@@ -23,6 +23,26 @@ npm run tauri dev
 
 Start only the browser frontend with `npm run dev`.
 
+## Godot documentation RAG
+
+The project pins [`@mjasnikovs/gofer-rag`](https://github.com/mjasnikovs/gofer-rag) at
+`0.1.0-canary.1`. It provides local retrieval and grounded answers over the Godot 4.7 documentation.
+
+The package requires Node.js 22 or newer and is a Node-only runtime dependency, so Tauri invokes it
+through `scripts/rag-warmup.mjs` instead of bundling it into the Vite browser renderer. The
+preparation splash downloads approximately 1.68 GiB of embedding and reranking models when they are
+missing. The Node worker aggregates their file events into one overall progress total before the
+Rust backend streams it to the interface. The models remain in the operating system's user cache
+until they are explicitly deleted from Settings; deletion returns the app to the preparation splash
+and starts a fresh download.
+
+## Local settings
+
+Gofer owns a versioned `settings.json` in its operating system application configuration directory.
+The first supported AI connection is an OpenAI-compatible chat-completions endpoint. Connection
+metadata is stored in Gofer's settings file, while its optional API key is stored separately in the
+operating system credential store. Gofer does not read or depend on Pi's agent configuration.
+
 ## Quality gates
 
 ```bash
