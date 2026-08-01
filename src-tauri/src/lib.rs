@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -20,6 +20,7 @@ const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
 const SETTINGS_VERSION: u32 = 1;
 const MAX_CHAT_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 static RAG_INITIALIZING: AtomicBool = AtomicBool::new(false);
+static ACTIVE_RAG_INITIALIZATION: Mutex<Option<Arc<RagInitialization>>> = Mutex::new(None);
 static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_AI_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -276,6 +277,81 @@ struct InitializationGuard;
 impl Drop for InitializationGuard {
     fn drop(&mut self) {
         RAG_INITIALIZING.store(false, Ordering::Release);
+    }
+}
+
+struct RagInitialization {
+    result: Mutex<Option<Result<(), String>>>,
+    completed: Condvar,
+}
+
+impl RagInitialization {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            completed: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> Result<(), String> {
+        let mut stored = self
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while stored.is_none() {
+            stored = self
+                .completed
+                .wait(stored)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+        stored
+            .clone()
+            .expect("completed RAG initialization must have a result")
+    }
+}
+
+struct ActiveRagInitializationGuard {
+    initialization: Arc<RagInitialization>,
+    finished: bool,
+}
+
+impl ActiveRagInitializationGuard {
+    fn finish(mut self, result: Result<(), String>) {
+        self.finish_with(result);
+        self.finished = true;
+    }
+
+    fn finish_with(&self, completion: Result<(), String>) {
+        let mut active = ACTIVE_RAG_INITIALIZATION
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut result = self
+            .initialization
+            .result
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *result = Some(completion);
+        if active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.initialization))
+        {
+            *active = None;
+        }
+        RAG_INITIALIZING.store(false, Ordering::Release);
+        drop(active);
+        drop(result);
+        self.initialization.completed.notify_all();
+    }
+}
+
+impl Drop for ActiveRagInitializationGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finish_with(Err(
+            "Gofer RAG initialization ended before producing a result".to_owned(),
+        ));
     }
 }
 
@@ -648,19 +724,39 @@ async fn delete_rag_cache() -> Result<CacheStatus, String> {
 
 #[tauri::command]
 async fn initialize_rag(app: AppHandle) -> Result<(), String> {
-    if RAG_INITIALIZING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return Err("Gofer RAG initialization is already running".to_owned());
+    tauri::async_runtime::spawn_blocking(move || run_rag_initialization(|| run_rag_warmup(&app)))
+        .await
+        .map_err(|error| format!("Gofer RAG initialization task failed: {error}"))?
+}
+
+fn run_rag_initialization(operation: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+    let (initialization, is_leader) = {
+        let mut active = ACTIVE_RAG_INITIALIZATION
+            .lock()
+            .map_err(|_| "The RAG initialization lock is poisoned".to_owned())?;
+        if let Some(initialization) = active.as_ref() {
+            (Arc::clone(initialization), false)
+        } else {
+            RAG_INITIALIZING
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| "Another model operation is already running".to_owned())?;
+            let initialization = Arc::new(RagInitialization::new());
+            *active = Some(Arc::clone(&initialization));
+            (initialization, true)
+        }
+    };
+
+    if !is_leader {
+        return initialization.wait();
     }
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let _guard = InitializationGuard;
-        run_rag_warmup(&app)
-    })
-    .await
-    .map_err(|error| format!("Gofer RAG initialization task failed: {error}"))?
+    let guard = ActiveRagInitializationGuard {
+        initialization,
+        finished: false,
+    };
+    let result = operation();
+    guard.finish(result.clone());
+    result
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1544,6 +1640,61 @@ mod tests {
                 .state,
             CacheState::Busy
         );
+    }
+
+    #[test]
+    fn concurrent_rag_initialization_joins_the_active_operation() {
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let leader = thread::spawn(move || {
+            run_rag_initialization(|| {
+                started_sender
+                    .send(())
+                    .expect("report initialization start");
+                release_receiver.recv().expect("release initialization");
+                Err("warmup failed".to_owned())
+            })
+        });
+        started_receiver.recv().expect("initialization start");
+
+        let follower_operation_ran = Arc::new(AtomicBool::new(false));
+        let follower_flag = Arc::clone(&follower_operation_ran);
+        let follower = thread::spawn(move || {
+            run_rag_initialization(|| {
+                follower_flag.store(true, Ordering::Release);
+                Ok(())
+            })
+        });
+
+        let follower_joined = (0..1_000).any(|_| {
+            let reference_count = ACTIVE_RAG_INITIALIZATION
+                .lock()
+                .expect("active initialization")
+                .as_ref()
+                .map(Arc::strong_count)
+                .unwrap_or_default();
+            if reference_count >= 3 {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(1));
+            false
+        });
+        assert!(
+            follower_joined,
+            "follower did not join active initialization"
+        );
+
+        release_sender.send(()).expect("release leader");
+        assert_eq!(
+            leader.join().expect("leader result"),
+            Err("warmup failed".to_owned())
+        );
+        assert_eq!(
+            follower.join().expect("follower result"),
+            Err("warmup failed".to_owned())
+        );
+        assert!(!follower_operation_ran.load(Ordering::Acquire));
+        assert!(!RAG_INITIALIZING.load(Ordering::Acquire));
     }
 
     #[cfg(unix)]
