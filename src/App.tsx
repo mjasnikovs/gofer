@@ -1,39 +1,42 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
+import type {ReactNode} from 'react'
 import {AlertDialog} from '@astryxdesign/core/AlertDialog'
 import {AppShell} from '@astryxdesign/core/AppShell'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {
     ChatComposer,
+    ChatComposerInput,
     ChatMessage,
     ChatMessageBubble,
-    ChatMessageList
+    ChatMessageList,
+    ChatMessageMetadata,
+    ChatToolCalls,
+    useChatStreamScroll
 } from '@astryxdesign/core/Chat'
-import {ClickableCard} from '@astryxdesign/core/ClickableCard'
+import {CodeBlock} from '@astryxdesign/core/CodeBlock'
 import {Divider} from '@astryxdesign/core/Divider'
+import {DropdownMenu} from '@astryxdesign/core/DropdownMenu'
 import {FormLayout} from '@astryxdesign/core/FormLayout'
 import {Grid} from '@astryxdesign/core/Grid'
 import {Icon} from '@astryxdesign/core/Icon'
-import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
+import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {NavIcon} from '@astryxdesign/core/NavIcon'
 import {ProgressBar} from '@astryxdesign/core/ProgressBar'
 import {SideNav, SideNavHeading, SideNavItem, SideNavSection} from '@astryxdesign/core/SideNav'
 import {Spinner} from '@astryxdesign/core/Spinner'
-import {HStack, VStack} from '@astryxdesign/core/Stack'
+import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
+import {Token} from '@astryxdesign/core/Token'
 import {
-    BoltIcon,
-    ChatBubbleLeftRightIcon,
     CircleStackIcon,
     CloudArrowDownIcon,
-    CodeBracketSquareIcon,
     Cog6ToothIcon,
-    CubeTransparentIcon,
-    FolderOpenIcon,
     KeyIcon,
     PlusIcon,
+    ArrowPathIcon,
     ServerStackIcon,
     SparklesIcon,
     TrashIcon
@@ -49,11 +52,50 @@ type Message = Readonly<{
     sender: 'user' | 'assistant'
     text: string
     timestamp: number
+    thinking?: string
+    tools?: readonly ToolActivity[]
+    usage?: TokenUsage
+    model?: string
+    status?: 'streaming' | 'complete' | 'error' | 'aborted'
+}>
+
+type TokenUsage = Readonly<{
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    reasoning?: number
+    totalTokens: number
+    cost: Readonly<{total: number}>
+}>
+
+type ToolActivity = Readonly<{
+    id: string
+    name: string
+    target?: string
+    output?: string
+    status: 'pending' | 'running' | 'complete' | 'error'
+    startedAt: number
+    endedAt?: number
 }>
 
 type AiStreamEvent =
     | Readonly<{type: 'text-delta'; delta: string}>
-    | Readonly<{type: 'done'; text: string; stopReason: string}>
+    | Readonly<{type: 'thinking-delta'; delta: string}>
+    | Readonly<{type: 'tool-start'; id: string; name: string; target?: string; startedAt: number}>
+    | Readonly<{type: 'tool-update'; id: string; output: string}>
+    | Readonly<{type: 'tool-end'; id: string; output: string; isError: boolean; endedAt: number}>
+    | Readonly<{type: 'usage'; usage: TokenUsage; model: string}>
+    | Readonly<{
+          type: 'done'
+          text: string
+          thinking: string
+          stopReason: string
+          usage: TokenUsage
+          model: string
+          agentMessages: readonly unknown[]
+      }>
+    | Readonly<{type: 'aborted'}>
 
 type AiStreamPayload = Readonly<{
     requestId: number
@@ -71,6 +113,28 @@ type AiSettings = Readonly<{
     baseUrl: string
     model: string
     api: 'openai-completions'
+    modelName: string
+    contextWindow: number
+    maxTokens: number
+    reasoning: boolean
+    supportsReasoningEffort: boolean
+    input: readonly string[]
+    thinkingLevel: ThinkingLevel
+    maxRetries: number
+    timeoutMs: number
+    systemPrompt: string
+}>
+
+type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+type AiModelOption = Readonly<{
+    id: string
+    name: string
+    contextWindow: number
+    maxTokens: number
+    reasoning: boolean
+    supportsReasoningEffort: boolean
+    input: readonly string[]
 }>
 
 type GoferSettings = Readonly<{
@@ -113,35 +177,96 @@ type Notice = Readonly<{
 }>
 
 type ApiKeyIntent = 'keep' | 'set' | 'clear'
+type StoredChat = Readonly<{
+    messages: readonly Message[]
+    agentMessages: readonly unknown[]
+}>
 
-const SUGGESTIONS = [
-    {
-        title: 'Build a player controller',
-        description: 'Create the scene, script movement, and wire input actions.',
-        prompt: 'Build a responsive third-person player controller.'
-    },
-    {
-        title: 'Debug the current scene',
-        description: 'Inspect nodes, errors, signals, and runtime behavior.',
-        prompt: 'Inspect the current scene and help me debug it.'
-    },
-    {
-        title: 'Polish the environment',
-        description: 'Improve lighting, materials, composition, and atmosphere.',
-        prompt: 'Polish the current environment and explain each change.'
-    },
-    {
-        title: 'Design an interaction',
-        description: 'Plan and implement an object the player can use.',
-        prompt: 'Design and implement an interactive object for this scene.'
+const CHAT_STORAGE_KEY = 'gofer.agent-chat.v1'
+const SPACIOUS_COMPOSER_INPUT_STYLE = {
+    minHeight: 'calc(var(--spacing-12) + var(--spacing-10))'
+} as const
+const LEFT_ALIGNED_USER_BUBBLE_STYLE = {alignSelf: 'flex-start'} as const
+const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex'} as const
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null
+}
+
+function isStoredMessage(value: unknown): value is Message {
+    if (!isRecord(value)) return false
+    return (
+        typeof value['id'] === 'number'
+        && (value['sender'] === 'user' || value['sender'] === 'assistant')
+        && typeof value['text'] === 'string'
+        && typeof value['timestamp'] === 'number'
+    )
+}
+
+function loadStoredChat(): StoredChat {
+    if (typeof window === 'undefined') return {messages: [], agentMessages: []}
+    try {
+        const serialized = window.localStorage.getItem(CHAT_STORAGE_KEY)
+        if (!serialized) return {messages: [], agentMessages: []}
+        const parsed = JSON.parse(serialized) as unknown
+        if (!isRecord(parsed)) return {messages: [], agentMessages: []}
+        if (!Array.isArray(parsed['messages']) || !parsed['messages'].every(isStoredMessage)) {
+            return {messages: [], agentMessages: []}
+        }
+        if (!Array.isArray(parsed['agentMessages'])) return {messages: [], agentMessages: []}
+        return {messages: parsed['messages'], agentMessages: parsed['agentMessages']}
+    } catch {
+        return {messages: [], agentMessages: []}
     }
-] as const
+}
+
+function normalizeSettings(settings: GoferSettings): GoferSettings {
+    return {
+        ...settings,
+        ai: Object.assign(
+            {
+                modelName: settings.ai.model,
+                contextWindow: 120_064,
+                maxTokens: 120_064,
+                reasoning: false,
+                supportsReasoningEffort: false,
+                input: ['text'],
+                thinkingLevel: 'off',
+                maxRetries: 2,
+                timeoutMs: 120_000,
+                systemPrompt: ''
+            },
+            settings.ai
+        )
+    }
+}
 
 function formatBytes(bytes: number) {
     if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GiB`
     if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
     if (bytes === 0) return '0 bytes'
     return `${String(Math.round(bytes / 1024))} KiB`
+}
+
+function formatContextTokens(tokens: number) {
+    const thousands = tokens / 1000
+    const fractionDigits =
+        thousands < 1 ? 2
+        : thousands < 10 ? 1
+        : 0
+    const formatted = thousands.toFixed(fractionDigits)
+    return `${fractionDigits === 0 ? formatted : formatted.replace(/\.?0+$/, '')}K`
+}
+
+function formatContextUsage(value: number, max: number) {
+    return `${formatContextTokens(value)} / ${formatContextTokens(max)}`
+}
+
+function contextProgressVariant(value: number, max: number) {
+    const usage = max > 0 ? value / max : 0
+    if (usage <= 0.8) return 'success'
+    if (usage <= 0.9) return 'warning'
+    return 'error'
 }
 
 function progressValue(progress?: DownloadProgress) {
@@ -330,7 +455,13 @@ function connectionNotice(result: ConnectionTestResult): Notice {
     return {status: 'error', title: 'AI server returned an error', description: result.message}
 }
 
-function Navigation({page, onNavigate}: {page: Page; onNavigate: (page: Page) => void}) {
+type NavigationProps = Readonly<{
+    page: Page
+    onNavigate: (page: Page) => void
+    onNewTask: () => void
+}>
+
+function Navigation({page, onNavigate, onNewTask}: NavigationProps) {
     return (
         <SideNav
             collapsible
@@ -381,211 +512,494 @@ function Navigation({page, onNavigate}: {page: Page; onNavigate: (page: Page) =>
                     isSelected={page === 'workspace'}
                     onClick={event => {
                         event.preventDefault()
-                        onNavigate('workspace')
+                        onNewTask()
                     }}
-                />
-                <SideNavItem
-                    label='Projects'
-                    icon={FolderOpenIcon}
-                    href='#projects'
-                />
-            </SideNavSection>
-            <SideNavSection title='Recent tasks'>
-                <SideNavItem
-                    label='Player movement'
-                    icon={ChatBubbleLeftRightIcon}
-                    href='#player-movement'
-                    endContent={
-                        <StatusDot
-                            variant='success'
-                            label='Complete'
-                        />
-                    }
-                />
-                <SideNavItem
-                    label='Village lighting'
-                    icon={ChatBubbleLeftRightIcon}
-                    href='#village-lighting'
-                    endContent={
-                        <StatusDot
-                            variant='neutral'
-                            label='Idle'
-                        />
-                    }
-                />
-                <SideNavItem
-                    label='Inventory prototype'
-                    icon={ChatBubbleLeftRightIcon}
-                    href='#inventory-prototype'
-                    endContent={
-                        <StatusDot
-                            variant='warning'
-                            label='Needs review'
-                        />
-                    }
                 />
             </SideNavSection>
         </SideNav>
     )
 }
 
-function Welcome({onSuggestion}: {onSuggestion: (prompt: string) => void}) {
+function Welcome({composer}: {composer: ReactNode}) {
     return (
         <VStack
-            gap={8}
-            paddingBlock={10}
-            hAlign='stretch'
+            gap={6}
+            width='100%'
+            maxWidth={720}
         >
             <VStack
-                gap={2}
-                hAlign='center'
+                gap={1}
+                hAlign='start'
             >
-                <Icon
-                    icon={SparklesIcon}
-                    size='lg'
-                    color='accent'
-                />
+                <HStack
+                    gap={2}
+                    vAlign='center'
+                >
+                    <Icon
+                        icon={SparklesIcon}
+                        size='sm'
+                        color='accent'
+                    />
+                    <Text type='large'>Gofer is ready</Text>
+                </HStack>
                 <Heading
                     level={1}
                     type='display-2'
                 >
-                    What should we make?
+                    Where should we start?
                 </Heading>
-                <Text color='secondary'>
-                    Describe the outcome. Gofer will plan the work and operate Godot for you.
-                </Text>
             </VStack>
-            <Grid
-                columns={{minWidth: 280}}
-                gap={3}
-            >
-                {SUGGESTIONS.map(suggestion => (
-                    <ClickableCard
-                        key={suggestion.title}
-                        label={suggestion.title}
-                        variant='muted'
-                        padding={4}
-                        onClick={() => {
-                            onSuggestion(suggestion.prompt)
-                        }}
-                    >
-                        <VStack gap={1}>
-                            <Heading level={3}>{suggestion.title}</Heading>
-                            <Text
-                                type='supporting'
-                                color='secondary'
-                            >
-                                {suggestion.description}
-                            </Text>
-                        </VStack>
-                    </ClickableCard>
-                ))}
-            </Grid>
+            {composer}
         </VStack>
     )
 }
 
 export function Workspace() {
+    const [storedChat] = useState(loadStoredChat)
     const [draft, setDraft] = useState('')
-    const [messages, setMessages] = useState<readonly Message[]>([])
+    const [messages, setMessages] = useState<readonly Message[]>(storedChat.messages)
     const [isStreaming, setIsStreaming] = useState(false)
     const [streamError, setStreamError] = useState<string>()
+    const [settings, setSettings] = useState<GoferSettings>()
+    const [models, setModels] = useState<readonly AiModelOption[]>([])
+    const [agentMessages, setAgentMessages] = useState<readonly unknown[]>(storedChat.agentMessages)
+    const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'offline'>(
+        () => (isTauri() ? 'connecting' : 'offline')
+    )
     const nextMessageId = useRef(1)
     const nextRequestId = useRef(1)
+    const activeRequestId = useRef<number | undefined>(undefined)
+    const messageScrollRef = useRef<HTMLElement>(null)
+    const chatScroll = useChatStreamScroll({
+        scrollRef: messageScrollRef,
+        enabled: messages.length > 0
+    })
+
+    useEffect(() => {
+        chatScroll.scrollIfLocked()
+    }, [messages, chatScroll.scrollIfLocked])
+
+    const applyModel = useCallback(async (model: AiModelOption, previous?: GoferSettings) => {
+        if (!previous) return
+        const nextSettings: GoferSettings = {
+            ...previous,
+            ai: {
+                ...previous.ai,
+                model: model.id,
+                modelName: model.name,
+                contextWindow: model.contextWindow,
+                maxTokens: model.maxTokens,
+                reasoning: model.reasoning,
+                supportsReasoningEffort: model.supportsReasoningEffort,
+                input: model.input,
+                thinkingLevel: model.reasoning ? previous.ai.thinkingLevel : 'off'
+            }
+        }
+        setSettings(nextSettings)
+        try {
+            await invoke('save_settings', {
+                request: {settings: nextSettings, apiKey: {action: 'keep'}}
+            })
+            setStreamError(undefined)
+        } catch (error) {
+            setStreamError(`The model selection could not be saved: ${String(error)}`)
+        }
+    }, [])
+
+    const applyThinkingLevel = useCallback(
+        async (thinkingLevel: ThinkingLevel, previous?: GoferSettings) => {
+            if (!previous) return
+            const nextSettings: GoferSettings = {
+                ...previous,
+                ai: {
+                    ...previous.ai,
+                    thinkingLevel
+                }
+            }
+            setSettings(nextSettings)
+            try {
+                await invoke('save_settings', {
+                    request: {settings: nextSettings, apiKey: {action: 'keep'}}
+                })
+                setStreamError(undefined)
+            } catch (error) {
+                setStreamError(`The reasoning level could not be saved: ${String(error)}`)
+            }
+        },
+        []
+    )
+
+    const connect = useCallback(async () => {
+        if (!isTauri()) return
+        await Promise.resolve()
+        setConnectionState('connecting')
+        setStreamError(undefined)
+        try {
+            const response = await invoke<SettingsResponse>('load_settings')
+            const loadedSettings = normalizeSettings(response.settings)
+            setSettings(loadedSettings)
+            const available = await invoke<AiModelOption[]>('list_ai_models', {
+                request: {settings: loadedSettings, apiKey: {action: 'keep'}}
+            })
+            setModels(available)
+            setConnectionState('connected')
+            if (
+                available.length === 1
+                && !available.some(model => model.id === loadedSettings.ai.model)
+            ) {
+                const onlyModel = available[0]
+                if (onlyModel) await applyModel(onlyModel, loadedSettings)
+            }
+        } catch (error) {
+            setConnectionState('offline')
+            setStreamError(`Local AI is unavailable: ${String(error)}`)
+        }
+    }, [applyModel])
+
+    useEffect(() => {
+        const timeout = window.setTimeout(() => {
+            void connect()
+        }, 0)
+        return () => {
+            window.clearTimeout(timeout)
+        }
+    }, [connect])
+
+    useEffect(() => {
+        window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({messages, agentMessages}))
+    }, [agentMessages, messages])
+
+    const updateAssistant = useCallback((id: number, update: (message: Message) => Message) => {
+        setMessages(previous =>
+            previous.map(message => (message.id === id ? update(message) : message))
+        )
+    }, [])
+
+    const runRequest = useCallback(
+        (prompt: string, history: readonly Message[]) => {
+            const userMessage: Message = {
+                id: nextMessageId.current++,
+                sender: 'user',
+                text: prompt,
+                timestamp: Date.now()
+            }
+            const assistantMessage: Message = {
+                id: nextMessageId.current++,
+                sender: 'assistant',
+                text: '',
+                timestamp: Date.now(),
+                tools: [],
+                status: 'streaming'
+            }
+            const requestId = nextRequestId.current++
+            const requestMessages = [...history, userMessage]
+
+            activeRequestId.current = requestId
+            setMessages([...history, userMessage, assistantMessage])
+            setDraft('')
+            setStreamError(undefined)
+            setIsStreaming(true)
+
+            const run = async () => {
+                let unlisten: (() => void) | undefined
+                try {
+                    unlisten = await listen<AiStreamPayload>('ai-stream-event', received => {
+                        if (received.payload.requestId !== requestId) return
+                        const event = received.payload.event
+                        if (event.type === 'text-delta') {
+                            updateAssistant(assistantMessage.id, message => ({
+                                ...message,
+                                text: message.text + event.delta
+                            }))
+                        }
+                        if (event.type === 'thinking-delta') {
+                            updateAssistant(assistantMessage.id, message => ({
+                                ...message,
+                                thinking: (message.thinking ?? '') + event.delta
+                            }))
+                        }
+                        if (event.type === 'tool-start') {
+                            updateAssistant(assistantMessage.id, message => ({
+                                ...message,
+                                tools: [
+                                    ...(message.tools ?? []),
+                                    {
+                                        id: event.id,
+                                        name: event.name,
+                                        status: 'running',
+                                        startedAt: event.startedAt,
+                                        ...(event.target && {target: event.target})
+                                    }
+                                ]
+                            }))
+                        }
+                        if (event.type === 'tool-update' || event.type === 'tool-end') {
+                            updateAssistant(assistantMessage.id, message => ({
+                                ...message,
+                                tools: (message.tools ?? []).map(tool =>
+                                    tool.id === event.id ?
+                                        {
+                                            ...tool,
+                                            output: event.output,
+                                            ...(event.type === 'tool-end' && {
+                                                status:
+                                                    event.isError ?
+                                                        ('error' as const)
+                                                    :   ('complete' as const),
+                                                endedAt: event.endedAt
+                                            })
+                                        }
+                                    :   tool
+                                )
+                            }))
+                        }
+                        if (event.type === 'usage') {
+                            updateAssistant(assistantMessage.id, message => ({
+                                ...message,
+                                usage: event.usage,
+                                model: event.model
+                            }))
+                        }
+                        if (event.type === 'done') {
+                            setAgentMessages(event.agentMessages)
+                            updateAssistant(assistantMessage.id, message => ({
+                                ...message,
+                                text: event.text || message.text,
+                                usage: event.usage,
+                                model: event.model,
+                                status: 'complete',
+                                ...((event.thinking || message.thinking) && {
+                                    thinking: event.thinking || message.thinking
+                                })
+                            }))
+                        }
+                        if (event.type === 'aborted') {
+                            updateAssistant(assistantMessage.id, message => ({
+                                ...message,
+                                text: message.text || 'Generation stopped.',
+                                status: 'aborted'
+                            }))
+                        }
+                    })
+                    await invoke('send_ai_message', {
+                        request: {
+                            requestId,
+                            agentMessages,
+                            messages: requestMessages.map(message => ({
+                                sender: message.sender,
+                                text: message.text,
+                                timestamp: message.timestamp
+                            }))
+                        }
+                    })
+                } catch (error) {
+                    const message = String(error)
+                    setStreamError(message)
+                    updateAssistant(assistantMessage.id, entry => ({
+                        ...entry,
+                        text: entry.text || 'The AI response could not be completed.',
+                        status: 'error'
+                    }))
+                } finally {
+                    unlisten?.()
+                    if (activeRequestId.current === requestId) activeRequestId.current = undefined
+                    setIsStreaming(false)
+                }
+            }
+            void run()
+        },
+        [agentMessages, updateAssistant]
+    )
 
     const submitMessage = (value: string) => {
         const prompt = value.trim()
         if (!prompt || isStreaming || !isTauri()) return
-
-        const userMessage: Message = {
-            id: nextMessageId.current++,
-            sender: 'user',
-            text: prompt,
-            timestamp: Date.now()
-        }
-        const assistantMessage: Message = {
-            id: nextMessageId.current++,
-            sender: 'assistant',
-            text: '',
-            timestamp: Date.now()
-        }
-        const requestId = nextRequestId.current++
-        const requestMessages = [...messages, userMessage]
-
-        setMessages(previous => [...previous, userMessage, assistantMessage])
-        setDraft('')
-        setStreamError(undefined)
-        setIsStreaming(true)
-
-        const run = async () => {
-            let unlisten: (() => void) | undefined
-            try {
-                unlisten = await listen<AiStreamPayload>('ai-stream-event', received => {
-                    if (received.payload.requestId !== requestId) return
-                    const event = received.payload.event
-                    if (event.type !== 'text-delta') return
-                    setMessages(previous =>
-                        previous.map(message =>
-                            message.id === assistantMessage.id ?
-                                {...message, text: message.text + event.delta}
-                            :   message
-                        )
-                    )
-                })
-                await invoke('send_ai_message', {
-                    request: {
-                        requestId,
-                        messages: requestMessages.map(message => ({
-                            sender: message.sender,
-                            text: message.text,
-                            timestamp: message.timestamp
-                        }))
-                    }
-                })
-            } catch (error) {
-                const message = String(error)
-                setStreamError(message)
-                setMessages(previous =>
-                    previous.map(entry =>
-                        entry.id === assistantMessage.id && !entry.text ?
-                            {...entry, text: 'The AI response could not be completed.'}
-                        :   entry
-                    )
-                )
-            } finally {
-                unlisten?.()
-                setIsStreaming(false)
-            }
-        }
-
-        void run()
+        runRequest(prompt, messages)
     }
+
+    const stop = () => {
+        if (activeRequestId.current === undefined) return
+        void invoke('cancel_ai_request', {requestId: activeRequestId.current})
+    }
+
+    const retry = (assistantId: number) => {
+        const assistantIndex = messages.findIndex(message => message.id === assistantId)
+        const userMessage = messages[assistantIndex - 1]
+        if (assistantIndex < 1 || userMessage?.sender !== 'user') return
+        runRequest(userMessage.text, messages.slice(0, assistantIndex - 1))
+    }
+
+    const totalUsage = messages.reduce(
+        (total, message) => total + (message.usage?.totalTokens ?? 0),
+        0
+    )
+    const contextUsage = messages.reduce(
+        (latest, message) => message.usage?.totalTokens ?? latest,
+        0
+    )
+    const contextWindow = settings?.ai.contextWindow ?? 120_064
+    const selectedModel = settings?.ai.modelName ?? settings?.ai.model ?? 'Loading model…'
+    const thinkingLevel = settings?.ai.thinkingLevel ?? 'off'
+    const thinkingLevels: readonly ThinkingLevel[] =
+        settings?.ai.reasoning ?
+            ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        :   ['off']
+
+    const composer = (
+        <VStack gap={1}>
+            <ChatComposer
+                value={draft}
+                onChange={setDraft}
+                onSubmit={submitMessage}
+                onStop={stop}
+                isStopShown={isStreaming}
+                density='spacious'
+                placeholder={isStreaming ? 'Gofer is working…' : 'Ask anything'}
+                input={
+                    <ChatComposerInput
+                        maxRows={8}
+                        style={SPACIOUS_COMPOSER_INPUT_STYLE}
+                    />
+                }
+                {...(streamError && {status: {type: 'error' as const, message: streamError}})}
+            />
+            <HStack
+                gap={1}
+                paddingInline={2}
+                vAlign='center'
+            >
+                <DropdownMenu
+                    button={{
+                        label: `Model: ${selectedModel}`,
+                        variant: 'ghost',
+                        size: 'sm',
+                        icon: (
+                            <Icon
+                                icon={SparklesIcon}
+                                size='sm'
+                                color='secondary'
+                            />
+                        ),
+                        endContent: (
+                            <Icon
+                                icon='chevronDown'
+                                size='sm'
+                                color='secondary'
+                            />
+                        ),
+                        children: (
+                            <Text
+                                type='supporting'
+                                color='secondary'
+                            >
+                                Model: {selectedModel}
+                            </Text>
+                        )
+                    }}
+                    menuWidth={320}
+                    items={models.map(model => ({
+                        label: model.name,
+                        onClick: () => {
+                            void applyModel(model, settings)
+                        }
+                    }))}
+                />
+                <DropdownMenu
+                    button={{
+                        label: `Reasoning: ${thinkingLevel}`,
+                        variant: 'ghost',
+                        size: 'sm',
+                        icon: (
+                            <Icon
+                                icon={Cog6ToothIcon}
+                                size='sm'
+                                color='secondary'
+                            />
+                        ),
+                        endContent: (
+                            <Icon
+                                icon='chevronDown'
+                                size='sm'
+                                color='secondary'
+                            />
+                        ),
+                        children: (
+                            <Text
+                                type='supporting'
+                                color='secondary'
+                            >
+                                Reasoning: {thinkingLevel}
+                            </Text>
+                        )
+                    }}
+                    items={thinkingLevels.map(level => ({
+                        label: level,
+                        onClick: () => {
+                            void applyThinkingLevel(level, settings)
+                        }
+                    }))}
+                />
+                <HStack
+                    gap={2}
+                    width={200}
+                    vAlign='center'
+                >
+                    <StackItem size='fill'>
+                        <ProgressBar
+                            label='Context usage'
+                            value={contextUsage}
+                            max={contextWindow}
+                            variant={contextProgressVariant(contextUsage, contextWindow)}
+                            isLabelHidden
+                        />
+                    </StackItem>
+                    <Text
+                        type='supporting'
+                        color='secondary'
+                    >
+                        {formatContextUsage(contextUsage, contextWindow)}
+                    </Text>
+                </HStack>
+                <Text
+                    type='supporting'
+                    color='secondary'
+                >
+                    ·
+                </Text>
+                <Text
+                    type='supporting'
+                    color='secondary'
+                >
+                    {totalUsage.toLocaleString()} tokens
+                </Text>
+            </HStack>
+        </VStack>
+    )
 
     return (
         <Layout
             height='fill'
-            contentWidth={880}
+            contentWidth={960}
             content={
-                <LayoutContent padding={6}>
+                <LayoutContent padding={0}>
                     <VStack
-                        gap={6}
+                        gap={0}
                         height='100%'
                     >
                         <HStack
+                            padding={4}
                             hAlign='between'
                             vAlign='center'
                         >
-                            <VStack gap={0.5}>
-                                <Heading level={2}>New task</Heading>
-                                <Text
-                                    type='supporting'
-                                    color='secondary'
-                                >
-                                    Agent workspace
-                                </Text>
-                            </VStack>
                             <HStack
                                 gap={3}
+                                vAlign='center'
+                            >
+                                <Heading level={2}>New task</Heading>
+                                <Token label='Godot 4.7' />
+                            </HStack>
+                            <HStack
+                                gap={2}
                                 vAlign='center'
                             >
                                 <HStack
@@ -593,106 +1007,204 @@ export function Workspace() {
                                     vAlign='center'
                                 >
                                     <StatusDot
-                                        variant='neutral'
-                                        label='Godot disconnected'
+                                        variant={
+                                            connectionState === 'connected' ? 'success'
+                                            : connectionState === 'connecting' ?
+                                                'warning'
+                                            :   'error'
+                                        }
+                                        label={connectionState}
                                     />
-                                    <Text type='supporting'>Godot disconnected</Text>
+                                    <Text type='supporting'>Local AI {connectionState}</Text>
                                 </HStack>
-                                <HStack
-                                    gap={1}
-                                    vAlign='center'
-                                >
-                                    <Icon
-                                        icon={CodeBracketSquareIcon}
+                                {connectionState === 'offline' && (
+                                    <Button
+                                        label='Reconnect'
+                                        variant='ghost'
                                         size='sm'
+                                        icon={
+                                            <Icon
+                                                icon={ArrowPathIcon}
+                                                size='sm'
+                                            />
+                                        }
+                                        clickAction={connect}
                                     />
-                                    <Text type='supporting'>4.7</Text>
-                                </HStack>
+                                )}
                             </HStack>
                         </HStack>
-                        {messages.length === 0 ?
-                            <Welcome onSuggestion={setDraft} />
-                        :   <ChatMessageList density='spacious'>
-                                {messages.map(message => (
-                                    <ChatMessage
-                                        key={message.id}
-                                        sender={message.sender}
-                                    >
-                                        <ChatMessageBubble
-                                            variant={
-                                                message.sender === 'assistant' ? 'ghost' : 'filled'
-                                            }
-                                            name={
-                                                message.sender === 'assistant' ? 'Gofer' : undefined
-                                            }
-                                        >
-                                            {message.text ?
-                                                <Text>{message.text}</Text>
-                                            :   <Spinner
-                                                    size='sm'
-                                                    label='Generating response'
-                                                />
-                                            }
-                                        </ChatMessageBubble>
-                                    </ChatMessage>
-                                ))}
-                            </ChatMessageList>
-                        }
-                    </VStack>
-                </LayoutContent>
-            }
-            footer={
-                <LayoutFooter>
-                    <VStack gap={2}>
-                        <ChatComposer
-                            value={draft}
-                            onChange={setDraft}
-                            onSubmit={submitMessage}
-                            placeholder={
-                                isStreaming ? 'Gofer is responding…' : (
-                                    'Ask Gofer to build, fix, or explain anything…'
-                                )
-                            }
-                            isDisabled={isStreaming}
-                            {...(streamError && {
-                                status: {type: 'error' as const, message: streamError}
-                            })}
-                            footerActions={
-                                <HStack
-                                    gap={3}
+                        <Divider />
+                        <StackItem size='fill'>
+                            {messages.length === 0 ?
+                                <VStack
+                                    height='100%'
+                                    padding={8}
+                                    hAlign='center'
                                     vAlign='center'
                                 >
-                                    <HStack
-                                        gap={1}
-                                        vAlign='center'
+                                    <Welcome composer={composer} />
+                                </VStack>
+                            :   <VStack
+                                    gap={0}
+                                    height='100%'
+                                >
+                                    <StackItem
+                                        ref={messageScrollRef}
+                                        size='fill'
+                                        isScrollable
+                                        style={CHAT_SCROLL_VIEWPORT_STYLE}
                                     >
-                                        <Icon
-                                            icon={CubeTransparentIcon}
-                                            size='sm'
-                                        />
-                                        <Text type='supporting'>Godot context</Text>
-                                    </HStack>
-                                    <HStack
-                                        gap={1}
-                                        vAlign='center'
+                                        <ChatMessageList
+                                            density='spacious'
+                                            isStreaming={isStreaming}
+                                        >
+                                            {messages.map(message => (
+                                                <ChatMessage
+                                                    key={message.id}
+                                                    sender={message.sender}
+                                                >
+                                                    {message.sender === 'assistant'
+                                                        && Boolean(message.tools?.length) && (
+                                                            <ChatToolCalls
+                                                                calls={(message.tools ?? []).map(
+                                                                    tool => ({
+                                                                        key: tool.id,
+                                                                        name: tool.name,
+                                                                        status: tool.status,
+                                                                        ...(tool.target && {
+                                                                            target: tool.target
+                                                                        }),
+                                                                        ...(tool.endedAt && {
+                                                                            duration: `${String(tool.endedAt - tool.startedAt)}ms`
+                                                                        }),
+                                                                        ...(tool.status === 'error'
+                                                                            && tool.output && {
+                                                                                errorMessage:
+                                                                                    tool.output
+                                                                            }),
+                                                                        ...(tool.output && {
+                                                                            resultDetail: (
+                                                                                <CodeBlock
+                                                                                    code={
+                                                                                        tool.output
+                                                                                    }
+                                                                                    language={
+                                                                                        (
+                                                                                            tool.name
+                                                                                            === 'bash'
+                                                                                        ) ?
+                                                                                            'bash'
+                                                                                        :   'text'
+                                                                                    }
+                                                                                />
+                                                                            )
+                                                                        })
+                                                                    })
+                                                                )}
+                                                            />
+                                                        )}
+                                                    {message.sender === 'assistant'
+                                                        && message.thinking && (
+                                                            <ChatMessageBubble
+                                                                variant='ghost'
+                                                                name='Reasoning'
+                                                            >
+                                                                <Text color='secondary'>
+                                                                    {message.thinking}
+                                                                </Text>
+                                                            </ChatMessageBubble>
+                                                        )}
+                                                    <ChatMessageBubble
+                                                        variant={
+                                                            message.sender === 'assistant' ?
+                                                                'ghost'
+                                                            :   'filled'
+                                                        }
+                                                        style={
+                                                            message.sender === 'user' ?
+                                                                LEFT_ALIGNED_USER_BUBBLE_STYLE
+                                                            :   undefined
+                                                        }
+                                                        metadata={
+                                                            message.sender === 'assistant' ?
+                                                                <ChatMessageMetadata
+                                                                    {...(message.status
+                                                                        === 'error' && {
+                                                                        status: 'error'
+                                                                    })}
+                                                                    footer={
+                                                                        <HStack
+                                                                            gap={2}
+                                                                            vAlign='center'
+                                                                        >
+                                                                            {message.usage && (
+                                                                                <Text
+                                                                                    type='supporting'
+                                                                                    color='secondary'
+                                                                                >
+                                                                                    {message.usage.input.toLocaleString()}{' '}
+                                                                                    in ·{' '}
+                                                                                    {message.usage.output.toLocaleString()}{' '}
+                                                                                    out
+                                                                                    {message.usage
+                                                                                        .reasoning
+                                                                                        !== undefined
+                                                                                        && ` · ${message.usage.reasoning.toLocaleString()} reasoning`}
+                                                                                </Text>
+                                                                            )}
+                                                                            {(message.status
+                                                                                === 'error'
+                                                                                || message.status
+                                                                                    === 'aborted') && (
+                                                                                <Button
+                                                                                    label='Retry'
+                                                                                    variant='ghost'
+                                                                                    size='sm'
+                                                                                    icon={
+                                                                                        <Icon
+                                                                                            icon={
+                                                                                                ArrowPathIcon
+                                                                                            }
+                                                                                            size='sm'
+                                                                                        />
+                                                                                    }
+                                                                                    clickAction={() => {
+                                                                                        retry(
+                                                                                            message.id
+                                                                                        )
+                                                                                    }}
+                                                                                />
+                                                                            )}
+                                                                        </HStack>
+                                                                    }
+                                                                />
+                                                            :   undefined
+                                                        }
+                                                    >
+                                                        {message.text ?
+                                                            <Text>{message.text}</Text>
+                                                        :   <Spinner
+                                                                size='sm'
+                                                                label='Generating response'
+                                                            />
+                                                        }
+                                                    </ChatMessageBubble>
+                                                </ChatMessage>
+                                            ))}
+                                        </ChatMessageList>
+                                    </StackItem>
+                                    <VStack
+                                        width='100%'
+                                        paddingInline={3}
+                                        paddingBlock={3}
                                     >
-                                        <Icon
-                                            icon={BoltIcon}
-                                            size='sm'
-                                        />
-                                        <Text type='supporting'>Plan first</Text>
-                                    </HStack>
-                                </HStack>
+                                        {composer}
+                                    </VStack>
+                                </VStack>
                             }
-                        />
-                        <Text
-                            type='supporting'
-                            color='secondary'
-                        >
-                            Gofer can make mistakes. Review project changes before shipping.
-                        </Text>
+                        </StackItem>
                     </VStack>
-                </LayoutFooter>
+                </LayoutContent>
             }
         />
     )
@@ -713,6 +1225,7 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
     const [isDownloading, setIsDownloading] = useState(false)
     const [isDeleteOpen, setIsDeleteOpen] = useState(false)
     const [isDeleting, setIsDeleting] = useState(false)
+    const [availableModels, setAvailableModels] = useState<readonly AiModelOption[]>([])
 
     const refreshCache = useCallback(async () => {
         const nextCache = await invoke<CacheStatus>('get_rag_cache_status')
@@ -740,7 +1253,7 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
                     invoke<SettingsResponse>('load_settings'),
                     invoke<CacheStatus>('get_rag_cache_status')
                 ])
-                setDraft(settingsResponse.settings)
+                setDraft(normalizeSettings(settingsResponse.settings))
                 setHasApiKey(settingsResponse.hasApiKey)
                 setCache(cacheResponse)
                 if (settingsResponse.credentialStoreError) {
@@ -783,6 +1296,12 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
                 request: nextRequest
             })
             setNotice(connectionNotice(result))
+            if (result.status === 'connected' || result.status === 'model-unavailable') {
+                const models = await invoke<AiModelOption[]>('list_ai_models', {
+                    request: nextRequest
+                })
+                setAvailableModels(models)
+            }
         } catch (error) {
             setNotice({
                 status: 'error',
@@ -881,6 +1400,18 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
     const value = progressValue(progress)
     const cacheIsBusy = cache?.state === 'busy' || isDownloading
     const canDeleteCache = Boolean(cache && cache.sizeBytes > 0 && !cacheIsBusy)
+    const selectModel = (model: AiModelOption) => {
+        updateAi({
+            model: model.id,
+            modelName: model.name,
+            contextWindow: model.contextWindow,
+            maxTokens: model.maxTokens,
+            reasoning: model.reasoning,
+            supportsReasoningEffort: model.supportsReasoningEffort,
+            input: model.input,
+            thinkingLevel: model.reasoning ? (draft?.ai.thinkingLevel ?? 'off') : 'off'
+        })
+    }
 
     return (
         <>
@@ -969,6 +1500,88 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
                                                 description='Must exactly match an ID returned by the server models endpoint.'
                                                 onChange={model => {
                                                     updateAi({model})
+                                                }}
+                                            />
+                                            {availableModels.length > 0 && (
+                                                <DropdownMenu
+                                                    button={{
+                                                        label: `Select server model (${String(availableModels.length)})`,
+                                                        variant: 'secondary'
+                                                    }}
+                                                    menuWidth={360}
+                                                    items={availableModels.map(model => ({
+                                                        label: `${model.name} · ${model.contextWindow.toLocaleString()} context`,
+                                                        onClick: () => {
+                                                            selectModel(model)
+                                                        }
+                                                    }))}
+                                                />
+                                            )}
+                                            <TextInput
+                                                label='Context window'
+                                                value={String(draft.ai.contextWindow)}
+                                                isRequired
+                                                description='Maximum context tokens advertised by the selected model.'
+                                                onChange={contextWindow => {
+                                                    updateAi({contextWindow: Number(contextWindow)})
+                                                }}
+                                            />
+                                            <TextInput
+                                                label='Maximum output tokens'
+                                                value={String(draft.ai.maxTokens)}
+                                                isRequired
+                                                onChange={maxTokens => {
+                                                    updateAi({maxTokens: Number(maxTokens)})
+                                                }}
+                                            />
+                                            <TextInput
+                                                label='Request timeout (milliseconds)'
+                                                value={String(draft.ai.timeoutMs)}
+                                                isRequired
+                                                description='Provider requests are cancelled after this interval.'
+                                                onChange={timeoutMs => {
+                                                    updateAi({timeoutMs: Number(timeoutMs)})
+                                                }}
+                                            />
+                                            <TextInput
+                                                label='Automatic retries'
+                                                value={String(draft.ai.maxRetries)}
+                                                isRequired
+                                                description='Transient provider failures are retried up to ten times.'
+                                                onChange={maxRetries => {
+                                                    updateAi({maxRetries: Number(maxRetries)})
+                                                }}
+                                            />
+                                            <DropdownMenu
+                                                button={{
+                                                    label: `Reasoning: ${draft.ai.thinkingLevel}`,
+                                                    variant: 'secondary'
+                                                }}
+                                                items={(draft.ai.reasoning ?
+                                                    ([
+                                                        'off',
+                                                        'minimal',
+                                                        'low',
+                                                        'medium',
+                                                        'high',
+                                                        'xhigh',
+                                                        'max'
+                                                    ] as const)
+                                                :   (['off'] as const)
+                                                ).map(level => ({
+                                                    label: level,
+                                                    onClick: () => {
+                                                        updateAi({thinkingLevel: level})
+                                                    }
+                                                }))}
+                                            />
+                                            <TextInput
+                                                label='Agent system prompt'
+                                                value={draft.ai.systemPrompt}
+                                                isOptional
+                                                description='Leave blank to use Gofer’s built-in coding-agent prompt.'
+                                                onChange={systemPrompt => {
+                                                    updateAi({systemPrompt})
                                                 }}
                                             />
                                             <TextInput
@@ -1173,6 +1786,7 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
 
 export default function App() {
     const [page, setPage] = useState<Page>('workspace')
+    const [workspaceKey, setWorkspaceKey] = useState(0)
     const [isReady, setIsReady] = useState(false)
     const showApplication = useCallback(() => {
         setIsReady(true)
@@ -1180,22 +1794,29 @@ export default function App() {
     const prepareModels = useCallback(() => {
         setIsReady(false)
     }, [])
+    const newTask = useCallback(() => {
+        window.localStorage.removeItem(CHAT_STORAGE_KEY)
+        setWorkspaceKey(previous => previous + 1)
+        setPage('workspace')
+    }, [])
 
     if (!isReady) return <InitializationSplash onReady={showApplication} />
 
     return (
         <AppShell
             contentPadding={0}
+            variant='section'
             sideNav={
                 <Navigation
                     page={page}
                     onNavigate={setPage}
+                    onNewTask={newTask}
                 />
             }
         >
             {page === 'settings' ?
                 <SettingsPage onCacheDeleted={prepareModels} />
-            :   <Workspace />}
+            :   <Workspace key={workspaceKey} />}
         </AppShell>
     )
 }

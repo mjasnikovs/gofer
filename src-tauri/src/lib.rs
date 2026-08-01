@@ -1,11 +1,12 @@
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -17,6 +18,9 @@ const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_VERSION: u32 = 1;
 static RAG_INITIALIZING: AtomicBool = AtomicBool::new(false);
 static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
+static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
+static ACTIVE_AI_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+static AI_CHILD: Mutex<Option<Arc<Mutex<Child>>>> = Mutex::new(None);
 static KEYRING_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -34,6 +38,26 @@ struct AiSettings {
     base_url: String,
     model: String,
     api: ApiDialect,
+    #[serde(default)]
+    model_name: String,
+    #[serde(default = "default_context_window")]
+    context_window: u64,
+    #[serde(default = "default_context_window")]
+    max_tokens: u64,
+    #[serde(default)]
+    reasoning: bool,
+    #[serde(default)]
+    supports_reasoning_effort: bool,
+    #[serde(default = "default_model_input")]
+    input: Vec<String>,
+    #[serde(default = "default_thinking_level")]
+    thinking_level: String,
+    #[serde(default = "default_max_retries")]
+    max_retries: u32,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default)]
+    system_prompt: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -108,6 +132,8 @@ enum ChatSender {
 struct ChatRequest {
     request_id: u64,
     messages: Vec<ChatMessageInput>,
+    #[serde(default)]
+    agent_messages: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -116,6 +142,20 @@ struct AiWorkerRequest {
     settings: AiSettings,
     api_key: Option<String>,
     messages: Vec<ChatMessageInput>,
+    agent_messages: Option<serde_json::Value>,
+    workspace_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiModelOption {
+    id: String,
+    name: String,
+    context_window: u64,
+    max_tokens: u64,
+    reasoning: bool,
+    supports_reasoning_effort: bool,
+    input: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -150,6 +190,48 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct Model {
     id: String,
+    #[serde(default)]
+    meta: Option<ModelMeta>,
+}
+
+#[derive(Deserialize)]
+struct ModelMeta {
+    #[serde(default)]
+    n_ctx: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PiModelsFile {
+    providers: HashMap<String, PiProvider>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PiProvider {
+    base_url: String,
+    #[serde(default)]
+    compat: PiCompat,
+    models: Vec<PiModel>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PiCompat {
+    #[serde(default)]
+    supports_reasoning_effort: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PiModel {
+    id: String,
+    name: String,
+    #[serde(default = "default_context_window")]
+    context_window: u64,
+    #[serde(default = "default_context_window")]
+    max_tokens: u64,
+    #[serde(default = "default_model_input")]
+    input: Vec<String>,
 }
 
 struct InitializationGuard;
@@ -164,21 +246,62 @@ struct AiRequestGuard;
 
 impl Drop for AiRequestGuard {
     fn drop(&mut self) {
+        ACTIVE_AI_REQUEST_ID.store(0, Ordering::Release);
+        AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+        if let Ok(mut active) = AI_CHILD.lock() {
+            *active = None;
+        }
         AI_REQUEST_RUNNING.store(false, Ordering::Release);
     }
+}
+
+fn default_context_window() -> u64 {
+    120_064
+}
+
+fn default_model_input() -> Vec<String> {
+    vec!["text".to_owned(), "image".to_owned()]
+}
+
+fn default_thinking_level() -> String {
+    "off".to_owned()
+}
+
+fn default_max_retries() -> u32 {
+    2
+}
+
+fn default_timeout_ms() -> u64 {
+    120_000
 }
 
 impl Default for GoferSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
-            ai: AiSettings {
-                connection_type: AiConnectionType::OpenaiCompatible,
-                name: "Local AI".to_owned(),
-                base_url: "http://127.0.0.1:8080/v1".to_owned(),
-                model: "Qwen3.6-27B-UD-Q4_K_XL.gguf".to_owned(),
-                api: ApiDialect::OpenaiCompletions,
-            },
+            ai: AiSettings::default(),
+        }
+    }
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            connection_type: AiConnectionType::OpenaiCompatible,
+            name: "Local AI".to_owned(),
+            base_url: "http://127.0.0.1:8080/v1".to_owned(),
+            model: "Qwen3.6-27B-UD-Q4_K_XL.gguf".to_owned(),
+            api: ApiDialect::OpenaiCompletions,
+            model_name: "Qwen3.6 27B".to_owned(),
+            context_window: default_context_window(),
+            max_tokens: default_context_window(),
+            reasoning: false,
+            supports_reasoning_effort: false,
+            input: default_model_input(),
+            thinking_level: default_thinking_level(),
+            max_retries: default_max_retries(),
+            timeout_ms: default_timeout_ms(),
+            system_prompt: String::new(),
         }
     }
 }
@@ -287,6 +410,68 @@ async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestRe
 }
 
 #[tauri::command]
+async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, String> {
+    let settings = validate_settings(request.settings)?;
+    let api_key = resolve_api_key(&request.api_key)?;
+    let base_url = format!("{}/", settings.ai.base_url.trim_end_matches('/'));
+    let models_url = reqwest::Url::parse(&base_url)
+        .and_then(|url| url.join("models"))
+        .map_err(|error| format!("Could not construct the models endpoint: {error}"))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("Could not create the AI connection client: {error}"))?;
+    let mut request_builder = client.get(models_url);
+    if let Some(api_key) = api_key {
+        request_builder = request_builder.bearer_auth(api_key);
+    }
+    let response = request_builder
+        .send()
+        .await
+        .map_err(|error| format!("The AI server could not be reached: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "The server returned HTTP {} from its models endpoint.",
+            response.status()
+        ));
+    }
+    let models = response
+        .json::<ModelsResponse>()
+        .await
+        .map_err(|error| format!("The server returned an invalid OpenAI models response: {error}"))?;
+    let catalog = pi_model_catalog().unwrap_or_default();
+    Ok(models
+        .data
+        .into_iter()
+        .map(|remote| {
+            let known = catalog.iter().find(|model| model.id == remote.id);
+            let context_window = remote
+                .meta
+                .and_then(|meta| meta.n_ctx)
+                .or_else(|| known.map(|model| model.context_window))
+                .unwrap_or(settings.ai.context_window);
+            AiModelOption {
+                id: remote.id.clone(),
+                name: known
+                    .map(|model| model.name.clone())
+                    .unwrap_or_else(|| remote.id.clone()),
+                context_window,
+                max_tokens: known
+                    .map(|model| model.max_tokens)
+                    .unwrap_or(context_window),
+                reasoning: known.map(|model| model.reasoning).unwrap_or(false),
+                supports_reasoning_effort: known
+                    .map(|model| model.supports_reasoning_effort)
+                    .unwrap_or(false),
+                input: known
+                    .map(|model| model.input.clone())
+                    .unwrap_or_else(|| settings.ai.input.clone()),
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
 async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), String> {
     if AI_REQUEST_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -295,9 +480,15 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
         return Err("Another AI response is already in progress".to_owned());
     }
     let guard = AiRequestGuard;
+    ACTIVE_AI_REQUEST_ID.store(request.request_id, Ordering::Release);
+    AI_REQUEST_CANCELLED.store(false, Ordering::Release);
     let messages = validate_chat_messages(request.messages)?;
     let settings = read_settings(&app)?;
     let api_key = stored_api_key()?;
+    let workspace_path = std::env::current_dir()
+        .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?
+        .display()
+        .to_string();
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
@@ -308,11 +499,41 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
                 settings: settings.ai,
                 api_key,
                 messages,
+                agent_messages: request.agent_messages,
+                workspace_path,
             },
         )
     })
     .await
     .map_err(|error| format!("AI response task failed: {error}"))?
+}
+
+#[tauri::command]
+fn cancel_ai_request(app: AppHandle, request_id: u64) -> Result<bool, String> {
+    if ACTIVE_AI_REQUEST_ID.load(Ordering::Acquire) != request_id {
+        return Ok(false);
+    }
+    AI_REQUEST_CANCELLED.store(true, Ordering::Release);
+    let active = AI_CHILD
+        .lock()
+        .map_err(|_| "The AI process lock is poisoned".to_owned())?
+        .clone();
+    if let Some(child) = active {
+        child
+            .lock()
+            .map_err(|_| "The AI child process lock is poisoned".to_owned())?
+            .kill()
+            .map_err(|error| format!("Could not stop the AI agent: {error}"))?;
+    }
+    app.emit(
+        "ai-stream-event",
+        AiStreamPayload {
+            request_id,
+            event: serde_json::json!({"type": "aborted"}),
+        },
+    )
+    .map_err(|error| format!("Could not report the cancelled AI request: {error}"))?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -376,13 +597,70 @@ fn read_settings(app: &AppHandle) -> Result<GoferSettings, String> {
 
 fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
     if !path.exists() {
-        return Ok(GoferSettings::default());
+        return Ok(default_settings_from_pi().unwrap_or_default());
     }
     let contents = fs::read_to_string(&path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let settings = serde_json::from_str(&contents)
         .map_err(|error| format!("Gofer settings in {} are invalid: {error}", path.display()))?;
     validate_settings(settings)
+}
+
+fn pi_models_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|path| path.join(".pi").join("agent").join("models.json"))
+        .ok_or_else(|| "The home directory could not be resolved".to_owned())
+}
+
+fn pi_model_catalog() -> Result<Vec<AiModelOption>, String> {
+    let path = pi_models_path()?;
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
+    let configured: PiModelsFile = serde_json::from_str(&contents)
+        .map_err(|error| format!("Pi models in {} are invalid: {error}", path.display()))?;
+    Ok(configured
+        .providers
+        .values()
+        .flat_map(|provider| {
+            provider.models.iter().map(|model| AiModelOption {
+                id: model.id.clone(),
+                name: model.name.clone(),
+                context_window: model.context_window,
+                max_tokens: model.max_tokens,
+                reasoning: provider.compat.supports_reasoning_effort,
+                supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+                input: model.input.clone(),
+            })
+        })
+        .collect())
+}
+
+fn default_settings_from_pi() -> Option<GoferSettings> {
+    let path = pi_models_path().ok()?;
+    let contents = fs::read_to_string(path).ok()?;
+    let configured: PiModelsFile = serde_json::from_str(&contents).ok()?;
+    let provider = configured.providers.values().next()?;
+    let model = provider.models.first()?;
+    Some(GoferSettings {
+        version: SETTINGS_VERSION,
+        ai: AiSettings {
+            connection_type: AiConnectionType::OpenaiCompatible,
+            name: "Local AI".to_owned(),
+            base_url: provider.base_url.clone(),
+            model: model.id.clone(),
+            api: ApiDialect::OpenaiCompletions,
+            model_name: model.name.clone(),
+            context_window: model.context_window,
+            max_tokens: model.max_tokens,
+            reasoning: provider.compat.supports_reasoning_effort,
+            supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+            input: model.input.clone(),
+            thinking_level: default_thinking_level(),
+            max_retries: default_max_retries(),
+            timeout_ms: default_timeout_ms(),
+            system_prompt: String::new(),
+        },
+    })
 }
 
 fn write_settings(app: &AppHandle, settings: &GoferSettings) -> Result<(), String> {
@@ -411,6 +689,30 @@ fn validate_settings(mut settings: GoferSettings) -> Result<GoferSettings, Strin
     }
     settings.ai.name = required_value("Connection name", settings.ai.name)?;
     settings.ai.model = required_value("Model ID", settings.ai.model)?;
+    if settings.ai.model_name.trim().is_empty() {
+        settings.ai.model_name = settings.ai.model.clone();
+    } else {
+        settings.ai.model_name = settings.ai.model_name.trim().to_owned();
+    }
+    if settings.ai.context_window == 0 || settings.ai.max_tokens == 0 {
+        return Err("Context window and maximum output tokens must be greater than zero".to_owned());
+    }
+    if settings.ai.max_retries > 10 {
+        return Err("Maximum retries cannot exceed 10".to_owned());
+    }
+    if !(1_000..=3_600_000).contains(&settings.ai.timeout_ms) {
+        return Err("Request timeout must be between 1,000 and 3,600,000 milliseconds".to_owned());
+    }
+    if ![
+        "off", "minimal", "low", "medium", "high", "xhigh", "max",
+    ]
+    .contains(&settings.ai.thinking_level.as_str())
+    {
+        return Err("Reasoning level is invalid".to_owned());
+    }
+    if !settings.ai.reasoning {
+        settings.ai.thinking_level = "off".to_owned();
+    }
     settings.ai.base_url = settings.ai.base_url.trim().trim_end_matches('/').to_owned();
     let url = reqwest::Url::parse(&settings.ai.base_url)
         .map_err(|error| format!("Base URL must be a valid absolute URL: {error}"))?;
@@ -745,6 +1047,10 @@ fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> 
         .stderr
         .take()
         .ok_or_else(|| "Could not read Pi AI worker errors".to_owned())?;
+    let child = Arc::new(Mutex::new(child));
+    *AI_CHILD
+        .lock()
+        .map_err(|_| "The AI process lock is poisoned".to_owned())? = Some(Arc::clone(&child));
     let stderr_reader = std::thread::spawn(move || {
         let mut output = String::new();
         let _ = BufReader::new(stderr).read_to_string(&mut output);
@@ -765,12 +1071,17 @@ fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> 
     }
 
     let status = child
+        .lock()
+        .map_err(|_| "The AI child process lock is poisoned".to_owned())?
         .wait()
         .map_err(|error| format!("Could not wait for the Pi AI worker: {error}"))?;
     let stderr = stderr_reader
         .join()
         .map_err(|_| "Could not collect Pi AI worker errors".to_owned())?;
     if !status.success() {
+        if AI_REQUEST_CANCELLED.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let detail = stderr.trim();
         if detail.is_empty() {
             return Err(format!("Pi AI worker exited with {status}"));
@@ -830,9 +1141,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            cancel_ai_request,
             delete_rag_cache,
             get_rag_cache_status,
             initialize_rag,
+            list_ai_models,
             load_settings,
             save_settings,
             send_ai_message,
@@ -859,6 +1172,7 @@ mod tests {
                 base_url: base_url.into(),
                 model: model.into(),
                 api: ApiDialect::OpenaiCompletions,
+                ..AiSettings::default()
             },
         }
     }

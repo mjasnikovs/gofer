@@ -38,6 +38,7 @@ const incompleteCache = {
 } as const
 
 beforeEach(() => {
+    window.localStorage.clear()
     tauri.isTauri.mockReturnValue(true)
     tauri.listen.mockResolvedValue(vi.fn())
 })
@@ -104,6 +105,7 @@ describe('SettingsPage', () => {
             if (command === 'test_ai_connection') {
                 return {status: 'connected', message: 'Connected.'}
             }
+            if (command === 'list_ai_models') return []
             return undefined
         })
     }
@@ -115,20 +117,24 @@ describe('SettingsPage', () => {
 
         expect(await screen.findByDisplayValue('Local AI')).toBeInTheDocument()
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
-        expect(tauri.invoke.mock.lastCall?.[0]).toBe('test_ai_connection')
-        expect(tauri.invoke.mock.lastCall?.[1]).toMatchObject({request: {apiKey: {action: 'keep'}}})
+        const keepRequest = tauri.invoke.mock.calls.find(call => call[0] === 'test_ai_connection')
+        expect(keepRequest?.[1]).toMatchObject({request: {apiKey: {action: 'keep'}}})
 
         await user.type(screen.getByPlaceholderText('Stored securely'), ' new-secret ')
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
-        expect(tauri.invoke.mock.lastCall?.[1]).toMatchObject({
+        const setRequest = tauri.invoke.mock.calls
+            .filter(call => call[0] === 'test_ai_connection')
+            .at(-1)
+        expect(setRequest?.[1]).toMatchObject({
             request: {apiKey: {action: 'set', value: ' new-secret '}}
         })
 
         await user.click(screen.getByRole('button', {name: 'Remove stored API key'}))
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
-        expect(tauri.invoke.mock.lastCall?.[1]).toMatchObject({
-            request: {apiKey: {action: 'clear'}}
-        })
+        const clearRequest = tauri.invoke.mock.calls
+            .filter(call => call[0] === 'test_ai_connection')
+            .at(-1)
+        expect(clearRequest?.[1]).toMatchObject({request: {apiKey: {action: 'clear'}}})
     })
 
     it('reports model listener failures and restores the cache state', async () => {
@@ -171,8 +177,84 @@ describe('Workspace', () => {
         expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
             request: {
                 requestId: 1,
+                agentMessages: [],
                 messages: [expect.objectContaining({sender: 'user', text: 'Say hello'})]
             }
         })
+    })
+
+    it('renders agent tool activity and token usage', async () => {
+        let handler: EventHandler | undefined
+        tauri.listen.mockImplementation(async (_event, nextHandler) => {
+            handler = nextHandler
+            return () => undefined
+        })
+        tauri.invoke.mockImplementation(async command => {
+            if (command === 'load_settings') return settingsResponse
+            if (command === 'list_ai_models') {
+                return [
+                    {
+                        id: 'local-model',
+                        name: 'Local model',
+                        contextWindow: 120_064,
+                        maxTokens: 120_064,
+                        reasoning: false,
+                        supportsReasoningEffort: false,
+                        input: ['text']
+                    }
+                ]
+            }
+            if (command === 'send_ai_message') {
+                const events = [
+                    {
+                        type: 'tool-start',
+                        id: 'tool-1',
+                        name: 'bash',
+                        target: 'pwd',
+                        startedAt: 10
+                    },
+                    {
+                        type: 'tool-end',
+                        id: 'tool-1',
+                        output: '/workspace',
+                        isError: false,
+                        endedAt: 20
+                    },
+                    {type: 'text-delta', delta: 'Finished'},
+                    {
+                        type: 'done',
+                        text: 'Finished',
+                        thinking: '',
+                        stopReason: 'stop',
+                        model: 'local-model',
+                        agentMessages: [],
+                        usage: {
+                            input: 10,
+                            output: 2,
+                            cacheRead: 0,
+                            cacheWrite: 0,
+                            reasoning: 0,
+                            totalTokens: 12,
+                            cost: {total: 0}
+                        }
+                    }
+                ]
+                for (const event of events) {
+                    handler?.({payload: {requestId: 1, event} as never})
+                }
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await screen.findByText('Local AI connected')
+        await userEvent.type(screen.getByRole('textbox'), 'Inspect workspace{enter}')
+
+        expect(await screen.findByText('Finished')).toBeInTheDocument()
+        expect(screen.getByText('bash')).toBeInTheDocument()
+        expect(screen.getByText('pwd')).toBeInTheDocument()
+        expect(screen.getByText(/10 in/)).toBeInTheDocument()
+        expect(screen.getByText('0.01K / 120K')).toBeInTheDocument()
+        expect(screen.queryByText('local-model')).not.toBeInTheDocument()
     })
 })

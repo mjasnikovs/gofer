@@ -1,7 +1,18 @@
+import {
+    Agent,
+    NodeExecutionEnv,
+    createBashTool,
+    createEditTool,
+    createReadTool,
+    createWriteTool
+} from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider} from '@earendil-works/pi-ai'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 
 const PROVIDER_ID = 'local'
+const DEFAULT_CONTEXT_WINDOW = 120_064
+const DEFAULT_SYSTEM_PROMPT = `You are Gofer, a capable local coding agent. Work autonomously toward the user's goal.
+You can inspect and modify files and run shell commands with the provided tools. Use tools when they help; never claim an action succeeded unless its result confirms it. Keep the user informed with a concise final response.`
 
 function zeroUsage() {
     return {
@@ -17,18 +28,18 @@ function zeroUsage() {
 function modelFor(settings) {
     return {
         id: settings.model,
-        name: settings.model === 'Qwen3.6-27B-UD-Q4_K_XL.gguf' ? 'Qwen3.6 27B' : settings.model,
+        name: settings.modelName || settings.model,
         api: 'openai-completions',
         provider: PROVIDER_ID,
         baseUrl: settings.baseUrl,
-        reasoning: false,
-        input: ['text', 'image'],
-        cost: {input: 0.3, output: 0.6, cacheRead: 0.03, cacheWrite: 0.3},
-        contextWindow: 120_064,
-        maxTokens: 120_064,
+        reasoning: settings.reasoning ?? false,
+        input: settings.input ?? ['text'],
+        cost: settings.cost ?? {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+        contextWindow: settings.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        maxTokens: settings.maxTokens ?? settings.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         compat: {
             supportsDeveloperRole: false,
-            supportsReasoningEffort: false
+            supportsReasoningEffort: settings.supportsReasoningEffort ?? false
         }
     }
 }
@@ -49,7 +60,46 @@ function contextMessage(message, model) {
     }
 }
 
-export async function streamAiResponse({settings, apiKey, messages, emit, signal}) {
+function textContent(content) {
+    return content
+        .filter(part => part.type === 'text')
+        .map(part => part.text)
+        .join('')
+}
+
+function toolTarget(name, args) {
+    if (name === 'bash') return args.command
+    return args.path
+}
+
+function bindTool(tool, context) {
+    return {
+        ...tool,
+        execute: (id, params, signal, onUpdate) =>
+            tool.execute(id, params, signal, onUpdate, context)
+    }
+}
+
+export function createAgentTools(workspacePath) {
+    const env = new NodeExecutionEnv({cwd: workspacePath})
+    const context = {env}
+    return {
+        env,
+        tools: [createReadTool(), createWriteTool(), createEditTool(), createBashTool()].map(tool =>
+            bindTool(tool, context)
+        )
+    }
+}
+
+export async function runAgent({
+    settings,
+    apiKey,
+    messages,
+    agentMessages,
+    workspacePath,
+    emit,
+    signal
+}) {
     const model = modelFor(settings)
     const provider = createProvider({
         id: PROVIDER_ID,
@@ -66,26 +116,100 @@ export async function streamAiResponse({settings, apiKey, messages, emit, signal
     })
     const models = createModels()
     models.setProvider(provider)
-    const stream = models.stream(
-        model,
-        {messages: messages.map(message => contextMessage(message, model))},
-        {signal}
-    )
+    const {env, tools} = createAgentTools(workspacePath)
+    const previousMessages =
+        Array.isArray(agentMessages) ? agentMessages : (
+            messages.slice(0, -1).map(message => contextMessage(message, model))
+        )
+    const prompt = messages.at(-1)?.text
+    if (!prompt) throw new Error('The agent request does not contain a user prompt')
 
-    let text = ''
-    for await (const event of stream) {
-        if (event.type === 'text_delta') {
-            text += event.delta
-            emit({type: 'text-delta', delta: event.delta})
+    const agent = new Agent({
+        initialState: {
+            systemPrompt: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+            model,
+            thinkingLevel: settings.thinkingLevel || 'off',
+            tools,
+            messages: previousMessages
+        },
+        streamFn: (nextModel, context, options) =>
+            models.streamSimple(nextModel, context, {
+                ...options,
+                timeoutMs: settings.timeoutMs ?? 120_000,
+                maxRetries: settings.maxRetries ?? 2,
+                maxRetryDelayMs: 15_000
+            }),
+        sessionId: settings.sessionId,
+        toolExecution: 'parallel'
+    })
+
+    if (signal) signal.addEventListener('abort', () => agent.abort(), {once: true})
+    let finalMessage
+    const unsubscribe = agent.subscribe(event => {
+        if (event.type === 'message_update') {
+            const update = event.assistantMessageEvent
+            if (update.type === 'text_delta') emit({type: 'text-delta', delta: update.delta})
+            if (update.type === 'thinking_delta')
+                emit({type: 'thinking-delta', delta: update.delta})
+            return
         }
-    }
+        if (event.type === 'tool_execution_start') {
+            emit({
+                type: 'tool-start',
+                id: event.toolCallId,
+                name: event.toolName,
+                target: toolTarget(event.toolName, event.args),
+                startedAt: Date.now()
+            })
+            return
+        }
+        if (event.type === 'tool_execution_update') {
+            emit({
+                type: 'tool-update',
+                id: event.toolCallId,
+                output: textContent(event.partialResult.content ?? [])
+            })
+            return
+        }
+        if (event.type === 'tool_execution_end') {
+            emit({
+                type: 'tool-end',
+                id: event.toolCallId,
+                output: textContent(event.result.content ?? []),
+                isError: event.isError,
+                endedAt: Date.now()
+            })
+            return
+        }
+        if (event.type === 'turn_end' && event.message.role === 'assistant') {
+            finalMessage = event.message
+            emit({type: 'usage', usage: event.message.usage, model: event.message.model})
+        }
+    })
 
-    const result = await stream.result()
-    if (result.stopReason === 'error' || result.stopReason === 'aborted') {
-        throw new Error(result.errorMessage || `AI request ${result.stopReason}`)
+    try {
+        await agent.prompt(prompt)
+        if (!finalMessage)
+            throw new Error(agent.state.errorMessage || 'The agent ended without a response')
+        if (finalMessage.stopReason === 'error') {
+            throw new Error(finalMessage.errorMessage || 'The model returned an error')
+        }
+        const completion = {
+            type: 'done',
+            text: textContent(finalMessage.content),
+            thinking: finalMessage.content
+                .filter(part => part.type === 'thinking')
+                .map(part => part.thinking)
+                .join(''),
+            stopReason: finalMessage.stopReason,
+            usage: finalMessage.usage,
+            model: finalMessage.model,
+            agentMessages: agent.state.messages
+        }
+        emit(completion)
+        return completion
+    } finally {
+        unsubscribe()
+        await env.cleanup()
     }
-
-    const completion = {type: 'done', text, stopReason: result.stopReason, usage: result.usage}
-    emit(completion)
-    return completion
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import {createServer} from 'node:http'
 import test from 'node:test'
-import {streamAiResponse} from './ai-provider.mjs'
+import {runAgent} from './ai-provider.mjs'
 
 const settings = {
     name: 'Local AI',
@@ -69,10 +69,11 @@ test('streams a Pi AI completion through the configured local provider', async (
     const events = []
 
     try {
-        const completion = await streamAiResponse({
+        const completion = await runAgent({
             settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
             apiKey: 'secret',
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: process.cwd(),
             emit: event => events.push(event)
         })
         const request = mock.request()
@@ -86,8 +87,108 @@ test('streams a Pi AI completion through the configured local provider', async (
         )
         assert.equal(request.authorization, 'Bearer secret')
         assert.equal(request.body.model, settings.model)
-        assert.equal(request.body.messages[0].role, 'user')
+        assert.equal(request.body.messages.at(-1).role, 'user')
+        assert.deepEqual(
+            request.body.tools.map(tool => tool.function.name),
+            ['read', 'write', 'edit', 'bash']
+        )
     } finally {
         mock.server.close()
+    }
+})
+
+test('runs the Pi agent tool loop and streams tool lifecycle events', async () => {
+    let requestCount = 0
+    const bodies = []
+    const server = createServer((request, response) => {
+        let body = ''
+        request.on('data', chunk => {
+            body += chunk
+        })
+        request.on('end', () => {
+            bodies.push(JSON.parse(body))
+            requestCount += 1
+            response.writeHead(200, {'content-type': 'text/event-stream'})
+            const delta =
+                requestCount === 1 ?
+                    {
+                        role: 'assistant',
+                        tool_calls: [
+                            {
+                                index: 0,
+                                id: 'call-read',
+                                type: 'function',
+                                function: {
+                                    name: 'read',
+                                    arguments: '{"path":"package.json"}'
+                                }
+                            }
+                        ]
+                    }
+                :   {role: 'assistant', content: 'Read complete'}
+            response.write(
+                `data: ${JSON.stringify({
+                    id: `chatcmpl-${requestCount}`,
+                    object: 'chat.completion.chunk',
+                    created: 1,
+                    model: settings.model,
+                    choices: [{index: 0, delta, finish_reason: null}]
+                })}\n\n`
+            )
+            response.write(
+                `data: ${JSON.stringify({
+                    id: `chatcmpl-${requestCount}`,
+                    object: 'chat.completion.chunk',
+                    created: 1,
+                    model: settings.model,
+                    choices: [
+                        {
+                            index: 0,
+                            delta: {},
+                            finish_reason: requestCount === 1 ? 'tool_calls' : 'stop'
+                        }
+                    ],
+                    usage: {prompt_tokens: 10, completion_tokens: 3, total_tokens: 13}
+                })}\n\n`
+            )
+            response.end('data: [DONE]\n\n')
+        })
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const address = server.address()
+    const events = []
+
+    try {
+        const completion = await runAgent({
+            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            messages: [{sender: 'user', text: 'Read package.json', timestamp: 1}],
+            workspacePath: process.cwd(),
+            emit: event => events.push(event)
+        })
+
+        assert.equal(completion.text, 'Read complete')
+        assert.equal(requestCount, 2)
+        assert.equal(events.find(event => event.type === 'tool-start').name, 'read')
+        assert.equal(events.find(event => event.type === 'tool-start').target, 'package.json')
+        assert.equal(events.find(event => event.type === 'tool-end').isError, false)
+        assert.match(events.find(event => event.type === 'tool-end').output, /\"name\": \"gofer\"/)
+        assert.equal(bodies[1].messages.at(-1).role, 'tool')
+
+        await runAgent({
+            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            messages: [
+                {sender: 'user', text: 'Read package.json', timestamp: 1},
+                {sender: 'assistant', text: completion.text, timestamp: 2},
+                {sender: 'user', text: 'Continue', timestamp: 3}
+            ],
+            agentMessages: completion.agentMessages,
+            workspacePath: process.cwd(),
+            emit: () => undefined
+        })
+
+        assert.equal(requestCount, 3)
+        assert.ok(bodies[2].messages.some(message => message.role === 'tool'))
+    } finally {
+        server.close()
     }
 })
