@@ -636,7 +636,7 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
             .map(|message| message.text.clone())
             .unwrap_or_default();
         let settings = read_settings(&app)?;
-        let api_key = stored_api_key()?;
+        let api_key = ai_worker_api_key()?;
         let storage = project_storage(&app)?;
         let workspace_path = storage.agent_workspace()?.display().to_string();
         let task_id = request.task_id;
@@ -1297,6 +1297,14 @@ impl CredentialStore for SystemCredentialStore {
 
 fn stored_api_key() -> Result<Option<String>, String> {
     SystemCredentialStore.load()
+}
+
+fn ai_worker_api_key() -> Result<Option<String>, String> {
+    #[cfg(feature = "webdriver")]
+    if std::env::var_os("GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE").is_some() {
+        return Ok(None);
+    }
+    stored_api_key()
 }
 
 fn settings_response(settings: GoferSettings) -> SettingsResponse {

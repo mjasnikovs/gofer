@@ -16,6 +16,7 @@ const appDataDir = join(fixtureRoot, 'data')
 process.env.GOFER_APP_DATA_DIR = appDataDir
 process.env.GOFER_RAG_CACHE_DIR = join(fixtureRoot, 'cache')
 process.env.GOFER_WEBDRIVER_RAG_READY = '1'
+process.env.GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE = '1'
 process.env.GOFER_AI_WORKER = resolve('fixtures/packaged/fake-ai-worker.mjs')
 
 let godotBridge: ChildProcessWithoutNullStreams | undefined
