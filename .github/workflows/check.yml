@@ -35,7 +35,7 @@ jobs:
               id: chrome
               uses: browser-actions/setup-chrome@v2
               with:
-                  chrome-version: 150.0.7871.128
+                  chrome-version: 150.0.7871.124
                   install-chromedriver: true
             - name: Install pinned Godot
               env:
