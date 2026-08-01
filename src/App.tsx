@@ -149,7 +149,7 @@ function progressLabel(progress?: DownloadProgress) {
     return `${progress.model}: ${progress.status}`
 }
 
-function InitializationSplash({onReady}: {onReady: () => void}) {
+export function InitializationSplash({onReady}: {onReady: () => void}) {
     const [state, setState] = useState<InitializationState>({status: 'initializing'})
     const hasStarted = useRef(false)
 
@@ -165,18 +165,19 @@ function InitializationSplash({onReady}: {onReady: () => void}) {
             return
         }
 
-        const unlisten = await listen<DownloadProgress>('rag-download-progress', event => {
-            setState({status: 'initializing', progress: event.payload})
-        })
+        let unlisten: (() => void) | undefined
 
         try {
+            unlisten = await listen<DownloadProgress>('rag-download-progress', event => {
+                setState({status: 'initializing', progress: event.payload})
+            })
             await invoke('initialize_rag')
             setState({status: 'ready'})
             onReady()
         } catch (error) {
             setState({status: 'error', message: String(error)})
         } finally {
-            unlisten()
+            unlisten?.()
         }
     }, [onReady])
 
@@ -621,7 +622,7 @@ function Workspace() {
     )
 }
 
-function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
+export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
     const hasLoaded = useRef(false)
     const [draft, setDraft] = useState<GoferSettings>()
     const [hasApiKey, setHasApiKey] = useState(false)
@@ -756,10 +757,11 @@ function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
         setIsDownloading(true)
         setNotice(undefined)
         setCache(previous => (previous ? {...previous, state: 'busy'} : previous))
-        const unlisten = await listen<DownloadProgress>('rag-download-progress', event => {
-            setProgress(event.payload)
-        })
+        let unlisten: (() => void) | undefined
         try {
+            unlisten = await listen<DownloadProgress>('rag-download-progress', event => {
+                setProgress(event.payload)
+            })
             await invoke('initialize_rag')
             await refreshCache()
             setNotice({
@@ -775,7 +777,7 @@ function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
                 description: String(error)
             })
         } finally {
-            unlisten()
+            unlisten?.()
             setIsDownloading(false)
             setProgress(undefined)
         }

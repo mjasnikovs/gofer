@@ -14,7 +14,11 @@
         "lint:fix": "eslint . --fix --quiet",
         "format": "prettier --write . --log-level warn",
         "format:check": "prettier --check . --log-level warn",
-        "check": "npm run --silent format:check && npm run --silent lint && npm run --silent typecheck && cargo check --quiet --manifest-path src-tauri/Cargo.toml",
+        "test:frontend": "vitest run",
+        "test:worker": "node --test scripts/rag-progress.test.mjs",
+        "test:rust": "cargo test --quiet --manifest-path src-tauri/Cargo.toml",
+        "test": "npm run --silent test:frontend && npm run --silent test:worker && npm run --silent test:rust",
+        "check": "npm run --silent format:check && npm run --silent lint && npm run --silent typecheck && npm run --silent test && cargo check --quiet --manifest-path src-tauri/Cargo.toml",
         "preview": "vite preview",
         "tauri": "tauri",
         "astryx": "node node_modules/@astryxdesign/cli/bin/astryx.mjs"
@@ -34,6 +38,9 @@
         "@astryxdesign/cli": "0.2.0",
         "@eslint/js": "10.0.1",
         "@tauri-apps/cli": "2.11.4",
+        "@testing-library/jest-dom": "7.0.0",
+        "@testing-library/react": "16.3.2",
+        "@testing-library/user-event": "14.6.1",
         "@types/node": "26.1.2",
         "@types/react": "19.2.18",
         "@types/react-dom": "19.2.4",
@@ -43,9 +50,11 @@
         "eslint-plugin-react-hooks": "7.1.1",
         "eslint-plugin-react-refresh": "0.5.3",
         "globals": "17.8.0",
+        "jsdom": "30.0.1",
         "prettier": "3.9.6",
         "typescript": "6.0.3",
         "typescript-eslint": "8.65.0",
-        "vite": "8.2.0"
+        "vite": "8.2.0",
+        "vitest": "4.1.10"
     }
 }

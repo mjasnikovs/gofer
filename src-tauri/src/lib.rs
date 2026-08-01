@@ -17,14 +17,14 @@ const SETTINGS_VERSION: u32 = 1;
 static RAG_INITIALIZING: AtomicBool = AtomicBool::new(false);
 static KEYRING_INITIALIZATION: Mutex<()> = Mutex::new(());
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GoferSettings {
     version: u32,
     ai: AiSettings,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AiSettings {
     connection_type: AiConnectionType,
@@ -34,19 +34,19 @@ struct AiSettings {
     api: ApiDialect,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum AiConnectionType {
     OpenaiCompatible,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum ApiDialect {
     OpenaiCompletions,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsResponse {
     settings: GoferSettings,
@@ -70,7 +70,7 @@ enum ApiKeyUpdate {
     Clear,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum ConnectionTestStatus {
     Connected,
@@ -80,13 +80,13 @@ enum ConnectionTestStatus {
     ServerUnreachable,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 struct ConnectionTestResult {
     status: ConnectionTestStatus,
     message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum CacheState {
     Installed,
@@ -261,24 +261,7 @@ async fn delete_rag_cache() -> Result<CacheStatus, String> {
         let operation = InitializationGuard;
 
         let path = rag_cache_path()?;
-        if path.exists() {
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-            if metadata.file_type().is_symlink() {
-                return Err(format!(
-                    "Refusing to delete the symlink at {}",
-                    path.display()
-                ));
-            }
-            if !metadata.is_dir() {
-                return Err(format!(
-                    "The Gofer RAG cache path is not a directory: {}",
-                    path.display()
-                ));
-            }
-            fs::remove_dir_all(&path)
-                .map_err(|error| format!("Could not delete {}: {error}", path.display()))?;
-        }
+        delete_cache_path(&path)?;
         drop(operation);
         cache_status()
     })
@@ -312,6 +295,10 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn read_settings(app: &AppHandle) -> Result<GoferSettings, String> {
     let path = settings_path(app)?;
+    read_settings_from_path(&path)
+}
+
+fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
     if !path.exists() {
         return Ok(GoferSettings::default());
     }
@@ -324,6 +311,10 @@ fn read_settings(app: &AppHandle) -> Result<GoferSettings, String> {
 
 fn write_settings(app: &AppHandle, settings: &GoferSettings) -> Result<(), String> {
     let path = settings_path(app)?;
+    write_settings_to_path(&path, settings)
+}
+
+fn write_settings_to_path(path: &Path, settings: &GoferSettings) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Gofer settings path has no parent: {}", path.display()))?;
@@ -482,6 +473,10 @@ fn validate_cache_path(path: PathBuf) -> Result<PathBuf, String> {
 fn cache_status() -> Result<CacheStatus, String> {
     let path = rag_cache_path()?;
     let busy = RAG_INITIALIZING.load(Ordering::Acquire);
+    cache_status_for_path(&path, busy)
+}
+
+fn cache_status_for_path(path: &Path, busy: bool) -> Result<CacheStatus, String> {
     let state = if busy {
         CacheState::Busy
     } else if !path.exists() {
@@ -504,6 +499,28 @@ fn cache_status() -> Result<CacheStatus, String> {
         size_bytes,
         state,
     })
+}
+
+fn delete_cache_path(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to delete the symlink at {}",
+            path.display()
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "The Gofer RAG cache path is not a directory: {}",
+            path.display()
+        ));
+    }
+    fs::remove_dir_all(path)
+        .map_err(|error| format!("Could not delete {}: {error}", path.display()))
 }
 
 fn required_model_files(cache: &Path) -> [PathBuf; 7] {
@@ -636,4 +653,297 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use tempfile::TempDir;
+
+    fn settings(base_url: impl Into<String>, model: impl Into<String>) -> GoferSettings {
+        GoferSettings {
+            version: SETTINGS_VERSION,
+            ai: AiSettings {
+                connection_type: AiConnectionType::OpenaiCompatible,
+                name: " Test connection ".to_owned(),
+                base_url: base_url.into(),
+                model: model.into(),
+                api: ApiDialect::OpenaiCompletions,
+            },
+        }
+    }
+
+    fn request(base_url: impl Into<String>, model: impl Into<String>) -> SettingsRequest {
+        SettingsRequest {
+            settings: settings(base_url, model),
+            api_key: ApiKeyUpdate::Set {
+                value: " secret-token ".to_owned(),
+            },
+        }
+    }
+
+    fn mock_server(status: &str, body: &str) -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let address = listener.local_addr().expect("mock server address");
+        let status = status.to_owned();
+        let body = body.to_owned();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 4096];
+            let length = stream.read(&mut request).expect("read request");
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            String::from_utf8_lossy(&request[..length]).into_owned()
+        });
+        (format!("http://{address}/v1/"), handle)
+    }
+
+    #[test]
+    fn settings_defaults_when_file_is_missing() {
+        let directory = TempDir::new().expect("temporary directory");
+        let loaded = read_settings_from_path(&directory.path().join("settings.json"))
+            .expect("default settings");
+
+        assert_eq!(loaded, GoferSettings::default());
+    }
+
+    #[test]
+    fn settings_round_trip_and_normalize_values() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("nested/settings.json");
+        let normalized = validate_settings(settings(" http://localhost:8080/v1/// ", " model "))
+            .expect("valid settings");
+
+        write_settings_to_path(&path, &normalized).expect("write settings");
+        let loaded = read_settings_from_path(&path).expect("read settings");
+
+        assert_eq!(loaded.ai.name, "Test connection");
+        assert_eq!(loaded.ai.model, "model");
+        assert_eq!(loaded.ai.base_url, "http://localhost:8080/v1");
+        assert!(
+            fs::read_to_string(path)
+                .expect("settings contents")
+                .ends_with('\n')
+        );
+    }
+
+    #[test]
+    fn invalid_settings_are_rejected() {
+        let mut unsupported = settings("http://localhost/v1", "model");
+        unsupported.version = SETTINGS_VERSION + 1;
+        assert!(
+            validate_settings(unsupported)
+                .unwrap_err()
+                .contains("Unsupported settings version")
+        );
+
+        let mut blank_name = settings("http://localhost/v1", "model");
+        blank_name.ai.name = "  ".to_owned();
+        assert_eq!(
+            validate_settings(blank_name).unwrap_err(),
+            "Connection name is required"
+        );
+
+        assert_eq!(
+            validate_settings(settings("http://localhost/v1", "  ")).unwrap_err(),
+            "Model ID is required"
+        );
+        assert!(
+            validate_settings(settings("relative/path", "model"))
+                .unwrap_err()
+                .contains("valid absolute URL")
+        );
+        assert_eq!(
+            validate_settings(settings("file:///tmp/server", "model")).unwrap_err(),
+            "Base URL must use http or https"
+        );
+    }
+
+    #[test]
+    fn corrupt_settings_file_is_rejected() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        fs::write(&path, "not json").expect("write corrupt settings");
+
+        assert!(
+            read_settings_from_path(&path)
+                .unwrap_err()
+                .contains("are invalid")
+        );
+    }
+
+    #[test]
+    fn cache_path_rejects_unsafe_targets() {
+        assert!(
+            validate_cache_path(PathBuf::from("/"))
+                .unwrap_err()
+                .contains("unsafe cache path")
+        );
+        assert!(
+            validate_cache_path(PathBuf::from("/tmp/gofer/../other"))
+                .unwrap_err()
+                .contains("traversal components")
+        );
+    }
+
+    #[test]
+    fn cache_status_distinguishes_missing_incomplete_installed_and_busy() {
+        let directory = TempDir::new().expect("temporary directory");
+        let cache = directory.path().join("cache");
+        let missing = cache_status_for_path(&cache, false).expect("missing status");
+        assert_eq!(missing.state, CacheState::NotInstalled);
+        assert_eq!(missing.size_bytes, 0);
+
+        fs::create_dir(&cache).expect("create cache");
+        fs::write(cache.join("partial.bin"), [1_u8, 2, 3]).expect("write partial cache");
+        let incomplete = cache_status_for_path(&cache, false).expect("incomplete status");
+        assert_eq!(incomplete.state, CacheState::Incomplete);
+        assert_eq!(incomplete.size_bytes, 3);
+
+        for file in required_model_files(&cache) {
+            fs::create_dir_all(file.parent().expect("model parent")).expect("create model parent");
+            fs::write(file, [0_u8; 2]).expect("write model file");
+        }
+        assert_eq!(
+            cache_status_for_path(&cache, false)
+                .expect("installed status")
+                .state,
+            CacheState::Installed
+        );
+        assert_eq!(
+            cache_status_for_path(&cache, true)
+                .expect("busy status")
+                .state,
+            CacheState::Busy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_size_ignores_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().expect("temporary directory");
+        let cache = directory.path().join("cache");
+        let outside = directory.path().join("outside.bin");
+        fs::create_dir(&cache).expect("create cache");
+        fs::write(cache.join("inside.bin"), [0_u8; 4]).expect("write inside file");
+        fs::write(&outside, [0_u8; 20]).expect("write outside file");
+        symlink(&outside, cache.join("link.bin")).expect("create symlink");
+
+        assert_eq!(directory_size(&cache).expect("cache size"), 4);
+    }
+
+    #[test]
+    fn cache_deletion_is_safe_and_idempotent() {
+        let directory = TempDir::new().expect("temporary directory");
+        let cache = directory.path().join("cache");
+        delete_cache_path(&cache).expect("missing cache deletion");
+        fs::create_dir(&cache).expect("create cache");
+        fs::write(cache.join("model.bin"), [0_u8; 4]).expect("write cache file");
+        delete_cache_path(&cache).expect("cache deletion");
+        assert!(!cache.exists());
+
+        let file = directory.path().join("file");
+        fs::write(&file, []).expect("write regular file");
+        assert!(
+            delete_cache_path(&file)
+                .unwrap_err()
+                .contains("not a directory")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_deletion_refuses_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDir::new().expect("temporary directory");
+        let target = directory.path().join("target");
+        let link = directory.path().join("cache");
+        fs::create_dir(&target).expect("create target");
+        symlink(&target, &link).expect("create cache symlink");
+
+        assert!(
+            delete_cache_path(&link)
+                .unwrap_err()
+                .contains("Refusing to delete the symlink")
+        );
+        assert!(target.exists());
+    }
+
+    #[tokio::test]
+    async fn connection_test_reports_available_model_and_sends_bearer_key() {
+        let (base_url, server) = mock_server("200 OK", r#"{"data":[{"id":"wanted"}]}"#);
+        let result = test_ai_connection(request(base_url, "wanted"))
+            .await
+            .expect("connection result");
+        let received = server.join().expect("mock server request");
+
+        assert_eq!(result.status, ConnectionTestStatus::Connected);
+        assert!(received.starts_with("GET /v1/models HTTP/1.1"));
+        assert!(
+            received
+                .to_ascii_lowercase()
+                .contains("authorization: bearer secret-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_test_classifies_model_auth_and_server_failures() {
+        let (base_url, server) = mock_server("200 OK", r#"{"data":[{"id":"other"}]}"#);
+        let result = test_ai_connection(request(base_url, "wanted"))
+            .await
+            .expect("model result");
+        server.join().expect("model request");
+        assert_eq!(result.status, ConnectionTestStatus::ModelUnavailable);
+
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            let (base_url, server) = mock_server(status, "{}");
+            let result = test_ai_connection(request(base_url, "wanted"))
+                .await
+                .expect("auth result");
+            server.join().expect("auth request");
+            assert_eq!(result.status, ConnectionTestStatus::Unauthorized);
+        }
+
+        let (base_url, server) = mock_server("500 Internal Server Error", "{}");
+        let result = test_ai_connection(request(base_url, "wanted"))
+            .await
+            .expect("server result");
+        server.join().expect("server request");
+        assert_eq!(result.status, ConnectionTestStatus::ServerError);
+    }
+
+    #[tokio::test]
+    async fn connection_test_rejects_invalid_models_response() {
+        let (base_url, server) = mock_server("200 OK", "not-json");
+        let error = test_ai_connection(request(base_url, "wanted"))
+            .await
+            .unwrap_err();
+        server.join().expect("invalid response request");
+
+        assert!(error.contains("invalid OpenAI models response"));
+    }
+
+    #[tokio::test]
+    async fn connection_test_reports_unreachable_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve address");
+        let address = listener.local_addr().expect("reserved address");
+        drop(listener);
+
+        let result = test_ai_connection(request(format!("http://{address}/v1"), "wanted"))
+            .await
+            .expect("unreachable result");
+
+        assert_eq!(result.status, ConnectionTestStatus::ServerUnreachable);
+    }
 }
