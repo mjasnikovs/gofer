@@ -106,6 +106,7 @@ export async function runAgent({
     messages,
     agentMessages,
     workspacePath,
+    memoryContext,
     emit,
     signal
 }) {
@@ -137,7 +138,7 @@ export async function runAgent({
 
     const agent = new Agent({
         initialState: {
-            systemPrompt: settings.systemPrompt || DEFAULT_SYSTEM_PROMPT,
+            systemPrompt: `${settings.systemPrompt || DEFAULT_SYSTEM_PROMPT}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}`,
             model,
             thinkingLevel: settings.thinkingLevel || 'off',
             tools,

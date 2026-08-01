@@ -1,15 +1,28 @@
-use keyring::{Entry, Error as KeyringError};
 use base64::Engine;
+use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
+
+mod git;
+mod godot;
+mod memory;
+mod storage;
+
+use storage::{
+    AppendGodotLogsRequest, AppendGodotLogsResult, BackupResult, FinishGodotRunRequest,
+    GodotLogSearchResult, GodotRunRecord, MaintenanceResult, MemoryRecord, MemorySearchResult,
+    MergeTaskResult, ProjectStorage, SaveMemoryEmbeddingRequest, SearchGodotLogsRequest,
+    SearchMemoryRequest, StartGodotRunRequest, StoredAttachment, StoredChat, TaskRecord,
+    TaskWorktreeRequest, UpsertMemoryRequest,
+};
 
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 const API_KEY_USERNAME: &str = "ai-default";
@@ -169,6 +182,7 @@ enum ChatSender {
 #[serde(rename_all = "camelCase")]
 struct ChatRequest {
     request_id: u64,
+    task_id: Option<String>,
     messages: Vec<ChatMessageInput>,
     #[serde(default)]
     agent_messages: Option<serde_json::Value>,
@@ -182,6 +196,7 @@ struct AiWorkerRequest {
     messages: Vec<AiWorkerMessage>,
     agent_messages: Option<serde_json::Value>,
     workspace_path: String,
+    memory_context: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -548,10 +563,9 @@ async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, 
             response.status()
         ));
     }
-    let models = response
-        .json::<ModelsResponse>()
-        .await
-        .map_err(|error| format!("The server returned an invalid OpenAI models response: {error}"))?;
+    let models = response.json::<ModelsResponse>().await.map_err(|error| {
+        format!("The server returned an invalid OpenAI models response: {error}")
+    })?;
     let catalog = pi_model_catalog().unwrap_or_default();
     Ok(models
         .data
@@ -596,16 +610,23 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
     ACTIVE_AI_REQUEST_ID.store(request.request_id, Ordering::Release);
     AI_REQUEST_CANCELLED.store(false, Ordering::Release);
     let messages = hydrate_chat_messages(&app, validate_chat_messages(request.messages)?)?;
+    let prompt = messages
+        .last()
+        .map(|message| message.text.clone())
+        .unwrap_or_default();
     let settings = read_settings(&app)?;
     let api_key = stored_api_key()?;
-    let workspace_path = std::env::current_dir()
-        .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?
+    let workspace_path = project_storage(&app)?
+        .agent_workspace()?
         .display()
         .to_string();
 
+    let storage = project_storage(&app)?;
+    let task_id = request.task_id;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
-        run_ai_worker(
+        let memory_context = retrieve_memory_context(&storage, &prompt, task_id.as_deref()).ok();
+        let completion = run_ai_worker(
             &app,
             request.request_id,
             AiWorkerRequest {
@@ -614,8 +635,11 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
                 messages,
                 agent_messages: request.agent_messages,
                 workspace_path,
+                memory_context,
             },
-        )
+        )?;
+        let _ = remember_completed_turn(&storage, task_id.as_deref(), &prompt, &completion);
+        Ok(())
     })
     .await
     .map_err(|error| format!("AI response task failed: {error}"))?
@@ -633,20 +657,13 @@ fn save_chat_attachment(app: AppHandle, request: ChatAttachmentUpload) -> Result
     if bytes.len() as u64 != request.attachment.size {
         return Err("The attachment size does not match its contents".to_owned());
     }
-    let path = chat_attachment_path(&app, &request.attachment.id)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "The attachment path has no parent".to_owned())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    fs::write(&path, bytes)
-        .map_err(|error| format!("Could not save {}: {error}", path.display()))
+    project_storage(&app)?.save_attachment(&request.attachment.as_stored(), &bytes)
 }
 
 #[tauri::command]
 fn read_chat_attachment(app: AppHandle, attachment: ChatAttachment) -> Result<String, String> {
     validate_chat_attachment(&attachment)?;
-    let bytes = read_chat_attachment_bytes(&app, &attachment)?;
+    let bytes = project_storage(&app)?.read_attachment(&attachment.as_stored())?;
     Ok(format!(
         "data:{};base64,{}",
         attachment.mime_type,
@@ -655,13 +672,133 @@ fn read_chat_attachment(app: AppHandle, attachment: ChatAttachment) -> Result<St
 }
 
 #[tauri::command]
-fn clear_chat_attachments(app: AppHandle) -> Result<(), String> {
-    let path = chat_attachments_path(&app)?;
-    if !path.exists() {
-        return Ok(());
+fn load_chat(app: AppHandle) -> Result<StoredChat, String> {
+    project_storage(&app)?.load_chat()
+}
+
+#[tauri::command]
+fn save_chat(app: AppHandle, chat: StoredChat) -> Result<(), String> {
+    project_storage(&app)?.save_chat(&chat)
+}
+
+#[tauri::command]
+fn create_chat_task(app: AppHandle) -> Result<StoredChat, String> {
+    project_storage(&app)?.create_task()
+}
+
+#[tauri::command]
+fn activate_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, String> {
+    project_storage(&app)?.activate_task(&task_id)
+}
+
+#[tauri::command]
+fn import_legacy_chat(app: AppHandle, chat: StoredChat) -> Result<StoredChat, String> {
+    let storage = project_storage(&app)?;
+    let legacy_directory = chat_attachments_path(&app)?;
+    for attachment in chat
+        .messages
+        .iter()
+        .flat_map(|message| message.attachments.iter())
+    {
+        storage.import_legacy_attachment(&legacy_directory, attachment)?;
     }
-    fs::remove_dir_all(&path)
-        .map_err(|error| format!("Could not remove {}: {error}", path.display()))
+    storage.save_chat(&chat)?;
+    storage.load_chat()
+}
+
+#[tauri::command]
+fn list_project_tasks(app: AppHandle) -> Result<Vec<TaskRecord>, String> {
+    project_storage(&app)?.list_tasks()
+}
+
+#[tauri::command]
+fn save_task_worktree(app: AppHandle, request: TaskWorktreeRequest) -> Result<TaskRecord, String> {
+    project_storage(&app)?.save_task_worktree(&request)
+}
+
+#[tauri::command]
+fn merge_task_worktree(app: AppHandle, task_id: String) -> Result<MergeTaskResult, String> {
+    project_storage(&app)?.merge_task(&task_id)
+}
+
+#[tauri::command]
+fn create_project_backup(app: AppHandle) -> Result<BackupResult, String> {
+    project_storage(&app)?.create_backup()
+}
+
+#[tauri::command]
+fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, String> {
+    project_storage(&app)?.run_maintenance()
+}
+
+#[tauri::command]
+async fn launch_godot(
+    app: AppHandle,
+    request: godot::LaunchGodotRequest,
+) -> Result<GodotRunRecord, String> {
+    let storage = project_storage(&app)?;
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || godot::launch(&worker_app, storage, request))
+        .await
+        .map_err(|error| format!("Godot process task failed: {error}"))?
+}
+
+#[tauri::command]
+fn cancel_godot() -> Result<(), String> {
+    godot::cancel()
+}
+
+#[tauri::command]
+fn start_godot_run(
+    app: AppHandle,
+    request: StartGodotRunRequest,
+) -> Result<GodotRunRecord, String> {
+    project_storage(&app)?.start_godot_run(&request)
+}
+
+#[tauri::command]
+fn append_godot_logs(
+    app: AppHandle,
+    request: AppendGodotLogsRequest,
+) -> Result<AppendGodotLogsResult, String> {
+    project_storage(&app)?.append_godot_logs(&request)
+}
+
+#[tauri::command]
+fn finish_godot_run(app: AppHandle, request: FinishGodotRunRequest) -> Result<(), String> {
+    project_storage(&app)?.finish_godot_run(&request)
+}
+
+#[tauri::command]
+fn search_godot_logs(
+    app: AppHandle,
+    request: SearchGodotLogsRequest,
+) -> Result<Vec<GodotLogSearchResult>, String> {
+    project_storage(&app)?.search_godot_logs(&request)
+}
+
+#[tauri::command]
+fn upsert_project_memory(
+    app: AppHandle,
+    request: UpsertMemoryRequest,
+) -> Result<MemoryRecord, String> {
+    project_storage(&app)?.upsert_memory(&request)
+}
+
+#[tauri::command]
+fn save_memory_embedding(
+    app: AppHandle,
+    request: SaveMemoryEmbeddingRequest,
+) -> Result<(), String> {
+    project_storage(&app)?.save_memory_embedding(&request)
+}
+
+#[tauri::command]
+fn search_project_memory(
+    app: AppHandle,
+    request: SearchMemoryRequest,
+) -> Result<Vec<MemorySearchResult>, String> {
+    project_storage(&app)?.search_memory(&request)
 }
 
 #[tauri::command]
@@ -773,11 +910,6 @@ fn chat_attachments_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Could not resolve Gofer's data directory: {error}"))
 }
 
-fn chat_attachment_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
-    validate_chat_attachment_id(id)?;
-    Ok(chat_attachments_path(app)?.join(id))
-}
-
 fn validate_chat_attachment(attachment: &ChatAttachment) -> Result<(), String> {
     if attachment.name.trim().is_empty() {
         return Err("Attachment names cannot be empty".to_owned());
@@ -791,6 +923,17 @@ fn validate_chat_attachment(attachment: &ChatAttachment) -> Result<(), String> {
         return Err("Only PNG, JPEG, WebP, and GIF images are supported".to_owned());
     }
     validate_chat_attachment_id(&attachment.id)
+}
+
+impl ChatAttachment {
+    fn as_stored(&self) -> StoredAttachment {
+        StoredAttachment {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            mime_type: self.mime_type.clone(),
+            size: self.size,
+        }
+    }
 }
 
 fn validate_chat_attachment_id(id: &str) -> Result<(), String> {
@@ -809,16 +952,17 @@ fn read_chat_attachment_bytes(
     app: &AppHandle,
     attachment: &ChatAttachment,
 ) -> Result<Vec<u8>, String> {
-    let path = chat_attachment_path(app, &attachment.id)?;
-    let bytes = fs::read(&path)
-        .map_err(|error| format!("Could not read attachment {}: {error}", attachment.name))?;
-    if bytes.len() as u64 != attachment.size {
-        return Err(format!(
-            "The stored attachment size is invalid: {}",
-            attachment.name
-        ));
-    }
-    Ok(bytes)
+    project_storage(app)?.read_attachment(&attachment.as_stored())
+}
+
+fn project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
+    let data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve Gofer's data directory: {error}"))?;
+    let workspace = std::env::current_dir()
+        .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?;
+    ProjectStorage::open(&data_root, &workspace)
 }
 
 fn hydrate_chat_messages(
@@ -955,7 +1099,9 @@ fn validate_settings(mut settings: GoferSettings) -> Result<GoferSettings, Strin
         settings.ai.model_name = settings.ai.model_name.trim().to_owned();
     }
     if settings.ai.context_window == 0 || settings.ai.max_tokens == 0 {
-        return Err("Context window and maximum output tokens must be greater than zero".to_owned());
+        return Err(
+            "Context window and maximum output tokens must be greater than zero".to_owned(),
+        );
     }
     if settings.ai.max_retries > 10 {
         return Err("Maximum retries cannot exceed 10".to_owned());
@@ -963,10 +1109,8 @@ fn validate_settings(mut settings: GoferSettings) -> Result<GoferSettings, Strin
     if !(1_000..=3_600_000).contains(&settings.ai.timeout_ms) {
         return Err("Request timeout must be between 1,000 and 3,600,000 milliseconds".to_owned());
     }
-    if ![
-        "off", "minimal", "low", "medium", "high", "xhigh", "max",
-    ]
-    .contains(&settings.ai.thinking_level.as_str())
+    if !["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        .contains(&settings.ai.thinking_level.as_str())
     {
         return Err("Reasoning level is invalid".to_owned());
     }
@@ -1008,10 +1152,7 @@ fn validate_chat_messages(
     }) {
         return Err("Chat messages must contain text or an image".to_owned());
     }
-    if messages
-        .iter()
-        .any(|message| message.attachments.len() > 5)
-    {
+    if messages.iter().any(|message| message.attachments.len() > 5) {
         return Err("Chat messages cannot contain more than 5 images".to_owned());
     }
     for attachment in messages
@@ -1286,7 +1427,11 @@ fn run_rag_warmup(app: &AppHandle) -> Result<(), String> {
     Err(format!("Gofer RAG initialization failed: {detail}"))
 }
 
-fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> Result<(), String> {
+fn run_ai_worker(
+    app: &AppHandle,
+    request_id: u64,
+    request: AiWorkerRequest,
+) -> Result<String, String> {
     let worker = ai_worker_path()?;
     let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
     let mut child = Command::new(&node)
@@ -1329,6 +1474,7 @@ fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> 
         output
     });
     let mut completed = false;
+    let mut completion_text = String::new();
 
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|error| format!("Could not read Pi AI output: {error}"))?;
@@ -1337,7 +1483,14 @@ fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> 
         };
         let event: serde_json::Value = serde_json::from_str(payload)
             .map_err(|error| format!("Pi AI returned an invalid event: {error}"))?;
-        completed |= event.get("type").and_then(serde_json::Value::as_str) == Some("done");
+        if event.get("type").and_then(serde_json::Value::as_str) == Some("done") {
+            completed = true;
+            completion_text = event
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+        }
         app.emit("ai-stream-event", AiStreamPayload { request_id, event })
             .map_err(|error| format!("Could not stream the AI response: {error}"))?;
     }
@@ -1352,7 +1505,7 @@ fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> 
         .map_err(|_| "Could not collect Pi AI worker errors".to_owned())?;
     if !status.success() {
         if AI_REQUEST_CANCELLED.load(Ordering::Acquire) {
-            return Ok(());
+            return Ok(String::new());
         }
         let detail = stderr.trim();
         if detail.is_empty() {
@@ -1363,7 +1516,71 @@ fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> 
     if !completed {
         return Err("Pi AI worker exited without completing the response".to_owned());
     }
+    Ok(completion_text)
+}
+
+fn retrieve_memory_context(
+    storage: &ProjectStorage,
+    prompt: &str,
+    task_id: Option<&str>,
+) -> Result<String, String> {
+    if prompt.trim().is_empty() {
+        return Err("No text is available for memory retrieval".to_owned());
+    }
+    let vector = memory::embed_query(prompt, &rag_cache_path()?).ok();
+    let results = storage.search_memory(&SearchMemoryRequest {
+        query: prompt.to_owned(),
+        task_id: task_id.map(str::to_owned),
+        vector,
+        limit: Some(6),
+    })?;
+    if results.is_empty() {
+        return Err("No relevant project memories were found".to_owned());
+    }
+    Ok(results
+        .into_iter()
+        .map(|result| format!("- [{}] {}", result.memory.kind, result.memory.content))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn remember_completed_turn(
+    storage: &ProjectStorage,
+    task_id: Option<&str>,
+    prompt: &str,
+    completion: &str,
+) -> Result<(), String> {
+    if prompt.trim().is_empty() || completion.trim().is_empty() {
+        return Ok(());
+    }
+    let content = format!(
+        "User request: {}\nOutcome: {}",
+        truncate_text(prompt.trim(), 1_000),
+        truncate_text(completion.trim(), 2_000)
+    );
+    let record = storage.upsert_memory(&UpsertMemoryRequest {
+        id: None,
+        task_id: task_id.map(str::to_owned),
+        kind: "summary".to_owned(),
+        state: "confirmed".to_owned(),
+        content: content.clone(),
+        provenance: serde_json::json!({"source": "completed-ai-turn"}),
+        superseded_by: None,
+    })?;
+    if let Ok(mut vectors) = memory::embed_documents(&[content], &rag_cache_path()?) {
+        if let Some(vector) = vectors.pop() {
+            storage.save_memory_embedding(&SaveMemoryEmbeddingRequest {
+                memory_id: record.id,
+                model: memory::MODEL.to_owned(),
+                vector,
+            })?;
+        }
+    }
     Ok(())
+}
+
+fn truncate_text(text: &str, maximum: usize) -> String {
+    text.chars().take(maximum).collect()
 }
 
 fn rag_worker_path() -> Result<PathBuf, String> {
@@ -1413,18 +1630,36 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            activate_chat_task,
+            append_godot_logs,
             cancel_ai_request,
+            cancel_godot,
+            create_chat_task,
+            create_project_backup,
             delete_rag_cache,
+            finish_godot_run,
             get_rag_cache_status,
+            import_legacy_chat,
             initialize_rag,
             list_ai_models,
+            list_project_tasks,
+            launch_godot,
+            load_chat,
             load_settings,
+            merge_task_worktree,
             read_chat_attachment,
+            run_storage_maintenance,
+            save_chat,
             save_settings,
             save_chat_attachment,
+            save_memory_embedding,
+            save_task_worktree,
+            search_godot_logs,
+            search_project_memory,
             send_ai_message,
+            start_godot_run,
             test_ai_connection,
-            clear_chat_attachments
+            upsert_project_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

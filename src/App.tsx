@@ -42,8 +42,10 @@ import {
     PlusIcon,
     ArrowPathIcon,
     PhotoIcon,
+    PlayIcon,
     ServerStackIcon,
     SparklesIcon,
+    StopIcon,
     TrashIcon
 } from '@heroicons/react/24/outline'
 import {invoke, isTauri} from '@tauri-apps/api/core'
@@ -197,8 +199,41 @@ type Notice = Readonly<{
 
 type ApiKeyIntent = 'keep' | 'set' | 'clear'
 type StoredChat = Readonly<{
+    taskId?: string
     messages: readonly Message[]
     agentMessages: readonly unknown[]
+}>
+
+type TaskWorktreeSummary = Readonly<{
+    branchName: string
+    worktreePath: string
+    baseCommit: string
+    headCommit?: string
+    mergedCommit?: string
+}>
+
+type TaskSummary = Readonly<{
+    id: string
+    title: string
+    status: 'active' | 'completed'
+    isCurrent: boolean
+    createdAt: number
+    updatedAt: number
+    worktree?: TaskWorktreeSummary
+}>
+
+type WorkspaceProps = Readonly<{
+    activeTask?: TaskSummary
+    onTasksChanged?: () => void
+    onMergeTask?: () => Promise<void>
+}>
+
+type GodotProcessEvent = Readonly<{
+    runId: string
+    eventType: 'started' | 'line' | 'finished'
+    level?: 'info' | 'warning' | 'error'
+    message?: string
+    exitCode?: number
 }>
 
 const CHAT_STORAGE_KEY = 'gofer.agent-chat.v1'
@@ -261,7 +296,7 @@ function attachmentData(file: File) {
     })
 }
 
-function loadStoredChat(): StoredChat {
+function loadLegacyChat(): StoredChat {
     if (typeof window === 'undefined') return {messages: [], agentMessages: []}
     try {
         const serialized = window.localStorage.getItem(CHAT_STORAGE_KEY)
@@ -276,6 +311,40 @@ function loadStoredChat(): StoredChat {
     } catch {
         return {messages: [], agentMessages: []}
     }
+}
+
+function isStoredChat(value: unknown): value is StoredChat {
+    if (!isRecord(value)) return false
+    return (
+        (value['taskId'] === undefined || typeof value['taskId'] === 'string')
+        && Array.isArray(value['messages'])
+        && value['messages'].every(isStoredMessage)
+        && Array.isArray(value['agentMessages'])
+    )
+}
+
+function isTaskSummary(value: unknown): value is TaskSummary {
+    if (!isRecord(value)) return false
+    return (
+        typeof value['id'] === 'string'
+        && typeof value['title'] === 'string'
+        && (value['status'] === 'active' || value['status'] === 'completed')
+        && typeof value['isCurrent'] === 'boolean'
+        && typeof value['createdAt'] === 'number'
+        && typeof value['updatedAt'] === 'number'
+        && (value['worktree'] === undefined || isTaskWorktreeSummary(value['worktree']))
+    )
+}
+
+function isTaskWorktreeSummary(value: unknown): value is TaskWorktreeSummary {
+    if (!isRecord(value)) return false
+    return (
+        typeof value['branchName'] === 'string'
+        && typeof value['worktreePath'] === 'string'
+        && typeof value['baseCommit'] === 'string'
+        && (value['headCommit'] === undefined || typeof value['headCommit'] === 'string')
+        && (value['mergedCommit'] === undefined || typeof value['mergedCommit'] === 'string')
+    )
 }
 
 function normalizeSettings(settings: GoferSettings): GoferSettings {
@@ -515,11 +584,13 @@ function connectionNotice(result: ConnectionTestResult): Notice {
 
 type NavigationProps = Readonly<{
     page: Page
+    tasks: readonly TaskSummary[]
     onNavigate: (page: Page) => void
     onNewTask: () => void
+    onOpenTask: (taskId: string) => void
 }>
 
-function Navigation({page, onNavigate, onNewTask}: NavigationProps) {
+export function Navigation({page, tasks, onNavigate, onNewTask, onOpenTask}: NavigationProps) {
     return (
         <SideNav
             collapsible
@@ -567,13 +638,28 @@ function Navigation({page, onNavigate, onNewTask}: NavigationProps) {
                     label='New task'
                     icon={PlusIcon}
                     href='#workspace'
-                    isSelected={page === 'workspace'}
                     onClick={event => {
                         event.preventDefault()
                         onNewTask()
                     }}
                 />
             </SideNavSection>
+            {tasks.length > 0 && (
+                <SideNavSection title='Tasks'>
+                    {tasks.map(task => (
+                        <SideNavItem
+                            key={task.id}
+                            label={task.title}
+                            href='#workspace'
+                            isSelected={page === 'workspace' && task.isCurrent}
+                            onClick={event => {
+                                event.preventDefault()
+                                onOpenTask(task.id)
+                            }}
+                        />
+                    ))}
+                </SideNavSection>
+            )}
         </SideNav>
     )
 }
@@ -612,24 +698,26 @@ function Welcome({composer}: {composer: ReactNode}) {
     )
 }
 
-export function Workspace() {
-    const [storedChat] = useState(loadStoredChat)
+export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspaceProps) {
     const [draft, setDraft] = useState('')
     const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
     const [attachmentPreviews, setAttachmentPreviews] = useState<Readonly<Record<string, string>>>(
         {}
     )
     const [isSavingAttachments, setIsSavingAttachments] = useState(false)
-    const [messages, setMessages] = useState<readonly Message[]>(storedChat.messages)
+    const [messages, setMessages] = useState<readonly Message[]>([])
+    const [isChatLoaded, setIsChatLoaded] = useState(() => !isTauri())
     const [isStreaming, setIsStreaming] = useState(false)
     const [streamError, setStreamError] = useState<string>()
     const [settings, setSettings] = useState<GoferSettings>()
     const [models, setModels] = useState<readonly AiModelOption[]>([])
-    const [agentMessages, setAgentMessages] = useState<readonly unknown[]>(storedChat.agentMessages)
+    const [agentMessages, setAgentMessages] = useState<readonly unknown[]>([])
+    const [taskId, setTaskId] = useState<string>()
+    const [isGodotRunning, setIsGodotRunning] = useState(false)
     const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'offline'>(
         () => (isTauri() ? 'connecting' : 'offline')
     )
-    const nextMessageId = useRef(Math.max(0, ...storedChat.messages.map(message => message.id)) + 1)
+    const nextMessageId = useRef(1)
     const nextRequestId = useRef(1)
     const activeRequestId = useRef<number | undefined>(undefined)
     const attachmentInputRef = useRef<HTMLInputElement>(null)
@@ -642,6 +730,77 @@ export function Workspace() {
     useEffect(() => {
         chatScroll.scrollIfLocked()
     }, [messages, chatScroll.scrollIfLocked])
+
+    useEffect(() => {
+        if (!isTauri()) return
+        let isCancelled = false
+        const load = async () => {
+            try {
+                const response = await invoke<unknown>('load_chat')
+                const stored = isStoredChat(response) ? response : {messages: [], agentMessages: []}
+                const legacy = loadLegacyChat()
+                const chat =
+                    (
+                        stored.messages.length === 0
+                        && stored.agentMessages.length === 0
+                        && (legacy.messages.length > 0 || legacy.agentMessages.length > 0)
+                    ) ?
+                        await invoke<StoredChat>('import_legacy_chat', {chat: legacy})
+                    :   stored
+                if (isCancelled) return
+                setMessages(chat.messages)
+                setAgentMessages(chat.agentMessages)
+                setTaskId(chat.taskId)
+                nextMessageId.current = Math.max(0, ...chat.messages.map(message => message.id)) + 1
+                window.localStorage.removeItem(CHAT_STORAGE_KEY)
+            } catch (error) {
+                if (isCancelled) return
+                const legacy = loadLegacyChat()
+                setMessages(legacy.messages)
+                setAgentMessages(legacy.agentMessages)
+                nextMessageId.current =
+                    Math.max(0, ...legacy.messages.map(message => message.id)) + 1
+                setStreamError(`Chat history could not be loaded: ${String(error)}`)
+            } finally {
+                if (!isCancelled) setIsChatLoaded(true)
+            }
+        }
+        void load()
+        return () => {
+            isCancelled = true
+        }
+    }, [])
+
+    useEffect(() => {
+        if (!isTauri()) return
+        let unlisten: (() => void) | undefined
+        void listen<GodotProcessEvent>('godot-process-event', event => {
+            if (event.payload.eventType === 'started') setIsGodotRunning(true)
+            if (event.payload.eventType === 'finished') setIsGodotRunning(false)
+            if (event.payload.level === 'error' && event.payload.message) {
+                setStreamError(`Godot: ${event.payload.message}`)
+            }
+        }).then(dispose => {
+            unlisten = dispose
+        })
+        return () => {
+            unlisten?.()
+        }
+    }, [])
+
+    const runGodot = useCallback(() => {
+        setStreamError(undefined)
+        void invoke('launch_godot', {request: {taskId, editor: false}}).catch((error: unknown) => {
+            setIsGodotRunning(false)
+            setStreamError(`Godot could not be launched: ${String(error)}`)
+        })
+    }, [taskId])
+
+    const stopGodot = useCallback(() => {
+        void invoke('cancel_godot').catch((error: unknown) => {
+            setStreamError(`Godot could not be stopped: ${String(error)}`)
+        })
+    }, [])
 
     const applyModel = useCallback(async (model: AiModelOption, previous?: GoferSettings) => {
         if (!previous) return
@@ -730,22 +889,23 @@ export function Workspace() {
     }, [connect])
 
     useEffect(() => {
-        const hasAttachments = messages.some(message => Boolean(message.attachments?.length))
-        let errorTimeout: number | undefined
-        try {
-            window.localStorage.setItem(
-                CHAT_STORAGE_KEY,
-                JSON.stringify({messages, agentMessages: hasAttachments ? [] : agentMessages})
-            )
-        } catch (error) {
-            errorTimeout = window.setTimeout(() => {
-                setStreamError(`Chat history could not be saved: ${String(error)}`)
-            }, 0)
-        }
+        if (!isChatLoaded || !isTauri()) return
+        let isCancelled = false
+        const timeout = window.setTimeout(() => {
+            void invoke('save_chat', {chat: {taskId, messages, agentMessages}})
+                .then(() => {
+                    onTasksChanged?.()
+                })
+                .catch((error: unknown) => {
+                    if (!isCancelled)
+                        setStreamError(`Chat history could not be saved: ${String(error)}`)
+                })
+        }, 150)
         return () => {
-            if (errorTimeout !== undefined) window.clearTimeout(errorTimeout)
+            isCancelled = true
+            window.clearTimeout(timeout)
         }
-    }, [agentMessages, messages])
+    }, [agentMessages, isChatLoaded, messages, onTasksChanged, taskId])
 
     useEffect(() => {
         if (!isTauri()) return
@@ -898,6 +1058,7 @@ export function Workspace() {
                     await invoke('send_ai_message', {
                         request: {
                             requestId,
+                            taskId,
                             agentMessages,
                             messages: requestMessages.map(message => ({
                                 sender: message.sender,
@@ -923,7 +1084,7 @@ export function Workspace() {
             }
             void run()
         },
-        [agentMessages, updateAssistant]
+        [agentMessages, taskId, updateAssistant]
     )
 
     const submitMessage = async (value: string) => {
@@ -1014,6 +1175,16 @@ export function Workspace() {
     const stop = () => {
         if (activeRequestId.current === undefined) return
         void invoke('cancel_ai_request', {requestId: activeRequestId.current})
+    }
+
+    const mergeTask = async () => {
+        if (!onMergeTask) return
+        setStreamError(undefined)
+        try {
+            await onMergeTask()
+        } catch (error) {
+            setStreamError(`The task could not be merged: ${String(error)}`)
+        }
     }
 
     const retry = (assistantId: number) => {
@@ -1277,7 +1448,7 @@ export function Workspace() {
                                 gap={3}
                                 vAlign='center'
                             >
-                                <Heading level={2}>New task</Heading>
+                                <Heading level={2}>{activeTask?.title ?? 'New task'}</Heading>
                                 <Token label='Godot 4.7' />
                             </HStack>
                             <HStack
@@ -1311,6 +1482,26 @@ export function Workspace() {
                                             />
                                         }
                                         clickAction={connect}
+                                    />
+                                )}
+                                <Button
+                                    label={isGodotRunning ? 'Stop Godot' : 'Run project'}
+                                    variant={isGodotRunning ? 'destructive' : 'secondary'}
+                                    size='sm'
+                                    icon={
+                                        <Icon
+                                            icon={isGodotRunning ? StopIcon : PlayIcon}
+                                            size='sm'
+                                        />
+                                    }
+                                    clickAction={isGodotRunning ? stopGodot : runGodot}
+                                />
+                                {activeTask?.worktree && !activeTask.worktree.mergedCommit && (
+                                    <Button
+                                        label='Merge task'
+                                        variant='secondary'
+                                        size='sm'
+                                        clickAction={mergeTask}
                                     />
                                 )}
                             </HStack>
@@ -1544,6 +1735,8 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const [isDownloading, setIsDownloading] = useState(false)
     const [isDeleteOpen, setIsDeleteOpen] = useState(false)
     const [isDeleting, setIsDeleting] = useState(false)
+    const [isBackingUp, setIsBackingUp] = useState(false)
+    const [isCleaningStorage, setIsCleaningStorage] = useState(false)
     const [availableModels, setAvailableModels] = useState<readonly AiModelOption[]>([])
 
     const refreshCache = useCallback(async () => {
@@ -1713,6 +1906,49 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             })
         } finally {
             setIsDeleting(false)
+        }
+    }
+
+    const createBackup = async () => {
+        setIsBackingUp(true)
+        setNotice(undefined)
+        try {
+            const result = await invoke<{path: string}>('create_project_backup')
+            setNotice({
+                status: 'success',
+                title: 'Project backup created',
+                description: result.path
+            })
+        } catch (error) {
+            setNotice({status: 'error', title: 'Backup failed', description: String(error)})
+        } finally {
+            setIsBackingUp(false)
+        }
+    }
+
+    const cleanStorage = async () => {
+        setIsCleaningStorage(true)
+        setNotice(undefined)
+        try {
+            const result = await invoke<{
+                attachmentsRemoved: number
+                blobsRemoved: number
+                godotRunsRemoved: number
+                backupsRemoved: number
+            }>('run_storage_maintenance')
+            setNotice({
+                status: 'success',
+                title: 'Storage maintenance complete',
+                description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, and ${String(result.backupsRemoved)} old backups removed.`
+            })
+        } catch (error) {
+            setNotice({
+                status: 'error',
+                title: 'Storage cleanup failed',
+                description: String(error)
+            })
+        } finally {
+            setIsCleaningStorage(false)
         }
     }
 
@@ -2092,6 +2328,52 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         </Text>
                                     }
                                 </Grid>
+
+                                <Divider />
+
+                                <Grid
+                                    columns={{minWidth: 320}}
+                                    gap={10}
+                                >
+                                    <VStack gap={2}>
+                                        <HStack
+                                            gap={2}
+                                            vAlign='center'
+                                        >
+                                            <Icon
+                                                icon={CircleStackIcon}
+                                                size='md'
+                                                color='accent'
+                                            />
+                                            <Heading level={2}>Project storage</Heading>
+                                        </HStack>
+                                        <Text color='secondary'>
+                                            Back up the active project database, attachments, and
+                                            Godot logs. Cleanup retains five backups and thirty days
+                                            of completed run logs.
+                                        </Text>
+                                    </VStack>
+                                    <HStack
+                                        gap={3}
+                                        hAlign='end'
+                                        vAlign='center'
+                                    >
+                                        <Button
+                                            label='Clean storage'
+                                            variant='secondary'
+                                            isLoading={isCleaningStorage}
+                                            isDisabled={isBackingUp}
+                                            clickAction={cleanStorage}
+                                        />
+                                        <Button
+                                            label='Back up project'
+                                            variant='primary'
+                                            isLoading={isBackingUp}
+                                            isDisabled={isCleaningStorage}
+                                            clickAction={createBackup}
+                                        />
+                                    </HStack>
+                                </Grid>
                             </VStack>
                         </LayoutContent>
                     }
@@ -2114,6 +2396,7 @@ export default function App() {
     const [page, setPage] = useState<Page>(() =>
         window.location.hash === '#settings' ? 'settings' : 'workspace'
     )
+    const [tasks, setTasks] = useState<readonly TaskSummary[]>([])
     const [workspaceKey, setWorkspaceKey] = useState(0)
     const [isReady, setIsReady] = useState(false)
     const showApplication = useCallback(() => {
@@ -2126,12 +2409,64 @@ export default function App() {
         window.history.pushState(undefined, '', `#${nextPage}`)
         setPage(nextPage)
     }, [])
+    const refreshTasks = useCallback(async () => {
+        if (!isTauri()) return
+        const response = await invoke<unknown>('list_project_tasks').catch(() => undefined)
+        if (Array.isArray(response) && response.every(isTaskSummary)) setTasks(response)
+    }, [])
     const newTask = useCallback(async () => {
-        if (isTauri()) await invoke('clear_chat_attachments').catch(() => undefined)
-        window.localStorage.removeItem(CHAT_STORAGE_KEY)
+        if (isTauri()) {
+            const created = await invoke('create_chat_task').then(
+                () => true,
+                () => false
+            )
+            if (!created) return
+            await refreshTasks()
+        }
         setWorkspaceKey(previous => previous + 1)
         navigate('workspace')
-    }, [navigate])
+    }, [navigate, refreshTasks])
+    const openTask = useCallback(
+        async (taskId: string) => {
+            if (isTauri()) {
+                const activated = await invoke('activate_chat_task', {taskId}).then(
+                    () => true,
+                    () => false
+                )
+                if (!activated) return
+                await refreshTasks()
+            }
+            setWorkspaceKey(previous => previous + 1)
+            navigate('workspace')
+        },
+        [navigate, refreshTasks]
+    )
+    const selectTask = useCallback(
+        (taskId: string) => {
+            void openTask(taskId)
+        },
+        [openTask]
+    )
+    const tasksChanged = useCallback(() => {
+        void refreshTasks()
+    }, [refreshTasks])
+    const activeTask = tasks.find(task => task.isCurrent)
+    const mergeActiveTask = useCallback(async () => {
+        const task = tasks.find(candidate => candidate.isCurrent)
+        if (!task?.worktree) return
+        await invoke('merge_task_worktree', {taskId: task.id})
+        await refreshTasks()
+    }, [refreshTasks, tasks])
+
+    useEffect(() => {
+        if (!isReady) return
+        const timeout = window.setTimeout(() => {
+            void refreshTasks()
+        }, 0)
+        return () => {
+            window.clearTimeout(timeout)
+        }
+    }, [isReady, refreshTasks])
 
     useEffect(() => {
         const syncPageWithLocation = () => {
@@ -2155,12 +2490,19 @@ export default function App() {
             sideNav={
                 <Navigation
                     page={page}
+                    tasks={tasks}
                     onNavigate={navigate}
                     onNewTask={newTask}
+                    onOpenTask={selectTask}
                 />
             }
         >
-            <Workspace key={workspaceKey} />
+            <Workspace
+                key={workspaceKey}
+                onTasksChanged={tasksChanged}
+                onMergeTask={mergeActiveTask}
+                {...(activeTask && {activeTask})}
+            />
             {page === 'settings' && (
                 <SettingsPage
                     isOpen

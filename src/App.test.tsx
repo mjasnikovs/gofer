@@ -1,7 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import {InitializationSplash, SettingsPage, Workspace} from './App'
+import {InitializationSplash, Navigation, SettingsPage, Workspace} from './App'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean
@@ -248,7 +248,53 @@ describe('Workspace', () => {
                 }
             })
         })
-        expect(window.localStorage.getItem('gofer.agent-chat.v1')).not.toContain('aGk=')
+        expect(window.localStorage.getItem('gofer.agent-chat.v1')).toBeNull()
+    })
+
+    it('loads project chat from Rust storage', async () => {
+        tauri.invoke.mockImplementation(async command => {
+            if (command === 'load_chat') {
+                return {
+                    taskId: '0198f4c0-02ef-7000-8000-000000000001',
+                    messages: [
+                        {id: 7, sender: 'user', text: 'Persisted project message', timestamp: 10}
+                    ],
+                    agentMessages: []
+                }
+            }
+            return undefined
+        })
+
+        render(<Workspace />)
+
+        expect(await screen.findByText('Persisted project message')).toBeInTheDocument()
+        await waitFor(() => {
+            const saveCall = tauri.invoke.mock.calls.find(call => call[0] === 'save_chat')
+            expect(saveCall?.[1]).toMatchObject({
+                chat: {taskId: '0198f4c0-02ef-7000-8000-000000000001'}
+            })
+        })
+    })
+
+    it('imports legacy localStorage chat once', async () => {
+        const legacy = {
+            messages: [{id: 3, sender: 'user', text: 'Legacy message', timestamp: 10}],
+            agentMessages: []
+        }
+        window.localStorage.setItem('gofer.agent-chat.v1', JSON.stringify(legacy))
+        tauri.invoke.mockImplementation(async (command, args) => {
+            if (command === 'load_chat') return {messages: [], agentMessages: []}
+            if (command === 'import_legacy_chat') {
+                return (args as {chat: typeof legacy}).chat
+            }
+            return undefined
+        })
+
+        render(<Workspace />)
+
+        expect(await screen.findByText('Legacy message')).toBeInTheDocument()
+        expect(tauri.invoke).toHaveBeenCalledWith('import_legacy_chat', {chat: legacy})
+        expect(window.localStorage.getItem('gofer.agent-chat.v1')).toBeNull()
     })
 
     it('streams a Pi AI response into the assistant message', async () => {
@@ -355,5 +401,44 @@ describe('Workspace', () => {
         expect(screen.getByText(/10 in/)).toBeInTheDocument()
         expect(screen.getByText('0.01K / 120K')).toBeInTheDocument()
         expect(screen.queryByText('local-model')).not.toBeInTheDocument()
+    })
+})
+
+describe('Navigation', () => {
+    it('lists persistent tasks and activates the selected task', async () => {
+        const onNewTask = vi.fn()
+        const onOpenTask = vi.fn()
+        render(
+            <Navigation
+                page='workspace'
+                tasks={[
+                    {
+                        id: 'task-1',
+                        title: 'Player controller',
+                        status: 'active',
+                        isCurrent: true,
+                        createdAt: 10,
+                        updatedAt: 20
+                    },
+                    {
+                        id: 'task-2',
+                        title: 'Inventory UI',
+                        status: 'active',
+                        isCurrent: false,
+                        createdAt: 11,
+                        updatedAt: 19
+                    }
+                ]}
+                onNavigate={vi.fn()}
+                onNewTask={onNewTask}
+                onOpenTask={onOpenTask}
+            />
+        )
+
+        await userEvent.click(screen.getByText('Inventory UI'))
+        await userEvent.click(screen.getByText('New task'))
+
+        expect(onOpenTask).toHaveBeenCalledWith('task-2')
+        expect(onNewTask).toHaveBeenCalledOnce()
     })
 })

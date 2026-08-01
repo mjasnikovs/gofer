@@ -1,8 +1,8 @@
 # Gofer
 
-Gofer is a Tauri desktop workspace for an AI agent that will operate Godot 4.7 on a user's behalf.
-This repository currently contains the application foundation and interface; the Godot connection is
-intentionally represented as disconnected and is not implemented yet.
+Gofer is a Tauri desktop workspace for an AI agent that operates Godot 4.7 on a user's behalf. It
+launches projects in the active task's isolated Git worktree, streams process output into the UI,
+and persists searchable compressed run logs.
 
 ## Stack
 
@@ -50,6 +50,41 @@ forwards Pi's streaming response events to the interface. The local provider use
 base URL and model with the `openai-completions` dialect, disables developer-role and
 reasoning-effort fields for llama.cpp compatibility, and uses `local` as the harmless placeholder
 API key when no credential is stored.
+
+## Local project data
+
+Gofer's Rust backend owns durable project data. A small `catalog.sqlite` in the operating system
+application-data directory maps canonical workspace paths to stable project IDs. Each project has an
+isolated `project.sqlite` containing tasks, messages, agent context, and attachment metadata. SQLite
+runs with WAL mode and foreign keys enabled.
+
+Attachment bytes are stored outside SQLite in a project-scoped, SHA-256-addressed blob store. The
+database retains their names, media types, sizes, hashes, and message relationships. Existing chat
+history in browser `localStorage` and its legacy attachment directory is imported once when an empty
+project database is first opened; the renderer then removes the migrated browser record.
+
+Tasks remain independently resumable. Git projects automatically receive an isolated `gofer/task-*`
+worktree with its branch, base, head, and merge commits recorded. Creating a task does not close
+other tasks; selecting one changes only the project's current task pointer. The task merge action
+commits pending task changes and creates a merge commit on a clean main worktree.
+
+Godot runs are tied to tasks. Raw log batches are written as project-scoped `.jsonl.zst` segments,
+while warning and error records are indexed with SQLite FTS5 for fast search. Normal informational
+output therefore does not cause unbounded growth in the relational tables.
+
+Project memory is canonical SQLite data with explicit project/task scope, kind, lifecycle state,
+provenance, and supersession. FTS5 provides exact retrieval. Normalized 1,024-dimensional Qwen3
+embeddings are stored alongside the source records and indexed by the statically linked, exactly
+pinned `sqlite-vec` 0.1.9 extension. Hybrid search combines lexical and vector ranks; changing a
+memory's content or scope invalidates its old embedding.
+
+Successful AI turns automatically create task-scoped summary memories. A persistent local embedding
+worker indexes them, and subsequent requests receive a hybrid retrieval of confirmed project and
+active-task memories. SQLite remains the canonical store; no external database service is required.
+
+Settings can create a consistent project backup containing SQLite data, attachments, logs, and a
+manifest. Maintenance removes unreferenced attachments after 24 hours, completed Godot runs after 30
+days, and retains the five newest backups.
 
 ## Quality gates
 
