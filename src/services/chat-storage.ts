@@ -1,4 +1,4 @@
-import type {ChatAttachment, Message, StoredChat} from './chat-models'
+import type {ChatAttachment, Message, StoredChat} from '../models/chat'
 
 const CHAT_STORAGE_KEY = 'gofer.agent-chat.v1'
 

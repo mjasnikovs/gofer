@@ -1,4 +1,4 @@
-import type {Message} from './chat-models'
+import type {Message} from '../models/chat'
 
 export function messageUsage(messages: readonly Message[]) {
     let total = 0

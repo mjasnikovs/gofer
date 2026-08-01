@@ -15,11 +15,11 @@ import {
 import type {RouterHistory} from '@tanstack/react-router'
 import {AppShell} from '@astryxdesign/core/AppShell'
 import {invoke, isTauri} from '@tauri-apps/api/core'
-import {InitializationSplash} from './InitializationSplash'
-import {Navigation} from './Navigation'
-import {Workspace} from './Workspace'
-import {isTaskSummary} from './app-models'
-import type {Page, TaskSummary} from './app-models'
+import {InitializationSplash} from '../components/application/InitializationSplash'
+import {Navigation} from '../components/application/Navigation'
+import {Workspace} from '../components/workspace/Workspace'
+import {isTaskSummary} from '../models/app'
+import type {Page, TaskSummary} from '../models/app'
 
 type CreatedTask = Readonly<{
     taskId?: string
@@ -32,7 +32,7 @@ type ApplicationContextValue = Readonly<{
 }>
 
 const ApplicationContext = createContext<ApplicationContextValue | undefined>(undefined)
-const SettingsPage = lazy(() => import('./SettingsPage'))
+const SettingsPage = lazy(() => import('../components/settings/SettingsPage'))
 
 async function loadTasks() {
     if (!isTauri()) return []

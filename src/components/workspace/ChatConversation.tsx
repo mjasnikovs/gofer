@@ -14,7 +14,7 @@ import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {Thumbnail} from '@astryxdesign/core/Thumbnail'
 import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
-import type {Message} from './chat-models'
+import type {Message} from '../../models/chat'
 
 type ChatConversationProps = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>

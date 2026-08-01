@@ -15,9 +15,9 @@ import {Thumbnail} from '@astryxdesign/core/Thumbnail'
 import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
 import PhotoIcon from '@heroicons/react/24/outline/PhotoIcon'
 import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
-import {contextProgressVariant, formatContextUsage} from './chat-format'
-import type {DraftAttachment} from './chat-models'
-import type {AiModelOption, GoferSettings, ThinkingLevel} from './settings-models'
+import {contextProgressVariant, formatContextUsage} from '../../utils/chat-format'
+import type {DraftAttachment} from '../../models/chat'
+import type {AiModelOption, GoferSettings, ThinkingLevel} from '../../models/settings'
 
 type TokenCounts = Readonly<{
     context: number

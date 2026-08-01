@@ -12,8 +12,8 @@ import CircleStackIcon from '@heroicons/react/24/outline/CircleStackIcon'
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {listen} from '@tauri-apps/api/event'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
-import type {InitializationState} from './chat-models'
-import {progressLabel, progressValue} from './settings-models'
+import type {InitializationState} from '../../models/chat'
+import {progressLabel, progressValue} from '../../models/settings'
 
 export function InitializationSplash({onReady}: {onReady: () => void}) {
     const [state, setState] = useState<InitializationState>({status: 'initializing'})

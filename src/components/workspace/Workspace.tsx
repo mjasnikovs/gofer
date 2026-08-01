@@ -5,7 +5,7 @@ import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {listen} from '@tauri-apps/api/event'
-import type {TaskSummary} from './app-models'
+import type {TaskSummary} from '../../models/app'
 import type {
     AiStreamPayload,
     ChatAttachment,
@@ -13,17 +13,22 @@ import type {
     GodotProcessEvent,
     Message,
     StoredChat
-} from './chat-models'
-import {messageUsage} from './chat-format'
+} from '../../models/chat'
+import {messageUsage} from '../../utils/chat-format'
 import {
     attachmentData,
     clearLegacyChat,
     isStoredChat,
     loadLegacyChat,
     nextStoredMessageId
-} from './chat-storage'
-import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS, normalizeSettings} from './settings-models'
-import type {AiModelOption, GoferSettings, SettingsResponse, ThinkingLevel} from './settings-models'
+} from '../../services/chat-storage'
+import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS, normalizeSettings} from '../../models/settings'
+import type {
+    AiModelOption,
+    GoferSettings,
+    SettingsResponse,
+    ThinkingLevel
+} from '../../models/settings'
 import {ChatConversation} from './ChatConversation'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
 import {WorkspaceHeader} from './WorkspaceHeader'

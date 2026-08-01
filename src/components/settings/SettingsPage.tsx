@@ -33,7 +33,7 @@ import {
     normalizeSettings,
     progressLabel,
     progressValue
-} from './settings-models'
+} from '../../models/settings'
 import type {
     AiModelOption,
     AiSettings,
@@ -45,7 +45,7 @@ import type {
     SettingsRequest,
     SettingsResponse,
     StorageMaintenanceResult
-} from './settings-models'
+} from '../../models/settings'
 
 type SettingsPageProps = Readonly<{
     isOpen: boolean

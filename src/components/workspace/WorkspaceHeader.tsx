@@ -7,7 +7,7 @@ import {Token} from '@astryxdesign/core/Token'
 import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
 import PlayIcon from '@heroicons/react/24/outline/PlayIcon'
 import StopIcon from '@heroicons/react/24/outline/StopIcon'
-import type {TaskSummary} from './app-models'
+import type {TaskSummary} from '../../models/app'
 
 export type ConnectionState = 'connecting' | 'connected' | 'offline'
 

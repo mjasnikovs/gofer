@@ -4,7 +4,7 @@ import {SideNav, SideNavHeading, SideNavItem, SideNavSection} from '@astryxdesig
 import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
 import PlusIcon from '@heroicons/react/24/outline/PlusIcon'
 import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
-import type {Page, TaskSummary} from './app-models'
+import type {Page, TaskSummary} from '../../models/app'
 
 type NavigationProps = Readonly<{
     page: Page
