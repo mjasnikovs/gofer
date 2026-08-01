@@ -1,7 +1,7 @@
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -11,10 +11,12 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 const API_KEY_USERNAME: &str = "ai-default";
+const AI_EVENT_PREFIX: &str = "GOFER_AI_EVENT:";
 const RAG_EVENT_PREFIX: &str = "GOFER_RAG_EVENT:";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SETTINGS_VERSION: u32 = 1;
 static RAG_INITIALIZING: AtomicBool = AtomicBool::new(false);
+static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static KEYRING_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -86,6 +88,43 @@ struct ConnectionTestResult {
     message: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatMessageInput {
+    sender: ChatSender,
+    text: String,
+    timestamp: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum ChatSender {
+    User,
+    Assistant,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatRequest {
+    request_id: u64,
+    messages: Vec<ChatMessageInput>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiWorkerRequest {
+    settings: AiSettings,
+    api_key: Option<String>,
+    messages: Vec<ChatMessageInput>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiStreamPayload {
+    request_id: u64,
+    event: serde_json::Value,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum CacheState {
@@ -118,6 +157,14 @@ struct InitializationGuard;
 impl Drop for InitializationGuard {
     fn drop(&mut self) {
         RAG_INITIALIZING.store(false, Ordering::Release);
+    }
+}
+
+struct AiRequestGuard;
+
+impl Drop for AiRequestGuard {
+    fn drop(&mut self) {
+        AI_REQUEST_RUNNING.store(false, Ordering::Release);
     }
 }
 
@@ -240,6 +287,35 @@ async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestRe
 }
 
 #[tauri::command]
+async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), String> {
+    if AI_REQUEST_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("Another AI response is already in progress".to_owned());
+    }
+    let guard = AiRequestGuard;
+    let messages = validate_chat_messages(request.messages)?;
+    let settings = read_settings(&app)?;
+    let api_key = stored_api_key()?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        run_ai_worker(
+            &app,
+            request.request_id,
+            AiWorkerRequest {
+                settings: settings.ai,
+                api_key,
+                messages,
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("AI response task failed: {error}"))?
+}
+
+#[tauri::command]
 async fn get_rag_cache_status() -> Result<CacheStatus, String> {
     tauri::async_runtime::spawn_blocking(cache_status)
         .await
@@ -350,6 +426,27 @@ fn required_value(name: &str, value: String) -> Result<String, String> {
         return Err(format!("{name} is required"));
     }
     Ok(value)
+}
+
+fn validate_chat_messages(
+    messages: Vec<ChatMessageInput>,
+) -> Result<Vec<ChatMessageInput>, String> {
+    if messages.is_empty() {
+        return Err("At least one chat message is required".to_owned());
+    }
+    if !matches!(
+        messages.last().map(|message| message.sender),
+        Some(ChatSender::User)
+    ) {
+        return Err("The last chat message must come from the user".to_owned());
+    }
+    if messages
+        .iter()
+        .any(|message| message.text.trim().is_empty())
+    {
+        return Err("Chat messages cannot be empty".to_owned());
+    }
+    Ok(messages)
 }
 
 fn credential_entry() -> Result<Entry, String> {
@@ -615,6 +712,77 @@ fn run_rag_warmup(app: &AppHandle) -> Result<(), String> {
     Err(format!("Gofer RAG initialization failed: {detail}"))
 }
 
+fn run_ai_worker(app: &AppHandle, request_id: u64, request: AiWorkerRequest) -> Result<(), String> {
+    let worker = ai_worker_path()?;
+    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let mut child = Command::new(&node)
+        .arg(&worker)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "Could not start the Pi AI worker with '{node}': {error}. Install Node.js 22.19 or newer, or set GOFER_NODE_BINARY."
+            )
+        })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Could not write to the Pi AI worker".to_owned())?;
+    let payload = serde_json::to_vec(&request)
+        .map_err(|error| format!("Could not serialize the AI request: {error}"))?;
+    stdin
+        .write_all(&payload)
+        .map_err(|error| format!("Could not send the request to the Pi AI worker: {error}"))?;
+    drop(stdin);
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Could not read Pi AI worker output".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Could not read Pi AI worker errors".to_owned())?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut output);
+        output
+    });
+    let mut completed = false;
+
+    for line in BufReader::new(stdout).lines() {
+        let line = line.map_err(|error| format!("Could not read Pi AI output: {error}"))?;
+        let Some(payload) = line.strip_prefix(AI_EVENT_PREFIX) else {
+            continue;
+        };
+        let event: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|error| format!("Pi AI returned an invalid event: {error}"))?;
+        completed |= event.get("type").and_then(serde_json::Value::as_str) == Some("done");
+        app.emit("ai-stream-event", AiStreamPayload { request_id, event })
+            .map_err(|error| format!("Could not stream the AI response: {error}"))?;
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not wait for the Pi AI worker: {error}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "Could not collect Pi AI worker errors".to_owned())?;
+    if !status.success() {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err(format!("Pi AI worker exited with {status}"));
+        }
+        return Err(format!("Pi AI request failed: {detail}"));
+    }
+    if !completed {
+        return Err("Pi AI worker exited without completing the response".to_owned());
+    }
+    Ok(())
+}
+
 fn rag_worker_path() -> Result<PathBuf, String> {
     let configured = std::env::var_os("GOFER_RAG_WORKER").map(PathBuf::from);
     let path = configured.unwrap_or_else(|| {
@@ -629,6 +797,24 @@ fn rag_worker_path() -> Result<PathBuf, String> {
     }
     Err(format!(
         "Gofer RAG worker was not found at {}. Run npm install, or set GOFER_RAG_WORKER.",
+        path.display()
+    ))
+}
+
+fn ai_worker_path() -> Result<PathBuf, String> {
+    let configured = std::env::var_os("GOFER_AI_WORKER").map(PathBuf::from);
+    let path = configured.unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join("ai-worker.mjs")
+    });
+
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(format!(
+        "The Pi AI worker was not found at {}. Run npm install, or set GOFER_AI_WORKER.",
         path.display()
     ))
 }
@@ -649,6 +835,7 @@ pub fn run() {
             initialize_rag,
             load_settings,
             save_settings,
+            send_ai_message,
             test_ai_connection
         ])
         .run(tauri::generate_context!())

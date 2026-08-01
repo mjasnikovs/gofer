@@ -1,11 +1,12 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import {InitializationSplash, SettingsPage} from './App'
+import {InitializationSplash, SettingsPage, Workspace} from './App'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean
-type ListenFunction = () => Promise<() => void>
+type EventHandler = (event: {payload: never}) => void
+type ListenFunction = (event?: string, handler?: EventHandler) => Promise<() => void>
 
 const tauri = vi.hoisted(() => ({
     invoke: vi.fn<InvokeFunction>(),
@@ -141,5 +142,37 @@ describe('SettingsPage', () => {
 
         expect(await screen.findByText(/listener unavailable/)).toBeInTheDocument()
         expect(screen.getByText('Incomplete')).toBeInTheDocument()
+    })
+})
+
+describe('Workspace', () => {
+    it('streams a Pi AI response into the assistant message', async () => {
+        let handler: EventHandler | undefined
+        tauri.listen.mockImplementation(async (_event, nextHandler) => {
+            handler = nextHandler
+            return () => undefined
+        })
+        tauri.invoke.mockImplementation(async command => {
+            if (command === 'send_ai_message') {
+                handler?.({
+                    payload: {
+                        requestId: 1,
+                        event: {type: 'text-delta', delta: 'Hello from local AI'}
+                    } as never
+                })
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await userEvent.type(screen.getByRole('textbox'), 'Say hello{enter}')
+
+        expect(await screen.findByText('Hello from local AI')).toBeInTheDocument()
+        expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
+            request: {
+                requestId: 1,
+                messages: [expect.objectContaining({sender: 'user', text: 'Say hello'})]
+            }
+        })
     })
 })

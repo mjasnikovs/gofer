@@ -48,6 +48,16 @@ type Message = Readonly<{
     id: number
     sender: 'user' | 'assistant'
     text: string
+    timestamp: number
+}>
+
+type AiStreamEvent =
+    | Readonly<{type: 'text-delta'; delta: string}>
+    | Readonly<{type: 'done'; text: string; stopReason: string}>
+
+type AiStreamPayload = Readonly<{
+    requestId: number
+    event: AiStreamEvent
 }>
 
 type InitializationState =
@@ -475,28 +485,80 @@ function Welcome({onSuggestion}: {onSuggestion: (prompt: string) => void}) {
     )
 }
 
-function Workspace() {
+export function Workspace() {
     const [draft, setDraft] = useState('')
     const [messages, setMessages] = useState<readonly Message[]>([])
+    const [isStreaming, setIsStreaming] = useState(false)
+    const [streamError, setStreamError] = useState<string>()
     const nextMessageId = useRef(1)
+    const nextRequestId = useRef(1)
 
     const submitMessage = (value: string) => {
         const prompt = value.trim()
-        if (!prompt) return
+        if (!prompt || isStreaming || !isTauri()) return
 
         const userMessage: Message = {
             id: nextMessageId.current++,
             sender: 'user',
-            text: prompt
+            text: prompt,
+            timestamp: Date.now()
         }
         const assistantMessage: Message = {
             id: nextMessageId.current++,
             sender: 'assistant',
-            text: 'The workspace is ready. Connect a Godot 4.7 editor to begin executing this task.'
+            text: '',
+            timestamp: Date.now()
         }
+        const requestId = nextRequestId.current++
+        const requestMessages = [...messages, userMessage]
 
         setMessages(previous => [...previous, userMessage, assistantMessage])
         setDraft('')
+        setStreamError(undefined)
+        setIsStreaming(true)
+
+        const run = async () => {
+            let unlisten: (() => void) | undefined
+            try {
+                unlisten = await listen<AiStreamPayload>('ai-stream-event', received => {
+                    if (received.payload.requestId !== requestId) return
+                    const event = received.payload.event
+                    if (event.type !== 'text-delta') return
+                    setMessages(previous =>
+                        previous.map(message =>
+                            message.id === assistantMessage.id ?
+                                {...message, text: message.text + event.delta}
+                            :   message
+                        )
+                    )
+                })
+                await invoke('send_ai_message', {
+                    request: {
+                        requestId,
+                        messages: requestMessages.map(message => ({
+                            sender: message.sender,
+                            text: message.text,
+                            timestamp: message.timestamp
+                        }))
+                    }
+                })
+            } catch (error) {
+                const message = String(error)
+                setStreamError(message)
+                setMessages(previous =>
+                    previous.map(entry =>
+                        entry.id === assistantMessage.id && !entry.text ?
+                            {...entry, text: 'The AI response could not be completed.'}
+                        :   entry
+                    )
+                )
+            } finally {
+                unlisten?.()
+                setIsStreaming(false)
+            }
+        }
+
+        void run()
     }
 
     return (
@@ -564,7 +626,13 @@ function Workspace() {
                                                 message.sender === 'assistant' ? 'Gofer' : undefined
                                             }
                                         >
-                                            <Text>{message.text}</Text>
+                                            {message.text ?
+                                                <Text>{message.text}</Text>
+                                            :   <Spinner
+                                                    size='sm'
+                                                    label='Generating response'
+                                                />
+                                            }
                                         </ChatMessageBubble>
                                     </ChatMessage>
                                 ))}
@@ -580,7 +648,15 @@ function Workspace() {
                             value={draft}
                             onChange={setDraft}
                             onSubmit={submitMessage}
-                            placeholder='Ask Gofer to build, fix, or explain anything…'
+                            placeholder={
+                                isStreaming ? 'Gofer is responding…' : (
+                                    'Ask Gofer to build, fix, or explain anything…'
+                                )
+                            }
+                            isDisabled={isStreaming}
+                            {...(streamError && {
+                                status: {type: 'error' as const, message: streamError}
+                            })}
                             footerActions={
                                 <HStack
                                     gap={3}

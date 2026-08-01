@@ -4,7 +4,7 @@
     "version": "0.1.0",
     "type": "module",
     "engines": {
-        "node": ">=22.0.0"
+        "node": ">=22.19.0"
     },
     "scripts": {
         "dev": "vite",
@@ -15,7 +15,7 @@
         "format": "prettier --write . --log-level warn",
         "format:check": "prettier --check . --log-level warn",
         "test:frontend": "vitest run",
-        "test:worker": "node --test scripts/rag-progress.test.mjs",
+        "test:worker": "node --test scripts/*.test.mjs",
         "test:rust": "cargo test --quiet --manifest-path src-tauri/Cargo.toml",
         "test": "npm run --silent test:frontend && npm run --silent test:worker && npm run --silent test:rust",
         "check": "npm run --silent format:check && npm run --silent lint && npm run --silent typecheck && npm run --silent test && cargo check --quiet --manifest-path src-tauri/Cargo.toml",
@@ -26,6 +26,7 @@
     "dependencies": {
         "@astryxdesign/core": "0.2.0",
         "@astryxdesign/theme-neutral": "0.2.0",
+        "@earendil-works/pi-ai": "0.83.0",
         "@heroicons/react": "2.2.0",
         "@mjasnikovs/gofer-rag": "0.1.0-canary.1",
         "@stylexjs/stylex": "0.19.0",
