@@ -49,6 +49,18 @@ Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
     value: () => null
 })
 
+Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+    value(this: HTMLDialogElement) {
+        this.open = true
+    }
+})
+
+Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+    value(this: HTMLDialogElement) {
+        this.open = false
+    }
+})
+
 Object.defineProperty(window, 'matchMedia', {
     writable: true,
     value: (query: string) => ({
@@ -61,4 +73,8 @@ Object.defineProperty(window, 'matchMedia', {
         removeEventListener: () => undefined,
         dispatchEvent: () => false
     })
+})
+
+Object.defineProperty(window, 'scrollTo', {
+    value: () => undefined
 })

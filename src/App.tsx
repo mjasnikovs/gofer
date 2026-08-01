@@ -18,6 +18,7 @@ import {
 } from '@astryxdesign/core/Chat'
 import {CodeBlock} from '@astryxdesign/core/CodeBlock'
 import {Divider} from '@astryxdesign/core/Divider'
+import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {DropdownMenu} from '@astryxdesign/core/DropdownMenu'
 import {FormLayout} from '@astryxdesign/core/FormLayout'
 import {Grid} from '@astryxdesign/core/Grid'
@@ -1522,7 +1523,13 @@ export function Workspace() {
     )
 }
 
-export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
+type SettingsPageProps = Readonly<{
+    isOpen: boolean
+    onOpenChange: (isOpen: boolean) => void
+    onCacheDeleted: () => void
+}>
+
+export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPageProps) {
     const hasLoaded = useRef(false)
     const [draft, setDraft] = useState<GoferSettings>()
     const [hasApiKey, setHasApiKey] = useState(false)
@@ -1727,362 +1734,369 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
 
     return (
         <>
-            <Layout
-                height='fill'
-                contentWidth={960}
-                content={
-                    <LayoutContent padding={6}>
-                        <VStack gap={8}>
-                            <VStack gap={1}>
-                                <Heading
-                                    level={1}
-                                    type='display-3'
+            <Dialog
+                isOpen={isOpen && !isDeleteOpen}
+                onOpenChange={onOpenChange}
+                purpose='form'
+                width={960}
+                maxHeight='90vh'
+            >
+                <Layout
+                    height='fill'
+                    header={
+                        <DialogHeader
+                            title='Settings'
+                            subtitle='Configuration is owned by Gofer and stored only on this device.'
+                            onOpenChange={onOpenChange}
+                        />
+                    }
+                    content={
+                        <LayoutContent padding={6}>
+                            <VStack gap={8}>
+                                {notice && (
+                                    <Banner
+                                        status={notice.status}
+                                        title={notice.title}
+                                        description={notice.description}
+                                        isDismissable={notice.status !== 'error'}
+                                        onDismiss={() => {
+                                            setNotice(undefined)
+                                        }}
+                                    />
+                                )}
+
+                                <Grid
+                                    columns={{minWidth: 320}}
+                                    gap={10}
                                 >
-                                    Settings
-                                </Heading>
-                                <Text color='secondary'>
-                                    Configuration is owned by Gofer and stored only on this device.
-                                </Text>
-                            </VStack>
+                                    <VStack gap={2}>
+                                        <HStack
+                                            gap={2}
+                                            vAlign='center'
+                                        >
+                                            <Icon
+                                                icon={ServerStackIcon}
+                                                size='md'
+                                                color='accent'
+                                            />
+                                            <Heading level={2}>AI connection</Heading>
+                                        </HStack>
+                                        <Text color='secondary'>
+                                            One active OpenAI-compatible connection. Changes take
+                                            effect only after saving.
+                                        </Text>
+                                    </VStack>
 
-                            {notice && (
-                                <Banner
-                                    status={notice.status}
-                                    title={notice.title}
-                                    description={notice.description}
-                                    isDismissable={notice.status !== 'error'}
-                                    onDismiss={() => {
-                                        setNotice(undefined)
-                                    }}
-                                />
-                            )}
-
-                            <Grid
-                                columns={{minWidth: 320}}
-                                gap={10}
-                            >
-                                <VStack gap={2}>
-                                    <HStack
-                                        gap={2}
-                                        vAlign='center'
-                                    >
-                                        <Icon
-                                            icon={ServerStackIcon}
-                                            size='md'
-                                            color='accent'
-                                        />
-                                        <Heading level={2}>AI connection</Heading>
-                                    </HStack>
-                                    <Text color='secondary'>
-                                        One active OpenAI-compatible connection. Changes take effect
-                                        only after saving.
-                                    </Text>
-                                </VStack>
-
-                                {draft ?
-                                    <VStack gap={5}>
-                                        <FormLayout>
-                                            <TextInput
-                                                label='Connection type'
-                                                value='OpenAI-compatible'
-                                                isDisabled
-                                                disabledMessage='OpenAI-compatible is the only supported connection type.'
-                                            />
-                                            <TextInput
-                                                label='Connection name'
-                                                value={draft.ai.name}
-                                                isRequired
-                                                onChange={name => {
-                                                    updateAi({name})
-                                                }}
-                                            />
-                                            <TextInput
-                                                label='Base URL'
-                                                value={draft.ai.baseUrl}
-                                                isRequired
-                                                description='Absolute HTTP or HTTPS URL including the API prefix.'
-                                                onChange={baseUrl => {
-                                                    updateAi({baseUrl})
-                                                }}
-                                            />
-                                            <TextInput
-                                                label='Model ID'
-                                                value={draft.ai.model}
-                                                isRequired
-                                                description='Must exactly match an ID returned by the server models endpoint.'
-                                                onChange={model => {
-                                                    updateAi({model})
-                                                }}
-                                            />
-                                            {availableModels.length > 0 && (
+                                    {draft ?
+                                        <VStack gap={5}>
+                                            <FormLayout>
+                                                <TextInput
+                                                    label='Connection type'
+                                                    value='OpenAI-compatible'
+                                                    isDisabled
+                                                    disabledMessage='OpenAI-compatible is the only supported connection type.'
+                                                />
+                                                <TextInput
+                                                    label='Connection name'
+                                                    value={draft.ai.name}
+                                                    isRequired
+                                                    onChange={name => {
+                                                        updateAi({name})
+                                                    }}
+                                                />
+                                                <TextInput
+                                                    label='Base URL'
+                                                    value={draft.ai.baseUrl}
+                                                    isRequired
+                                                    description='Absolute HTTP or HTTPS URL including the API prefix.'
+                                                    onChange={baseUrl => {
+                                                        updateAi({baseUrl})
+                                                    }}
+                                                />
+                                                <TextInput
+                                                    label='Model ID'
+                                                    value={draft.ai.model}
+                                                    isRequired
+                                                    description='Must exactly match an ID returned by the server models endpoint.'
+                                                    onChange={model => {
+                                                        updateAi({model})
+                                                    }}
+                                                />
+                                                {availableModels.length > 0 && (
+                                                    <DropdownMenu
+                                                        button={{
+                                                            label: `Select server model (${String(availableModels.length)})`,
+                                                            variant: 'secondary'
+                                                        }}
+                                                        menuWidth={360}
+                                                        items={availableModels.map(model => ({
+                                                            label: `${model.name} · ${model.contextWindow.toLocaleString()} context`,
+                                                            onClick: () => {
+                                                                selectModel(model)
+                                                            }
+                                                        }))}
+                                                    />
+                                                )}
+                                                <TextInput
+                                                    label='Context window'
+                                                    value={String(draft.ai.contextWindow)}
+                                                    isRequired
+                                                    description='Maximum context tokens advertised by the selected model.'
+                                                    onChange={contextWindow => {
+                                                        updateAi({
+                                                            contextWindow: Number(contextWindow)
+                                                        })
+                                                    }}
+                                                />
+                                                <TextInput
+                                                    label='Maximum output tokens'
+                                                    value={String(draft.ai.maxTokens)}
+                                                    isRequired
+                                                    onChange={maxTokens => {
+                                                        updateAi({maxTokens: Number(maxTokens)})
+                                                    }}
+                                                />
+                                                <TextInput
+                                                    label='Request timeout (milliseconds)'
+                                                    value={String(draft.ai.timeoutMs)}
+                                                    isRequired
+                                                    description='Provider requests are cancelled after this interval.'
+                                                    onChange={timeoutMs => {
+                                                        updateAi({timeoutMs: Number(timeoutMs)})
+                                                    }}
+                                                />
+                                                <TextInput
+                                                    label='Automatic retries'
+                                                    value={String(draft.ai.maxRetries)}
+                                                    isRequired
+                                                    description='Transient provider failures are retried up to ten times.'
+                                                    onChange={maxRetries => {
+                                                        updateAi({maxRetries: Number(maxRetries)})
+                                                    }}
+                                                />
                                                 <DropdownMenu
                                                     button={{
-                                                        label: `Select server model (${String(availableModels.length)})`,
+                                                        label: `Reasoning: ${draft.ai.thinkingLevel}`,
                                                         variant: 'secondary'
                                                     }}
-                                                    menuWidth={360}
-                                                    items={availableModels.map(model => ({
-                                                        label: `${model.name} · ${model.contextWindow.toLocaleString()} context`,
+                                                    items={(draft.ai.reasoning ?
+                                                        ([
+                                                            'off',
+                                                            'minimal',
+                                                            'low',
+                                                            'medium',
+                                                            'high',
+                                                            'xhigh',
+                                                            'max'
+                                                        ] as const)
+                                                    :   (['off'] as const)
+                                                    ).map(level => ({
+                                                        label: level,
                                                         onClick: () => {
-                                                            selectModel(model)
+                                                            updateAi({thinkingLevel: level})
                                                         }
                                                     }))}
                                                 />
-                                            )}
-                                            <TextInput
-                                                label='Context window'
-                                                value={String(draft.ai.contextWindow)}
-                                                isRequired
-                                                description='Maximum context tokens advertised by the selected model.'
-                                                onChange={contextWindow => {
-                                                    updateAi({contextWindow: Number(contextWindow)})
-                                                }}
-                                            />
-                                            <TextInput
-                                                label='Maximum output tokens'
-                                                value={String(draft.ai.maxTokens)}
-                                                isRequired
-                                                onChange={maxTokens => {
-                                                    updateAi({maxTokens: Number(maxTokens)})
-                                                }}
-                                            />
-                                            <TextInput
-                                                label='Request timeout (milliseconds)'
-                                                value={String(draft.ai.timeoutMs)}
-                                                isRequired
-                                                description='Provider requests are cancelled after this interval.'
-                                                onChange={timeoutMs => {
-                                                    updateAi({timeoutMs: Number(timeoutMs)})
-                                                }}
-                                            />
-                                            <TextInput
-                                                label='Automatic retries'
-                                                value={String(draft.ai.maxRetries)}
-                                                isRequired
-                                                description='Transient provider failures are retried up to ten times.'
-                                                onChange={maxRetries => {
-                                                    updateAi({maxRetries: Number(maxRetries)})
-                                                }}
-                                            />
-                                            <DropdownMenu
-                                                button={{
-                                                    label: `Reasoning: ${draft.ai.thinkingLevel}`,
-                                                    variant: 'secondary'
-                                                }}
-                                                items={(draft.ai.reasoning ?
-                                                    ([
-                                                        'off',
-                                                        'minimal',
-                                                        'low',
-                                                        'medium',
-                                                        'high',
-                                                        'xhigh',
-                                                        'max'
-                                                    ] as const)
-                                                :   (['off'] as const)
-                                                ).map(level => ({
-                                                    label: level,
-                                                    onClick: () => {
-                                                        updateAi({thinkingLevel: level})
+                                                <TextInput
+                                                    label='Agent system prompt'
+                                                    value={draft.ai.systemPrompt}
+                                                    isOptional
+                                                    description='Leave blank to use Gofer’s built-in coding-agent prompt.'
+                                                    onChange={systemPrompt => {
+                                                        updateAi({systemPrompt})
+                                                    }}
+                                                />
+                                                <TextInput
+                                                    label='API dialect'
+                                                    value='OpenAI chat completions'
+                                                    isDisabled
+                                                    disabledMessage='Additional OpenAI API dialects are not supported yet.'
+                                                />
+                                                <TextInput
+                                                    label='API key'
+                                                    type='password'
+                                                    value={apiKey}
+                                                    isOptional
+                                                    startIcon={KeyIcon}
+                                                    placeholder={
+                                                        hasApiKey ? 'Stored securely' : (
+                                                            'Not required by local servers'
+                                                        )
                                                     }
-                                                }))}
-                                            />
-                                            <TextInput
-                                                label='Agent system prompt'
-                                                value={draft.ai.systemPrompt}
-                                                isOptional
-                                                description='Leave blank to use Gofer’s built-in coding-agent prompt.'
-                                                onChange={systemPrompt => {
-                                                    updateAi({systemPrompt})
-                                                }}
-                                            />
-                                            <TextInput
-                                                label='API dialect'
-                                                value='OpenAI chat completions'
-                                                isDisabled
-                                                disabledMessage='Additional OpenAI API dialects are not supported yet.'
-                                            />
-                                            <TextInput
-                                                label='API key'
-                                                type='password'
-                                                value={apiKey}
-                                                isOptional
-                                                startIcon={KeyIcon}
-                                                placeholder={
-                                                    hasApiKey ? 'Stored securely' : (
-                                                        'Not required by local servers'
-                                                    )
-                                                }
-                                                description={
-                                                    apiKeyIntent === 'clear' ?
-                                                        'The stored key will be removed when you save.'
-                                                    : hasApiKey ?
-                                                        'Leave blank to keep the key stored in the operating system credential store.'
-                                                    :   'Enter a key only if this server requires authentication.'
+                                                    description={
+                                                        apiKeyIntent === 'clear' ?
+                                                            'The stored key will be removed when you save.'
+                                                        : hasApiKey ?
+                                                            'Leave blank to keep the key stored in the operating system credential store.'
+                                                        :   'Enter a key only if this server requires authentication.'
 
-                                                }
-                                                onChange={enteredApiKey => {
-                                                    setApiKey(enteredApiKey)
-                                                    setApiKeyIntent(
-                                                        enteredApiKey.trim() ? 'set' : 'keep'
-                                                    )
-                                                }}
-                                            />
-                                        </FormLayout>
-                                        {(hasApiKey || apiKeyIntent === 'clear') && (
-                                            <Button
-                                                label={
-                                                    apiKeyIntent === 'clear' ? 'Keep stored API key'
-                                                    :   'Remove stored API key'
-                                                }
-                                                variant='ghost'
-                                                clickAction={() => {
-                                                    setApiKey('')
-                                                    setApiKeyIntent(
-                                                        apiKeyIntent === 'clear' ? 'keep' : 'clear'
-                                                    )
-                                                }}
-                                            />
-                                        )}
-                                        <HStack
-                                            gap={3}
-                                            hAlign='end'
-                                        >
-                                            <Button
-                                                label='Test connection'
-                                                variant='secondary'
-                                                isLoading={isTesting}
-                                                isDisabled={isSaving}
-                                                clickAction={testConnection}
-                                            />
-                                            <Button
-                                                label='Save connection'
-                                                variant='primary'
-                                                isLoading={isSaving}
-                                                isDisabled={isTesting}
-                                                clickAction={save}
-                                            />
-                                        </HStack>
-                                    </VStack>
-                                :   <Text color='secondary'>
-                                        {isLoading ?
-                                            'Loading Gofer settings…'
-                                        :   'Settings are unavailable.'}
-                                    </Text>
-                                }
-                            </Grid>
-
-                            <Divider />
-
-                            <Grid
-                                columns={{minWidth: 320}}
-                                gap={10}
-                            >
-                                <VStack gap={2}>
-                                    <HStack
-                                        gap={2}
-                                        vAlign='center'
-                                    >
-                                        <Icon
-                                            icon={CircleStackIcon}
-                                            size='md'
-                                            color='accent'
-                                        />
-                                        <Heading level={2}>Godot documentation models</Heading>
-                                    </HStack>
-                                    <Text color='secondary'>
-                                        Local embedding and reranking models used to search the
-                                        Godot 4.7 documentation.
-                                    </Text>
-                                </VStack>
-
-                                {cache ?
-                                    <VStack gap={5}>
-                                        <VStack gap={3}>
-                                            <HStack
-                                                gap={2}
-                                                vAlign='center'
-                                            >
-                                                <StatusDot
-                                                    variant={cacheStateVariant(cache.state)}
-                                                    label={cacheStateLabel(cache.state)}
+                                                    }
+                                                    onChange={enteredApiKey => {
+                                                        setApiKey(enteredApiKey)
+                                                        setApiKeyIntent(
+                                                            enteredApiKey.trim() ? 'set' : 'keep'
+                                                        )
+                                                    }}
                                                 />
-                                                <Text>{cacheStateLabel(cache.state)}</Text>
-                                            </HStack>
-                                            <VStack gap={1}>
-                                                <Text type='supporting'>Cache location</Text>
-                                                <Text color='secondary'>{cache.path}</Text>
-                                            </VStack>
-                                            <VStack gap={1}>
-                                                <Text type='supporting'>Disk usage</Text>
-                                                <Text color='secondary'>
-                                                    {formatBytes(cache.sizeBytes)}
-                                                </Text>
-                                            </VStack>
-                                        </VStack>
-
-                                        {isDownloading && (
-                                            <VStack gap={2}>
-                                                <ProgressBar
-                                                    label={progressLabel(progress)}
-                                                    value={value ?? 0}
-                                                    isIndeterminate={value === undefined}
-                                                    hasValueLabel={value !== undefined}
-                                                />
-                                                <Text
-                                                    type='supporting'
-                                                    color='secondary'
-                                                >
-                                                    {progressLabel(progress)}
-                                                </Text>
-                                            </VStack>
-                                        )}
-
-                                        <HStack
-                                            gap={3}
-                                            hAlign='end'
-                                        >
-                                            {cache.state !== 'installed' && (
+                                            </FormLayout>
+                                            {(hasApiKey || apiKeyIntent === 'clear') && (
                                                 <Button
-                                                    label='Download models'
+                                                    label={
+                                                        apiKeyIntent === 'clear' ?
+                                                            'Keep stored API key'
+                                                        :   'Remove stored API key'
+                                                    }
+                                                    variant='ghost'
+                                                    clickAction={() => {
+                                                        setApiKey('')
+                                                        setApiKeyIntent(
+                                                            apiKeyIntent === 'clear' ? 'keep' : (
+                                                                'clear'
+                                                            )
+                                                        )
+                                                    }}
+                                                />
+                                            )}
+                                            <HStack
+                                                gap={3}
+                                                hAlign='end'
+                                            >
+                                                <Button
+                                                    label='Test connection'
                                                     variant='secondary'
+                                                    isLoading={isTesting}
+                                                    isDisabled={isSaving}
+                                                    clickAction={testConnection}
+                                                />
+                                                <Button
+                                                    label='Save connection'
+                                                    variant='primary'
+                                                    isLoading={isSaving}
+                                                    isDisabled={isTesting}
+                                                    clickAction={save}
+                                                />
+                                            </HStack>
+                                        </VStack>
+                                    :   <Text color='secondary'>
+                                            {isLoading ?
+                                                'Loading Gofer settings…'
+                                            :   'Settings are unavailable.'}
+                                        </Text>
+                                    }
+                                </Grid>
+
+                                <Divider />
+
+                                <Grid
+                                    columns={{minWidth: 320}}
+                                    gap={10}
+                                >
+                                    <VStack gap={2}>
+                                        <HStack
+                                            gap={2}
+                                            vAlign='center'
+                                        >
+                                            <Icon
+                                                icon={CircleStackIcon}
+                                                size='md'
+                                                color='accent'
+                                            />
+                                            <Heading level={2}>Godot documentation models</Heading>
+                                        </HStack>
+                                        <Text color='secondary'>
+                                            Local embedding and reranking models used to search the
+                                            Godot 4.7 documentation.
+                                        </Text>
+                                    </VStack>
+
+                                    {cache ?
+                                        <VStack gap={5}>
+                                            <VStack gap={3}>
+                                                <HStack
+                                                    gap={2}
+                                                    vAlign='center'
+                                                >
+                                                    <StatusDot
+                                                        variant={cacheStateVariant(cache.state)}
+                                                        label={cacheStateLabel(cache.state)}
+                                                    />
+                                                    <Text>{cacheStateLabel(cache.state)}</Text>
+                                                </HStack>
+                                                <VStack gap={1}>
+                                                    <Text type='supporting'>Cache location</Text>
+                                                    <Text color='secondary'>{cache.path}</Text>
+                                                </VStack>
+                                                <VStack gap={1}>
+                                                    <Text type='supporting'>Disk usage</Text>
+                                                    <Text color='secondary'>
+                                                        {formatBytes(cache.sizeBytes)}
+                                                    </Text>
+                                                </VStack>
+                                            </VStack>
+
+                                            {isDownloading && (
+                                                <VStack gap={2}>
+                                                    <ProgressBar
+                                                        label={progressLabel(progress)}
+                                                        value={value ?? 0}
+                                                        isIndeterminate={value === undefined}
+                                                        hasValueLabel={value !== undefined}
+                                                    />
+                                                    <Text
+                                                        type='supporting'
+                                                        color='secondary'
+                                                    >
+                                                        {progressLabel(progress)}
+                                                    </Text>
+                                                </VStack>
+                                            )}
+
+                                            <HStack
+                                                gap={3}
+                                                hAlign='end'
+                                            >
+                                                {cache.state !== 'installed' && (
+                                                    <Button
+                                                        label='Download models'
+                                                        variant='secondary'
+                                                        icon={
+                                                            <Icon
+                                                                icon={CloudArrowDownIcon}
+                                                                size='sm'
+                                                            />
+                                                        }
+                                                        isLoading={isDownloading}
+                                                        clickAction={downloadModels}
+                                                    />
+                                                )}
+                                                <Button
+                                                    label='Delete model cache'
+                                                    variant='destructive'
                                                     icon={
                                                         <Icon
-                                                            icon={CloudArrowDownIcon}
+                                                            icon={TrashIcon}
                                                             size='sm'
                                                         />
                                                     }
-                                                    isLoading={isDownloading}
-                                                    clickAction={downloadModels}
+                                                    isDisabled={!canDeleteCache}
+                                                    clickAction={() => {
+                                                        setIsDeleteOpen(true)
+                                                    }}
                                                 />
-                                            )}
-                                            <Button
-                                                label='Delete model cache'
-                                                variant='destructive'
-                                                icon={
-                                                    <Icon
-                                                        icon={TrashIcon}
-                                                        size='sm'
-                                                    />
-                                                }
-                                                isDisabled={!canDeleteCache}
-                                                clickAction={() => {
-                                                    setIsDeleteOpen(true)
-                                                }}
-                                            />
-                                        </HStack>
-                                    </VStack>
-                                :   <Text color='secondary'>
-                                        {isLoading ?
-                                            'Inspecting the model cache…'
-                                        :   'Cache status is unavailable.'}
-                                    </Text>
-                                }
-                            </Grid>
-                        </VStack>
-                    </LayoutContent>
-                }
-            />
+                                            </HStack>
+                                        </VStack>
+                                    :   <Text color='secondary'>
+                                            {isLoading ?
+                                                'Inspecting the model cache…'
+                                            :   'Cache status is unavailable.'}
+                                        </Text>
+                                    }
+                                </Grid>
+                            </VStack>
+                        </LayoutContent>
+                    }
+                />
+            </Dialog>
             <AlertDialog
                 isOpen={isDeleteOpen}
                 onOpenChange={setIsDeleteOpen}
@@ -2097,7 +2111,9 @@ export function SettingsPage({onCacheDeleted}: {onCacheDeleted: () => void}) {
 }
 
 export default function App() {
-    const [page, setPage] = useState<Page>('workspace')
+    const [page, setPage] = useState<Page>(() =>
+        window.location.hash === '#settings' ? 'settings' : 'workspace'
+    )
     const [workspaceKey, setWorkspaceKey] = useState(0)
     const [isReady, setIsReady] = useState(false)
     const showApplication = useCallback(() => {
@@ -2106,11 +2122,28 @@ export default function App() {
     const prepareModels = useCallback(() => {
         setIsReady(false)
     }, [])
+    const navigate = useCallback((nextPage: Page) => {
+        window.history.pushState(undefined, '', `#${nextPage}`)
+        setPage(nextPage)
+    }, [])
     const newTask = useCallback(async () => {
         if (isTauri()) await invoke('clear_chat_attachments').catch(() => undefined)
         window.localStorage.removeItem(CHAT_STORAGE_KEY)
         setWorkspaceKey(previous => previous + 1)
-        setPage('workspace')
+        navigate('workspace')
+    }, [navigate])
+
+    useEffect(() => {
+        const syncPageWithLocation = () => {
+            setPage(window.location.hash === '#settings' ? 'settings' : 'workspace')
+        }
+
+        window.addEventListener('hashchange', syncPageWithLocation)
+        window.addEventListener('popstate', syncPageWithLocation)
+        return () => {
+            window.removeEventListener('hashchange', syncPageWithLocation)
+            window.removeEventListener('popstate', syncPageWithLocation)
+        }
     }, [])
 
     if (!isReady) return <InitializationSplash onReady={showApplication} />
@@ -2122,14 +2155,21 @@ export default function App() {
             sideNav={
                 <Navigation
                     page={page}
-                    onNavigate={setPage}
+                    onNavigate={navigate}
                     onNewTask={newTask}
                 />
             }
         >
-            {page === 'settings' ?
-                <SettingsPage onCacheDeleted={prepareModels} />
-            :   <Workspace key={workspaceKey} />}
+            <Workspace key={workspaceKey} />
+            {page === 'settings' && (
+                <SettingsPage
+                    isOpen
+                    onOpenChange={isOpen => {
+                        if (!isOpen) navigate('workspace')
+                    }}
+                    onCacheDeleted={prepareModels}
+                />
+            )}
         </AppShell>
     )
 }

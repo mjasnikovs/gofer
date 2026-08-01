@@ -112,7 +112,13 @@ describe('SettingsPage', () => {
 
     it('loads settings and sends keep, set, and clear API-key intents', async () => {
         loadSettings()
-        render(<SettingsPage onCacheDeleted={vi.fn()} />)
+        render(
+            <SettingsPage
+                isOpen
+                onOpenChange={vi.fn()}
+                onCacheDeleted={vi.fn()}
+            />
+        )
         const user = userEvent.setup()
 
         expect(await screen.findByDisplayValue('Local AI')).toBeInTheDocument()
@@ -139,7 +145,13 @@ describe('SettingsPage', () => {
 
     it('reports model listener failures and restores the cache state', async () => {
         loadSettings()
-        render(<SettingsPage onCacheDeleted={vi.fn()} />)
+        render(
+            <SettingsPage
+                isOpen
+                onOpenChange={vi.fn()}
+                onCacheDeleted={vi.fn()}
+            />
+        )
         const user = userEvent.setup()
 
         await screen.findByDisplayValue('Local AI')
@@ -148,6 +160,23 @@ describe('SettingsPage', () => {
 
         expect(await screen.findByText(/listener unavailable/)).toBeInTheDocument()
         expect(screen.getByText('Incomplete')).toBeInTheDocument()
+    })
+
+    it('closes without starting a new task', async () => {
+        loadSettings()
+        const onOpenChange = vi.fn()
+        render(
+            <SettingsPage
+                isOpen
+                onOpenChange={onOpenChange}
+                onCacheDeleted={vi.fn()}
+            />
+        )
+
+        await userEvent.click(screen.getByRole('button', {name: 'Close'}))
+
+        expect(onOpenChange).toHaveBeenCalledWith(false)
+        expect(tauri.invoke).not.toHaveBeenCalledWith('clear_chat_attachments')
     })
 })
 
