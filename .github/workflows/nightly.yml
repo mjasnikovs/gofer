@@ -1,0 +1,74 @@
+name: Nightly desktop journey
+
+on:
+    schedule:
+        - cron: '23 2 * * *'
+    workflow_dispatch:
+
+concurrency:
+    group: nightly-desktop
+    cancel-in-progress: false
+
+jobs:
+    desktop:
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-24.04
+                      godot_url: https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
+                      godot_sha256: c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba
+                      godot_path: Godot_v4.7.1-stable_linux.x86_64
+                    - os: windows-2025
+                      godot_url: https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_win64.exe.zip
+                      godot_sha256: c7a289051eaefb460b0106b60e9cd5bee0ef55fd102dcb2bed1eb356cf3d90a1
+                      godot_path: Godot_v4.7.1-stable_win64.exe
+                    - os: macos-15
+                      godot_url: https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_macos.universal.zip
+                      godot_sha256: 897cb7f9799796c717ae75f31446aed883dc92b1d6c3b33d893cc7843fff2fa9
+                      godot_path: Godot.app/Contents/MacOS/Godot
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 60
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.19.0
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: 1.97.1
+            - name: Install Linux system dependencies
+              if: runner.os == 'Linux'
+              run: >-
+                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
+                  libappindicator3-dev librsvg2-dev patchelf xvfb
+            - name: Install JavaScript dependencies
+              run: npm ci
+            - name: Install pinned Godot
+              shell: pwsh
+              env:
+                  GODOT_URL: ${{ matrix.godot_url }}
+                  GODOT_SHA256: ${{ matrix.godot_sha256 }}
+                  GODOT_PATH: ${{ matrix.godot_path }}
+              run: |
+                  Invoke-WebRequest -Uri $env:GODOT_URL -OutFile godot.zip
+                  $actual = (Get-FileHash godot.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+                  if ($actual -ne $env:GODOT_SHA256) { throw "Godot SHA-256 mismatch: $actual" }
+                  Expand-Archive godot.zip -DestinationPath "$env:RUNNER_TEMP/godot"
+                  $binary = Join-Path "$env:RUNNER_TEMP/godot" $env:GODOT_PATH
+                  "GOFER_GODOT_BINARY=$binary" | Out-File -FilePath $env:GITHUB_ENV -Append
+            - name: Make Godot executable
+              if: runner.os != 'Windows'
+              shell: bash
+              run: chmod +x "$GOFER_GODOT_BINARY"
+            - name: Run real Godot protocol and acceptance tests
+              run: npm run test:godot
+            - name: Build the release-mode WebDriver application
+              run: npm run build:desktop:test
+            - name: Run packaged desktop journey on Linux
+              if: runner.os == 'Linux'
+              run: xvfb-run -a npm run test:desktop:packaged
+            - name: Run packaged desktop journey
+              if: runner.os != 'Linux'
+              run: npm run test:desktop:packaged

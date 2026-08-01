@@ -1,0 +1,22 @@
+{
+    "build": {
+        "beforeBuildCommand": "npm run build -- --mode webdriver"
+    },
+    "app": {
+        "withGlobalTauri": true,
+        "security": {
+            "capabilities": [
+                "default",
+                {
+                    "identifier": "webdriver",
+                    "description": "WebdriverIO permissions for test-only builds",
+                    "windows": ["main"],
+                    "permissions": ["wdio:default", "wdio-webdriver:default"]
+                }
+            ]
+        }
+    },
+    "bundle": {
+        "active": false
+    }
+}

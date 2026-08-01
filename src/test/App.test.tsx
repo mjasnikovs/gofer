@@ -1,6 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import axe from 'axe-core'
 import {InitializationSplash} from '../components/application/InitializationSplash'
 import {Navigation} from '../components/application/Navigation'
 import {SettingsPage} from '../components/settings/SettingsPage'
@@ -17,8 +18,11 @@ const tauri = vi.hoisted(() => ({
     listen: vi.fn<ListenFunction>()
 }))
 
-vi.mock('@tauri-apps/api/core', () => ({invoke: tauri.invoke, isTauri: tauri.isTauri}))
-vi.mock('@tauri-apps/api/event', () => ({listen: tauri.listen}))
+vi.mock('../services/desktop', () => ({
+    invoke: tauri.invoke,
+    isTauri: tauri.isTauri,
+    listen: tauri.listen
+}))
 
 const settingsResponse = {
     settings: {
@@ -52,6 +56,16 @@ afterEach(() => {
 })
 
 describe('InitializationSplash', () => {
+    it('has no automatically detectable accessibility violations in its error state', async () => {
+        tauri.isTauri.mockReturnValue(false)
+        const {container} = render(<InitializationSplash onReady={vi.fn()} />)
+
+        await screen.findByText('Models could not be initialized')
+        const result = await axe.run(container)
+
+        expect(result.violations).toEqual([])
+    })
+
     it('explains that model initialization requires the desktop app', async () => {
         tauri.isTauri.mockReturnValue(false)
 

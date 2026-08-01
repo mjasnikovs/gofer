@@ -1,0 +1,6 @@
+{
+    "protocolVersion": 2,
+    "id": "request-8",
+    "command": "open_project",
+    "params": {"path": "/tmp/project"}
+}

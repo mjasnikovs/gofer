@@ -1,0 +1,14 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://gofer.local/protocol/request.schema.json",
+    "title": "Gofer protocol request",
+    "type": "object",
+    "required": ["protocolVersion", "id", "command", "params"],
+    "properties": {
+        "protocolVersion": {"type": "integer", "minimum": 1},
+        "id": {"type": "string", "minLength": 1},
+        "command": {"type": "string", "minLength": 1},
+        "params": {"type": "object"}
+    },
+    "additionalProperties": true
+}

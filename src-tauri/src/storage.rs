@@ -237,7 +237,7 @@ pub struct TaskRecord {
     pub worktree: Option<TaskWorktree>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(not(test), allow(dead_code))]
 pub struct TaskWorktreeRequest {
@@ -342,7 +342,7 @@ pub struct MemoryRecord {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpsertMemoryRequest {
     pub id: Option<String>,
@@ -1984,6 +1984,271 @@ mod tests {
         invalid_attachment.id = "valid-id".to_owned();
         invalid_attachment.name = "x".repeat(256);
         assert!(validate_attachment(&invalid_attachment).is_err());
+    }
+
+    #[test]
+    fn validation_covers_every_storage_boundary_branch() {
+        let commit = "a".repeat(40);
+        let valid_worktree = TaskWorktreeRequest {
+            task_id: "task".to_owned(),
+            branch_name: "gofer/task".to_owned(),
+            worktree_path: std::env::temp_dir()
+                .join("gofer-worktree")
+                .display()
+                .to_string(),
+            base_commit: commit.clone(),
+            head_commit: Some(commit.clone()),
+            merged_commit: Some("b".repeat(64)),
+        };
+        assert!(validate_worktree(&valid_worktree).is_ok());
+        for request in [
+            TaskWorktreeRequest {
+                branch_name: " ".to_owned(),
+                ..valid_worktree.clone()
+            },
+            TaskWorktreeRequest {
+                branch_name: "x".repeat(256),
+                ..valid_worktree.clone()
+            },
+            TaskWorktreeRequest {
+                branch_name: "bad\nbranch".to_owned(),
+                ..valid_worktree.clone()
+            },
+            TaskWorktreeRequest {
+                worktree_path: "relative".to_owned(),
+                ..valid_worktree.clone()
+            },
+            TaskWorktreeRequest {
+                worktree_path: std::env::temp_dir()
+                    .join("..")
+                    .join("escape")
+                    .display()
+                    .to_string(),
+                ..valid_worktree.clone()
+            },
+            TaskWorktreeRequest {
+                base_commit: "short".to_owned(),
+                ..valid_worktree.clone()
+            },
+            TaskWorktreeRequest {
+                head_commit: Some("z".repeat(40)),
+                ..valid_worktree.clone()
+            },
+        ] {
+            assert!(validate_worktree(&request).is_err());
+        }
+
+        let valid_log = GodotLogEntry {
+            timestamp: 1,
+            level: "info".to_owned(),
+            message: "started".to_owned(),
+            source: Some("stdout".to_owned()),
+            stack_trace: None,
+        };
+        assert!(validate_log_entries(std::slice::from_ref(&valid_log)).is_ok());
+        assert!(validate_log_entries(&[]).is_err());
+        for entry in [
+            GodotLogEntry {
+                level: "fatal".to_owned(),
+                ..valid_log.clone()
+            },
+            GodotLogEntry {
+                message: " ".to_owned(),
+                ..valid_log.clone()
+            },
+            GodotLogEntry {
+                message: "x".repeat(1_024 * 1_024 + 1),
+                ..valid_log.clone()
+            },
+        ] {
+            assert!(validate_log_entries(&[entry]).is_err());
+        }
+
+        let valid_memory = UpsertMemoryRequest {
+            id: None,
+            task_id: None,
+            kind: "fact".to_owned(),
+            state: "confirmed".to_owned(),
+            content: "Godot uses scenes".to_owned(),
+            provenance: serde_json::json!({"source": "test"}),
+            superseded_by: None,
+        };
+        assert!(validate_memory(&valid_memory).is_ok());
+        for memory in [
+            UpsertMemoryRequest {
+                kind: "unknown".to_owned(),
+                ..valid_memory.clone()
+            },
+            UpsertMemoryRequest {
+                state: "unknown".to_owned(),
+                ..valid_memory.clone()
+            },
+            UpsertMemoryRequest {
+                content: " ".to_owned(),
+                ..valid_memory.clone()
+            },
+            UpsertMemoryRequest {
+                content: "x".repeat(64 * 1_024 + 1),
+                ..valid_memory.clone()
+            },
+            UpsertMemoryRequest {
+                provenance: serde_json::json!([]),
+                ..valid_memory.clone()
+            },
+        ] {
+            assert!(validate_memory(&memory).is_err());
+        }
+
+        let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        vector[0] = 1.0;
+        assert!(validate_vector(&vector).is_ok());
+        assert!(validate_vector(&vector[..10]).is_err());
+        let mut non_finite = vector.clone();
+        non_finite[0] = f32::NAN;
+        assert!(validate_vector(&non_finite).is_err());
+        let zero = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        assert!(validate_vector(&zero).is_err());
+        assert!(
+            validate_embedding(&SaveMemoryEmbeddingRequest {
+                memory_id: "memory".to_owned(),
+                model: "wrong-model".to_owned(),
+                vector,
+            })
+            .is_err()
+        );
+
+        let valid_attachment = attachment("valid-id");
+        for invalid in [
+            StoredAttachment {
+                id: String::new(),
+                ..valid_attachment.clone()
+            },
+            StoredAttachment {
+                id: "bad/id".to_owned(),
+                ..valid_attachment.clone()
+            },
+            StoredAttachment {
+                name: " ".to_owned(),
+                ..valid_attachment.clone()
+            },
+            StoredAttachment {
+                size: 0,
+                ..valid_attachment.clone()
+            },
+            StoredAttachment {
+                size: 10 * 1_024 * 1_024 + 1,
+                ..valid_attachment.clone()
+            },
+            StoredAttachment {
+                mime_type: "application/pdf".to_owned(),
+                ..valid_attachment.clone()
+            },
+        ] {
+            assert!(validate_attachment(&invalid).is_err());
+        }
+
+        let invalid_sender = StoredChat {
+            task_id: None,
+            messages: vec![StoredMessage {
+                id: 1,
+                sender: "system".to_owned(),
+                text: String::new(),
+                timestamp: 1,
+                attachments: Vec::new(),
+                extra: serde_json::Map::new(),
+            }],
+            agent_messages: Vec::new(),
+        };
+        assert!(validate_chat(&invalid_sender).is_err());
+        let mut too_many_attachments = invalid_sender;
+        too_many_attachments.messages[0].sender = "user".to_owned();
+        too_many_attachments.messages[0].attachments = vec![valid_attachment; 6];
+        assert!(validate_chat(&too_many_attachments).is_err());
+    }
+
+    #[test]
+    fn storage_operations_cover_invalid_state_and_conflict_branches() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let workspace = storage.agent_workspace().expect("agent workspace");
+        assert!(
+            storage
+                .start_godot_run_in(
+                    &StartGodotRunRequest {
+                        task_id: None,
+                        godot_version: None,
+                        metadata: serde_json::json!([]),
+                    },
+                    &workspace,
+                )
+                .is_err()
+        );
+        assert!(
+            storage
+                .finish_godot_run(&FinishGodotRunRequest {
+                    run_id: "missing".to_owned(),
+                    status: "running".to_owned(),
+                    exit_code: None,
+                })
+                .is_err()
+        );
+        assert!(
+            storage
+                .finish_godot_run(&FinishGodotRunRequest {
+                    run_id: "missing".to_owned(),
+                    status: "failed".to_owned(),
+                    exit_code: None,
+                })
+                .is_err()
+        );
+        assert!(
+            storage
+                .search_godot_logs(&SearchGodotLogsRequest {
+                    query: "---".to_owned(),
+                    run_id: None,
+                    limit: None,
+                })
+                .is_err()
+        );
+        assert!(
+            storage
+                .search_memory(&SearchMemoryRequest {
+                    query: " ".to_owned(),
+                    task_id: None,
+                    vector: None,
+                    limit: None,
+                })
+                .is_err()
+        );
+
+        let stored = attachment("conflict-id");
+        assert!(storage.save_attachment(&stored, b"x").is_err());
+        storage
+            .save_attachment(&stored, b"hi")
+            .expect("save attachment");
+        storage
+            .save_attachment(&stored, b"hi")
+            .expect("idempotent attachment save");
+        let renamed = StoredAttachment {
+            name: "other.png".to_owned(),
+            ..stored.clone()
+        };
+        assert!(storage.save_attachment(&renamed, b"hi").is_err());
+        assert!(storage.read_attachment(&renamed).is_err());
+
+        let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        vector[0] = 1.0;
+        assert!(
+            storage
+                .search_memory(&SearchMemoryRequest {
+                    query: String::new(),
+                    task_id: None,
+                    vector: Some(vector),
+                    limit: Some(1),
+                })
+                .expect("empty vector search")
+                .is_empty()
+        );
     }
 
     #[test]

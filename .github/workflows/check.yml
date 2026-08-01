@@ -1,0 +1,112 @@
+name: Check
+
+on:
+    push:
+        branches: [master]
+    workflow_dispatch:
+
+concurrency:
+    group: check-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    check:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.19.0
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: 1.97.1
+                  components: clippy,rustfmt
+            - name: Install system dependencies
+              run: >-
+                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
+                  libappindicator3-dev librsvg2-dev patchelf unzip
+            - name: Install JavaScript dependencies
+              run: npm ci
+            - name: Install pinned visual-test browser
+              run: npx playwright install --with-deps chromium
+            - name: Install pinned WebDriver browser
+              id: chrome
+              uses: browser-actions/setup-chrome@v2
+              with:
+                  chrome-version: 150.0.7871.128
+                  install-chromedriver: true
+            - name: Install pinned Godot
+              env:
+                  GODOT_URL: https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
+                  GODOT_SHA256: c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba
+              run: |
+                  curl --fail --location --output godot.zip "$GODOT_URL"
+                  echo "$GODOT_SHA256  godot.zip" | sha256sum --check
+                  unzip -q godot.zip -d "$RUNNER_TEMP/godot"
+                  chmod +x "$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64"
+                  echo "GOFER_GODOT_BINARY=$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64" >> "$GITHUB_ENV"
+            - name: Run required checks with zero retries
+              env:
+                  GOFER_CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}
+                  GOFER_CHROMEDRIVER_BINARY: ${{ steps.chrome.outputs.chromedriver-path }}
+              run: npm run check
+
+    packaged:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.19.0
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: 1.97.1
+            - name: Install system dependencies
+              run: >-
+                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
+                  libappindicator3-dev librsvg2-dev patchelf xvfb
+            - name: Install JavaScript dependencies
+              run: npm ci
+            - name: Install pinned Godot
+              env:
+                  GODOT_URL: https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
+                  GODOT_SHA256: c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba
+              run: |
+                  curl --fail --location --output godot.zip "$GODOT_URL"
+                  echo "$GODOT_SHA256  godot.zip" | sha256sum --check
+                  unzip -q godot.zip -d "$RUNNER_TEMP/godot"
+                  chmod +x "$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64"
+                  echo "GOFER_GODOT_BINARY=$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64" >> "$GITHUB_ENV"
+            - name: Build the release-mode WebDriver application
+              run: npm run build:desktop:test
+            - name: Run the packaged application with zero retries
+              run: xvfb-run -a npm run test:desktop:packaged
+
+    rust-coverage:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.19.0
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: nightly-2026-07-25
+                  components: llvm-tools-preview
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-llvm-cov
+            - name: Install Linux Tauri dependencies
+              run: >-
+                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
+                  libappindicator3-dev librsvg2-dev patchelf
+            - name: Install JavaScript dependencies
+              run: npm ci
+            - name: Enforce Rust line and branch coverage
+              run: npm run test:coverage:rust

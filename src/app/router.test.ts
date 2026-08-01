@@ -10,7 +10,7 @@ const tauri = vi.hoisted(() => ({
     isTauri: vi.fn<IsTauriFunction>()
 }))
 
-vi.mock('@tauri-apps/api/core', () => ({invoke: tauri.invoke, isTauri: tauri.isTauri}))
+vi.mock('../services/desktop', () => ({invoke: tauri.invoke, isTauri: tauri.isTauri}))
 
 const tasks = [
     {

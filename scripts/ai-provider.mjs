@@ -8,6 +8,7 @@ import {
 } from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider} from '@earendil-works/pi-ai'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
+import {confineTool} from './workspace-confinement.mjs'
 
 const PROVIDER_ID = 'local'
 const DEFAULT_CONTEXT_WINDOW = 120_064
@@ -94,9 +95,9 @@ export function createAgentTools(workspacePath) {
     const context = {env}
     return {
         env,
-        tools: [createReadTool(), createWriteTool(), createEditTool(), createBashTool()].map(tool =>
-            bindTool(tool, context)
-        )
+        tools: [createReadTool(), createWriteTool(), createEditTool(), createBashTool()]
+            .map(tool => confineTool(tool, workspacePath))
+            .map(tool => bindTool(tool, context))
     }
 }
 

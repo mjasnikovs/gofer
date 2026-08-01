@@ -3,17 +3,9 @@ import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
 import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
-import {invoke, isTauri} from '@tauri-apps/api/core'
-import {listen} from '@tauri-apps/api/event'
+import {invoke, isTauri, listen} from '../../services/desktop'
 import type {TaskSummary} from '../../models/app'
-import type {
-    AiStreamPayload,
-    ChatAttachment,
-    DraftAttachment,
-    GodotProcessEvent,
-    Message,
-    StoredChat
-} from '../../models/chat'
+import type {ChatAttachment, DraftAttachment, Message} from '../../models/chat'
 import {messageUsage} from '../../utils/chat-format'
 import {
     attachmentData,
@@ -23,12 +15,7 @@ import {
     nextStoredMessageId
 } from '../../services/chat-storage'
 import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS, normalizeSettings} from '../../models/settings'
-import type {
-    AiModelOption,
-    GoferSettings,
-    SettingsResponse,
-    ThinkingLevel
-} from '../../models/settings'
+import type {AiModelOption, GoferSettings, ThinkingLevel} from '../../models/settings'
 import {ChatConversation} from './ChatConversation'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
 import {WorkspaceHeader} from './WorkspaceHeader'
@@ -90,7 +77,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         let isCancelled = false
         const load = async () => {
             try {
-                const response = await invoke<unknown>('load_chat')
+                const response = await invoke('load_chat')
                 const stored = isStoredChat(response) ? response : {messages: [], agentMessages: []}
                 const legacy = loadLegacyChat()
                 const chat =
@@ -99,7 +86,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                         && stored.agentMessages.length === 0
                         && (legacy.messages.length > 0 || legacy.agentMessages.length > 0)
                     ) ?
-                        await invoke<StoredChat>('import_legacy_chat', {chat: legacy})
+                        await invoke('import_legacy_chat', {chat: legacy})
                     :   stored
                 if (isCancelled) return
                 setMessages(chat.messages)
@@ -128,7 +115,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         if (!isTauri()) return
         let isCancelled = false
         let unlisten: (() => void) | undefined
-        void listen<GodotProcessEvent>('godot-process-event', event => {
+        void listen('godot-process-event', event => {
             if (isCancelled) return
             if (event.payload.eventType === 'started') setIsGodotRunning(true)
             if (event.payload.eventType === 'finished') setIsGodotRunning(false)
@@ -218,10 +205,10 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         setConnectionState('connecting')
         setStreamError(undefined)
         try {
-            const response = await invoke<SettingsResponse>('load_settings')
+            const response = await invoke('load_settings')
             const loadedSettings = normalizeSettings(response.settings)
             setSettings(loadedSettings)
-            const available = await invoke<AiModelOption[]>('list_ai_models', {
+            const available = await invoke('list_ai_models', {
                 request: {settings: loadedSettings, apiKey: {action: 'keep'}}
             })
             setModels(available)
@@ -280,7 +267,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             const previews = await Promise.all(
                 attachments.map(async attachment => {
                     try {
-                        const preview = await invoke<string>('read_chat_attachment', {attachment})
+                        const preview = await invoke('read_chat_attachment', {attachment})
                         return [attachment.id, preview] as const
                     } catch {
                         return undefined
@@ -339,7 +326,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             const run = async () => {
                 let unlisten: (() => void) | undefined
                 try {
-                    unlisten = await listen<AiStreamPayload>('ai-stream-event', received => {
+                    unlisten = await listen('ai-stream-event', received => {
                         if (received.payload.requestId !== requestId) return
                         const event = received.payload.event
                         if (event.type === 'text-delta') {

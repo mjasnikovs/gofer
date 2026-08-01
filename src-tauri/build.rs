@@ -21,6 +21,7 @@ fn main() {
             "save_chat",
             "save_chat_attachment",
             "save_settings",
+            "send_godot_command",
             "send_ai_message",
             "test_ai_connection",
         ]),

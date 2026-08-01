@@ -45,7 +45,12 @@ export function WorkspaceHeader({
                 gap={3}
                 vAlign='center'
             >
-                <Heading level={2}>{activeTask?.title ?? 'New task'}</Heading>
+                <Heading
+                    level={2}
+                    accessibilityLevel={1}
+                >
+                    {activeTask?.title ?? 'New task'}
+                </Heading>
                 <Token label='Godot 4.7' />
             </HStack>
             <HStack

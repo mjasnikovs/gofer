@@ -9,9 +9,7 @@ import {Spinner} from '@astryxdesign/core/Spinner'
 import {VStack} from '@astryxdesign/core/Stack'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import CircleStackIcon from '@heroicons/react/24/outline/CircleStackIcon'
-import {invoke, isTauri} from '@tauri-apps/api/core'
-import {listen} from '@tauri-apps/api/event'
-import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
+import {invoke, isTauri, listen} from '../../services/desktop'
 import type {InitializationState} from '../../models/chat'
 import {progressLabel, progressValue} from '../../models/settings'
 
@@ -33,7 +31,7 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
 
         let unlisten: (() => void) | undefined
         try {
-            unlisten = await listen<DownloadProgress>('rag-download-progress', event => {
+            unlisten = await listen('rag-download-progress', event => {
                 setState({status: 'initializing', progress: event.payload})
             })
             await invoke('initialize_rag')

@@ -5,7 +5,10 @@ import '@astryxdesign/core/reset.css'
 import '@astryxdesign/core/astryx.css'
 import '@astryxdesign/theme-neutral/theme.css'
 import App from './App'
-import {goferTheme} from './theme/theme'
+import {goferTheme} from './theme/gofer'
+import './theme/gofer-theme.css'
+
+if (import.meta.env.MODE === 'webdriver') void import('@wdio/tauri-plugin')
 
 const root = document.getElementById('root')
 

@@ -1,0 +1,9 @@
+{
+    "protocolVersion": 1,
+    "id": "request-3",
+    "error": {
+        "code": "unsupported_protocol_version",
+        "message": "Protocol version 2 is not supported",
+        "details": {"supportedVersions": [1]}
+    }
+}

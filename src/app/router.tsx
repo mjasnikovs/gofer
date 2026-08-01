@@ -14,15 +14,11 @@ import {
 } from '@tanstack/react-router'
 import type {RouterHistory} from '@tanstack/react-router'
 import {AppShell} from '@astryxdesign/core/AppShell'
-import {invoke, isTauri} from '@tauri-apps/api/core'
+import {invoke, isTauri} from '../services/desktop'
 import {InitializationSplash} from '../components/application/InitializationSplash'
 import {Navigation} from '../components/application/Navigation'
 import {isTaskSummary} from '../models/app'
 import type {Page, TaskSummary} from '../models/app'
-
-type CreatedTask = Readonly<{
-    taskId?: string
-}>
 
 type ApplicationContextValue = Readonly<{
     prepareModels: () => void
@@ -38,7 +34,7 @@ const Workspace = lazy(() =>
 
 async function loadTasks() {
     if (!isTauri()) return []
-    const response = await invoke<unknown>('list_project_tasks')
+    const response = await invoke('list_project_tasks')
     if (!Array.isArray(response) || !response.every(isTaskSummary)) return []
     return response
 }
@@ -103,7 +99,7 @@ function Application() {
     )
     const newTask = useCallback(async () => {
         if (!isTauri()) return
-        const created = await invoke<CreatedTask>('create_chat_task').catch(() => undefined)
+        const created = await invoke('create_chat_task').catch(() => undefined)
         if (!created?.taskId) return
         await refreshTasks()
         await navigate({to: '/tasks/$taskId', params: {taskId: created.taskId}})

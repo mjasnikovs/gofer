@@ -5,17 +5,20 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 mod git;
 mod godot;
+mod godot_bridge;
 mod memory;
+mod process;
+pub mod protocol;
 mod storage;
 
+use process::{ProcessSpawner, SystemProcessSpawner};
 use storage::{
     BackupResult, GodotRunRecord, MaintenanceResult, MergeTaskResult, ProjectStorage,
     SaveMemoryEmbeddingRequest, SearchMemoryRequest, StoredAttachment, StoredChat, TaskRecord,
@@ -41,7 +44,8 @@ static ACTIVE_RAG_INITIALIZATION: Mutex<Option<Arc<RagInitialization>>> = Mutex:
 static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_AI_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
-static AI_CHILD: Mutex<Option<Arc<Mutex<Child>>>> = Mutex::new(None);
+type SharedChildProcess = Arc<Mutex<Box<dyn process::ChildProcess>>>;
+static AI_CHILD: Mutex<Option<SharedChildProcess>> = Mutex::new(None);
 static KEYRING_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -658,6 +662,14 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
 
 #[tauri::command(async)]
 fn save_chat_attachment(app: AppHandle, request: ChatAttachmentUpload) -> Result<(), String> {
+    save_chat_attachment_in(&project_storage(&app)?, request)
+}
+
+// coverage-critical-start: attachment
+fn save_chat_attachment_in(
+    storage: &ProjectStorage,
+    request: ChatAttachmentUpload,
+) -> Result<(), String> {
     validate_chat_attachment(&request.attachment)?;
     if request.data.len() > MAX_CHAT_ATTACHMENT_BASE64_BYTES {
         return Err("Images cannot be larger than 10 MiB".to_owned());
@@ -665,19 +677,24 @@ fn save_chat_attachment(app: AppHandle, request: ChatAttachmentUpload) -> Result
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&request.data)
         .map_err(|error| format!("The attachment data is not valid base64: {error}"))?;
-    if bytes.len() > MAX_CHAT_ATTACHMENT_BYTES {
-        return Err("Images cannot be larger than 10 MiB".to_owned());
-    }
     if bytes.len() as u64 != request.attachment.size {
         return Err("The attachment size does not match its contents".to_owned());
     }
-    project_storage(&app)?.save_attachment(&request.attachment.as_stored(), &bytes)
+    storage.save_attachment(&request.attachment.as_stored(), &bytes)
 }
+// coverage-critical-end: attachment
 
 #[tauri::command(async)]
 fn read_chat_attachment(app: AppHandle, attachment: ChatAttachment) -> Result<String, String> {
+    read_chat_attachment_in(&project_storage(&app)?, attachment)
+}
+
+fn read_chat_attachment_in(
+    storage: &ProjectStorage,
+    attachment: ChatAttachment,
+) -> Result<String, String> {
     validate_chat_attachment(&attachment)?;
-    let bytes = project_storage(&app)?.read_attachment(&attachment.as_stored())?;
+    let bytes = storage.read_attachment(&attachment.as_stored())?;
     Ok(format!(
         "data:{};base64,{}",
         attachment.mime_type,
@@ -754,12 +771,25 @@ async fn launch_godot(
 }
 
 #[tauri::command(async)]
+fn send_godot_command(
+    address: String,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    godot_bridge::send(&address, &request)
+}
+
+#[tauri::command(async)]
 fn cancel_godot() -> Result<(), String> {
     godot::cancel()
 }
 
 #[tauri::command(async)]
 fn cancel_ai_request(app: AppHandle, request_id: u64) -> Result<bool, String> {
+    cancel_ai_request_with(&app, request_id)
+}
+
+// coverage-critical-start: cancellation
+fn cancel_ai_request_with<R: Runtime>(app: &AppHandle<R>, request_id: u64) -> Result<bool, String> {
     if ACTIVE_AI_REQUEST_ID.load(Ordering::Acquire) != request_id {
         return Ok(false);
     }
@@ -786,6 +816,7 @@ fn cancel_ai_request(app: AppHandle, request_id: u64) -> Result<bool, String> {
     .map_err(|error| format!("Could not report the cancelled AI request: {error}"))?;
     Ok(true)
 }
+// coverage-critical-end: cancellation
 
 #[tauri::command]
 async fn get_rag_cache_status() -> Result<CacheStatus, String> {
@@ -855,6 +886,9 @@ fn run_rag_initialization(operation: impl FnOnce() -> Result<(), String>) -> Res
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = configured_app_data_path()? {
+        return Ok(path.join(SETTINGS_FILE_NAME));
+    }
     app.path()
         .app_config_dir()
         .map(|path| path.join(SETTINGS_FILE_NAME))
@@ -862,12 +896,39 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn chat_attachments_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app_data_path(app).map(|path| path.join(CHAT_ATTACHMENTS_DIRECTORY))
+}
+
+fn configured_app_data_path() -> Result<Option<PathBuf>, String> {
+    let Some(configured) = std::env::var_os("GOFER_APP_DATA_DIR") else {
+        return Ok(None);
+    };
+    validate_app_data_path(PathBuf::from(configured)).map(Some)
+}
+
+// coverage-critical-start: path
+fn validate_app_data_path(path: PathBuf) -> Result<PathBuf, String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err("GOFER_APP_DATA_DIR must be an absolute path without traversal".to_owned());
+    }
+    Ok(path)
+}
+// coverage-critical-end: path
+
+fn app_data_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = configured_app_data_path()? {
+        return Ok(path);
+    }
     app.path()
         .app_data_dir()
-        .map(|path| path.join(CHAT_ATTACHMENTS_DIRECTORY))
         .map_err(|error| format!("Could not resolve Gofer's data directory: {error}"))
 }
 
+// coverage-critical-start: attachment
 fn validate_chat_attachment(attachment: &ChatAttachment) -> Result<(), String> {
     if attachment.name.trim().is_empty() || attachment.name.len() > 255 {
         return Err("Attachment names must contain between 1 and 255 bytes".to_owned());
@@ -905,6 +966,7 @@ fn validate_chat_attachment_id(id: &str) -> Result<(), String> {
     }
     Ok(())
 }
+// coverage-critical-end: attachment
 
 fn read_chat_attachment_bytes(
     app: &AppHandle,
@@ -914,10 +976,7 @@ fn read_chat_attachment_bytes(
 }
 
 fn project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
-    let data_root = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Could not resolve Gofer's data directory: {error}"))?;
+    let data_root = app_data_path(app)?;
     let workspace = std::env::current_dir()
         .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?;
     ProjectStorage::open(&data_root, &workspace)
@@ -976,7 +1035,11 @@ fn pi_models_path() -> Result<PathBuf, String> {
 
 fn pi_model_catalog() -> Result<Vec<AiModelOption>, String> {
     let path = pi_models_path()?;
-    let contents = fs::read_to_string(&path)
+    pi_model_catalog_from_path(&path)
+}
+
+fn pi_model_catalog_from_path(path: &Path) -> Result<Vec<AiModelOption>, String> {
+    let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let configured: PiModelsFile = serde_json::from_str(&contents)
         .map_err(|error| format!("Pi models in {} are invalid: {error}", path.display()))?;
@@ -999,6 +1062,10 @@ fn pi_model_catalog() -> Result<Vec<AiModelOption>, String> {
 
 fn default_settings_from_pi() -> Option<GoferSettings> {
     let path = pi_models_path().ok()?;
+    default_settings_from_pi_path(&path)
+}
+
+fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
     let contents = fs::read_to_string(path).ok()?;
     let configured: PiModelsFile = serde_json::from_str(&contents).ok()?;
     let provider = configured.providers.values().next()?;
@@ -1189,18 +1256,60 @@ fn credential_entry() -> Result<Entry, String> {
         .map_err(|error| format!("Could not access the operating system credential store: {error}"))
 }
 
-fn stored_api_key() -> Result<Option<String>, String> {
-    match credential_entry()?.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(KeyringError::NoEntry) => Ok(None),
-        Err(error) => Err(format!(
-            "Could not read the AI API key from the credential store: {error}"
-        )),
+trait CredentialStore {
+    fn clear(&self) -> Result<(), String>;
+    fn load(&self) -> Result<Option<String>, String>;
+    fn store(&self, value: &str) -> Result<(), String>;
+}
+
+struct SystemCredentialStore;
+
+impl CredentialStore for SystemCredentialStore {
+    fn clear(&self) -> Result<(), String> {
+        match credential_entry()?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(error) => Err(format!("Could not remove the AI API key: {error}")),
+        }
+    }
+
+    fn load(&self) -> Result<Option<String>, String> {
+        match credential_entry()?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(error) => Err(format!(
+                "Could not read the AI API key from the credential store: {error}"
+            )),
+        }
+    }
+
+    fn store(&self, value: &str) -> Result<(), String> {
+        credential_entry()?
+            .set_password(value)
+            .map_err(|error| format!("Could not store the AI API key: {error}"))
     }
 }
 
+fn stored_api_key() -> Result<Option<String>, String> {
+    SystemCredentialStore.load()
+}
+
 fn settings_response(settings: GoferSettings) -> SettingsResponse {
-    match stored_api_key() {
+    #[cfg(feature = "webdriver")]
+    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
+        return SettingsResponse {
+            settings,
+            has_api_key: false,
+            credential_store_error: None,
+        };
+    }
+    settings_response_with(&SystemCredentialStore, settings)
+}
+
+fn settings_response_with(
+    store: &impl CredentialStore,
+    settings: GoferSettings,
+) -> SettingsResponse {
+    match store.load() {
         Ok(api_key) => SettingsResponse {
             settings,
             has_api_key: api_key.is_some(),
@@ -1215,6 +1324,14 @@ fn settings_response(settings: GoferSettings) -> SettingsResponse {
 }
 
 fn apply_api_key_update(update: &ApiKeyUpdate) -> Result<(), String> {
+    apply_api_key_update_with(&SystemCredentialStore, update)
+}
+
+// coverage-critical-start: credential
+fn apply_api_key_update_with(
+    store: &impl CredentialStore,
+    update: &ApiKeyUpdate,
+) -> Result<(), String> {
     match update {
         ApiKeyUpdate::Keep => Ok(()),
         ApiKeyUpdate::Set { value } => {
@@ -1225,27 +1342,22 @@ fn apply_api_key_update(update: &ApiKeyUpdate) -> Result<(), String> {
             if value.len() > MAX_API_KEY_BYTES {
                 return Err("API keys cannot exceed 16 KiB".to_owned());
             }
-            credential_entry()?
-                .set_password(value)
-                .map_err(|error| format!("Could not store the AI API key: {error}"))
+            store.store(value)
         }
-        ApiKeyUpdate::Clear => delete_api_key(),
-    }
-}
-
-fn delete_api_key() -> Result<(), String> {
-    match credential_entry()?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(error) => Err(format!("Could not remove the AI API key: {error}")),
+        ApiKeyUpdate::Clear => store.clear(),
     }
 }
 
 fn restore_api_key(value: Option<&str>) -> Result<(), String> {
+    restore_api_key_with(&SystemCredentialStore, value)
+}
+
+fn restore_api_key_with(store: &impl CredentialStore, value: Option<&str>) -> Result<(), String> {
     match value {
-        Some(value) => credential_entry()?
-            .set_password(value)
+        Some(value) => store
+            .store(value)
             .map_err(|error| format!("Could not restore the previous AI API key: {error}")),
-        None => delete_api_key(),
+        None => store.clear(),
     }
 }
 
@@ -1265,6 +1377,7 @@ fn resolve_api_key(update: &ApiKeyUpdate) -> Result<Option<String>, String> {
         ApiKeyUpdate::Clear => Ok(None),
     }
 }
+// coverage-critical-end: credential
 
 fn rag_cache_path() -> Result<PathBuf, String> {
     if let Some(configured) = std::env::var_os("GOFER_RAG_CACHE_DIR") {
@@ -1281,6 +1394,7 @@ fn rag_cache_path() -> Result<PathBuf, String> {
     }
 }
 
+// coverage-critical-start: cache
 fn validate_cache_path(path: PathBuf) -> Result<PathBuf, String> {
     if path
         .components()
@@ -1354,6 +1468,7 @@ fn delete_cache_path(path: &Path) -> Result<(), String> {
     fs::remove_dir_all(path)
         .map_err(|error| format!("Could not delete {}: {error}", path.display()))
 }
+// coverage-critical-end: cache
 
 fn required_model_files(cache: &Path) -> [PathBuf; 7] {
     [
@@ -1391,26 +1506,32 @@ fn directory_size(path: &Path) -> Result<u64, String> {
 }
 
 fn run_rag_warmup(app: &AppHandle) -> Result<(), String> {
+    run_rag_warmup_with(app, &SystemProcessSpawner)
+}
+
+fn run_rag_warmup_with<R: Runtime>(
+    app: &AppHandle<R>,
+    spawner: &impl ProcessSpawner,
+) -> Result<(), String> {
+    #[cfg(feature = "webdriver")]
+    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
+        return Ok(());
+    }
+
     let worker = rag_worker_path()?;
     let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
-    let mut child = Command::new(&node)
-        .arg(&worker)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = spawner
+        .spawn(node.as_ref(), &[worker.into_os_string()], false)
         .map_err(|error| {
             format!(
                 "Could not start Node.js with '{node}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY."
             )
         })?;
     let stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| "Could not read Gofer RAG worker output".to_owned())?;
     let stderr = child
-        .stderr
-        .take()
+        .take_stderr()
         .ok_or_else(|| "Could not read Gofer RAG worker errors".to_owned())?;
     let stderr_reader = std::thread::spawn(move || {
         let mut output = String::new();
@@ -1436,13 +1557,16 @@ fn run_rag_warmup(app: &AppHandle) -> Result<(), String> {
         .join()
         .map_err(|_| "Could not collect Gofer RAG worker errors".to_owned())?;
 
-    if status.success() {
+    if status.success {
         return Ok(());
     }
 
     let detail = stderr.trim();
     if detail.is_empty() {
-        return Err(format!("Gofer RAG initialization exited with {status}"));
+        return Err(format!(
+            "Gofer RAG initialization exited with {}",
+            status.description
+        ));
     }
     Err(format!("Gofer RAG initialization failed: {detail}"))
 }
@@ -1452,22 +1576,26 @@ fn run_ai_worker(
     request_id: u64,
     request: AiWorkerRequest,
 ) -> Result<String, String> {
+    run_ai_worker_with(app, request_id, request, &SystemProcessSpawner)
+}
+
+fn run_ai_worker_with<R: Runtime>(
+    app: &AppHandle<R>,
+    request_id: u64,
+    request: AiWorkerRequest,
+    spawner: &impl ProcessSpawner,
+) -> Result<String, String> {
     let worker = ai_worker_path()?;
     let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
-    let mut child = Command::new(&node)
-        .arg(&worker)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    let mut child = spawner
+        .spawn(node.as_ref(), &[worker.into_os_string()], true)
         .map_err(|error| {
             format!(
                 "Could not start the Pi AI worker with '{node}': {error}. Install Node.js 22.19 or newer, or set GOFER_NODE_BINARY."
             )
         })?;
     let mut stdin = child
-        .stdin
-        .take()
+        .take_stdin()
         .ok_or_else(|| "Could not write to the Pi AI worker".to_owned())?;
     let payload = serde_json::to_vec(&request)
         .map_err(|error| format!("Could not serialize the AI request: {error}"))?;
@@ -1477,12 +1605,10 @@ fn run_ai_worker(
     drop(stdin);
 
     let stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| "Could not read Pi AI worker output".to_owned())?;
     let stderr = child
-        .stderr
-        .take()
+        .take_stderr()
         .ok_or_else(|| "Could not read Pi AI worker errors".to_owned())?;
     let child = Arc::new(Mutex::new(child));
     *AI_CHILD
@@ -1527,13 +1653,13 @@ fn run_ai_worker(
     let stderr = stderr_reader
         .join()
         .map_err(|_| "Could not collect Pi AI worker errors".to_owned())?;
-    if !status.success() {
+    if !status.success {
         if AI_REQUEST_CANCELLED.load(Ordering::Acquire) {
             return Ok(String::new());
         }
         let detail = stderr.trim();
         if detail.is_empty() {
-            return Err(format!("Pi AI worker exited with {status}"));
+            return Err(format!("Pi AI worker exited with {}", status.description));
         }
         return Err(format!("Pi AI request failed: {detail}"));
     }
@@ -1548,6 +1674,11 @@ fn retrieve_memory_context(
     prompt: &str,
     task_id: Option<&str>,
 ) -> Result<String, String> {
+    #[cfg(feature = "webdriver")]
+    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
+        return Err("Memory retrieval is disabled for the prepared WebDriver cache".to_owned());
+    }
+
     if prompt.trim().is_empty() {
         return Err("No text is available for memory retrieval".to_owned());
     }
@@ -1574,6 +1705,11 @@ fn remember_completed_turn(
     prompt: &str,
     completion: &str,
 ) -> Result<(), String> {
+    #[cfg(feature = "webdriver")]
+    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
+        return Ok(());
+    }
+
     if prompt.trim().is_empty() || completion.trim().is_empty() {
         return Ok(());
     }
@@ -1651,7 +1787,13 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "webdriver")]
+    let builder = builder
+        .plugin(tauri_plugin_wdio::init())
+        .plugin(tauri_plugin_wdio_webdriver::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             activate_chat_task,
             cancel_ai_request,
@@ -1673,6 +1815,7 @@ pub fn run() {
             save_chat,
             save_settings,
             save_chat_attachment,
+            send_godot_command,
             send_ai_message,
             test_ai_connection,
         ])
@@ -1683,10 +1826,158 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use crate::process::{
+        ChildProcess, ProcessOutput, ProcessReader, ProcessStatus, ProcessWriter,
+    };
+    use std::ffi::{OsStr, OsString};
+    use std::io::{self, Cursor, Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use std::thread;
     use tempfile::TempDir;
+
+    static AI_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct FakeProcessSpawner {
+        child: Mutex<Option<FakeChildProcess>>,
+        fail_spawn: bool,
+    }
+
+    impl FakeProcessSpawner {
+        fn new(stdout: &str, stderr: &str, success: bool) -> Self {
+            Self {
+                child: Mutex::new(Some(FakeChildProcess {
+                    stdin: Some(Box::new(Cursor::new(Vec::new()))),
+                    stdout: Some(Box::new(Cursor::new(stdout.as_bytes().to_vec()))),
+                    stderr: Some(Box::new(Cursor::new(stderr.as_bytes().to_vec()))),
+                    status: ProcessStatus {
+                        success,
+                        code: Some(if success { 0 } else { 1 }),
+                        description: if success {
+                            "exit status: 0"
+                        } else {
+                            "exit status: 1"
+                        }
+                        .to_owned(),
+                    },
+                    killed: Arc::new(AtomicBool::new(false)),
+                })),
+                fail_spawn: false,
+            }
+        }
+    }
+
+    impl ProcessSpawner for FakeProcessSpawner {
+        fn output(&self, _: &OsStr, _: &[OsString]) -> io::Result<ProcessOutput> {
+            unreachable!("Node worker tests do not request command output")
+        }
+
+        fn spawn(&self, _: &OsStr, _: &[OsString], _: bool) -> io::Result<Box<dyn ChildProcess>> {
+            if self.fail_spawn {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "fake Node missing"));
+            }
+            self.child
+                .lock()
+                .expect("fake child lock")
+                .take()
+                .map(|child| Box::new(child) as Box<dyn ChildProcess>)
+                .ok_or_else(|| io::Error::other("fake process already spawned"))
+        }
+    }
+
+    struct FakeChildProcess {
+        stdin: Option<ProcessWriter>,
+        stdout: Option<ProcessReader>,
+        stderr: Option<ProcessReader>,
+        status: ProcessStatus,
+        killed: Arc<AtomicBool>,
+    }
+
+    impl ChildProcess for FakeChildProcess {
+        fn take_stdin(&mut self) -> Option<ProcessWriter> {
+            self.stdin.take()
+        }
+
+        fn take_stdout(&mut self) -> Option<ProcessReader> {
+            self.stdout.take()
+        }
+
+        fn take_stderr(&mut self) -> Option<ProcessReader> {
+            self.stderr.take()
+        }
+
+        fn try_wait(&mut self) -> io::Result<Option<ProcessStatus>> {
+            Ok(Some(self.status.clone()))
+        }
+
+        fn wait(&mut self) -> io::Result<ProcessStatus> {
+            Ok(self.status.clone())
+        }
+
+        fn kill(&mut self) -> io::Result<()> {
+            self.killed.store(true, AtomicOrdering::Release);
+            Ok(())
+        }
+    }
+
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_builder()
+            .build(tauri::generate_context!())
+            .expect("build mock Tauri app");
+        tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("build mock webview");
+        app
+    }
+
+    fn worker_request() -> AiWorkerRequest {
+        AiWorkerRequest {
+            settings: AiSettings::default(),
+            api_key: None,
+            messages: vec![AiWorkerMessage {
+                sender: ChatSender::User,
+                text: "hello".to_owned(),
+                timestamp: 1,
+                images: Vec::new(),
+            }],
+            agent_messages: None,
+            workspace_path: "/tmp/workspace".to_owned(),
+            memory_context: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeCredentialStore {
+        value: Mutex<Option<String>>,
+        fail_clear: bool,
+        fail_load: bool,
+        fail_store: bool,
+    }
+
+    impl CredentialStore for FakeCredentialStore {
+        fn clear(&self) -> Result<(), String> {
+            if self.fail_clear {
+                return Err("fake clear failure".to_owned());
+            }
+            *self.value.lock().expect("fake credential lock") = None;
+            Ok(())
+        }
+
+        fn load(&self) -> Result<Option<String>, String> {
+            if self.fail_load {
+                return Err("fake load failure".to_owned());
+            }
+            Ok(self.value.lock().expect("fake credential lock").clone())
+        }
+
+        fn store(&self, value: &str) -> Result<(), String> {
+            if self.fail_store {
+                return Err("fake store failure".to_owned());
+            }
+            *self.value.lock().expect("fake credential lock") = Some(value.to_owned());
+            Ok(())
+        }
+    }
 
     fn settings(base_url: impl Into<String>, model: impl Into<String>) -> GoferSettings {
         GoferSettings {
@@ -1709,6 +2000,301 @@ mod tests {
                 value: " secret-token ".to_owned(),
             },
         }
+    }
+
+    #[test]
+    fn injected_node_worker_streams_events_and_reports_lifecycle_failures() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let app = mock_app();
+        let output = [
+            "worker diagnostic",
+            r#"GOFER_AI_EVENT:{"type":"text-delta","delta":"Hello"}"#,
+            r#"GOFER_AI_EVENT:{"type":"tool-start","id":"tool-1","name":"write_file","startedAt":1}"#,
+            r#"GOFER_AI_EVENT:{"type":"tool-end","id":"tool-1","output":"saved","isError":false,"endedAt":2}"#,
+            r#"GOFER_AI_EVENT:{"type":"done","text":"Hello","agentMessages":[],"usage":{},"model":"fake"}"#,
+            "",
+        ]
+        .join("\n");
+        let spawner = FakeProcessSpawner::new(&output, "", true);
+        assert_eq!(
+            run_ai_worker_with(app.handle(), 7, worker_request(), &spawner)
+                .expect("fake AI completion"),
+            "Hello"
+        );
+
+        let incomplete = FakeProcessSpawner::new("unrelated output\n", "", true);
+        assert_eq!(
+            run_ai_worker_with(app.handle(), 8, worker_request(), &incomplete).unwrap_err(),
+            "Pi AI worker exited without completing the response"
+        );
+
+        let invalid = FakeProcessSpawner::new("GOFER_AI_EVENT:not-json\n", "", true);
+        assert!(
+            run_ai_worker_with(app.handle(), 9, worker_request(), &invalid)
+                .unwrap_err()
+                .contains("invalid event")
+        );
+
+        AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+        let failed = FakeProcessSpawner::new("", "provider failed\n", false);
+        assert_eq!(
+            run_ai_worker_with(app.handle(), 10, worker_request(), &failed).unwrap_err(),
+            "Pi AI request failed: provider failed"
+        );
+        let silent_failure = FakeProcessSpawner::new("", "", false);
+        assert!(
+            run_ai_worker_with(app.handle(), 10, worker_request(), &silent_failure)
+                .unwrap_err()
+                .contains("exit status: 1")
+        );
+
+        let missing = FakeProcessSpawner {
+            child: Mutex::new(None),
+            fail_spawn: true,
+        };
+        assert!(
+            run_ai_worker_with(app.handle(), 10, worker_request(), &missing)
+                .unwrap_err()
+                .contains("Could not start the Pi AI worker")
+        );
+
+        AI_REQUEST_CANCELLED.store(true, Ordering::Release);
+        let cancelled = FakeProcessSpawner::new("", "killed", false);
+        assert_eq!(
+            run_ai_worker_with(app.handle(), 11, worker_request(), &cancelled)
+                .expect("cancelled worker"),
+            ""
+        );
+        AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+        *AI_CHILD.lock().expect("AI child lock") = None;
+    }
+
+    #[test]
+    fn cancellation_handles_mismatched_idle_and_active_ai_requests() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let app = mock_app();
+        ACTIVE_AI_REQUEST_ID.store(40, Ordering::Release);
+        assert!(!cancel_ai_request_with(app.handle(), 41).expect("mismatched cancellation"));
+
+        *AI_CHILD.lock().expect("AI child lock") = None;
+        assert!(cancel_ai_request_with(app.handle(), 40).expect("idle cancellation"));
+
+        let killed = Arc::new(AtomicBool::new(false));
+        *AI_CHILD.lock().expect("AI child lock") =
+            Some(Arc::new(Mutex::new(Box::new(FakeChildProcess {
+                stdin: None,
+                stdout: None,
+                stderr: None,
+                status: ProcessStatus {
+                    success: false,
+                    code: None,
+                    description: "killed".to_owned(),
+                },
+                killed: Arc::clone(&killed),
+            }))));
+        assert!(cancel_ai_request_with(app.handle(), 40).expect("active cancellation"));
+        assert!(killed.load(AtomicOrdering::Acquire));
+        assert!(AI_REQUEST_CANCELLED.load(Ordering::Acquire));
+        *AI_CHILD.lock().expect("AI child lock") = None;
+        ACTIVE_AI_REQUEST_ID.store(0, Ordering::Release);
+        AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn injected_rag_worker_streams_progress_and_classifies_failures() {
+        let app = mock_app();
+        let success = FakeProcessSpawner::new(
+            "diagnostic\nGOFER_RAG_EVENT:{\"phase\":\"download\",\"progress\":0.5}\n",
+            "",
+            true,
+        );
+        run_rag_warmup_with(app.handle(), &success).expect("fake RAG warmup");
+
+        let invalid = FakeProcessSpawner::new("GOFER_RAG_EVENT:not-json\n", "", true);
+        assert!(
+            run_rag_warmup_with(app.handle(), &invalid)
+                .unwrap_err()
+                .contains("invalid progress data")
+        );
+
+        let failed = FakeProcessSpawner::new("", "download failed\n", false);
+        assert_eq!(
+            run_rag_warmup_with(app.handle(), &failed).unwrap_err(),
+            "Gofer RAG initialization failed: download failed"
+        );
+
+        let silent = FakeProcessSpawner::new("", "", false);
+        assert!(
+            run_rag_warmup_with(app.handle(), &silent)
+                .unwrap_err()
+                .contains("exit status: 1")
+        );
+    }
+
+    #[test]
+    fn credential_updates_use_the_injected_store() {
+        let store = FakeCredentialStore::default();
+        apply_api_key_update_with(
+            &store,
+            &ApiKeyUpdate::Set {
+                value: " secret ".to_owned(),
+            },
+        )
+        .expect("set credential");
+        assert_eq!(
+            store.load().expect("load set credential").as_deref(),
+            Some("secret")
+        );
+
+        apply_api_key_update_with(&store, &ApiKeyUpdate::Keep).expect("keep credential");
+        assert_eq!(
+            store.load().expect("load kept credential").as_deref(),
+            Some("secret")
+        );
+
+        apply_api_key_update_with(&store, &ApiKeyUpdate::Clear).expect("clear credential");
+        assert_eq!(store.load().expect("load cleared credential"), None);
+    }
+
+    #[test]
+    fn configured_app_data_paths_must_be_absolute_and_confined() {
+        assert!(validate_app_data_path(std::env::temp_dir().join("gofer-data")).is_ok());
+        assert!(validate_app_data_path(PathBuf::from("relative-data")).is_err());
+        assert!(validate_app_data_path(std::env::temp_dir().join("../escape")).is_err());
+    }
+
+    #[test]
+    fn credential_updates_validate_before_using_the_store() {
+        let store = FakeCredentialStore {
+            fail_store: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_api_key_update_with(
+                &store,
+                &ApiKeyUpdate::Set {
+                    value: "  ".to_owned()
+                }
+            ),
+            Err("API key cannot be empty when setting a credential".to_owned())
+        );
+        assert_eq!(
+            apply_api_key_update_with(
+                &store,
+                &ApiKeyUpdate::Set {
+                    value: "x".repeat(MAX_API_KEY_BYTES + 1)
+                }
+            ),
+            Err("API keys cannot exceed 16 KiB".to_owned())
+        );
+        assert_eq!(
+            apply_api_key_update_with(
+                &store,
+                &ApiKeyUpdate::Set {
+                    value: "secret".to_owned()
+                }
+            ),
+            Err("fake store failure".to_owned())
+        );
+    }
+
+    #[test]
+    fn credential_clear_and_restore_errors_are_propagated() {
+        let clear_failure = FakeCredentialStore {
+            fail_clear: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_api_key_update_with(&clear_failure, &ApiKeyUpdate::Clear),
+            Err("fake clear failure".to_owned())
+        );
+        assert_eq!(
+            restore_api_key_with(&clear_failure, None),
+            Err("fake clear failure".to_owned())
+        );
+
+        let store_failure = FakeCredentialStore {
+            fail_store: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            restore_api_key_with(&store_failure, Some("previous")),
+            Err("Could not restore the previous AI API key: fake store failure".to_owned())
+        );
+
+        let load_failure = FakeCredentialStore {
+            fail_load: true,
+            ..Default::default()
+        };
+        let response = settings_response_with(&load_failure, settings("http://localhost", "model"));
+        assert!(!response.has_api_key);
+        assert_eq!(
+            response.credential_store_error.as_deref(),
+            Some("fake load failure")
+        );
+    }
+
+    #[test]
+    fn tauri_mock_runtime_invokes_the_registered_godot_transport_command() {
+        use std::io::{BufRead, BufReader};
+        use tauri::Manager;
+        use tauri::ipc::{CallbackFn, InvokeBody};
+        use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder};
+        use tauri::webview::InvokeRequest;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Godot bridge");
+        let address = listener.local_addr().expect("fake Godot bridge address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept Rust transport");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("clone stream"))
+                .read_line(&mut request)
+                .expect("read request");
+            let request: serde_json::Value = serde_json::from_str(&request).expect("parse request");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocolVersion": 1,
+                    "id": request["id"],
+                    "result": {"acceptedVersion": 1}
+                })
+            )
+            .expect("write response");
+        });
+        let app = mock_builder()
+            .invoke_handler(tauri::generate_handler![send_godot_command])
+            .build(tauri::generate_context!())
+            .expect("build mock Tauri app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("build mock webview");
+        assert!(app.get_webview_window("main").is_some());
+        let response = get_ipc_response(
+            &webview,
+            InvokeRequest {
+                cmd: "send_godot_command".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().expect("mock URL"),
+                body: InvokeBody::Json(serde_json::json!({
+                    "address": address.to_string(),
+                    "request": {
+                        "protocolVersion": 1,
+                        "id": "ipc-1",
+                        "command": "handshake",
+                        "params": {}
+                    }
+                })),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_owned(),
+            },
+        )
+        .expect("invoke registered command")
+        .deserialize::<serde_json::Value>()
+        .expect("deserialize command response");
+        assert_eq!(response["result"]["acceptedVersion"], 1);
+        server.join().expect("fake Godot bridge");
     }
 
     fn chat_attachment() -> ChatAttachment {
@@ -1860,6 +2446,217 @@ mod tests {
     }
 
     #[test]
+    fn validation_rejects_every_bounded_settings_and_chat_shape() {
+        let invalid_settings = [
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.name = "x".repeat(101);
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.model = "x".repeat(513);
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.model_name = "x".repeat(513);
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.system_prompt = "x".repeat(64 * 1_024 + 1);
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.input = Vec::new();
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.input = vec!["text".to_owned(); 17];
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.input = vec![String::new()];
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.context_window = 0;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.max_tokens = 0;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.max_retries = 11;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.timeout_ms = 999;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.thinking_level = "impossible".to_owned();
+                value
+            },
+            settings("https://example.com/v1#fragment", "model"),
+            settings("https://user:password@example.com/v1", "model"),
+            settings(
+                format!("https://example.com/{}", "x".repeat(2_048)),
+                "model",
+            ),
+        ];
+        for value in invalid_settings {
+            assert!(validate_settings(value).is_err());
+        }
+
+        let attachment = chat_attachment();
+        for invalid in [
+            ChatAttachment {
+                name: " ".to_owned(),
+                ..attachment.clone()
+            },
+            ChatAttachment {
+                name: "x".repeat(256),
+                ..attachment.clone()
+            },
+            ChatAttachment {
+                size: 0,
+                ..attachment.clone()
+            },
+            ChatAttachment {
+                size: MAX_CHAT_ATTACHMENT_BYTES as u64 + 1,
+                ..attachment.clone()
+            },
+            ChatAttachment {
+                id: String::new(),
+                ..attachment.clone()
+            },
+            ChatAttachment {
+                id: "x".repeat(65),
+                ..attachment.clone()
+            },
+        ] {
+            assert!(validate_chat_attachment(&invalid).is_err());
+        }
+
+        assert!(validate_chat_messages(Vec::new()).is_err());
+        assert!(
+            validate_chat_messages(
+                (0..=MAX_CHAT_MESSAGES)
+                    .map(|_| ChatMessageInput {
+                        sender: ChatSender::User,
+                        text: "message".to_owned(),
+                        timestamp: 1,
+                        attachments: Vec::new(),
+                    })
+                    .collect(),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_chat_messages(vec![ChatMessageInput {
+                sender: ChatSender::Assistant,
+                text: "answer".to_owned(),
+                timestamp: 1,
+                attachments: Vec::new(),
+            }])
+            .is_err()
+        );
+        assert!(
+            validate_chat_messages(vec![ChatMessageInput {
+                sender: ChatSender::User,
+                text: " ".to_owned(),
+                timestamp: 1,
+                attachments: Vec::new(),
+            }])
+            .is_err()
+        );
+        assert!(
+            validate_chat_messages(vec![ChatMessageInput {
+                sender: ChatSender::User,
+                text: "image set".to_owned(),
+                timestamp: 1,
+                attachments: vec![attachment; 6],
+            }])
+            .is_err()
+        );
+        assert!(validate_agent_messages(&None).is_ok());
+        assert!(validate_agent_messages(&Some(serde_json::json!([]))).is_ok());
+        assert!(
+            validate_agent_messages(&Some(serde_json::json!([
+                "x".repeat(MAX_AGENT_MESSAGES_BYTES)
+            ])))
+            .is_err()
+        );
+        assert_eq!(resolve_api_key(&ApiKeyUpdate::Clear), Ok(None));
+        assert!(
+            resolve_api_key(&ApiKeyUpdate::Set {
+                value: " ".to_owned()
+            })
+            .is_err()
+        );
+        assert!(
+            resolve_api_key(&ApiKeyUpdate::Set {
+                value: "x".repeat(MAX_API_KEY_BYTES + 1)
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pi_model_file_drives_catalog_and_default_settings() {
+        let directory = TempDir::new().expect("temporary Pi settings");
+        let path = directory.path().join("models.json");
+        fs::write(
+            &path,
+            r#"{
+                "providers": {
+                    "local": {
+                        "baseUrl": "http://127.0.0.1:11434/v1",
+                        "compat": {"supportsReasoningEffort": true},
+                        "models": [{
+                            "id": "vision-model",
+                            "name": "Vision Model",
+                            "contextWindow": 8192,
+                            "maxTokens": 2048,
+                            "input": ["text", "image"]
+                        }]
+                    }
+                }
+            }"#,
+        )
+        .expect("write Pi models");
+
+        let catalog = pi_model_catalog_from_path(&path).expect("Pi catalog");
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "Vision Model");
+        assert!(catalog[0].reasoning);
+        assert_eq!(catalog[0].input, ["text", "image"]);
+        let defaults = default_settings_from_pi_path(&path).expect("Pi defaults");
+        assert_eq!(defaults.ai.model, "vision-model");
+        assert_eq!(defaults.ai.context_window, 8_192);
+        assert!(defaults.ai.supports_reasoning_effort);
+
+        fs::write(&path, "not-json").expect("write invalid Pi models");
+        assert!(
+            pi_model_catalog_from_path(&path)
+                .unwrap_err()
+                .contains("invalid")
+        );
+        assert!(default_settings_from_pi_path(&path).is_none());
+    }
+
+    #[test]
     fn corrupt_settings_file_is_rejected() {
         let directory = TempDir::new().expect("temporary directory");
         let path = directory.path().join("settings.json");
@@ -1874,6 +2671,7 @@ mod tests {
 
     #[test]
     fn cache_path_rejects_unsafe_targets() {
+        assert!(validate_cache_path(std::env::temp_dir().join("gofer-safe-cache")).is_ok());
         assert!(
             validate_cache_path(PathBuf::from("/"))
                 .unwrap_err()
@@ -1884,6 +2682,18 @@ mod tests {
                 .unwrap_err()
                 .contains("traversal components")
         );
+        assert!(
+            validate_cache_path(PathBuf::from("relative-cache"))
+                .unwrap_err()
+                .contains("unsafe cache path")
+        );
+        if let Some(home) = dirs::home_dir() {
+            assert!(
+                validate_cache_path(home)
+                    .unwrap_err()
+                    .contains("home directory")
+            );
+        }
     }
 
     #[test]
@@ -2092,5 +2902,99 @@ mod tests {
             .expect("unreachable result");
 
         assert_eq!(result.status, ConnectionTestStatus::ServerUnreachable);
+    }
+
+    #[tokio::test]
+    async fn model_listing_maps_remote_metadata_and_reports_failures() {
+        let (base_url, server) = mock_server(
+            "200 OK",
+            r#"{"data":[{"id":"custom","meta":{"n_ctx":4096}},{"id":"plain"}]}"#,
+        );
+        let models = list_ai_models(request(base_url, "custom"))
+            .await
+            .expect("model list");
+        server.join().expect("model list request");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "custom");
+        assert_eq!(models[0].context_window, 4_096);
+        assert_eq!(models[0].max_tokens, 4_096);
+        assert_eq!(models[1].name, "plain");
+
+        let (base_url, server) = mock_server("500 Internal Server Error", "{}");
+        assert!(
+            list_ai_models(request(base_url, "custom"))
+                .await
+                .unwrap_err()
+                .contains("HTTP 500")
+        );
+        server.join().expect("failed model list request");
+
+        let (base_url, server) = mock_server("200 OK", "not-json");
+        assert!(
+            list_ai_models(request(base_url, "custom"))
+                .await
+                .unwrap_err()
+                .contains("invalid OpenAI models response")
+        );
+        server.join().expect("invalid model list request");
+    }
+
+    #[test]
+    fn injected_storage_covers_attachment_round_trip_and_rejections() {
+        let directory = TempDir::new().expect("temporary application data");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).expect("create workspace");
+        let storage = ProjectStorage::open(&directory.path().join("data"), &workspace)
+            .expect("open project storage");
+        let attachment = chat_attachment();
+        save_chat_attachment_in(
+            &storage,
+            ChatAttachmentUpload {
+                attachment: attachment.clone(),
+                data: "aGk=".to_owned(),
+            },
+        )
+        .expect("save attachment");
+        assert_eq!(
+            read_chat_attachment_in(&storage, attachment.clone()).expect("read attachment"),
+            "data:image/png;base64,aGk="
+        );
+
+        assert!(
+            save_chat_attachment_in(
+                &storage,
+                ChatAttachmentUpload {
+                    attachment: attachment.clone(),
+                    data: "not-base64".to_owned(),
+                },
+            )
+            .unwrap_err()
+            .contains("not valid base64")
+        );
+        let mut wrong_size = attachment.clone();
+        wrong_size.size = 1;
+        assert_eq!(
+            save_chat_attachment_in(
+                &storage,
+                ChatAttachmentUpload {
+                    attachment: wrong_size,
+                    data: "aGk=".to_owned(),
+                },
+            )
+            .unwrap_err(),
+            "The attachment size does not match its contents"
+        );
+
+        assert!(
+            save_chat_attachment_in(
+                &storage,
+                ChatAttachmentUpload {
+                    attachment: attachment.clone(),
+                    data: "x".repeat(MAX_CHAT_ATTACHMENT_BASE64_BYTES + 1),
+                },
+            )
+            .unwrap_err()
+            .contains("10 MiB")
+        );
     }
 }

@@ -144,6 +144,13 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Result<Output, String> {
     Command::new("git")
         .args(arguments)
         .current_dir(directory)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_PREFIX")
         .output()
         .map_err(|error| format!("Could not start Git: {error}"))
 }
@@ -225,5 +232,30 @@ mod tests {
             .expect_err("dirty merge must fail");
 
         assert!(error.contains("must be clean"));
+    }
+
+    #[test]
+    fn non_repository_and_existing_worktree_paths_are_handled() {
+        let directory = TempDir::new().expect("temporary non-repository");
+        let target = directory.path().join("target");
+        assert!(
+            create_task_worktree(directory.path(), &target, "gofer/task-none")
+                .expect("non-repository lookup")
+                .is_none()
+        );
+        assert!(
+            merge_task_worktree(directory.path(), &target, "gofer/task-none")
+                .unwrap_err()
+                .contains("not a Git repository")
+        );
+        discard_created_worktree(directory.path(), &target, "gofer/task-none");
+
+        let repository = repository();
+        fs::create_dir(&target).expect("existing worktree target");
+        assert!(
+            create_task_worktree(repository.path(), &target, "gofer/task-existing")
+                .unwrap_err()
+                .contains("already exists")
+        );
     }
 }

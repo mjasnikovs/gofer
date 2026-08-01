@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 1,
+    "id": "request-2",
+    "sequence": 0,
+    "event": "text_delta",
+    "data": {"text": "Ready"}
+}

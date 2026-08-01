@@ -19,8 +19,7 @@ import CloudArrowDownIcon from '@heroicons/react/24/outline/CloudArrowDownIcon'
 import KeyIcon from '@heroicons/react/24/outline/KeyIcon'
 import ServerStackIcon from '@heroicons/react/24/outline/ServerStackIcon'
 import TrashIcon from '@heroicons/react/24/outline/TrashIcon'
-import {invoke, isTauri} from '@tauri-apps/api/core'
-import {listen} from '@tauri-apps/api/event'
+import {invoke, isTauri, listen} from '../../services/desktop'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import {
     ALL_THINKING_LEVELS,
@@ -39,12 +38,9 @@ import type {
     AiSettings,
     ApiKeyIntent,
     CacheStatus,
-    ConnectionTestResult,
     GoferSettings,
     Notice,
-    SettingsRequest,
-    SettingsResponse,
-    StorageMaintenanceResult
+    SettingsRequest
 } from '../../models/settings'
 
 type SettingsPageProps = Readonly<{
@@ -73,7 +69,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const [availableModels, setAvailableModels] = useState<readonly AiModelOption[]>([])
 
     const refreshCache = useCallback(async () => {
-        const nextCache = await invoke<CacheStatus>('get_rag_cache_status')
+        const nextCache = await invoke('get_rag_cache_status')
         setCache(nextCache)
     }, [])
 
@@ -95,8 +91,8 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
 
             try {
                 const [settingsResponse, cacheResponse] = await Promise.all([
-                    invoke<SettingsResponse>('load_settings'),
-                    invoke<CacheStatus>('get_rag_cache_status')
+                    invoke('load_settings'),
+                    invoke('get_rag_cache_status')
                 ])
                 setDraft(normalizeSettings(settingsResponse.settings))
                 setHasApiKey(settingsResponse.hasApiKey)
@@ -137,12 +133,12 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         setIsTesting(true)
         setNotice(undefined)
         try {
-            const result = await invoke<ConnectionTestResult>('test_ai_connection', {
+            const result = await invoke('test_ai_connection', {
                 request: nextRequest
             })
             setNotice(connectionNotice(result))
             if (result.status === 'connected' || result.status === 'model-unavailable') {
-                const models = await invoke<AiModelOption[]>('list_ai_models', {
+                const models = await invoke('list_ai_models', {
                     request: nextRequest
                 })
                 setAvailableModels(models)
@@ -164,7 +160,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         setIsSaving(true)
         setNotice(undefined)
         try {
-            const response = await invoke<SettingsResponse>('save_settings', {request: nextRequest})
+            const response = await invoke('save_settings', {request: nextRequest})
             setDraft(response.settings)
             setHasApiKey(response.hasApiKey)
             setApiKey('')
@@ -199,7 +195,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         setCache(previous => (previous ? {...previous, state: 'busy'} : previous))
         let unlisten: (() => void) | undefined
         try {
-            unlisten = await listen<DownloadProgress>('rag-download-progress', event => {
+            unlisten = await listen('rag-download-progress', event => {
                 setProgress(event.payload)
             })
             await invoke('initialize_rag')
@@ -227,7 +223,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         setIsDeleting(true)
         setNotice(undefined)
         try {
-            const nextCache = await invoke<CacheStatus>('delete_rag_cache')
+            const nextCache = await invoke('delete_rag_cache')
             setCache(nextCache)
             setIsDeleteOpen(false)
             onCacheDeleted()
@@ -246,7 +242,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         setIsBackingUp(true)
         setNotice(undefined)
         try {
-            const result = await invoke<{path: string}>('create_project_backup')
+            const result = await invoke('create_project_backup')
             setNotice({
                 status: 'success',
                 title: 'Project backup created',
@@ -263,7 +259,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         setIsCleaningStorage(true)
         setNotice(undefined)
         try {
-            const result = await invoke<StorageMaintenanceResult>('run_storage_maintenance')
+            const result = await invoke('run_storage_maintenance')
             setNotice({
                 status: 'success',
                 title: 'Storage maintenance complete',
