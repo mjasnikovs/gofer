@@ -15,7 +15,9 @@ import {
 import type {RouterHistory} from '@tanstack/react-router'
 import {AppShell} from '@astryxdesign/core/AppShell'
 import {invoke, isTauri} from '@tauri-apps/api/core'
-import {InitializationSplash, Navigation, Workspace} from './App'
+import {InitializationSplash} from './InitializationSplash'
+import {Navigation} from './Navigation'
+import {Workspace} from './Workspace'
 import {isTaskSummary} from './app-models'
 import type {Page, TaskSummary} from './app-models'
 

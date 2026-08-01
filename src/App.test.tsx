@@ -1,8 +1,10 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import {InitializationSplash, Navigation, Workspace} from './App'
+import {InitializationSplash} from './InitializationSplash'
+import {Navigation} from './Navigation'
 import {SettingsPage} from './SettingsPage'
+import {Workspace} from './Workspace'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean

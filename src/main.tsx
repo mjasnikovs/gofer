@@ -4,7 +4,7 @@ import {Theme} from '@astryxdesign/core/theme'
 import '@astryxdesign/core/reset.css'
 import '@astryxdesign/core/astryx.css'
 import '@astryxdesign/theme-neutral/theme.css'
-import AppRouter from './router'
+import App from './App'
 import {goferTheme} from './theme'
 
 const root = document.getElementById('root')
@@ -19,7 +19,7 @@ ReactDOM.createRoot(root).render(
             theme={goferTheme}
             mode='system'
         >
-            <AppRouter />
+            <App />
         </Theme>
     </React.StrictMode>
 )
