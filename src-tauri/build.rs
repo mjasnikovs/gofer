@@ -1,3 +1,29 @@
 fn main() {
-    tauri_build::build()
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "activate_chat_task",
+            "cancel_ai_request",
+            "cancel_godot",
+            "create_chat_task",
+            "create_project_backup",
+            "delete_rag_cache",
+            "get_rag_cache_status",
+            "import_legacy_chat",
+            "initialize_rag",
+            "launch_godot",
+            "list_ai_models",
+            "list_project_tasks",
+            "load_chat",
+            "load_settings",
+            "merge_task_worktree",
+            "read_chat_attachment",
+            "run_storage_maintenance",
+            "save_chat",
+            "save_chat_attachment",
+            "save_settings",
+            "send_ai_message",
+            "test_ai_connection",
+        ]),
+    ))
+    .expect("failed to build the Tauri application")
 }

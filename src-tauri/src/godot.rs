@@ -5,6 +5,7 @@ use crate::storage::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::io::{BufRead, BufReader};
+use std::path::{Component, Path};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -38,12 +39,11 @@ impl Drop for RunGuard {
         if self.finished {
             return;
         }
-        if let Ok(mut active) = ACTIVE_GODOT.lock() {
-            if let Some(active) = active.take() {
-                if let Ok(mut child) = active.child.lock() {
-                    let _ = child.kill();
-                }
-            }
+        if let Ok(mut active) = ACTIVE_GODOT.lock()
+            && let Some(active) = active.take()
+            && let Ok(mut child) = active.child.lock()
+        {
+            let _ = child.kill();
         }
         let _ = self.storage.finish_godot_run(&FinishGodotRunRequest {
             run_id: self.run_id.clone(),
@@ -78,6 +78,9 @@ pub fn launch(
     storage: ProjectStorage,
     request: LaunchGodotRequest,
 ) -> Result<GodotRunRecord, String> {
+    if let Some(scene) = request.scene.as_deref() {
+        validate_scene(scene)?;
+    }
     if GODOT_PROCESS_ACTIVE
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -264,6 +267,36 @@ fn command_text(binary: &str, arguments: &[&str]) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+fn validate_scene(scene: &str) -> Result<(), String> {
+    let scene = scene.trim();
+    if scene.is_empty() {
+        return Ok(());
+    }
+    if scene.len() > 4_096 || scene.chars().any(char::is_control) {
+        return Err("The Godot scene path is invalid".to_owned());
+    }
+    let relative = scene.strip_prefix("res://").unwrap_or(scene);
+    let path = Path::new(relative);
+    if relative.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+        || !matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("tscn" | "scn")
+        )
+    {
+        return Err(
+            "Godot scenes must be relative .tscn or .scn paths inside the project".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn read_lines(
     reader: impl std::io::Read + Send + 'static,
     source: &'static str,
@@ -295,7 +328,8 @@ fn emit(
     message: Option<&str>,
     exit_code: Option<i32>,
 ) {
-    let _ = app.emit(
+    let _ = app.emit_to(
+        "main",
         "godot-process-event",
         GodotProcessEvent {
             run_id: run_id.to_owned(),
@@ -325,5 +359,14 @@ mod tests {
         assert_eq!(classify_line("SCRIPT ERROR: Parse error"), "error");
         assert_eq!(classify_line("WARNING: unused signal"), "warning");
         assert_eq!(classify_line("Godot Engine v4"), "info");
+    }
+
+    #[test]
+    fn validates_project_relative_scene_paths() {
+        assert!(validate_scene("res://levels/main.tscn").is_ok());
+        assert!(validate_scene("levels/main.scn").is_ok());
+        assert!(validate_scene("../outside.tscn").is_err());
+        assert!(validate_scene("/tmp/outside.tscn").is_err());
+        assert!(validate_scene("scripts/bootstrap.gd").is_err());
     }
 }

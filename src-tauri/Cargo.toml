@@ -20,7 +20,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 base64 = "0.22"
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
 dirs = "6"
 keyring = "4"
 reqwest = { version = "0.13", features = ["json"] }

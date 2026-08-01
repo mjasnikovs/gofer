@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-delete-rag-cache"
+description = "Enables the delete_rag_cache command without any pre-configured scope."
+commands.allow = ["delete_rag_cache"]
+
+[[permission]]
+identifier = "deny-delete-rag-cache"
+description = "Denies the delete_rag_cache command without any pre-configured scope."
+commands.deny = ["delete_rag_cache"]

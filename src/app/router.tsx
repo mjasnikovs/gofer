@@ -17,7 +17,6 @@ import {AppShell} from '@astryxdesign/core/AppShell'
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {InitializationSplash} from '../components/application/InitializationSplash'
 import {Navigation} from '../components/application/Navigation'
-import {Workspace} from '../components/workspace/Workspace'
 import {isTaskSummary} from '../models/app'
 import type {Page, TaskSummary} from '../models/app'
 
@@ -33,6 +32,9 @@ type ApplicationContextValue = Readonly<{
 
 const ApplicationContext = createContext<ApplicationContextValue | undefined>(undefined)
 const SettingsPage = lazy(() => import('../components/settings/SettingsPage'))
+const Workspace = lazy(() =>
+    import('../components/workspace/Workspace').then(module => ({default: module.Workspace}))
+)
 
 async function loadTasks() {
     if (!isTauri()) return []
@@ -155,12 +157,14 @@ function Application() {
                     />
                 }
             >
-                <Workspace
-                    key={displayedTask?.id ?? selectedTaskId ?? 'workspace'}
-                    onTasksChanged={tasksChanged}
-                    onMergeTask={mergeDisplayedTask}
-                    {...(displayedTask && {activeTask: displayedTask})}
-                />
+                <Suspense fallback={null}>
+                    <Workspace
+                        key={displayedTask?.id ?? selectedTaskId ?? 'workspace'}
+                        onTasksChanged={tasksChanged}
+                        onMergeTask={mergeDisplayedTask}
+                        {...(displayedTask && {activeTask: displayedTask})}
+                    />
+                </Suspense>
                 <Outlet />
             </AppShell>
         </ApplicationContext>

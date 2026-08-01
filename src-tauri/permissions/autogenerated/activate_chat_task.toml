@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-activate-chat-task"
+description = "Enables the activate_chat_task command without any pre-configured scope."
+commands.allow = ["activate_chat_task"]
+
+[[permission]]
+identifier = "deny-activate-chat-task"
+description = "Denies the activate_chat_task command without any pre-configured scope."
+commands.deny = ["activate_chat_task"]

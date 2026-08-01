@@ -17,11 +17,9 @@ mod memory;
 mod storage;
 
 use storage::{
-    AppendGodotLogsRequest, AppendGodotLogsResult, BackupResult, FinishGodotRunRequest,
-    GodotLogSearchResult, GodotRunRecord, MaintenanceResult, MemoryRecord, MemorySearchResult,
-    MergeTaskResult, ProjectStorage, SaveMemoryEmbeddingRequest, SearchGodotLogsRequest,
-    SearchMemoryRequest, StartGodotRunRequest, StoredAttachment, StoredChat, TaskRecord,
-    TaskWorktreeRequest, UpsertMemoryRequest,
+    BackupResult, GodotRunRecord, MaintenanceResult, MergeTaskResult, ProjectStorage,
+    SaveMemoryEmbeddingRequest, SearchMemoryRequest, StoredAttachment, StoredChat, TaskRecord,
+    UpsertMemoryRequest,
 };
 
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
@@ -32,6 +30,12 @@ const SETTINGS_FILE_NAME: &str = "settings.json";
 const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
 const SETTINGS_VERSION: u32 = 1;
 const MAX_CHAT_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_BASE64_BYTES: usize = MAX_CHAT_ATTACHMENT_BYTES.div_ceil(3) * 4;
+const MAX_CHAT_MESSAGES: usize = 200;
+const MAX_CHAT_MESSAGE_BYTES: usize = 256 * 1024;
+const MAX_CHAT_TEXT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_AGENT_MESSAGES_BYTES: usize = 8 * 1024 * 1024;
+const MAX_API_KEY_BYTES: usize = 16 * 1024;
 static RAG_INITIALIZING: AtomicBool = AtomicBool::new(false);
 static ACTIVE_RAG_INITIALIZATION: Mutex<Option<Arc<RagInitialization>>> = Mutex::new(None);
 static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -471,8 +475,13 @@ async fn save_settings(
 
 #[tauri::command]
 async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestResult, String> {
-    let settings = validate_settings(request.settings)?;
-    let api_key = resolve_api_key(&request.api_key)?;
+    let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
+        let settings = validate_settings(request.settings)?;
+        let api_key = resolve_api_key(&request.api_key)?;
+        Ok::<_, String>((settings, api_key))
+    })
+    .await
+    .map_err(|error| format!("AI connection validation task failed: {error}"))??;
     let base_url = format!("{}/", settings.ai.base_url.trim_end_matches('/'));
     let models_url = reqwest::Url::parse(&base_url)
         .and_then(|url| url.join("models"))
@@ -539,8 +548,13 @@ async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestRe
 
 #[tauri::command]
 async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, String> {
-    let settings = validate_settings(request.settings)?;
-    let api_key = resolve_api_key(&request.api_key)?;
+    let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
+        let settings = validate_settings(request.settings)?;
+        let api_key = resolve_api_key(&request.api_key)?;
+        Ok::<_, String>((settings, api_key))
+    })
+    .await
+    .map_err(|error| format!("AI model validation task failed: {error}"))??;
     let base_url = format!("{}/", settings.ai.base_url.trim_end_matches('/'));
     let models_url = reqwest::Url::parse(&base_url)
         .and_then(|url| url.join("models"))
@@ -609,22 +623,19 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
     let guard = AiRequestGuard;
     ACTIVE_AI_REQUEST_ID.store(request.request_id, Ordering::Release);
     AI_REQUEST_CANCELLED.store(false, Ordering::Release);
-    let messages = hydrate_chat_messages(&app, validate_chat_messages(request.messages)?)?;
-    let prompt = messages
-        .last()
-        .map(|message| message.text.clone())
-        .unwrap_or_default();
-    let settings = read_settings(&app)?;
-    let api_key = stored_api_key()?;
-    let workspace_path = project_storage(&app)?
-        .agent_workspace()?
-        .display()
-        .to_string();
-
-    let storage = project_storage(&app)?;
-    let task_id = request.task_id;
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
+        validate_agent_messages(&request.agent_messages)?;
+        let messages = hydrate_chat_messages(&app, validate_chat_messages(request.messages)?)?;
+        let prompt = messages
+            .last()
+            .map(|message| message.text.clone())
+            .unwrap_or_default();
+        let settings = read_settings(&app)?;
+        let api_key = stored_api_key()?;
+        let storage = project_storage(&app)?;
+        let workspace_path = storage.agent_workspace()?.display().to_string();
+        let task_id = request.task_id;
         let memory_context = retrieve_memory_context(&storage, &prompt, task_id.as_deref()).ok();
         let completion = run_ai_worker(
             &app,
@@ -645,9 +656,12 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
     .map_err(|error| format!("AI response task failed: {error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_chat_attachment(app: AppHandle, request: ChatAttachmentUpload) -> Result<(), String> {
     validate_chat_attachment(&request.attachment)?;
+    if request.data.len() > MAX_CHAT_ATTACHMENT_BASE64_BYTES {
+        return Err("Images cannot be larger than 10 MiB".to_owned());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&request.data)
         .map_err(|error| format!("The attachment data is not valid base64: {error}"))?;
@@ -660,7 +674,7 @@ fn save_chat_attachment(app: AppHandle, request: ChatAttachmentUpload) -> Result
     project_storage(&app)?.save_attachment(&request.attachment.as_stored(), &bytes)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn read_chat_attachment(app: AppHandle, attachment: ChatAttachment) -> Result<String, String> {
     validate_chat_attachment(&attachment)?;
     let bytes = project_storage(&app)?.read_attachment(&attachment.as_stored())?;
@@ -671,27 +685,27 @@ fn read_chat_attachment(app: AppHandle, attachment: ChatAttachment) -> Result<St
     ))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_chat(app: AppHandle) -> Result<StoredChat, String> {
     project_storage(&app)?.load_chat()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn save_chat(app: AppHandle, chat: StoredChat) -> Result<(), String> {
     project_storage(&app)?.save_chat(&chat)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn create_chat_task(app: AppHandle) -> Result<StoredChat, String> {
     project_storage(&app)?.create_task()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn activate_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, String> {
     project_storage(&app)?.activate_task(&task_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn import_legacy_chat(app: AppHandle, chat: StoredChat) -> Result<StoredChat, String> {
     let storage = project_storage(&app)?;
     let legacy_directory = chat_attachments_path(&app)?;
@@ -706,27 +720,22 @@ fn import_legacy_chat(app: AppHandle, chat: StoredChat) -> Result<StoredChat, St
     storage.load_chat()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_project_tasks(app: AppHandle) -> Result<Vec<TaskRecord>, String> {
     project_storage(&app)?.list_tasks()
 }
 
-#[tauri::command]
-fn save_task_worktree(app: AppHandle, request: TaskWorktreeRequest) -> Result<TaskRecord, String> {
-    project_storage(&app)?.save_task_worktree(&request)
-}
-
-#[tauri::command]
+#[tauri::command(async)]
 fn merge_task_worktree(app: AppHandle, task_id: String) -> Result<MergeTaskResult, String> {
     project_storage(&app)?.merge_task(&task_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn create_project_backup(app: AppHandle) -> Result<BackupResult, String> {
     project_storage(&app)?.create_backup()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, String> {
     project_storage(&app)?.run_maintenance()
 }
@@ -736,72 +745,20 @@ async fn launch_godot(
     app: AppHandle,
     request: godot::LaunchGodotRequest,
 ) -> Result<GodotRunRecord, String> {
-    let storage = project_storage(&app)?;
-    let worker_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || godot::launch(&worker_app, storage, request))
-        .await
-        .map_err(|error| format!("Godot process task failed: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = project_storage(&app)?;
+        godot::launch(&app, storage, request)
+    })
+    .await
+    .map_err(|error| format!("Godot process task failed: {error}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn cancel_godot() -> Result<(), String> {
     godot::cancel()
 }
 
-#[tauri::command]
-fn start_godot_run(
-    app: AppHandle,
-    request: StartGodotRunRequest,
-) -> Result<GodotRunRecord, String> {
-    project_storage(&app)?.start_godot_run(&request)
-}
-
-#[tauri::command]
-fn append_godot_logs(
-    app: AppHandle,
-    request: AppendGodotLogsRequest,
-) -> Result<AppendGodotLogsResult, String> {
-    project_storage(&app)?.append_godot_logs(&request)
-}
-
-#[tauri::command]
-fn finish_godot_run(app: AppHandle, request: FinishGodotRunRequest) -> Result<(), String> {
-    project_storage(&app)?.finish_godot_run(&request)
-}
-
-#[tauri::command]
-fn search_godot_logs(
-    app: AppHandle,
-    request: SearchGodotLogsRequest,
-) -> Result<Vec<GodotLogSearchResult>, String> {
-    project_storage(&app)?.search_godot_logs(&request)
-}
-
-#[tauri::command]
-fn upsert_project_memory(
-    app: AppHandle,
-    request: UpsertMemoryRequest,
-) -> Result<MemoryRecord, String> {
-    project_storage(&app)?.upsert_memory(&request)
-}
-
-#[tauri::command]
-fn save_memory_embedding(
-    app: AppHandle,
-    request: SaveMemoryEmbeddingRequest,
-) -> Result<(), String> {
-    project_storage(&app)?.save_memory_embedding(&request)
-}
-
-#[tauri::command]
-fn search_project_memory(
-    app: AppHandle,
-    request: SearchMemoryRequest,
-) -> Result<Vec<MemorySearchResult>, String> {
-    project_storage(&app)?.search_memory(&request)
-}
-
-#[tauri::command]
+#[tauri::command(async)]
 fn cancel_ai_request(app: AppHandle, request_id: u64) -> Result<bool, String> {
     if ACTIVE_AI_REQUEST_ID.load(Ordering::Acquire) != request_id {
         return Ok(false);
@@ -818,7 +775,8 @@ fn cancel_ai_request(app: AppHandle, request_id: u64) -> Result<bool, String> {
             .kill()
             .map_err(|error| format!("Could not stop the AI agent: {error}"))?;
     }
-    app.emit(
+    app.emit_to(
+        "main",
         "ai-stream-event",
         AiStreamPayload {
             request_id,
@@ -911,8 +869,8 @@ fn chat_attachments_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn validate_chat_attachment(attachment: &ChatAttachment) -> Result<(), String> {
-    if attachment.name.trim().is_empty() {
-        return Err("Attachment names cannot be empty".to_owned());
+    if attachment.name.trim().is_empty() || attachment.name.len() > 255 {
+        return Err("Attachment names must contain between 1 and 255 bytes".to_owned());
     }
     if attachment.size == 0 || attachment.size > MAX_CHAT_ATTACHMENT_BYTES as u64 {
         return Err("Images must be between 1 byte and 10 MiB".to_owned());
@@ -1003,7 +961,7 @@ fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
     if !path.exists() {
         return Ok(default_settings_from_pi().unwrap_or_default());
     }
-    let contents = fs::read_to_string(&path)
+    let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let settings = serde_json::from_str(&contents)
         .map_err(|error| format!("Gofer settings in {} are invalid: {error}", path.display()))?;
@@ -1080,7 +1038,7 @@ fn write_settings_to_path(path: &Path, settings: &GoferSettings) -> Result<(), S
         .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     let contents = serde_json::to_string_pretty(settings)
         .map_err(|error| format!("Could not serialize Gofer settings: {error}"))?;
-    fs::write(&path, format!("{contents}\n"))
+    fs::write(path, format!("{contents}\n"))
         .map_err(|error| format!("Could not write {}: {error}", path.display()))
 }
 
@@ -1093,10 +1051,32 @@ fn validate_settings(mut settings: GoferSettings) -> Result<GoferSettings, Strin
     }
     settings.ai.name = required_value("Connection name", settings.ai.name)?;
     settings.ai.model = required_value("Model ID", settings.ai.model)?;
+    if settings.ai.name.len() > 100 {
+        return Err("Connection names cannot exceed 100 bytes".to_owned());
+    }
+    if settings.ai.model.len() > 512 {
+        return Err("Model IDs cannot exceed 512 bytes".to_owned());
+    }
     if settings.ai.model_name.trim().is_empty() {
         settings.ai.model_name = settings.ai.model.clone();
     } else {
         settings.ai.model_name = settings.ai.model_name.trim().to_owned();
+    }
+    if settings.ai.model_name.len() > 512 {
+        return Err("Model names cannot exceed 512 bytes".to_owned());
+    }
+    if settings.ai.system_prompt.len() > 64 * 1024 {
+        return Err("System prompts cannot exceed 64 KiB".to_owned());
+    }
+    if settings.ai.input.is_empty()
+        || settings.ai.input.len() > 16
+        || settings
+            .ai
+            .input
+            .iter()
+            .any(|input| input.is_empty() || input.len() > 64)
+    {
+        return Err("Model input types are invalid".to_owned());
     }
     if settings.ai.context_window == 0 || settings.ai.max_tokens == 0 {
         return Err(
@@ -1123,6 +1103,15 @@ fn validate_settings(mut settings: GoferSettings) -> Result<GoferSettings, Strin
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err("Base URL must use http or https".to_owned());
     }
+    if url.cannot_be_a_base()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || settings.ai.base_url.len() > 2_048
+    {
+        return Err("Base URL cannot contain credentials, a query, or a fragment".to_owned());
+    }
     Ok(settings)
 }
 
@@ -1137,8 +1126,10 @@ fn required_value(name: &str, value: String) -> Result<String, String> {
 fn validate_chat_messages(
     messages: Vec<ChatMessageInput>,
 ) -> Result<Vec<ChatMessageInput>, String> {
-    if messages.is_empty() {
-        return Err("At least one chat message is required".to_owned());
+    if messages.is_empty() || messages.len() > MAX_CHAT_MESSAGES {
+        return Err(format!(
+            "Chat requests must contain between 1 and {MAX_CHAT_MESSAGES} messages"
+        ));
     }
     if !matches!(
         messages.last().map(|message| message.sender),
@@ -1155,6 +1146,16 @@ fn validate_chat_messages(
     if messages.iter().any(|message| message.attachments.len() > 5) {
         return Err("Chat messages cannot contain more than 5 images".to_owned());
     }
+    let mut total_text_bytes = 0_usize;
+    for message in &messages {
+        if message.text.len() > MAX_CHAT_MESSAGE_BYTES {
+            return Err("Individual chat messages cannot exceed 256 KiB".to_owned());
+        }
+        total_text_bytes = total_text_bytes.saturating_add(message.text.len());
+    }
+    if total_text_bytes > MAX_CHAT_TEXT_BYTES {
+        return Err("Chat request text cannot exceed 4 MiB".to_owned());
+    }
     for attachment in messages
         .iter()
         .flat_map(|message| message.attachments.iter())
@@ -1162,6 +1163,22 @@ fn validate_chat_messages(
         validate_chat_attachment(attachment)?;
     }
     Ok(messages)
+}
+
+fn validate_agent_messages(messages: &Option<serde_json::Value>) -> Result<(), String> {
+    let Some(messages) = messages else {
+        return Ok(());
+    };
+    if !messages.is_array() {
+        return Err("Agent message history must be an array".to_owned());
+    }
+    let size = serde_json::to_vec(messages)
+        .map_err(|_| "Agent message history is invalid".to_owned())?
+        .len();
+    if size > MAX_AGENT_MESSAGES_BYTES {
+        return Err("Agent message history cannot exceed 8 MiB".to_owned());
+    }
+    Ok(())
 }
 
 fn credential_entry() -> Result<Entry, String> {
@@ -1205,6 +1222,9 @@ fn apply_api_key_update(update: &ApiKeyUpdate) -> Result<(), String> {
             if value.is_empty() {
                 return Err("API key cannot be empty when setting a credential".to_owned());
             }
+            if value.len() > MAX_API_KEY_BYTES {
+                return Err("API keys cannot exceed 16 KiB".to_owned());
+            }
             credential_entry()?
                 .set_password(value)
                 .map_err(|error| format!("Could not store the AI API key: {error}"))
@@ -1236,6 +1256,9 @@ fn resolve_api_key(update: &ApiKeyUpdate) -> Result<Option<String>, String> {
             let value = value.trim();
             if value.is_empty() {
                 return Err("API key cannot be empty when testing a credential".to_owned());
+            }
+            if value.len() > MAX_API_KEY_BYTES {
+                return Err("API keys cannot exceed 16 KiB".to_owned());
             }
             Ok(Some(value.to_owned()))
         }
@@ -1293,16 +1316,13 @@ fn cache_status_for_path(path: &Path, busy: bool) -> Result<CacheStatus, String>
         CacheState::Busy
     } else if !path.exists() {
         CacheState::NotInstalled
-    } else if required_model_files(&path)
-        .iter()
-        .all(|file| file.is_file())
-    {
+    } else if required_model_files(path).iter().all(|file| file.is_file()) {
         CacheState::Installed
     } else {
         CacheState::Incomplete
     };
     let size_bytes = if path.exists() {
-        directory_size(&path)?
+        directory_size(path)?
     } else {
         0
     };
@@ -1405,7 +1425,7 @@ fn run_rag_warmup(app: &AppHandle) -> Result<(), String> {
         };
         let progress: serde_json::Value = serde_json::from_str(payload)
             .map_err(|error| format!("Gofer RAG returned invalid progress data: {error}"))?;
-        app.emit("rag-download-progress", progress)
+        app.emit_to("main", "rag-download-progress", progress)
             .map_err(|error| format!("Could not report Gofer RAG progress: {error}"))?;
     }
 
@@ -1491,8 +1511,12 @@ fn run_ai_worker(
                 .unwrap_or_default()
                 .to_owned();
         }
-        app.emit("ai-stream-event", AiStreamPayload { request_id, event })
-            .map_err(|error| format!("Could not stream the AI response: {error}"))?;
+        app.emit_to(
+            "main",
+            "ai-stream-event",
+            AiStreamPayload { request_id, event },
+        )
+        .map_err(|error| format!("Could not stream the AI response: {error}"))?;
     }
 
     let status = child
@@ -1567,14 +1591,14 @@ fn remember_completed_turn(
         provenance: serde_json::json!({"source": "completed-ai-turn"}),
         superseded_by: None,
     })?;
-    if let Ok(mut vectors) = memory::embed_documents(&[content], &rag_cache_path()?) {
-        if let Some(vector) = vectors.pop() {
-            storage.save_memory_embedding(&SaveMemoryEmbeddingRequest {
-                memory_id: record.id,
-                model: memory::MODEL.to_owned(),
-                vector,
-            })?;
-        }
+    if let Ok(mut vectors) = memory::embed_documents(&[content], &rag_cache_path()?)
+        && let Some(vector) = vectors.pop()
+    {
+        storage.save_memory_embedding(&SaveMemoryEmbeddingRequest {
+            memory_id: record.id,
+            model: memory::MODEL.to_owned(),
+            vector,
+        })?;
     }
     Ok(())
 }
@@ -1628,16 +1652,13 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             activate_chat_task,
-            append_godot_logs,
             cancel_ai_request,
             cancel_godot,
             create_chat_task,
             create_project_backup,
             delete_rag_cache,
-            finish_godot_run,
             get_rag_cache_status,
             import_legacy_chat,
             initialize_rag,
@@ -1652,14 +1673,8 @@ pub fn run() {
             save_chat,
             save_settings,
             save_chat_attachment,
-            save_memory_embedding,
-            save_task_worktree,
-            search_godot_logs,
-            search_project_memory,
             send_ai_message,
-            start_godot_run,
             test_ai_connection,
-            upsert_project_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1748,6 +1763,22 @@ mod tests {
     }
 
     #[test]
+    fn chat_and_agent_payloads_are_bounded() {
+        let oversized_message = vec![ChatMessageInput {
+            sender: ChatSender::User,
+            text: "x".repeat(MAX_CHAT_MESSAGE_BYTES + 1),
+            timestamp: 1,
+            attachments: Vec::new(),
+        }];
+        assert!(
+            validate_chat_messages(oversized_message)
+                .unwrap_err()
+                .contains("256 KiB")
+        );
+        assert!(validate_agent_messages(&Some(serde_json::json!({"role": "user"}))).is_err());
+    }
+
+    #[test]
     fn chat_attachment_metadata_is_validated() {
         let mut invalid_type = chat_attachment();
         invalid_type.mime_type = "application/pdf".to_owned();
@@ -1815,6 +1846,16 @@ mod tests {
         assert_eq!(
             validate_settings(settings("file:///tmp/server", "model")).unwrap_err(),
             "Base URL must use http or https"
+        );
+        assert!(
+            validate_settings(settings("https://user:secret@example.com/v1", "model"))
+                .unwrap_err()
+                .contains("credentials")
+        );
+        assert!(
+            validate_settings(settings("https://example.com/v1?token=secret", "model"))
+                .unwrap_err()
+                .contains("query")
         );
     }
 

@@ -17,8 +17,10 @@
         "test:frontend": "vitest run",
         "test:worker": "node --test scripts/*.test.mjs",
         "test:rust": "cargo test --quiet --manifest-path src-tauri/Cargo.toml",
+        "check:rustfmt": "cargo fmt --check --manifest-path src-tauri/Cargo.toml",
+        "check:clippy": "cargo clippy --quiet --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
         "test": "npm run --silent test:frontend && npm run --silent test:worker && npm run --silent test:rust",
-        "check": "npm run --silent format:check && npm run --silent lint && npm run --silent typecheck && npm run --silent test && cargo check --quiet --manifest-path src-tauri/Cargo.toml",
+        "check": "npm run --silent format:check && npm run --silent lint && npm run --silent typecheck && npm run --silent check:rustfmt && npm run --silent check:clippy && npm run --silent test && cargo check --quiet --manifest-path src-tauri/Cargo.toml",
         "preview": "vite preview",
         "tauri": "tauri",
         "astryx": "node node_modules/@astryxdesign/cli/bin/astryx.mjs"
@@ -34,7 +36,6 @@
         "@stylexjs/stylex": "0.19.0",
         "@tanstack/react-router": "1.170.18",
         "@tauri-apps/api": "2.11.1",
-        "@tauri-apps/plugin-opener": "2.5.4",
         "react": "19.2.8",
         "react-dom": "19.2.8"
     },

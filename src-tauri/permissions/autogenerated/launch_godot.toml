@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-launch-godot"
+description = "Enables the launch_godot command without any pre-configured scope."
+commands.allow = ["launch_godot"]
+
+[[permission]]
+identifier = "deny-launch-godot"
+description = "Denies the launch_godot command without any pre-configured scope."
+commands.deny = ["launch_godot"]

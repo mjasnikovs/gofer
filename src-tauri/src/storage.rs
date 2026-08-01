@@ -16,6 +16,9 @@ const PROJECTS_DIRECTORY: &str = "projects";
 const PROJECT_DATABASE_FILE_NAME: &str = "project.sqlite";
 const MEMORY_EMBEDDING_DIMENSIONS: usize = 1024;
 const MEMORY_EMBEDDING_MODEL: &str = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+const MAX_STORED_CHAT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_STORED_CHAT_MESSAGES: usize = 10_000;
+const MAX_STORED_MESSAGE_BYTES: usize = 1024 * 1024;
 static SQLITE_VEC_REGISTRATION: Once = Once::new();
 
 const CATALOG_SCHEMA: &str = r#"
@@ -236,6 +239,7 @@ pub struct TaskRecord {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct TaskWorktreeRequest {
     pub task_id: String,
     pub branch_name: String,
@@ -303,6 +307,7 @@ pub struct FinishGodotRunRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct SearchGodotLogsRequest {
     pub query: String,
     pub run_id: Option<String>,
@@ -311,6 +316,7 @@ pub struct SearchGodotLogsRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct GodotLogSearchResult {
     pub id: String,
     pub run_id: String,
@@ -592,14 +598,14 @@ impl ProjectStorage {
         let created_worktree =
             git::create_task_worktree(&self.workspace_path, &worktree_path, &branch_name)?;
         let result = self.insert_task(&task_id, created_worktree.as_ref());
-        if result.is_err() {
-            if let Some(worktree) = &created_worktree {
-                git::discard_created_worktree(
-                    &self.workspace_path,
-                    &worktree.worktree_path,
-                    &worktree.branch_name,
-                );
-            }
+        if result.is_err()
+            && let Some(worktree) = &created_worktree
+        {
+            git::discard_created_worktree(
+                &self.workspace_path,
+                &worktree.worktree_path,
+                &worktree.branch_name,
+            );
         }
         result?;
         Ok(StoredChat {
@@ -641,7 +647,7 @@ impl ProjectStorage {
                 )
                 .map_err(database_error)?;
         }
-        set_active_task(&transaction, &task_id)?;
+        set_active_task(&transaction, task_id)?;
         transaction.commit().map_err(database_error)
     }
 
@@ -765,6 +771,7 @@ impl ProjectStorage {
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn save_task_worktree(&self, request: &TaskWorktreeRequest) -> Result<TaskRecord, String> {
         validate_worktree(request)?;
         let connection = self.connection()?;
@@ -798,6 +805,7 @@ impl ProjectStorage {
             .ok_or_else(|| "The updated task was not found".to_owned())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start_godot_run(
         &self,
         request: &StartGodotRunRequest,
@@ -812,6 +820,9 @@ impl ProjectStorage {
     ) -> Result<GodotRunRecord, String> {
         if !request.metadata.is_object() {
             return Err("Godot run metadata must be an object".to_owned());
+        }
+        if request.metadata.to_string().len() > 256 * 1024 {
+            return Err("Godot run metadata cannot exceed 256 KiB".to_owned());
         }
         let connection = self.connection()?;
         let task_id = match &request.task_id {
@@ -978,6 +989,7 @@ impl ProjectStorage {
         Ok(())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn search_godot_logs(
         &self,
         request: &SearchGodotLogsRequest,
@@ -1566,8 +1578,11 @@ fn open_connection(path: &Path) -> Result<Connection, String> {
 
 fn register_sqlite_vec() {
     SQLITE_VEC_REGISTRATION.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            rusqlite::auto_extension::RawAutoExtension,
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
         )));
     });
 }
@@ -1643,6 +1658,7 @@ fn require_task(connection: &Connection, task_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn validate_worktree(request: &TaskWorktreeRequest) -> Result<(), String> {
     if request.branch_name.trim().is_empty()
         || request.branch_name.len() > 255
@@ -1668,6 +1684,7 @@ fn validate_worktree(request: &TaskWorktreeRequest) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn validate_commit(commit: &str) -> Result<(), String> {
     if ![40, 64].contains(&commit.len()) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Git commit IDs must be complete 40 or 64 character hashes".to_owned());
@@ -1817,9 +1834,26 @@ fn empty_object() -> Value {
 }
 
 fn validate_chat(chat: &StoredChat) -> Result<(), String> {
+    if chat.messages.len() > MAX_STORED_CHAT_MESSAGES {
+        return Err(format!(
+            "Stored chats cannot contain more than {MAX_STORED_CHAT_MESSAGES} messages"
+        ));
+    }
+    let serialized_size = serde_json::to_vec(chat)
+        .map_err(|_| "Stored chat data is invalid".to_owned())?
+        .len();
+    if serialized_size > MAX_STORED_CHAT_BYTES {
+        return Err("Stored chat data cannot exceed 32 MiB".to_owned());
+    }
     for message in &chat.messages {
         if message.sender != "user" && message.sender != "assistant" {
             return Err("Stored chat messages have an invalid sender".to_owned());
+        }
+        if message.text.len() > MAX_STORED_MESSAGE_BYTES {
+            return Err("Stored chat messages cannot exceed 1 MiB".to_owned());
+        }
+        if message.attachments.len() > 5 {
+            return Err("Stored chat messages cannot contain more than 5 images".to_owned());
         }
         for attachment in &message.attachments {
             validate_attachment(attachment)?;
@@ -1830,6 +1864,7 @@ fn validate_chat(chat: &StoredChat) -> Result<(), String> {
 
 pub fn validate_attachment(attachment: &StoredAttachment) -> Result<(), String> {
     if attachment.id.is_empty()
+        || attachment.id.len() > 64
         || !attachment
             .id
             .chars()
@@ -1837,8 +1872,8 @@ pub fn validate_attachment(attachment: &StoredAttachment) -> Result<(), String> 
     {
         return Err("The attachment ID is invalid".to_owned());
     }
-    if attachment.name.trim().is_empty() {
-        return Err("The attachment name is required".to_owned());
+    if attachment.name.trim().is_empty() || attachment.name.len() > 255 {
+        return Err("Attachment names must contain between 1 and 255 bytes".to_owned());
     }
     if attachment.size == 0 || attachment.size > 10 * 1024 * 1024 {
         return Err("Images must be between 1 byte and 10 MiB".to_owned());
@@ -1926,6 +1961,29 @@ mod tests {
                 .expect("read attachment"),
             b"hi"
         );
+    }
+
+    #[test]
+    fn stored_chat_and_attachment_metadata_are_bounded() {
+        let oversized = StoredChat {
+            task_id: None,
+            messages: vec![StoredMessage {
+                id: 1,
+                sender: "user".to_owned(),
+                text: "x".repeat(MAX_STORED_MESSAGE_BYTES + 1),
+                timestamp: 1,
+                attachments: Vec::new(),
+                extra: serde_json::Map::new(),
+            }],
+            agent_messages: Vec::new(),
+        };
+        assert!(validate_chat(&oversized).unwrap_err().contains("1 MiB"));
+
+        let mut invalid_attachment = attachment(&"a".repeat(65));
+        assert!(validate_attachment(&invalid_attachment).is_err());
+        invalid_attachment.id = "valid-id".to_owned();
+        invalid_attachment.name = "x".repeat(256);
+        assert!(validate_attachment(&invalid_attachment).is_err());
     }
 
     #[test]
