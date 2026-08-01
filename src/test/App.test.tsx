@@ -6,6 +6,7 @@ import {InitializationSplash} from '../components/application/InitializationSpla
 import {Navigation} from '../components/application/Navigation'
 import {SettingsPage} from '../components/settings/SettingsPage'
 import {Workspace} from '../components/workspace/Workspace'
+import type {StoredChat} from '../models/chat'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean
@@ -313,6 +314,51 @@ describe('Workspace', () => {
                 chat: {taskId: '0198f4c0-02ef-7000-8000-000000000001'}
             })
         })
+    })
+
+    it('coalesces chat snapshots while a save is already running', async () => {
+        let resolveFirstSave: (() => void) | undefined
+        tauri.invoke.mockImplementation((command, args) => {
+            if (command === 'load_chat') {
+                return Promise.resolve({taskId: 'task-1', messages: [], agentMessages: []})
+            }
+            if (command === 'save_chat') {
+                const saveCount = tauri.invoke.mock.calls.filter(
+                    call => call[0] === 'save_chat'
+                ).length
+                if (saveCount === 1) {
+                    return new Promise<void>(resolve => {
+                        resolveFirstSave = resolve
+                    })
+                }
+            }
+            return Promise.resolve(args)
+        })
+        render(<Workspace />)
+
+        await waitFor(() => {
+            expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
+        })
+        await userEvent.type(screen.getByRole('textbox'), 'First{enter}')
+        await waitFor(() => {
+            expect(screen.getByRole('textbox')).toBeEnabled()
+        })
+        await userEvent.type(screen.getByRole('textbox'), 'Second{enter}')
+        await new Promise(resolve => window.setTimeout(resolve, 250))
+
+        expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
+        resolveFirstSave?.()
+        await waitFor(() => {
+            expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(2)
+        })
+        const latestSave = tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat').at(-1)
+        const latestChat = (latestSave?.[1] as {chat: StoredChat} | undefined)?.chat
+        expect(latestChat?.taskId).toBe('task-1')
+        expect(
+            latestChat?.messages
+                .filter(message => message.sender === 'user')
+                .map(message => message.text)
+        ).toEqual(['First', 'Second'])
     })
 
     it('loads each persisted attachment preview only once across message updates', async () => {

@@ -976,6 +976,12 @@ fn read_chat_attachment_bytes(
 }
 
 fn project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
+    app.try_state::<ProjectStorage>()
+        .map(|storage| storage.inner().clone())
+        .ok_or_else(|| "Project storage has not been initialized".to_owned())
+}
+
+fn open_project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
     let data_root = app_data_path(app)?;
     let workspace = std::env::current_dir()
         .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?;
@@ -1794,6 +1800,11 @@ pub fn run() {
         .plugin(tauri_plugin_wdio_webdriver::init());
 
     builder
+        .setup(|app| {
+            let storage = open_project_storage(app.handle()).map_err(std::io::Error::other)?;
+            app.manage(storage);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             activate_chat_task,
             cancel_ai_request,

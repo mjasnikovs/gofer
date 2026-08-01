@@ -5,7 +5,7 @@ import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
 import {invoke, isTauri, listen} from '../../services/desktop'
 import type {TaskSummary} from '../../models/app'
-import type {ChatAttachment, DraftAttachment, Message} from '../../models/chat'
+import type {ChatAttachment, DraftAttachment, Message, StoredChat} from '../../models/chat'
 import {messageUsage} from '../../utils/chat-format'
 import {
     attachmentData,
@@ -54,6 +54,8 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     const activeRequestId = useRef<number | undefined>(undefined)
     const requestedAttachmentPreviews = useRef(new Set<string>())
     const isWorkspaceMounted = useRef(false)
+    const pendingChatSave = useRef<StoredChat | undefined>(undefined)
+    const isChatSaveRunning = useRef(false)
     const attachmentInputRef = useRef<HTMLInputElement>(null)
     const messageScrollRef = useRef<HTMLElement>(null)
     const chatScroll = useChatStreamScroll({
@@ -71,6 +73,26 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     useEffect(() => {
         chatScroll.scrollIfLocked()
     }, [messages, chatScroll.scrollIfLocked])
+
+    const savePendingChat = useCallback(async () => {
+        if (isChatSaveRunning.current) return
+        isChatSaveRunning.current = true
+        try {
+            while (pendingChatSave.current) {
+                const chat = pendingChatSave.current
+                pendingChatSave.current = undefined
+                try {
+                    await invoke('save_chat', {chat})
+                    if (isWorkspaceMounted.current) onTasksChanged?.()
+                } catch (error) {
+                    if (isWorkspaceMounted.current)
+                        setStreamError(`Chat history could not be saved: ${String(error)}`)
+                }
+            }
+        } finally {
+            isChatSaveRunning.current = false
+        }
+    }, [onTasksChanged])
 
     useEffect(() => {
         if (!isTauri()) return
@@ -237,22 +259,18 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
 
     useEffect(() => {
         if (!isChatLoaded || !isTauri()) return
-        let isCancelled = false
         const timeout = window.setTimeout(() => {
-            void invoke('save_chat', {chat: {taskId, messages, agentMessages}})
-                .then(() => {
-                    onTasksChanged?.()
-                })
-                .catch((error: unknown) => {
-                    if (!isCancelled)
-                        setStreamError(`Chat history could not be saved: ${String(error)}`)
-                })
+            pendingChatSave.current = {
+                ...(taskId !== undefined && {taskId}),
+                messages,
+                agentMessages
+            }
+            void savePendingChat()
         }, 150)
         return () => {
-            isCancelled = true
             window.clearTimeout(timeout)
         }
-    }, [agentMessages, isChatLoaded, messages, onTasksChanged, taskId])
+    }, [agentMessages, isChatLoaded, messages, savePendingChat, taskId])
 
     useEffect(() => {
         if (!isTauri()) return

@@ -1,11 +1,11 @@
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::{Arc, Mutex, MutexGuard, Once};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -417,6 +417,7 @@ pub struct ProjectStorage {
     data_root: PathBuf,
     project_id: String,
     workspace_path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ProjectStorage {
@@ -456,6 +457,7 @@ impl ProjectStorage {
             data_root: data_root.to_path_buf(),
             project_id,
             workspace_path: canonical_path,
+            write_lock: Arc::new(Mutex::new(())),
         };
         fs::create_dir_all(storage.project_directory())
             .map_err(|error| format!("Could not create project storage: {error}"))?;
@@ -498,8 +500,20 @@ impl ProjectStorage {
 
     pub fn save_chat(&self, chat: &StoredChat) -> Result<(), String> {
         validate_chat(chat)?;
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction().map_err(database_error)?;
+        let message_payloads = chat
+            .messages
+            .iter()
+            .map(|message| {
+                serde_json::to_string(message)
+                    .map_err(|error| format!("Could not serialize chat message: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let agent_messages = serde_json::to_string(&chat.agent_messages)
+            .map_err(|error| format!("Could not serialize agent context: {error}"))?;
+        let (_write_guard, mut connection) = self.write_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
         let task_id = match &chat.task_id {
             Some(task_id) => {
                 let exists = transaction
@@ -517,9 +531,8 @@ impl ProjectStorage {
         transaction
             .execute("DELETE FROM messages WHERE task_id = ?1", [&task_id])
             .map_err(database_error)?;
-        for (sequence, message) in chat.messages.iter().enumerate() {
-            let payload = serde_json::to_string(message)
-                .map_err(|error| format!("Could not serialize chat message: {error}"))?;
+        for (sequence, (message, payload)) in chat.messages.iter().zip(message_payloads).enumerate()
+        {
             transaction
                 .execute(
                     "INSERT INTO messages
@@ -575,8 +588,6 @@ impl ProjectStorage {
                 )
                 .map_err(database_error)?;
         }
-        let agent_messages = serde_json::to_string(&chat.agent_messages)
-            .map_err(|error| format!("Could not serialize agent context: {error}"))?;
         transaction
             .execute(
                 "UPDATE tasks SET agent_messages_json = ?1, updated_at = ?2 WHERE id = ?3",
@@ -620,8 +631,10 @@ impl ProjectStorage {
         task_id: &str,
         worktree: Option<&git::CreatedWorktree>,
     ) -> Result<(), String> {
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction().map_err(database_error)?;
+        let (_write_guard, mut connection) = self.write_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
         let now = now_millis()?;
         transaction
             .execute(
@@ -652,15 +665,21 @@ impl ProjectStorage {
     }
 
     pub fn activate_task(&self, task_id: &str) -> Result<StoredChat, String> {
-        let connection = self.connection()?;
-        require_task(&connection, task_id)?;
-        connection
-            .execute(
-                "UPDATE tasks SET status = 'active', updated_at = ?1 WHERE id = ?2",
-                params![now_millis()?, task_id],
-            )
-            .map_err(database_error)?;
-        set_active_task(&connection, task_id)?;
+        {
+            let (_write_guard, mut connection) = self.write_connection()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+            require_task(&transaction, task_id)?;
+            transaction
+                .execute(
+                    "UPDATE tasks SET status = 'active', updated_at = ?1 WHERE id = ?2",
+                    params![now_millis()?, task_id],
+                )
+                .map_err(database_error)?;
+            set_active_task(&transaction, task_id)?;
+            transaction.commit().map_err(database_error)?;
+        }
         self.load_chat()
     }
 
@@ -701,7 +720,12 @@ impl ProjectStorage {
             &branch_name,
         )?;
         let now = now_millis()?;
-        connection
+        drop(connection);
+        let (_write_guard, mut connection) = self.write_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        transaction
             .execute(
                 "UPDATE task_worktrees
                  SET head_commit = ?1, merged_commit = ?2, updated_at = ?3
@@ -709,12 +733,13 @@ impl ProjectStorage {
                 params![merged.head_commit, merged.merged_commit, now, task_id],
             )
             .map_err(database_error)?;
-        connection
+        transaction
             .execute(
                 "UPDATE tasks SET status = 'completed', updated_at = ?1 WHERE id = ?2",
                 params![now, task_id],
             )
             .map_err(database_error)?;
+        transaction.commit().map_err(database_error)?;
         Ok(MergeTaskResult {
             task_id: task_id.to_owned(),
             head_commit: merged.head_commit,
@@ -774,31 +799,33 @@ impl ProjectStorage {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn save_task_worktree(&self, request: &TaskWorktreeRequest) -> Result<TaskRecord, String> {
         validate_worktree(request)?;
-        let connection = self.connection()?;
-        require_task(&connection, &request.task_id)?;
-        connection
-            .execute(
-                "INSERT INTO task_worktrees
-                 (task_id, branch_name, worktree_path, base_commit, head_commit, merged_commit, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(task_id) DO UPDATE SET
-                    branch_name = excluded.branch_name,
-                    worktree_path = excluded.worktree_path,
-                    base_commit = excluded.base_commit,
-                    head_commit = excluded.head_commit,
-                    merged_commit = excluded.merged_commit,
-                    updated_at = excluded.updated_at",
-                params![
-                    request.task_id,
-                    request.branch_name.trim(),
-                    request.worktree_path,
-                    request.base_commit,
-                    request.head_commit,
-                    request.merged_commit,
-                    now_millis()?
-                ],
-            )
-            .map_err(database_error)?;
+        {
+            let (_write_guard, connection) = self.write_connection()?;
+            require_task(&connection, &request.task_id)?;
+            connection
+                .execute(
+                    "INSERT INTO task_worktrees
+                     (task_id, branch_name, worktree_path, base_commit, head_commit, merged_commit, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(task_id) DO UPDATE SET
+                        branch_name = excluded.branch_name,
+                        worktree_path = excluded.worktree_path,
+                        base_commit = excluded.base_commit,
+                        head_commit = excluded.head_commit,
+                        merged_commit = excluded.merged_commit,
+                        updated_at = excluded.updated_at",
+                    params![
+                        request.task_id,
+                        request.branch_name.trim(),
+                        request.worktree_path,
+                        request.base_commit,
+                        request.head_commit,
+                        request.merged_commit,
+                        now_millis()?
+                    ],
+                )
+                .map_err(database_error)?;
+        }
         self.list_tasks()?
             .into_iter()
             .find(|task| task.id == request.task_id)
@@ -824,7 +851,7 @@ impl ProjectStorage {
         if request.metadata.to_string().len() > 256 * 1024 {
             return Err("Godot run metadata cannot exceed 256 KiB".to_owned());
         }
-        let connection = self.connection()?;
+        let (_write_guard, connection) = self.write_connection()?;
         let task_id = match &request.task_id {
             Some(task_id) => {
                 require_task(&connection, task_id)?;
@@ -869,19 +896,6 @@ impl ProjectStorage {
         request: &AppendGodotLogsRequest,
     ) -> Result<AppendGodotLogsResult, String> {
         validate_log_entries(&request.entries)?;
-        let mut connection = self.connection()?;
-        let status = connection
-            .query_row(
-                "SELECT status FROM godot_runs WHERE id = ?1",
-                [&request.run_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(database_error)?
-            .ok_or_else(|| "The Godot run was not found".to_owned())?;
-        if status != "running" {
-            return Err("Logs can only be appended to a running Godot session".to_owned());
-        }
         let segment_id = Uuid::now_v7().to_string();
         let relative_path = PathBuf::from("logs")
             .join(&request.run_id)
@@ -917,7 +931,22 @@ impl ProjectStorage {
             .map(|entry| entry.timestamp)
             .max()
             .ok_or_else(|| "At least one Godot log entry is required".to_owned())?;
-        let transaction = connection.transaction().map_err(database_error)?;
+        let (_write_guard, mut connection) = self.write_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let status = transaction
+            .query_row(
+                "SELECT status FROM godot_runs WHERE id = ?1",
+                [&request.run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(|| "The Godot run was not found".to_owned())?;
+        if status != "running" {
+            return Err("Logs can only be appended to a running Godot session".to_owned());
+        }
         transaction
             .execute(
                 "INSERT INTO godot_log_segments
@@ -970,8 +999,8 @@ impl ProjectStorage {
         if !["completed", "failed", "aborted"].contains(&request.status.as_str()) {
             return Err("The final Godot run status is invalid".to_owned());
         }
-        let changed = self
-            .connection()?
+        let (_write_guard, connection) = self.write_connection()?;
+        let changed = connection
             .execute(
                 "UPDATE godot_runs SET status = ?1, ended_at = ?2, exit_code = ?3
                  WHERE id = ?4 AND status = 'running'",
@@ -1044,7 +1073,7 @@ impl ProjectStorage {
 
     pub fn upsert_memory(&self, request: &UpsertMemoryRequest) -> Result<MemoryRecord, String> {
         validate_memory(request)?;
-        let mut connection = self.connection()?;
+        let (_write_guard, mut connection) = self.write_connection()?;
         if let Some(task_id) = &request.task_id {
             require_task(&connection, task_id)?;
         }
@@ -1063,7 +1092,9 @@ impl ProjectStorage {
             )
             .optional()
             .map_err(database_error)?;
-        let transaction = connection.transaction().map_err(database_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
         transaction
             .execute(
                 "INSERT INTO memory_items
@@ -1108,7 +1139,7 @@ impl ProjectStorage {
         request: &SaveMemoryEmbeddingRequest,
     ) -> Result<(), String> {
         validate_embedding(request)?;
-        let mut connection = self.connection()?;
+        let (_write_guard, mut connection) = self.write_connection()?;
         let task_id = connection
             .query_row(
                 "SELECT task_id FROM memory_items WHERE id = ?1",
@@ -1120,7 +1151,9 @@ impl ProjectStorage {
             .ok_or_else(|| "The memory record was not found".to_owned())?;
         let bytes = vector_bytes(&request.vector);
         let scope_key = task_id.unwrap_or_else(|| "project".to_owned());
-        let transaction = connection.transaction().map_err(database_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
         transaction
             .execute(
                 "INSERT INTO memory_embeddings
@@ -1287,7 +1320,7 @@ impl ProjectStorage {
                 Err(error) => return Err(format!("Could not store {}: {error}", path.display())),
             }
         }
-        let connection = self.connection()?;
+        let (_write_guard, connection) = self.write_connection()?;
         let existing = connection
             .query_row(
                 "SELECT content_hash, name, mime_type, size FROM attachments WHERE id = ?1",
@@ -1390,6 +1423,7 @@ impl ProjectStorage {
     }
 
     pub fn create_backup(&self) -> Result<BackupResult, String> {
+        let _write_guard = self.write_lock()?;
         let created_at = now_millis()?;
         let backup_root = self.data_root.join("backups").join(&self.project_id);
         fs::create_dir_all(&backup_root)
@@ -1425,6 +1459,7 @@ impl ProjectStorage {
     }
 
     pub fn run_maintenance(&self) -> Result<MaintenanceResult, String> {
+        let _write_guard = self.write_lock()?;
         let now = now_millis()?;
         let attachment_cutoff = now.saturating_sub(24 * 60 * 60 * 1_000);
         let log_cutoff = now.saturating_sub(30 * 24 * 60 * 60 * 1_000);
@@ -1453,7 +1488,9 @@ impl ProjectStorage {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         drop(old_runs_statement);
-        let transaction = connection.transaction().map_err(database_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
         for (id, _) in &orphaned {
             transaction
                 .execute("DELETE FROM attachments WHERE id = ?1", [id])
@@ -1497,6 +1534,18 @@ impl ProjectStorage {
 
     fn connection(&self) -> Result<Connection, String> {
         open_connection(&self.project_directory().join(PROJECT_DATABASE_FILE_NAME))
+    }
+
+    fn write_connection(&self) -> Result<(MutexGuard<'_, ()>, Connection), String> {
+        let guard = self.write_lock()?;
+        let connection = self.connection()?;
+        Ok((guard, connection))
+    }
+
+    fn write_lock(&self) -> Result<MutexGuard<'_, ()>, String> {
+        self.write_lock
+            .lock()
+            .map_err(|_| "The project storage write lock is poisoned".to_owned())
     }
 
     fn ensure_active_task(&self, connection: &Connection) -> Result<String, String> {
@@ -1961,6 +2010,37 @@ mod tests {
                 .expect("read attachment"),
             b"hi"
         );
+    }
+
+    #[test]
+    fn cloned_storage_serializes_writes() {
+        let directory = TempDir::new().expect("temporary storage");
+        let storage = storage(&directory);
+        let chat = storage.load_chat().expect("active chat");
+        let clone = storage.clone();
+        assert!(Arc::ptr_eq(&storage.write_lock, &clone.write_lock));
+
+        let guard = storage.write_lock().expect("write lock");
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            started_sender.send(()).expect("signal writer start");
+            result_sender
+                .send(clone.save_chat(&chat))
+                .expect("send write result");
+        });
+        started_receiver.recv().expect("writer started");
+        assert!(matches!(
+            result_receiver.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        drop(guard);
+        result_receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("writer completed")
+            .expect("save chat");
+        writer.join().expect("writer thread");
     }
 
     #[test]
