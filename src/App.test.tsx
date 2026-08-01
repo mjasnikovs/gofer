@@ -1,7 +1,8 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import {InitializationSplash, Navigation, SettingsPage, Workspace} from './App'
+import {InitializationSplash, Navigation, Workspace} from './App'
+import {SettingsPage} from './SettingsPage'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean
@@ -181,6 +182,28 @@ describe('SettingsPage', () => {
 })
 
 describe('Workspace', () => {
+    it('disposes a process listener that finishes registering after unmount', async () => {
+        const dispose = vi.fn()
+        let resolveListen: ((dispose: () => void) => void) | undefined
+        tauri.listen.mockImplementation(
+            () =>
+                new Promise(resolve => {
+                    resolveListen = resolve
+                })
+        )
+
+        const rendered = render(<Workspace />)
+        await waitFor(() => {
+            expect(tauri.listen).toHaveBeenCalledWith('godot-process-event', expect.any(Function))
+        })
+        rendered.unmount()
+        resolveListen?.(dispose)
+
+        await waitFor(() => {
+            expect(dispose).toHaveBeenCalledOnce()
+        })
+    })
+
     it('attaches and sends an image without requiring text', async () => {
         tauri.invoke.mockImplementation(async command => {
             if (command === 'load_settings') {
@@ -273,6 +296,47 @@ describe('Workspace', () => {
             expect(saveCall?.[1]).toMatchObject({
                 chat: {taskId: '0198f4c0-02ef-7000-8000-000000000001'}
             })
+        })
+    })
+
+    it('loads each persisted attachment preview only once across message updates', async () => {
+        tauri.invoke.mockImplementation(async command => {
+            if (command === 'load_chat') {
+                return {
+                    messages: [
+                        {
+                            id: 7,
+                            sender: 'user',
+                            text: 'Persisted image',
+                            timestamp: 10,
+                            attachments: [
+                                {
+                                    id: 'attachment-1',
+                                    name: 'scene.png',
+                                    mimeType: 'image/png',
+                                    size: 2
+                                }
+                            ]
+                        }
+                    ],
+                    agentMessages: []
+                }
+            }
+            if (command === 'read_chat_attachment') return 'data:image/png;base64,aGk='
+            return undefined
+        })
+
+        render(<Workspace />)
+
+        expect(await screen.findByAltText('Attached image: scene.png')).toHaveAttribute(
+            'src',
+            'data:image/png;base64,aGk='
+        )
+        await userEvent.type(screen.getByRole('textbox'), 'Continue{enter}')
+        await waitFor(() => {
+            expect(
+                tauri.invoke.mock.calls.filter(call => call[0] === 'read_chat_attachment')
+            ).toHaveLength(1)
         })
     })
 

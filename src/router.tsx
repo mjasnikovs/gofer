@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- Router configuration is shared with tests. */
-import {createContext, use, useCallback, useEffect, useMemo, useState} from 'react'
+import {Suspense, createContext, lazy, use, useCallback, useEffect, useMemo, useState} from 'react'
 import {
     createHashHistory,
     createRootRoute,
@@ -15,7 +15,7 @@ import {
 import type {RouterHistory} from '@tanstack/react-router'
 import {AppShell} from '@astryxdesign/core/AppShell'
 import {invoke, isTauri} from '@tauri-apps/api/core'
-import {InitializationSplash, Navigation, SettingsPage, Workspace} from './App'
+import {InitializationSplash, Navigation, Workspace} from './App'
 import {isTaskSummary} from './app-models'
 import type {Page, TaskSummary} from './app-models'
 
@@ -30,6 +30,7 @@ type ApplicationContextValue = Readonly<{
 }>
 
 const ApplicationContext = createContext<ApplicationContextValue | undefined>(undefined)
+const SettingsPage = lazy(() => import('./SettingsPage'))
 
 async function loadTasks() {
     if (!isTauri()) return []
@@ -180,19 +181,21 @@ function SettingsRoute() {
     const navigate = useNavigate()
 
     return (
-        <SettingsPage
-            isOpen
-            onOpenChange={isOpen => {
-                if (isOpen) return
-                const currentTask = tasks.find(task => task.isCurrent)
-                if (currentTask) {
-                    void navigate({to: '/tasks/$taskId', params: {taskId: currentTask.id}})
-                    return
-                }
-                void navigate({to: '/'})
-            }}
-            onCacheDeleted={prepareModels}
-        />
+        <Suspense fallback={null}>
+            <SettingsPage
+                isOpen
+                onOpenChange={isOpen => {
+                    if (isOpen) return
+                    const currentTask = tasks.find(task => task.isCurrent)
+                    if (currentTask) {
+                        void navigate({to: '/tasks/$taskId', params: {taskId: currentTask.id}})
+                        return
+                    }
+                    void navigate({to: '/'})
+                }}
+                onCacheDeleted={prepareModels}
+            />
+        </Suspense>
     )
 }
 

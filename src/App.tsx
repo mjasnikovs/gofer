@@ -1,6 +1,5 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {Suspense, lazy, useCallback, useEffect, useRef, useState} from 'react'
 import type {ReactNode} from 'react'
-import {AlertDialog} from '@astryxdesign/core/AlertDialog'
 import {AppShell} from '@astryxdesign/core/AppShell'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -16,12 +15,8 @@ import {
     ChatToolCalls,
     useChatStreamScroll
 } from '@astryxdesign/core/Chat'
-import {CodeBlock} from '@astryxdesign/core/CodeBlock'
 import {Divider} from '@astryxdesign/core/Divider'
-import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {DropdownMenu} from '@astryxdesign/core/DropdownMenu'
-import {FormLayout} from '@astryxdesign/core/FormLayout'
-import {Grid} from '@astryxdesign/core/Grid'
 import {Icon} from '@astryxdesign/core/Icon'
 import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {NavIcon} from '@astryxdesign/core/NavIcon'
@@ -31,27 +26,28 @@ import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
-import {TextInput} from '@astryxdesign/core/TextInput'
 import {Thumbnail} from '@astryxdesign/core/Thumbnail'
 import {Token} from '@astryxdesign/core/Token'
-import {
-    CircleStackIcon,
-    CloudArrowDownIcon,
-    Cog6ToothIcon,
-    KeyIcon,
-    PlusIcon,
-    ArrowPathIcon,
-    PhotoIcon,
-    PlayIcon,
-    ServerStackIcon,
-    SparklesIcon,
-    StopIcon,
-    TrashIcon
-} from '@heroicons/react/24/outline'
+import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
+import CircleStackIcon from '@heroicons/react/24/outline/CircleStackIcon'
+import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
+import PhotoIcon from '@heroicons/react/24/outline/PhotoIcon'
+import PlayIcon from '@heroicons/react/24/outline/PlayIcon'
+import PlusIcon from '@heroicons/react/24/outline/PlusIcon'
+import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
+import StopIcon from '@heroicons/react/24/outline/StopIcon'
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {listen} from '@tauri-apps/api/event'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import type {Page, TaskSummary} from './app-models'
+import {
+    ALL_THINKING_LEVELS,
+    NO_THINKING_LEVELS,
+    normalizeSettings,
+    progressLabel,
+    progressValue
+} from './settings-models'
+import type {AiModelOption, GoferSettings, SettingsResponse, ThinkingLevel} from './settings-models'
 
 type Message = Readonly<{
     id: number
@@ -127,76 +123,6 @@ type InitializationState =
     | Readonly<{status: 'error'; message: string}>
     | Readonly<{status: 'ready'}>
 
-type AiSettings = Readonly<{
-    connectionType: 'openai-compatible'
-    name: string
-    baseUrl: string
-    model: string
-    api: 'openai-completions'
-    modelName: string
-    contextWindow: number
-    maxTokens: number
-    reasoning: boolean
-    supportsReasoningEffort: boolean
-    input: readonly string[]
-    thinkingLevel: ThinkingLevel
-    maxRetries: number
-    timeoutMs: number
-    systemPrompt: string
-}>
-
-type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-
-type AiModelOption = Readonly<{
-    id: string
-    name: string
-    contextWindow: number
-    maxTokens: number
-    reasoning: boolean
-    supportsReasoningEffort: boolean
-    input: readonly string[]
-}>
-
-type GoferSettings = Readonly<{
-    version: 1
-    ai: AiSettings
-}>
-
-type SettingsResponse = Readonly<{
-    settings: GoferSettings
-    hasApiKey: boolean
-    credentialStoreError?: string
-}>
-
-type ApiKeyUpdate =
-    | Readonly<{action: 'keep'}>
-    | Readonly<{action: 'set'; value: string}>
-    | Readonly<{action: 'clear'}>
-
-type SettingsRequest = Readonly<{
-    settings: GoferSettings
-    apiKey: ApiKeyUpdate
-}>
-
-type CacheStatus = Readonly<{
-    path: string
-    sizeBytes: number
-    state: 'installed' | 'incomplete' | 'not-installed' | 'busy'
-}>
-
-type ConnectionTestResult = Readonly<{
-    status:
-        'connected' | 'model-unavailable' | 'unauthorized' | 'server-error' | 'server-unreachable'
-    message: string
-}>
-
-type Notice = Readonly<{
-    status: 'info' | 'warning' | 'error' | 'success'
-    title: string
-    description: string
-}>
-
-type ApiKeyIntent = 'keep' | 'set' | 'clear'
 type StoredChat = Readonly<{
     taskId?: string
     messages: readonly Message[]
@@ -227,6 +153,9 @@ const SPACIOUS_COMPOSER_INPUT_STYLE = {
 } as const
 const LEFT_ALIGNED_USER_BUBBLE_STYLE = {alignSelf: 'flex-start'} as const
 const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex'} as const
+const ToolOutputCodeBlock = lazy(() =>
+    import('@astryxdesign/core/CodeBlock').then(module => ({default: module.CodeBlock}))
+)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null
@@ -304,32 +233,24 @@ function isStoredChat(value: unknown): value is StoredChat {
     )
 }
 
-function normalizeSettings(settings: GoferSettings): GoferSettings {
-    return {
-        ...settings,
-        ai: Object.assign(
-            {
-                modelName: settings.ai.model,
-                contextWindow: 120_064,
-                maxTokens: 120_064,
-                reasoning: false,
-                supportsReasoningEffort: false,
-                input: ['text'],
-                thinkingLevel: 'off',
-                maxRetries: 2,
-                timeoutMs: 120_000,
-                systemPrompt: ''
-            },
-            settings.ai
-        )
+function nextStoredMessageId(messages: readonly Message[]) {
+    let maximumId = 0
+    for (const message of messages) {
+        if (message.id > maximumId) maximumId = message.id
     }
+    return maximumId + 1
 }
 
-function formatBytes(bytes: number) {
-    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GiB`
-    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`
-    if (bytes === 0) return '0 bytes'
-    return `${String(Math.round(bytes / 1024))} KiB`
+function messageUsage(messages: readonly Message[]) {
+    let total = 0
+    let context = 0
+    for (const message of messages) {
+        const tokens = message.usage?.totalTokens
+        if (tokens === undefined) continue
+        total += tokens
+        context = tokens
+    }
+    return {total, context}
 }
 
 function formatContextTokens(tokens: number) {
@@ -351,21 +272,6 @@ function contextProgressVariant(value: number, max: number) {
     if (usage <= 0.8) return 'success'
     if (usage <= 0.9) return 'warning'
     return 'error'
-}
-
-function progressValue(progress?: DownloadProgress) {
-    if (typeof progress?.progress === 'number') return Math.min(100, Math.max(0, progress.progress))
-    if (progress?.loaded !== undefined && progress.total)
-        return (progress.loaded / progress.total) * 100
-    return undefined
-}
-
-function progressLabel(progress?: DownloadProgress) {
-    if (!progress) return 'Preparing model download…'
-    if (progress.loaded !== undefined && progress.total) {
-        return `${progress.model}: ${formatBytes(progress.loaded)} of ${formatBytes(progress.total)}`
-    }
-    return `${progress.model}: ${progress.status}`
 }
 
 export function InitializationSplash({onReady}: {onReady: () => void}) {
@@ -498,45 +404,6 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
             />
         </AppShell>
     )
-}
-
-function apiKeyUpdate(intent: ApiKeyIntent, value: string): ApiKeyUpdate {
-    if (intent === 'clear') return {action: 'clear'}
-    if (intent === 'set') return {action: 'set', value}
-    return {action: 'keep'}
-}
-
-function cacheStateLabel(state: CacheStatus['state']) {
-    if (state === 'installed') return 'Installed'
-    if (state === 'incomplete') return 'Incomplete'
-    if (state === 'busy') return 'Busy'
-    return 'Not installed'
-}
-
-function cacheStateVariant(state: CacheStatus['state']) {
-    if (state === 'installed') return 'success' as const
-    if (state === 'incomplete' || state === 'busy') return 'warning' as const
-    return 'neutral' as const
-}
-
-function connectionNotice(result: ConnectionTestResult): Notice {
-    if (result.status === 'connected') {
-        return {status: 'success', title: 'AI connection works', description: result.message}
-    }
-    if (result.status === 'model-unavailable') {
-        return {
-            status: 'warning',
-            title: 'Configured model is unavailable',
-            description: result.message
-        }
-    }
-    if (result.status === 'unauthorized') {
-        return {status: 'error', title: 'Authentication failed', description: result.message}
-    }
-    if (result.status === 'server-unreachable') {
-        return {status: 'error', title: 'AI server is unreachable', description: result.message}
-    }
-    return {status: 'error', title: 'AI server returned an error', description: result.message}
 }
 
 type NavigationProps = Readonly<{
@@ -685,12 +552,21 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     const nextMessageId = useRef(1)
     const nextRequestId = useRef(1)
     const activeRequestId = useRef<number | undefined>(undefined)
+    const requestedAttachmentPreviews = useRef(new Set<string>())
+    const isWorkspaceMounted = useRef(false)
     const attachmentInputRef = useRef<HTMLInputElement>(null)
     const messageScrollRef = useRef<HTMLElement>(null)
     const chatScroll = useChatStreamScroll({
         scrollRef: messageScrollRef,
         enabled: messages.length > 0
     })
+
+    useEffect(() => {
+        isWorkspaceMounted.current = true
+        return () => {
+            isWorkspaceMounted.current = false
+        }
+    }, [])
 
     useEffect(() => {
         chatScroll.scrollIfLocked()
@@ -716,15 +592,14 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                 setMessages(chat.messages)
                 setAgentMessages(chat.agentMessages)
                 setTaskId(chat.taskId)
-                nextMessageId.current = Math.max(0, ...chat.messages.map(message => message.id)) + 1
+                nextMessageId.current = nextStoredMessageId(chat.messages)
                 window.localStorage.removeItem(CHAT_STORAGE_KEY)
             } catch (error) {
                 if (isCancelled) return
                 const legacy = loadLegacyChat()
                 setMessages(legacy.messages)
                 setAgentMessages(legacy.agentMessages)
-                nextMessageId.current =
-                    Math.max(0, ...legacy.messages.map(message => message.id)) + 1
+                nextMessageId.current = nextStoredMessageId(legacy.messages)
                 setStreamError(`Chat history could not be loaded: ${String(error)}`)
             } finally {
                 if (!isCancelled) setIsChatLoaded(true)
@@ -738,17 +613,24 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
 
     useEffect(() => {
         if (!isTauri()) return
+        let isCancelled = false
         let unlisten: (() => void) | undefined
         void listen<GodotProcessEvent>('godot-process-event', event => {
+            if (isCancelled) return
             if (event.payload.eventType === 'started') setIsGodotRunning(true)
             if (event.payload.eventType === 'finished') setIsGodotRunning(false)
             if (event.payload.level === 'error' && event.payload.message) {
                 setStreamError(`Godot: ${event.payload.message}`)
             }
         }).then(dispose => {
+            if (isCancelled) {
+                dispose()
+                return
+            }
             unlisten = dispose
         })
         return () => {
+            isCancelled = true
             unlisten?.()
         }
     }, [])
@@ -874,9 +756,13 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
 
     useEffect(() => {
         if (!isTauri()) return
-        const attachments = messages.flatMap(message => message.attachments ?? [])
+        const attachments = messages.flatMap(message =>
+            (message.attachments ?? []).filter(
+                attachment => !requestedAttachmentPreviews.current.has(attachment.id)
+            )
+        )
         if (attachments.length === 0) return
-        let isCancelled = false
+        for (const attachment of attachments) requestedAttachmentPreviews.current.add(attachment.id)
         const load = async () => {
             const previews = await Promise.all(
                 attachments.map(async attachment => {
@@ -888,18 +774,16 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     }
                 })
             )
-            if (isCancelled) return
-            setAttachmentPreviews(previous =>
-                Object.fromEntries([
-                    ...Object.entries(previous),
-                    ...previews.filter(entry => entry !== undefined)
-                ])
-            )
+            if (!isWorkspaceMounted.current) return
+            setAttachmentPreviews(previous => {
+                const next = {...previous}
+                for (const entry of previews) {
+                    if (entry) next[entry[0]] = entry[1]
+                }
+                return next
+            })
         }
         void load()
-        return () => {
-            isCancelled = true
-        }
     }, [messages])
 
     const updateAssistant = useCallback((id: number, update: (message: Message) => Message) => {
@@ -1159,21 +1043,11 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         runRequest(userMessage.text, messages.slice(0, assistantIndex - 1), userMessage.attachments)
     }
 
-    const totalUsage = messages.reduce(
-        (total, message) => total + (message.usage?.totalTokens ?? 0),
-        0
-    )
-    const contextUsage = messages.reduce(
-        (latest, message) => message.usage?.totalTokens ?? latest,
-        0
-    )
+    const usage = messageUsage(messages)
     const contextWindow = settings?.ai.contextWindow ?? 120_064
     const selectedModel = settings?.ai.modelName ?? settings?.ai.model ?? 'Loading model…'
     const thinkingLevel = settings?.ai.thinkingLevel ?? 'off'
-    const thinkingLevels: readonly ThinkingLevel[] =
-        settings?.ai.reasoning ?
-            ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-        :   ['off']
+    const thinkingLevels = settings?.ai.reasoning ? ALL_THINKING_LEVELS : NO_THINKING_LEVELS
     const supportsImages = Boolean(settings?.ai.input.includes('image'))
     const canAttachImages = supportsImages && !isStreaming && !isSavingAttachments && isTauri()
 
@@ -1365,9 +1239,9 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     <StackItem size='fill'>
                         <ProgressBar
                             label='Context usage'
-                            value={contextUsage}
+                            value={usage.context}
                             max={contextWindow}
-                            variant={contextProgressVariant(contextUsage, contextWindow)}
+                            variant={contextProgressVariant(usage.context, contextWindow)}
                             isLabelHidden
                         />
                     </StackItem>
@@ -1375,7 +1249,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                         type='supporting'
                         color='secondary'
                     >
-                        {formatContextUsage(contextUsage, contextWindow)}
+                        {formatContextUsage(usage.context, contextWindow)}
                     </Text>
                 </HStack>
                 <Text
@@ -1388,7 +1262,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     type='supporting'
                     color='secondary'
                 >
-                    {totalUsage.toLocaleString()} tokens
+                    {usage.total.toLocaleString()} tokens
                 </Text>
             </HStack>
         </VStack>
@@ -1522,19 +1396,29 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                                                                             }),
                                                                         ...(tool.output && {
                                                                             resultDetail: (
-                                                                                <CodeBlock
-                                                                                    code={
-                                                                                        tool.output
+                                                                                <Suspense
+                                                                                    fallback={
+                                                                                        <Text>
+                                                                                            {
+                                                                                                tool.output
+                                                                                            }
+                                                                                        </Text>
                                                                                     }
-                                                                                    language={
-                                                                                        (
-                                                                                            tool.name
-                                                                                            === 'bash'
-                                                                                        ) ?
-                                                                                            'bash'
-                                                                                        :   'text'
-                                                                                    }
-                                                                                />
+                                                                                >
+                                                                                    <ToolOutputCodeBlock
+                                                                                        code={
+                                                                                            tool.output
+                                                                                        }
+                                                                                        language={
+                                                                                            (
+                                                                                                tool.name
+                                                                                                === 'bash'
+                                                                                            ) ?
+                                                                                                'bash'
+                                                                                            :   'text'
+                                                                                        }
+                                                                                    />
+                                                                                </Suspense>
                                                                             )
                                                                         })
                                                                     })
@@ -1676,683 +1560,5 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                 </LayoutContent>
             }
         />
-    )
-}
-
-type SettingsPageProps = Readonly<{
-    isOpen: boolean
-    onOpenChange: (isOpen: boolean) => void
-    onCacheDeleted: () => void
-}>
-
-export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPageProps) {
-    const hasLoaded = useRef(false)
-    const [draft, setDraft] = useState<GoferSettings>()
-    const [hasApiKey, setHasApiKey] = useState(false)
-    const [apiKey, setApiKey] = useState('')
-    const [apiKeyIntent, setApiKeyIntent] = useState<ApiKeyIntent>('keep')
-    const [cache, setCache] = useState<CacheStatus>()
-    const [progress, setProgress] = useState<DownloadProgress>()
-    const [notice, setNotice] = useState<Notice>()
-    const [isLoading, setIsLoading] = useState(true)
-    const [isTesting, setIsTesting] = useState(false)
-    const [isSaving, setIsSaving] = useState(false)
-    const [isDownloading, setIsDownloading] = useState(false)
-    const [isDeleteOpen, setIsDeleteOpen] = useState(false)
-    const [isDeleting, setIsDeleting] = useState(false)
-    const [isBackingUp, setIsBackingUp] = useState(false)
-    const [isCleaningStorage, setIsCleaningStorage] = useState(false)
-    const [availableModels, setAvailableModels] = useState<readonly AiModelOption[]>([])
-
-    const refreshCache = useCallback(async () => {
-        const nextCache = await invoke<CacheStatus>('get_rag_cache_status')
-        setCache(nextCache)
-    }, [])
-
-    useEffect(() => {
-        if (hasLoaded.current) return
-        hasLoaded.current = true
-
-        const load = async () => {
-            if (!isTauri()) {
-                setNotice({
-                    status: 'warning',
-                    title: 'Desktop app required',
-                    description:
-                        'Local settings and model management are available in the Tauri desktop app.'
-                })
-                setIsLoading(false)
-                return
-            }
-
-            try {
-                const [settingsResponse, cacheResponse] = await Promise.all([
-                    invoke<SettingsResponse>('load_settings'),
-                    invoke<CacheStatus>('get_rag_cache_status')
-                ])
-                setDraft(normalizeSettings(settingsResponse.settings))
-                setHasApiKey(settingsResponse.hasApiKey)
-                setCache(cacheResponse)
-                if (settingsResponse.credentialStoreError) {
-                    setNotice({
-                        status: 'warning',
-                        title: 'API key storage is unavailable',
-                        description: settingsResponse.credentialStoreError
-                    })
-                }
-            } catch (error) {
-                setNotice({
-                    status: 'error',
-                    title: 'Settings could not be loaded',
-                    description: String(error)
-                })
-            } finally {
-                setIsLoading(false)
-            }
-        }
-
-        void load()
-    }, [])
-
-    const updateAi = (update: Partial<AiSettings>) => {
-        setDraft(previous => (previous ? {...previous, ai: {...previous.ai, ...update}} : previous))
-    }
-
-    const request = (): SettingsRequest | undefined => {
-        if (!draft) return undefined
-        return {settings: draft, apiKey: apiKeyUpdate(apiKeyIntent, apiKey)}
-    }
-
-    const testConnection = async () => {
-        const nextRequest = request()
-        if (!nextRequest) return
-        setIsTesting(true)
-        setNotice(undefined)
-        try {
-            const result = await invoke<ConnectionTestResult>('test_ai_connection', {
-                request: nextRequest
-            })
-            setNotice(connectionNotice(result))
-            if (result.status === 'connected' || result.status === 'model-unavailable') {
-                const models = await invoke<AiModelOption[]>('list_ai_models', {
-                    request: nextRequest
-                })
-                setAvailableModels(models)
-            }
-        } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Connection test failed',
-                description: String(error)
-            })
-        } finally {
-            setIsTesting(false)
-        }
-    }
-
-    const save = async () => {
-        const nextRequest = request()
-        if (!nextRequest) return
-        setIsSaving(true)
-        setNotice(undefined)
-        try {
-            const response = await invoke<SettingsResponse>('save_settings', {request: nextRequest})
-            setDraft(response.settings)
-            setHasApiKey(response.hasApiKey)
-            setApiKey('')
-            setApiKeyIntent('keep')
-            setNotice(
-                response.credentialStoreError ?
-                    {
-                        status: 'warning',
-                        title: 'Connection saved without API key access',
-                        description: response.credentialStoreError
-                    }
-                :   {
-                        status: 'success',
-                        title: 'Settings saved',
-                        description: 'Gofer will use this AI connection for subsequent requests.'
-                    }
-            )
-        } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Settings could not be saved',
-                description: String(error)
-            })
-        } finally {
-            setIsSaving(false)
-        }
-    }
-
-    const downloadModels = async () => {
-        setIsDownloading(true)
-        setNotice(undefined)
-        setCache(previous => (previous ? {...previous, state: 'busy'} : previous))
-        let unlisten: (() => void) | undefined
-        try {
-            unlisten = await listen<DownloadProgress>('rag-download-progress', event => {
-                setProgress(event.payload)
-            })
-            await invoke('initialize_rag')
-            await refreshCache()
-            setNotice({
-                status: 'success',
-                title: 'Documentation models installed',
-                description: 'Gofer can now search the local Godot 4.7 documentation.'
-            })
-        } catch (error) {
-            await refreshCache()
-            setNotice({
-                status: 'error',
-                title: 'Models could not be installed',
-                description: String(error)
-            })
-        } finally {
-            unlisten?.()
-            setIsDownloading(false)
-            setProgress(undefined)
-        }
-    }
-
-    const deleteCache = async () => {
-        setIsDeleting(true)
-        setNotice(undefined)
-        try {
-            const nextCache = await invoke<CacheStatus>('delete_rag_cache')
-            setCache(nextCache)
-            setIsDeleteOpen(false)
-            onCacheDeleted()
-        } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Model cache could not be deleted',
-                description: String(error)
-            })
-        } finally {
-            setIsDeleting(false)
-        }
-    }
-
-    const createBackup = async () => {
-        setIsBackingUp(true)
-        setNotice(undefined)
-        try {
-            const result = await invoke<{path: string}>('create_project_backup')
-            setNotice({
-                status: 'success',
-                title: 'Project backup created',
-                description: result.path
-            })
-        } catch (error) {
-            setNotice({status: 'error', title: 'Backup failed', description: String(error)})
-        } finally {
-            setIsBackingUp(false)
-        }
-    }
-
-    const cleanStorage = async () => {
-        setIsCleaningStorage(true)
-        setNotice(undefined)
-        try {
-            const result = await invoke<{
-                attachmentsRemoved: number
-                blobsRemoved: number
-                godotRunsRemoved: number
-                backupsRemoved: number
-            }>('run_storage_maintenance')
-            setNotice({
-                status: 'success',
-                title: 'Storage maintenance complete',
-                description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, and ${String(result.backupsRemoved)} old backups removed.`
-            })
-        } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Storage cleanup failed',
-                description: String(error)
-            })
-        } finally {
-            setIsCleaningStorage(false)
-        }
-    }
-
-    const value = progressValue(progress)
-    const cacheIsBusy = cache?.state === 'busy' || isDownloading
-    const canDeleteCache = Boolean(cache && cache.sizeBytes > 0 && !cacheIsBusy)
-    const selectModel = (model: AiModelOption) => {
-        updateAi({
-            model: model.id,
-            modelName: model.name,
-            contextWindow: model.contextWindow,
-            maxTokens: model.maxTokens,
-            reasoning: model.reasoning,
-            supportsReasoningEffort: model.supportsReasoningEffort,
-            input: model.input,
-            thinkingLevel: model.reasoning ? (draft?.ai.thinkingLevel ?? 'off') : 'off'
-        })
-    }
-
-    return (
-        <>
-            <Dialog
-                isOpen={isOpen && !isDeleteOpen}
-                onOpenChange={onOpenChange}
-                purpose='form'
-                width={960}
-                maxHeight='90vh'
-            >
-                <Layout
-                    height='fill'
-                    header={
-                        <DialogHeader
-                            title='Settings'
-                            subtitle='Configuration is owned by Gofer and stored only on this device.'
-                            onOpenChange={onOpenChange}
-                        />
-                    }
-                    content={
-                        <LayoutContent padding={6}>
-                            <VStack gap={8}>
-                                {notice && (
-                                    <Banner
-                                        status={notice.status}
-                                        title={notice.title}
-                                        description={notice.description}
-                                        isDismissable={notice.status !== 'error'}
-                                        onDismiss={() => {
-                                            setNotice(undefined)
-                                        }}
-                                    />
-                                )}
-
-                                <Grid
-                                    columns={{minWidth: 320}}
-                                    gap={10}
-                                >
-                                    <VStack gap={2}>
-                                        <HStack
-                                            gap={2}
-                                            vAlign='center'
-                                        >
-                                            <Icon
-                                                icon={ServerStackIcon}
-                                                size='md'
-                                                color='accent'
-                                            />
-                                            <Heading level={2}>AI connection</Heading>
-                                        </HStack>
-                                        <Text color='secondary'>
-                                            One active OpenAI-compatible connection. Changes take
-                                            effect only after saving.
-                                        </Text>
-                                    </VStack>
-
-                                    {draft ?
-                                        <VStack gap={5}>
-                                            <FormLayout>
-                                                <TextInput
-                                                    label='Connection type'
-                                                    value='OpenAI-compatible'
-                                                    isDisabled
-                                                    disabledMessage='OpenAI-compatible is the only supported connection type.'
-                                                />
-                                                <TextInput
-                                                    label='Connection name'
-                                                    value={draft.ai.name}
-                                                    isRequired
-                                                    onChange={name => {
-                                                        updateAi({name})
-                                                    }}
-                                                />
-                                                <TextInput
-                                                    label='Base URL'
-                                                    value={draft.ai.baseUrl}
-                                                    isRequired
-                                                    description='Absolute HTTP or HTTPS URL including the API prefix.'
-                                                    onChange={baseUrl => {
-                                                        updateAi({baseUrl})
-                                                    }}
-                                                />
-                                                <TextInput
-                                                    label='Model ID'
-                                                    value={draft.ai.model}
-                                                    isRequired
-                                                    description='Must exactly match an ID returned by the server models endpoint.'
-                                                    onChange={model => {
-                                                        updateAi({model})
-                                                    }}
-                                                />
-                                                {availableModels.length > 0 && (
-                                                    <DropdownMenu
-                                                        button={{
-                                                            label: `Select server model (${String(availableModels.length)})`,
-                                                            variant: 'secondary'
-                                                        }}
-                                                        menuWidth={360}
-                                                        items={availableModels.map(model => ({
-                                                            label: `${model.name} · ${model.contextWindow.toLocaleString()} context`,
-                                                            onClick: () => {
-                                                                selectModel(model)
-                                                            }
-                                                        }))}
-                                                    />
-                                                )}
-                                                <TextInput
-                                                    label='Context window'
-                                                    value={String(draft.ai.contextWindow)}
-                                                    isRequired
-                                                    description='Maximum context tokens advertised by the selected model.'
-                                                    onChange={contextWindow => {
-                                                        updateAi({
-                                                            contextWindow: Number(contextWindow)
-                                                        })
-                                                    }}
-                                                />
-                                                <TextInput
-                                                    label='Maximum output tokens'
-                                                    value={String(draft.ai.maxTokens)}
-                                                    isRequired
-                                                    onChange={maxTokens => {
-                                                        updateAi({maxTokens: Number(maxTokens)})
-                                                    }}
-                                                />
-                                                <TextInput
-                                                    label='Request timeout (milliseconds)'
-                                                    value={String(draft.ai.timeoutMs)}
-                                                    isRequired
-                                                    description='Provider requests are cancelled after this interval.'
-                                                    onChange={timeoutMs => {
-                                                        updateAi({timeoutMs: Number(timeoutMs)})
-                                                    }}
-                                                />
-                                                <TextInput
-                                                    label='Automatic retries'
-                                                    value={String(draft.ai.maxRetries)}
-                                                    isRequired
-                                                    description='Transient provider failures are retried up to ten times.'
-                                                    onChange={maxRetries => {
-                                                        updateAi({maxRetries: Number(maxRetries)})
-                                                    }}
-                                                />
-                                                <DropdownMenu
-                                                    button={{
-                                                        label: `Reasoning: ${draft.ai.thinkingLevel}`,
-                                                        variant: 'secondary'
-                                                    }}
-                                                    items={(draft.ai.reasoning ?
-                                                        ([
-                                                            'off',
-                                                            'minimal',
-                                                            'low',
-                                                            'medium',
-                                                            'high',
-                                                            'xhigh',
-                                                            'max'
-                                                        ] as const)
-                                                    :   (['off'] as const)
-                                                    ).map(level => ({
-                                                        label: level,
-                                                        onClick: () => {
-                                                            updateAi({thinkingLevel: level})
-                                                        }
-                                                    }))}
-                                                />
-                                                <TextInput
-                                                    label='Agent system prompt'
-                                                    value={draft.ai.systemPrompt}
-                                                    isOptional
-                                                    description='Leave blank to use Gofer’s built-in coding-agent prompt.'
-                                                    onChange={systemPrompt => {
-                                                        updateAi({systemPrompt})
-                                                    }}
-                                                />
-                                                <TextInput
-                                                    label='API dialect'
-                                                    value='OpenAI chat completions'
-                                                    isDisabled
-                                                    disabledMessage='Additional OpenAI API dialects are not supported yet.'
-                                                />
-                                                <TextInput
-                                                    label='API key'
-                                                    type='password'
-                                                    value={apiKey}
-                                                    isOptional
-                                                    startIcon={KeyIcon}
-                                                    placeholder={
-                                                        hasApiKey ? 'Stored securely' : (
-                                                            'Not required by local servers'
-                                                        )
-                                                    }
-                                                    description={
-                                                        apiKeyIntent === 'clear' ?
-                                                            'The stored key will be removed when you save.'
-                                                        : hasApiKey ?
-                                                            'Leave blank to keep the key stored in the operating system credential store.'
-                                                        :   'Enter a key only if this server requires authentication.'
-
-                                                    }
-                                                    onChange={enteredApiKey => {
-                                                        setApiKey(enteredApiKey)
-                                                        setApiKeyIntent(
-                                                            enteredApiKey.trim() ? 'set' : 'keep'
-                                                        )
-                                                    }}
-                                                />
-                                            </FormLayout>
-                                            {(hasApiKey || apiKeyIntent === 'clear') && (
-                                                <Button
-                                                    label={
-                                                        apiKeyIntent === 'clear' ?
-                                                            'Keep stored API key'
-                                                        :   'Remove stored API key'
-                                                    }
-                                                    variant='ghost'
-                                                    clickAction={() => {
-                                                        setApiKey('')
-                                                        setApiKeyIntent(
-                                                            apiKeyIntent === 'clear' ? 'keep' : (
-                                                                'clear'
-                                                            )
-                                                        )
-                                                    }}
-                                                />
-                                            )}
-                                            <HStack
-                                                gap={3}
-                                                hAlign='end'
-                                            >
-                                                <Button
-                                                    label='Test connection'
-                                                    variant='secondary'
-                                                    isLoading={isTesting}
-                                                    isDisabled={isSaving}
-                                                    clickAction={testConnection}
-                                                />
-                                                <Button
-                                                    label='Save connection'
-                                                    variant='primary'
-                                                    isLoading={isSaving}
-                                                    isDisabled={isTesting}
-                                                    clickAction={save}
-                                                />
-                                            </HStack>
-                                        </VStack>
-                                    :   <Text color='secondary'>
-                                            {isLoading ?
-                                                'Loading Gofer settings…'
-                                            :   'Settings are unavailable.'}
-                                        </Text>
-                                    }
-                                </Grid>
-
-                                <Divider />
-
-                                <Grid
-                                    columns={{minWidth: 320}}
-                                    gap={10}
-                                >
-                                    <VStack gap={2}>
-                                        <HStack
-                                            gap={2}
-                                            vAlign='center'
-                                        >
-                                            <Icon
-                                                icon={CircleStackIcon}
-                                                size='md'
-                                                color='accent'
-                                            />
-                                            <Heading level={2}>Godot documentation models</Heading>
-                                        </HStack>
-                                        <Text color='secondary'>
-                                            Local embedding and reranking models used to search the
-                                            Godot 4.7 documentation.
-                                        </Text>
-                                    </VStack>
-
-                                    {cache ?
-                                        <VStack gap={5}>
-                                            <VStack gap={3}>
-                                                <HStack
-                                                    gap={2}
-                                                    vAlign='center'
-                                                >
-                                                    <StatusDot
-                                                        variant={cacheStateVariant(cache.state)}
-                                                        label={cacheStateLabel(cache.state)}
-                                                    />
-                                                    <Text>{cacheStateLabel(cache.state)}</Text>
-                                                </HStack>
-                                                <VStack gap={1}>
-                                                    <Text type='supporting'>Cache location</Text>
-                                                    <Text color='secondary'>{cache.path}</Text>
-                                                </VStack>
-                                                <VStack gap={1}>
-                                                    <Text type='supporting'>Disk usage</Text>
-                                                    <Text color='secondary'>
-                                                        {formatBytes(cache.sizeBytes)}
-                                                    </Text>
-                                                </VStack>
-                                            </VStack>
-
-                                            {isDownloading && (
-                                                <VStack gap={2}>
-                                                    <ProgressBar
-                                                        label={progressLabel(progress)}
-                                                        value={value ?? 0}
-                                                        isIndeterminate={value === undefined}
-                                                        hasValueLabel={value !== undefined}
-                                                    />
-                                                    <Text
-                                                        type='supporting'
-                                                        color='secondary'
-                                                    >
-                                                        {progressLabel(progress)}
-                                                    </Text>
-                                                </VStack>
-                                            )}
-
-                                            <HStack
-                                                gap={3}
-                                                hAlign='end'
-                                            >
-                                                {cache.state !== 'installed' && (
-                                                    <Button
-                                                        label='Download models'
-                                                        variant='secondary'
-                                                        icon={
-                                                            <Icon
-                                                                icon={CloudArrowDownIcon}
-                                                                size='sm'
-                                                            />
-                                                        }
-                                                        isLoading={isDownloading}
-                                                        clickAction={downloadModels}
-                                                    />
-                                                )}
-                                                <Button
-                                                    label='Delete model cache'
-                                                    variant='destructive'
-                                                    icon={
-                                                        <Icon
-                                                            icon={TrashIcon}
-                                                            size='sm'
-                                                        />
-                                                    }
-                                                    isDisabled={!canDeleteCache}
-                                                    clickAction={() => {
-                                                        setIsDeleteOpen(true)
-                                                    }}
-                                                />
-                                            </HStack>
-                                        </VStack>
-                                    :   <Text color='secondary'>
-                                            {isLoading ?
-                                                'Inspecting the model cache…'
-                                            :   'Cache status is unavailable.'}
-                                        </Text>
-                                    }
-                                </Grid>
-
-                                <Divider />
-
-                                <Grid
-                                    columns={{minWidth: 320}}
-                                    gap={10}
-                                >
-                                    <VStack gap={2}>
-                                        <HStack
-                                            gap={2}
-                                            vAlign='center'
-                                        >
-                                            <Icon
-                                                icon={CircleStackIcon}
-                                                size='md'
-                                                color='accent'
-                                            />
-                                            <Heading level={2}>Project storage</Heading>
-                                        </HStack>
-                                        <Text color='secondary'>
-                                            Back up the active project database, attachments, and
-                                            Godot logs. Cleanup retains five backups and thirty days
-                                            of completed run logs.
-                                        </Text>
-                                    </VStack>
-                                    <HStack
-                                        gap={3}
-                                        hAlign='end'
-                                        vAlign='center'
-                                    >
-                                        <Button
-                                            label='Clean storage'
-                                            variant='secondary'
-                                            isLoading={isCleaningStorage}
-                                            isDisabled={isBackingUp}
-                                            clickAction={cleanStorage}
-                                        />
-                                        <Button
-                                            label='Back up project'
-                                            variant='primary'
-                                            isLoading={isBackingUp}
-                                            isDisabled={isCleaningStorage}
-                                            clickAction={createBackup}
-                                        />
-                                    </HStack>
-                                </Grid>
-                            </VStack>
-                        </LayoutContent>
-                    }
-                />
-            </Dialog>
-            <AlertDialog
-                isOpen={isDeleteOpen}
-                onOpenChange={setIsDeleteOpen}
-                title='Delete documentation model cache?'
-                description='This removes only the downloaded embedding and reranking models. Gofer will return to the preparation screen and download approximately 1.68 GiB again.'
-                actionLabel='Delete model cache'
-                isActionLoading={isDeleting}
-                onAction={deleteCache}
-            />
-        </>
     )
 }
