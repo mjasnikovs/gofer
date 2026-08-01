@@ -152,6 +152,76 @@ describe('SettingsPage', () => {
 })
 
 describe('Workspace', () => {
+    it('attaches and sends an image without requiring text', async () => {
+        tauri.invoke.mockImplementation(async command => {
+            if (command === 'load_settings') {
+                return {
+                    ...settingsResponse,
+                    settings: {
+                        ...settingsResponse.settings,
+                        ai: {...settingsResponse.settings.ai, input: ['text', 'image']}
+                    }
+                }
+            }
+            if (command === 'list_ai_models') {
+                return [
+                    {
+                        id: 'local-model',
+                        name: 'Local model',
+                        contextWindow: 120_064,
+                        maxTokens: 120_064,
+                        reasoning: false,
+                        supportsReasoningEffort: false,
+                        input: ['text', 'image']
+                    }
+                ]
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        const attachButton = await screen.findByRole('button', {name: 'Attach images'})
+        expect(attachButton).toBeEnabled()
+        const input = document.querySelector<HTMLInputElement>('input[type="file"]')
+        if (!input) throw new Error('Attachment input was not rendered')
+        await userEvent.upload(input, new File(['hi'], 'scene.png', {type: 'image/png'}))
+
+        expect(await screen.findByAltText('Attached image: scene.png')).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', {name: 'Send'}))
+
+        await waitFor(() => {
+            const saveCall = tauri.invoke.mock.calls.find(
+                call => call[0] === 'save_chat_attachment'
+            )
+            const serializedSaveRequest = JSON.stringify(saveCall?.[1])
+            expect(serializedSaveRequest).toContain('"name":"scene.png"')
+            expect(serializedSaveRequest).toContain('"mimeType":"image/png"')
+            expect(serializedSaveRequest).toContain('"size":2')
+            expect(serializedSaveRequest).toContain('"data":"aGk="')
+            expect(serializedSaveRequest).toMatch(/"id":"[a-z\d-]+"/u)
+            expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
+                request: {
+                    requestId: 1,
+                    agentMessages: [],
+                    messages: [
+                        expect.objectContaining({
+                            sender: 'user',
+                            text: '',
+                            attachments: [
+                                expect.objectContaining({
+                                    name: 'scene.png',
+                                    mimeType: 'image/png',
+                                    size: 2
+                                })
+                            ]
+                        })
+                    ]
+                }
+            })
+        })
+        expect(window.localStorage.getItem('gofer.agent-chat.v1')).not.toContain('aGk=')
+    })
+
     it('streams a Pi AI response into the assistant message', async () => {
         let handler: EventHandler | undefined
         tauri.listen.mockImplementation(async (_event, nextHandler) => {

@@ -97,6 +97,39 @@ test('streams a Pi AI completion through the configured local provider', async (
     }
 })
 
+test('sends image-only prompts as OpenAI image content', async () => {
+    const mock = startServer()
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const address = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: {
+                ...settings,
+                baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
+                input: ['text', 'image']
+            },
+            messages: [
+                {
+                    sender: 'user',
+                    text: '',
+                    timestamp: 1,
+                    images: [{data: 'aGk=', mimeType: 'image/png'}]
+                }
+            ],
+            workspacePath: process.cwd(),
+            emit: () => undefined
+        })
+
+        assert.deepEqual(mock.request().body.messages.at(-1), {
+            role: 'user',
+            content: [{type: 'image_url', image_url: {url: 'data:image/png;base64,aGk='}}]
+        })
+    } finally {
+        mock.server.close()
+    }
+})
+
 test('runs the Pi agent tool loop and streams tool lifecycle events', async () => {
     let requestCount = 0
     const bodies = []

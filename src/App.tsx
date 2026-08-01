@@ -6,11 +6,13 @@ import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {
     ChatComposer,
+    ChatComposerDrawer,
     ChatComposerInput,
     ChatMessage,
     ChatMessageBubble,
     ChatMessageList,
     ChatMessageMetadata,
+    ChatSendButton,
     ChatToolCalls,
     useChatStreamScroll
 } from '@astryxdesign/core/Chat'
@@ -29,6 +31,7 @@ import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
+import {Thumbnail} from '@astryxdesign/core/Thumbnail'
 import {Token} from '@astryxdesign/core/Token'
 import {
     CircleStackIcon,
@@ -37,6 +40,7 @@ import {
     KeyIcon,
     PlusIcon,
     ArrowPathIcon,
+    PhotoIcon,
     ServerStackIcon,
     SparklesIcon,
     TrashIcon
@@ -57,7 +61,21 @@ type Message = Readonly<{
     usage?: TokenUsage
     model?: string
     status?: 'streaming' | 'complete' | 'error' | 'aborted'
+    attachments?: readonly ChatAttachment[]
 }>
+
+type ChatAttachment = Readonly<{
+    id: string
+    name: string
+    mimeType: string
+    size: number
+}>
+
+type DraftAttachment = ChatAttachment
+    & Readonly<{
+        data: string
+        previewUrl: string
+    }>
 
 type TokenUsage = Readonly<{
     input: number
@@ -183,6 +201,10 @@ type StoredChat = Readonly<{
 }>
 
 const CHAT_STORAGE_KEY = 'gofer.agent-chat.v1'
+const CHAT_ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif'
+const CHAT_ATTACHMENT_TYPES = new Set(CHAT_ATTACHMENT_ACCEPT.split(','))
+const MAX_CHAT_ATTACHMENTS = 5
+const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const SPACIOUS_COMPOSER_INPUT_STYLE = {
     minHeight: 'calc(var(--spacing-12) + var(--spacing-10))'
 } as const
@@ -200,7 +222,42 @@ function isStoredMessage(value: unknown): value is Message {
         && (value['sender'] === 'user' || value['sender'] === 'assistant')
         && typeof value['text'] === 'string'
         && typeof value['timestamp'] === 'number'
+        && (value['attachments'] === undefined
+            || (Array.isArray(value['attachments'])
+                && value['attachments'].every(isStoredAttachment)))
     )
+}
+
+function isStoredAttachment(value: unknown): value is ChatAttachment {
+    if (!isRecord(value)) return false
+    return (
+        typeof value['id'] === 'string'
+        && typeof value['name'] === 'string'
+        && typeof value['mimeType'] === 'string'
+        && typeof value['size'] === 'number'
+    )
+}
+
+function attachmentData(file: File) {
+    return new Promise<{data: string; previewUrl: string}>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.addEventListener('error', () => {
+            reject(reader.error ?? new Error(`Could not read ${file.name}`))
+        })
+        reader.addEventListener('load', () => {
+            if (typeof reader.result !== 'string') {
+                reject(new Error(`Could not read ${file.name}`))
+                return
+            }
+            const separator = reader.result.indexOf(',')
+            if (separator < 0) {
+                reject(new Error(`Could not encode ${file.name}`))
+                return
+            }
+            resolve({data: reader.result.slice(separator + 1), previewUrl: reader.result})
+        })
+        reader.readAsDataURL(file)
+    })
 }
 
 function loadStoredChat(): StoredChat {
@@ -557,6 +614,11 @@ function Welcome({composer}: {composer: ReactNode}) {
 export function Workspace() {
     const [storedChat] = useState(loadStoredChat)
     const [draft, setDraft] = useState('')
+    const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
+    const [attachmentPreviews, setAttachmentPreviews] = useState<Readonly<Record<string, string>>>(
+        {}
+    )
+    const [isSavingAttachments, setIsSavingAttachments] = useState(false)
     const [messages, setMessages] = useState<readonly Message[]>(storedChat.messages)
     const [isStreaming, setIsStreaming] = useState(false)
     const [streamError, setStreamError] = useState<string>()
@@ -566,9 +628,10 @@ export function Workspace() {
     const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'offline'>(
         () => (isTauri() ? 'connecting' : 'offline')
     )
-    const nextMessageId = useRef(1)
+    const nextMessageId = useRef(Math.max(0, ...storedChat.messages.map(message => message.id)) + 1)
     const nextRequestId = useRef(1)
     const activeRequestId = useRef<number | undefined>(undefined)
+    const attachmentInputRef = useRef<HTMLInputElement>(null)
     const messageScrollRef = useRef<HTMLElement>(null)
     const chatScroll = useChatStreamScroll({
         scrollRef: messageScrollRef,
@@ -666,8 +729,52 @@ export function Workspace() {
     }, [connect])
 
     useEffect(() => {
-        window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify({messages, agentMessages}))
+        const hasAttachments = messages.some(message => Boolean(message.attachments?.length))
+        let errorTimeout: number | undefined
+        try {
+            window.localStorage.setItem(
+                CHAT_STORAGE_KEY,
+                JSON.stringify({messages, agentMessages: hasAttachments ? [] : agentMessages})
+            )
+        } catch (error) {
+            errorTimeout = window.setTimeout(() => {
+                setStreamError(`Chat history could not be saved: ${String(error)}`)
+            }, 0)
+        }
+        return () => {
+            if (errorTimeout !== undefined) window.clearTimeout(errorTimeout)
+        }
     }, [agentMessages, messages])
+
+    useEffect(() => {
+        if (!isTauri()) return
+        const attachments = messages.flatMap(message => message.attachments ?? [])
+        if (attachments.length === 0) return
+        let isCancelled = false
+        const load = async () => {
+            const previews = await Promise.all(
+                attachments.map(async attachment => {
+                    try {
+                        const preview = await invoke<string>('read_chat_attachment', {attachment})
+                        return [attachment.id, preview] as const
+                    } catch {
+                        return undefined
+                    }
+                })
+            )
+            if (isCancelled) return
+            setAttachmentPreviews(previous =>
+                Object.fromEntries([
+                    ...Object.entries(previous),
+                    ...previews.filter(entry => entry !== undefined)
+                ])
+            )
+        }
+        void load()
+        return () => {
+            isCancelled = true
+        }
+    }, [messages])
 
     const updateAssistant = useCallback((id: number, update: (message: Message) => Message) => {
         setMessages(previous =>
@@ -676,12 +783,17 @@ export function Workspace() {
     }, [])
 
     const runRequest = useCallback(
-        (prompt: string, history: readonly Message[]) => {
+        (
+            prompt: string,
+            history: readonly Message[],
+            attachments: readonly ChatAttachment[] = []
+        ) => {
             const userMessage: Message = {
                 id: nextMessageId.current++,
                 sender: 'user',
                 text: prompt,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                ...(attachments.length > 0 && {attachments})
             }
             const assistantMessage: Message = {
                 id: nextMessageId.current++,
@@ -697,6 +809,7 @@ export function Workspace() {
             activeRequestId.current = requestId
             setMessages([...history, userMessage, assistantMessage])
             setDraft('')
+            setDraftAttachments([])
             setStreamError(undefined)
             setIsStreaming(true)
 
@@ -788,7 +901,8 @@ export function Workspace() {
                             messages: requestMessages.map(message => ({
                                 sender: message.sender,
                                 text: message.text,
-                                timestamp: message.timestamp
+                                timestamp: message.timestamp,
+                                attachments: message.attachments ?? []
                             }))
                         }
                     })
@@ -811,10 +925,89 @@ export function Workspace() {
         [agentMessages, updateAssistant]
     )
 
-    const submitMessage = (value: string) => {
+    const submitMessage = async (value: string) => {
         const prompt = value.trim()
-        if (!prompt || isStreaming || !isTauri()) return
-        runRequest(prompt, messages)
+        if ((!prompt && draftAttachments.length === 0) || isStreaming || !isTauri()) return
+        setIsSavingAttachments(true)
+        setStreamError(undefined)
+        try {
+            await Promise.all(
+                draftAttachments.map(attachment =>
+                    invoke('save_chat_attachment', {
+                        request: {
+                            attachment: {
+                                id: attachment.id,
+                                name: attachment.name,
+                                mimeType: attachment.mimeType,
+                                size: attachment.size
+                            },
+                            data: attachment.data
+                        }
+                    })
+                )
+            )
+            setAttachmentPreviews(previous => ({
+                ...previous,
+                ...Object.fromEntries(
+                    draftAttachments.map(attachment => [attachment.id, attachment.previewUrl])
+                )
+            }))
+            runRequest(
+                prompt,
+                messages,
+                draftAttachments.map(attachment => ({
+                    id: attachment.id,
+                    name: attachment.name,
+                    mimeType: attachment.mimeType,
+                    size: attachment.size
+                }))
+            )
+        } catch (error) {
+            setStreamError(`The images could not be attached: ${String(error)}`)
+        } finally {
+            setIsSavingAttachments(false)
+        }
+    }
+
+    const selectAttachments = async (files: FileList | null) => {
+        if (!files) return
+        const available = MAX_CHAT_ATTACHMENTS - draftAttachments.length
+        const selected = Array.from(files).slice(0, available)
+        const invalid = selected.find(
+            file =>
+                !CHAT_ATTACHMENT_TYPES.has(file.type)
+                || file.size === 0
+                || file.size > MAX_CHAT_ATTACHMENT_BYTES
+        )
+        if (files.length > available) {
+            setStreamError(`You can attach up to ${String(MAX_CHAT_ATTACHMENTS)} images.`)
+            return
+        }
+        if (invalid) {
+            setStreamError(
+                invalid.size === 0 ? `${invalid.name} is empty.`
+                : CHAT_ATTACHMENT_TYPES.has(invalid.type) ? `${invalid.name} is larger than 10 MiB.`
+                : `${invalid.name} is not a supported image.`
+            )
+            return
+        }
+        try {
+            const attachments = await Promise.all(
+                selected.map(async file => ({
+                    id: crypto.randomUUID(),
+                    name: file.name,
+                    mimeType: file.type,
+                    size: file.size,
+                    ...(await attachmentData(file))
+                }))
+            )
+            setDraftAttachments(previous => [...previous, ...attachments])
+            setStreamError(undefined)
+        } catch (error) {
+            setStreamError(`The images could not be read: ${String(error)}`)
+        } finally {
+            if (attachmentInputRef.current) attachmentInputRef.current.value = ''
+        }
     }
 
     const stop = () => {
@@ -826,7 +1019,7 @@ export function Workspace() {
         const assistantIndex = messages.findIndex(message => message.id === assistantId)
         const userMessage = messages[assistantIndex - 1]
         if (assistantIndex < 1 || userMessage?.sender !== 'user') return
-        runRequest(userMessage.text, messages.slice(0, assistantIndex - 1))
+        runRequest(userMessage.text, messages.slice(0, assistantIndex - 1), userMessage.attachments)
     }
 
     const totalUsage = messages.reduce(
@@ -844,21 +1037,109 @@ export function Workspace() {
         settings?.ai.reasoning ?
             ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
         :   ['off']
+    const supportsImages = Boolean(settings?.ai.input.includes('image'))
+    const canAttachImages = supportsImages && !isStreaming && !isSavingAttachments && isTauri()
 
     const composer = (
         <VStack gap={1}>
+            <input
+                ref={attachmentInputRef}
+                type='file'
+                accept={CHAT_ATTACHMENT_ACCEPT}
+                multiple
+                hidden
+                onChange={event => {
+                    void selectAttachments(event.currentTarget.files)
+                }}
+            />
             <ChatComposer
                 value={draft}
                 onChange={setDraft}
-                onSubmit={submitMessage}
+                onSubmit={value => {
+                    void submitMessage(value)
+                }}
                 onStop={stop}
                 isStopShown={isStreaming}
                 density='spacious'
-                placeholder={isStreaming ? 'Gofer is working…' : 'Ask anything'}
+                placeholder={
+                    isSavingAttachments ? 'Attaching images…'
+                    : isStreaming ?
+                        'Gofer is working…'
+                    :   'Ask anything'
+                }
+                drawer={
+                    draftAttachments.length > 0 ?
+                        <ChatComposerDrawer>
+                            <HStack
+                                gap={2}
+                                wrap='wrap'
+                            >
+                                {draftAttachments.map(attachment => (
+                                    <Thumbnail
+                                        key={attachment.id}
+                                        src={attachment.previewUrl}
+                                        alt={`Attached image: ${attachment.name}`}
+                                        label={attachment.name}
+                                        isDisabled={isStreaming || isSavingAttachments}
+                                        showRemoveOn='always'
+                                        onRemove={() => {
+                                            setDraftAttachments(previous =>
+                                                previous.filter(item => item.id !== attachment.id)
+                                            )
+                                        }}
+                                    />
+                                ))}
+                            </HStack>
+                        </ChatComposerDrawer>
+                    :   undefined
+                }
+                headerActions={
+                    <Button
+                        label='Attach images'
+                        variant='ghost'
+                        size='sm'
+                        isIconOnly
+                        icon={<Icon icon={PhotoIcon} />}
+                        isDisabled={!canAttachImages}
+                        tooltip={
+                            supportsImages ? 'Attach up to 5 images' : (
+                                'The selected model does not support image input'
+                            )
+                        }
+                        onClick={() => {
+                            attachmentInputRef.current?.click()
+                        }}
+                    />
+                }
                 input={
                     <ChatComposerInput
                         maxRows={8}
                         style={SPACIOUS_COMPOSER_INPUT_STYLE}
+                        onKeyDown={event => {
+                            if (
+                                event.key !== 'Enter'
+                                || event.shiftKey
+                                || draft.trim()
+                                || draftAttachments.length === 0
+                                || event.nativeEvent.isComposing
+                            ) {
+                                return
+                            }
+                            event.preventDefault()
+                            void submitMessage('')
+                        }}
+                    />
+                }
+                sendButton={
+                    <ChatSendButton
+                        isStopShown={isStreaming}
+                        isDisabled={
+                            isSavingAttachments || (!draft.trim() && draftAttachments.length === 0)
+                        }
+                        onSend={() => {
+                            void submitMessage(draft)
+                        }}
+                        onStop={stop}
                     />
                 }
                 {...(streamError && {status: {type: 'error' as const, message: streamError}})}
@@ -1181,13 +1462,44 @@ export function Workspace() {
                                                             :   undefined
                                                         }
                                                     >
-                                                        {message.text ?
-                                                            <Text>{message.text}</Text>
-                                                        :   <Spinner
-                                                                size='sm'
-                                                                label='Generating response'
-                                                            />
-                                                        }
+                                                        <VStack
+                                                            gap={2}
+                                                            hAlign='start'
+                                                        >
+                                                            {Boolean(
+                                                                message.attachments?.length
+                                                            ) && (
+                                                                <HStack
+                                                                    gap={2}
+                                                                    wrap='wrap'
+                                                                >
+                                                                    {(
+                                                                        message.attachments ?? []
+                                                                    ).map(attachment => (
+                                                                        <Thumbnail
+                                                                            key={attachment.id}
+                                                                            alt={`Attached image: ${attachment.name}`}
+                                                                            label={attachment.name}
+                                                                            {...(attachmentPreviews[
+                                                                                attachment.id
+                                                                            ] && {
+                                                                                src: attachmentPreviews[
+                                                                                    attachment.id
+                                                                                ]
+                                                                            })}
+                                                                        />
+                                                                    ))}
+                                                                </HStack>
+                                                            )}
+                                                            {message.text ?
+                                                                <Text>{message.text}</Text>
+                                                            : message.sender === 'assistant' ?
+                                                                <Spinner
+                                                                    size='sm'
+                                                                    label='Generating response'
+                                                                />
+                                                            :   undefined}
+                                                        </VStack>
                                                     </ChatMessageBubble>
                                                 </ChatMessage>
                                             ))}
@@ -1794,7 +2106,8 @@ export default function App() {
     const prepareModels = useCallback(() => {
         setIsReady(false)
     }, [])
-    const newTask = useCallback(() => {
+    const newTask = useCallback(async () => {
+        if (isTauri()) await invoke('clear_chat_attachments').catch(() => undefined)
         window.localStorage.removeItem(CHAT_STORAGE_KEY)
         setWorkspaceKey(previous => previous + 1)
         setPage('workspace')

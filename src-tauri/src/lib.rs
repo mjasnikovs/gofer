@@ -1,4 +1,5 @@
 use keyring::{Entry, Error as KeyringError};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -15,7 +16,9 @@ const API_KEY_USERNAME: &str = "ai-default";
 const AI_EVENT_PREFIX: &str = "GOFER_AI_EVENT:";
 const RAG_EVENT_PREFIX: &str = "GOFER_RAG_EVENT:";
 const SETTINGS_FILE_NAME: &str = "settings.json";
+const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
 const SETTINGS_VERSION: u32 = 1;
+const MAX_CHAT_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 static RAG_INITIALIZING: AtomicBool = AtomicBool::new(false);
 static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -118,9 +121,43 @@ struct ChatMessageInput {
     sender: ChatSender,
     text: String,
     timestamp: u64,
+    #[serde(default)]
+    attachments: Vec<ChatAttachment>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAttachment {
+    id: String,
+    name: String,
+    mime_type: String,
+    size: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAttachmentUpload {
+    attachment: ChatAttachment,
+    data: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiWorkerImage {
+    data: String,
+    mime_type: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiWorkerMessage {
+    sender: ChatSender,
+    text: String,
+    timestamp: u64,
+    images: Vec<AiWorkerImage>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum ChatSender {
     User,
@@ -141,7 +178,7 @@ struct ChatRequest {
 struct AiWorkerRequest {
     settings: AiSettings,
     api_key: Option<String>,
-    messages: Vec<ChatMessageInput>,
+    messages: Vec<AiWorkerMessage>,
     agent_messages: Option<serde_json::Value>,
     workspace_path: String,
 }
@@ -482,7 +519,7 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
     let guard = AiRequestGuard;
     ACTIVE_AI_REQUEST_ID.store(request.request_id, Ordering::Release);
     AI_REQUEST_CANCELLED.store(false, Ordering::Release);
-    let messages = validate_chat_messages(request.messages)?;
+    let messages = hydrate_chat_messages(&app, validate_chat_messages(request.messages)?)?;
     let settings = read_settings(&app)?;
     let api_key = stored_api_key()?;
     let workspace_path = std::env::current_dir()
@@ -506,6 +543,49 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
     })
     .await
     .map_err(|error| format!("AI response task failed: {error}"))?
+}
+
+#[tauri::command]
+fn save_chat_attachment(app: AppHandle, request: ChatAttachmentUpload) -> Result<(), String> {
+    validate_chat_attachment(&request.attachment)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&request.data)
+        .map_err(|error| format!("The attachment data is not valid base64: {error}"))?;
+    if bytes.len() > MAX_CHAT_ATTACHMENT_BYTES {
+        return Err("Images cannot be larger than 10 MiB".to_owned());
+    }
+    if bytes.len() as u64 != request.attachment.size {
+        return Err("The attachment size does not match its contents".to_owned());
+    }
+    let path = chat_attachment_path(&app, &request.attachment.id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "The attachment path has no parent".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    fs::write(&path, bytes)
+        .map_err(|error| format!("Could not save {}: {error}", path.display()))
+}
+
+#[tauri::command]
+fn read_chat_attachment(app: AppHandle, attachment: ChatAttachment) -> Result<String, String> {
+    validate_chat_attachment(&attachment)?;
+    let bytes = read_chat_attachment_bytes(&app, &attachment)?;
+    Ok(format!(
+        "data:{};base64,{}",
+        attachment.mime_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[tauri::command]
+fn clear_chat_attachments(app: AppHandle) -> Result<(), String> {
+    let path = chat_attachments_path(&app)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_dir_all(&path)
+        .map_err(|error| format!("Could not remove {}: {error}", path.display()))
 }
 
 #[tauri::command]
@@ -588,6 +668,90 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .app_config_dir()
         .map(|path| path.join(SETTINGS_FILE_NAME))
         .map_err(|error| format!("Could not resolve Gofer's configuration directory: {error}"))
+}
+
+fn chat_attachments_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join(CHAT_ATTACHMENTS_DIRECTORY))
+        .map_err(|error| format!("Could not resolve Gofer's data directory: {error}"))
+}
+
+fn chat_attachment_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    validate_chat_attachment_id(id)?;
+    Ok(chat_attachments_path(app)?.join(id))
+}
+
+fn validate_chat_attachment(attachment: &ChatAttachment) -> Result<(), String> {
+    if attachment.name.trim().is_empty() {
+        return Err("Attachment names cannot be empty".to_owned());
+    }
+    if attachment.size == 0 || attachment.size > MAX_CHAT_ATTACHMENT_BYTES as u64 {
+        return Err("Images must be between 1 byte and 10 MiB".to_owned());
+    }
+    if !["image/png", "image/jpeg", "image/webp", "image/gif"]
+        .contains(&attachment.mime_type.as_str())
+    {
+        return Err("Only PNG, JPEG, WebP, and GIF images are supported".to_owned());
+    }
+    validate_chat_attachment_id(&attachment.id)
+}
+
+fn validate_chat_attachment_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err("The attachment ID is invalid".to_owned());
+    }
+    Ok(())
+}
+
+fn read_chat_attachment_bytes(
+    app: &AppHandle,
+    attachment: &ChatAttachment,
+) -> Result<Vec<u8>, String> {
+    let path = chat_attachment_path(app, &attachment.id)?;
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("Could not read attachment {}: {error}", attachment.name))?;
+    if bytes.len() as u64 != attachment.size {
+        return Err(format!(
+            "The stored attachment size is invalid: {}",
+            attachment.name
+        ));
+    }
+    Ok(bytes)
+}
+
+fn hydrate_chat_messages(
+    app: &AppHandle,
+    messages: Vec<ChatMessageInput>,
+) -> Result<Vec<AiWorkerMessage>, String> {
+    messages
+        .into_iter()
+        .map(|message| {
+            let images = message
+                .attachments
+                .iter()
+                .map(|attachment| {
+                    validate_chat_attachment(attachment)?;
+                    let bytes = read_chat_attachment_bytes(app, attachment)?;
+                    Ok(AiWorkerImage {
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        mime_type: attachment.mime_type.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(AiWorkerMessage {
+                sender: message.sender,
+                text: message.text,
+                timestamp: message.timestamp,
+                images,
+            })
+        })
+        .collect()
 }
 
 fn read_settings(app: &AppHandle) -> Result<GoferSettings, String> {
@@ -742,11 +906,23 @@ fn validate_chat_messages(
     ) {
         return Err("The last chat message must come from the user".to_owned());
     }
+    if messages.iter().any(|message| {
+        message.text.trim().is_empty()
+            && (message.sender != ChatSender::User || message.attachments.is_empty())
+    }) {
+        return Err("Chat messages must contain text or an image".to_owned());
+    }
     if messages
         .iter()
-        .any(|message| message.text.trim().is_empty())
+        .any(|message| message.attachments.len() > 5)
     {
-        return Err("Chat messages cannot be empty".to_owned());
+        return Err("Chat messages cannot contain more than 5 images".to_owned());
+    }
+    for attachment in messages
+        .iter()
+        .flat_map(|message| message.attachments.iter())
+    {
+        validate_chat_attachment(attachment)?;
     }
     Ok(messages)
 }
@@ -1147,9 +1323,12 @@ pub fn run() {
             initialize_rag,
             list_ai_models,
             load_settings,
+            read_chat_attachment,
             save_settings,
+            save_chat_attachment,
             send_ai_message,
-            test_ai_connection
+            test_ai_connection,
+            clear_chat_attachments
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1186,6 +1365,15 @@ mod tests {
         }
     }
 
+    fn chat_attachment() -> ChatAttachment {
+        ChatAttachment {
+            id: "018f47aa-09d2-7b34-a2d3-8c4e6f123456".to_owned(),
+            name: "scene.png".to_owned(),
+            mime_type: "image/png".to_owned(),
+            size: 2,
+        }
+    }
+
     fn mock_server(status: &str, body: &str) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
         let address = listener.local_addr().expect("mock server address");
@@ -1214,6 +1402,37 @@ mod tests {
             .expect("default settings");
 
         assert_eq!(loaded, GoferSettings::default());
+    }
+
+    #[test]
+    fn image_only_user_messages_are_valid() {
+        let messages = vec![ChatMessageInput {
+            sender: ChatSender::User,
+            text: String::new(),
+            timestamp: 1,
+            attachments: vec![chat_attachment()],
+        }];
+
+        assert!(validate_chat_messages(messages).is_ok());
+    }
+
+    #[test]
+    fn chat_attachment_metadata_is_validated() {
+        let mut invalid_type = chat_attachment();
+        invalid_type.mime_type = "application/pdf".to_owned();
+        assert!(
+            validate_chat_attachment(&invalid_type)
+                .unwrap_err()
+                .contains("Only PNG")
+        );
+
+        let mut unsafe_id = chat_attachment();
+        unsafe_id.id = "../scene".to_owned();
+        assert!(
+            validate_chat_attachment(&unsafe_id)
+                .unwrap_err()
+                .contains("ID is invalid")
+        );
     }
 
     #[test]

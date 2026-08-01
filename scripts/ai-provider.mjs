@@ -46,7 +46,16 @@ function modelFor(settings) {
 
 function contextMessage(message, model) {
     if (message.sender === 'user') {
-        return {role: 'user', content: message.text, timestamp: message.timestamp}
+        const images = Array.isArray(message.images) ? message.images : []
+        const content = [
+            ...(message.text ? [{type: 'text', text: message.text}] : []),
+            ...images.map(image => ({type: 'image', data: image.data, mimeType: image.mimeType}))
+        ]
+        return {
+            role: 'user',
+            content: images.length > 0 ? content : message.text,
+            timestamp: message.timestamp
+        }
     }
     return {
         role: 'assistant',
@@ -121,8 +130,10 @@ export async function runAgent({
         Array.isArray(agentMessages) ? agentMessages : (
             messages.slice(0, -1).map(message => contextMessage(message, model))
         )
-    const prompt = messages.at(-1)?.text
-    if (!prompt) throw new Error('The agent request does not contain a user prompt')
+    const promptMessage = messages.at(-1)
+    if (!promptMessage || (!promptMessage.text && promptMessage.images.length === 0)) {
+        throw new Error('The agent request does not contain a user prompt or image')
+    }
 
     const agent = new Agent({
         initialState: {
@@ -188,7 +199,7 @@ export async function runAgent({
     })
 
     try {
-        await agent.prompt(prompt)
+        await agent.prompt(contextMessage(promptMessage, model))
         if (!finalMessage)
             throw new Error(agent.state.errorMessage || 'The agent ended without a response')
         if (finalMessage.stopReason === 'error') {
