@@ -51,8 +51,7 @@ import {
 import {invoke, isTauri} from '@tauri-apps/api/core'
 import {listen} from '@tauri-apps/api/event'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
-
-type Page = 'workspace' | 'settings'
+import type {Page, TaskSummary} from './app-models'
 
 type Message = Readonly<{
     id: number
@@ -204,24 +203,6 @@ type StoredChat = Readonly<{
     agentMessages: readonly unknown[]
 }>
 
-type TaskWorktreeSummary = Readonly<{
-    branchName: string
-    worktreePath: string
-    baseCommit: string
-    headCommit?: string
-    mergedCommit?: string
-}>
-
-type TaskSummary = Readonly<{
-    id: string
-    title: string
-    status: 'active' | 'completed'
-    isCurrent: boolean
-    createdAt: number
-    updatedAt: number
-    worktree?: TaskWorktreeSummary
-}>
-
 type WorkspaceProps = Readonly<{
     activeTask?: TaskSummary
     onTasksChanged?: () => void
@@ -320,30 +301,6 @@ function isStoredChat(value: unknown): value is StoredChat {
         && Array.isArray(value['messages'])
         && value['messages'].every(isStoredMessage)
         && Array.isArray(value['agentMessages'])
-    )
-}
-
-function isTaskSummary(value: unknown): value is TaskSummary {
-    if (!isRecord(value)) return false
-    return (
-        typeof value['id'] === 'string'
-        && typeof value['title'] === 'string'
-        && (value['status'] === 'active' || value['status'] === 'completed')
-        && typeof value['isCurrent'] === 'boolean'
-        && typeof value['createdAt'] === 'number'
-        && typeof value['updatedAt'] === 'number'
-        && (value['worktree'] === undefined || isTaskWorktreeSummary(value['worktree']))
-    )
-}
-
-function isTaskWorktreeSummary(value: unknown): value is TaskWorktreeSummary {
-    if (!isRecord(value)) return false
-    return (
-        typeof value['branchName'] === 'string'
-        && typeof value['worktreePath'] === 'string'
-        && typeof value['baseCommit'] === 'string'
-        && (value['headCommit'] === undefined || typeof value['headCommit'] === 'string')
-        && (value['mergedCommit'] === undefined || typeof value['mergedCommit'] === 'string')
     )
 }
 
@@ -584,13 +541,21 @@ function connectionNotice(result: ConnectionTestResult): Notice {
 
 type NavigationProps = Readonly<{
     page: Page
+    selectedTaskId?: string
     tasks: readonly TaskSummary[]
     onNavigate: (page: Page) => void
     onNewTask: () => void
     onOpenTask: (taskId: string) => void
 }>
 
-export function Navigation({page, tasks, onNavigate, onNewTask, onOpenTask}: NavigationProps) {
+export function Navigation({
+    page,
+    selectedTaskId,
+    tasks,
+    onNavigate,
+    onNewTask,
+    onOpenTask
+}: NavigationProps) {
     return (
         <SideNav
             collapsible
@@ -609,7 +574,7 @@ export function Navigation({page, tasks, onNavigate, onNewTask, onOpenTask}: Nav
                             }
                         />
                     }
-                    headingHref='#workspace'
+                    headingHref='#/'
                 />
             }
             footer={
@@ -620,7 +585,7 @@ export function Navigation({page, tasks, onNavigate, onNewTask, onOpenTask}: Nav
                     <SideNavItem
                         label='Settings'
                         icon={Cog6ToothIcon}
-                        href='#settings'
+                        href='#/settings'
                         isSelected={page === 'settings'}
                         onClick={event => {
                             event.preventDefault()
@@ -637,7 +602,7 @@ export function Navigation({page, tasks, onNavigate, onNewTask, onOpenTask}: Nav
                 <SideNavItem
                     label='New task'
                     icon={PlusIcon}
-                    href='#workspace'
+                    href='#/'
                     onClick={event => {
                         event.preventDefault()
                         onNewTask()
@@ -650,8 +615,8 @@ export function Navigation({page, tasks, onNavigate, onNewTask, onOpenTask}: Nav
                         <SideNavItem
                             key={task.id}
                             label={task.title}
-                            href='#workspace'
-                            isSelected={page === 'workspace' && task.isCurrent}
+                            href={`#/tasks/${encodeURIComponent(task.id)}`}
+                            isSelected={page === 'workspace' && task.id === selectedTaskId}
                             onClick={event => {
                                 event.preventDefault()
                                 onOpenTask(task.id)
@@ -2389,129 +2354,5 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                 onAction={deleteCache}
             />
         </>
-    )
-}
-
-export default function App() {
-    const [page, setPage] = useState<Page>(() =>
-        window.location.hash === '#settings' ? 'settings' : 'workspace'
-    )
-    const [tasks, setTasks] = useState<readonly TaskSummary[]>([])
-    const [workspaceKey, setWorkspaceKey] = useState(0)
-    const [isReady, setIsReady] = useState(false)
-    const showApplication = useCallback(() => {
-        setIsReady(true)
-    }, [])
-    const prepareModels = useCallback(() => {
-        setIsReady(false)
-    }, [])
-    const navigate = useCallback((nextPage: Page) => {
-        window.history.pushState(undefined, '', `#${nextPage}`)
-        setPage(nextPage)
-    }, [])
-    const refreshTasks = useCallback(async () => {
-        if (!isTauri()) return
-        const response = await invoke<unknown>('list_project_tasks').catch(() => undefined)
-        if (Array.isArray(response) && response.every(isTaskSummary)) setTasks(response)
-    }, [])
-    const newTask = useCallback(async () => {
-        if (isTauri()) {
-            const created = await invoke('create_chat_task').then(
-                () => true,
-                () => false
-            )
-            if (!created) return
-            await refreshTasks()
-        }
-        setWorkspaceKey(previous => previous + 1)
-        navigate('workspace')
-    }, [navigate, refreshTasks])
-    const openTask = useCallback(
-        async (taskId: string) => {
-            if (isTauri()) {
-                const activated = await invoke('activate_chat_task', {taskId}).then(
-                    () => true,
-                    () => false
-                )
-                if (!activated) return
-                await refreshTasks()
-            }
-            setWorkspaceKey(previous => previous + 1)
-            navigate('workspace')
-        },
-        [navigate, refreshTasks]
-    )
-    const selectTask = useCallback(
-        (taskId: string) => {
-            void openTask(taskId)
-        },
-        [openTask]
-    )
-    const tasksChanged = useCallback(() => {
-        void refreshTasks()
-    }, [refreshTasks])
-    const activeTask = tasks.find(task => task.isCurrent)
-    const mergeActiveTask = useCallback(async () => {
-        const task = tasks.find(candidate => candidate.isCurrent)
-        if (!task?.worktree) return
-        await invoke('merge_task_worktree', {taskId: task.id})
-        await refreshTasks()
-    }, [refreshTasks, tasks])
-
-    useEffect(() => {
-        if (!isReady) return
-        const timeout = window.setTimeout(() => {
-            void refreshTasks()
-        }, 0)
-        return () => {
-            window.clearTimeout(timeout)
-        }
-    }, [isReady, refreshTasks])
-
-    useEffect(() => {
-        const syncPageWithLocation = () => {
-            setPage(window.location.hash === '#settings' ? 'settings' : 'workspace')
-        }
-
-        window.addEventListener('hashchange', syncPageWithLocation)
-        window.addEventListener('popstate', syncPageWithLocation)
-        return () => {
-            window.removeEventListener('hashchange', syncPageWithLocation)
-            window.removeEventListener('popstate', syncPageWithLocation)
-        }
-    }, [])
-
-    if (!isReady) return <InitializationSplash onReady={showApplication} />
-
-    return (
-        <AppShell
-            contentPadding={0}
-            variant='section'
-            sideNav={
-                <Navigation
-                    page={page}
-                    tasks={tasks}
-                    onNavigate={navigate}
-                    onNewTask={newTask}
-                    onOpenTask={selectTask}
-                />
-            }
-        >
-            <Workspace
-                key={workspaceKey}
-                onTasksChanged={tasksChanged}
-                onMergeTask={mergeActiveTask}
-                {...(activeTask && {activeTask})}
-            />
-            {page === 'settings' && (
-                <SettingsPage
-                    isOpen
-                    onOpenChange={isOpen => {
-                        if (!isOpen) navigate('workspace')
-                    }}
-                    onCacheDeleted={prepareModels}
-                />
-            )}
-        </AppShell>
     )
 }

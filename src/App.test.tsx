@@ -411,6 +411,7 @@ describe('Navigation', () => {
         render(
             <Navigation
                 page='workspace'
+                selectedTaskId='task-1'
                 tasks={[
                     {
                         id: 'task-1',
@@ -438,6 +439,10 @@ describe('Navigation', () => {
         await userEvent.click(screen.getByText('Inventory UI'))
         await userEvent.click(screen.getByText('New task'))
 
+        expect(screen.getByText('Inventory UI').closest('a')).toHaveAttribute(
+            'href',
+            '#/tasks/task-2'
+        )
         expect(onOpenTask).toHaveBeenCalledWith('task-2')
         expect(onNewTask).toHaveBeenCalledOnce()
     })
