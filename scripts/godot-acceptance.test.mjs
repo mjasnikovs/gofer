@@ -53,6 +53,22 @@ function startBridge(project, port) {
     return {child, output: () => output}
 }
 
+function waitForExit(child) {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+    return new Promise(resolveExit => child.once('exit', resolveExit))
+}
+
+/**
+ * Ends a bridge process and waits until it is really gone.
+ *
+ * Windows holds a lock on the project directory for as long as the editor is alive, so the fixture
+ * cannot be removed until the process has actually exited — `kill()` alone only requests it.
+ */
+async function stopBridge({child}) {
+    if (child.exitCode === null && child.signalCode === null) child.kill()
+    await waitForExit(child)
+}
+
 async function connect(port) {
     return new Promise((resolveConnect, reject) => {
         const deadline = Date.now() + 10_000
@@ -115,13 +131,19 @@ class ProtocolClient {
 
 test('real Godot bridge accepts commands, persists mutation, reports errors, and reconnects', async context => {
     const project = await fixtureProject()
-    context.after(() => rm(project, {recursive: true, force: true}))
     await writeFile(join(project, 'broken.gd'), 'extends Node\nfunc broken(\n')
     const port = await availablePort()
     let bridge = startBridge(project, port)
-    context.after(() => bridge.child.kill())
     let client = await connect(port)
+
+    // node:test runs `after` hooks in registration order, so these must be registered outermost
+    // first: close the socket, wait for the editor to exit, and only then remove its project.
+    // Removing it first made Windows fail with EBUSY while Godot still held the directory.
     context.after(() => client.close())
+    context.after(() => stopBridge(bridge))
+    context.after(() =>
+        rm(project, {recursive: true, force: true, maxRetries: 10, retryDelay: 100})
+    )
 
     const handshake = await client.request('handshake', {client: 'gofer', acceptedVersions: [1]})
     assert.ok(handshake.result, JSON.stringify(handshake))
@@ -164,7 +186,8 @@ test('real Godot bridge accepts commands, persists mutation, reports errors, and
     client = await connect(port)
     assert.equal((await client.request('handshake')).result.acceptedVersion, 1)
     await client.request('shutdown')
-    await new Promise(resolveExit => bridge.child.once('exit', resolveExit))
+    // A graceful exit, not a kill: the parse-error output below must be complete.
+    await waitForExit(bridge.child)
     assert.match(bridge.output(), /SCRIPT ERROR: Parse Error/u)
 
     const scene = await readFile(join(project, 'main.tscn'), 'utf8')
