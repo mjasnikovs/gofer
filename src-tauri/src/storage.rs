@@ -182,6 +182,17 @@ PRAGMA user_version = 2;
 COMMIT;
 "#;
 
+// `memory_vectors` is a vec0 virtual table, so the `memory_embeddings` foreign key cascade does
+// not reach it. Without this trigger a deleted memory would leave its vector searchable forever.
+const PROJECT_SCHEMA_V3: &str = r#"
+BEGIN;
+CREATE TRIGGER memory_items_ad_vectors AFTER DELETE ON memory_items BEGIN
+    DELETE FROM memory_vectors WHERE memory_id = old.id;
+END;
+PRAGMA user_version = 3;
+COMMIT;
+"#;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAttachment {
@@ -235,18 +246,6 @@ pub struct TaskRecord {
     pub created_at: u64,
     pub updated_at: u64,
     pub worktree: Option<TaskWorktree>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(not(test), allow(dead_code))]
-pub struct TaskWorktreeRequest {
-    pub task_id: String,
-    pub branch_name: String,
-    pub worktree_path: String,
-    pub base_commit: String,
-    pub head_commit: Option<String>,
-    pub merged_commit: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -303,29 +302,6 @@ pub struct FinishGodotRunRequest {
     pub run_id: String,
     pub status: String,
     pub exit_code: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(not(test), allow(dead_code))]
-pub struct SearchGodotLogsRequest {
-    pub query: String,
-    pub run_id: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg_attr(not(test), allow(dead_code))]
-pub struct GodotLogSearchResult {
-    pub id: String,
-    pub run_id: String,
-    pub timestamp: u64,
-    pub level: String,
-    pub source: Option<String>,
-    pub message: String,
-    pub stack_trace: Option<String>,
-    pub rank: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -403,6 +379,7 @@ pub struct MaintenanceResult {
     pub blobs_removed: usize,
     pub godot_runs_removed: usize,
     pub backups_removed: usize,
+    pub memory_embeddings_restored: usize,
 }
 
 #[derive(Default)]
@@ -797,42 +774,6 @@ impl ProjectStorage {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn save_task_worktree(&self, request: &TaskWorktreeRequest) -> Result<TaskRecord, String> {
-        validate_worktree(request)?;
-        {
-            let (_write_guard, connection) = self.write_connection()?;
-            require_task(&connection, &request.task_id)?;
-            connection
-                .execute(
-                    "INSERT INTO task_worktrees
-                     (task_id, branch_name, worktree_path, base_commit, head_commit, merged_commit, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                     ON CONFLICT(task_id) DO UPDATE SET
-                        branch_name = excluded.branch_name,
-                        worktree_path = excluded.worktree_path,
-                        base_commit = excluded.base_commit,
-                        head_commit = excluded.head_commit,
-                        merged_commit = excluded.merged_commit,
-                        updated_at = excluded.updated_at",
-                    params![
-                        request.task_id,
-                        request.branch_name.trim(),
-                        request.worktree_path,
-                        request.base_commit,
-                        request.head_commit,
-                        request.merged_commit,
-                        now_millis()?
-                    ],
-                )
-                .map_err(database_error)?;
-        }
-        self.list_tasks()?
-            .into_iter()
-            .find(|task| task.id == request.task_id)
-            .ok_or_else(|| "The updated task was not found".to_owned())
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start_godot_run(
         &self,
         request: &StartGodotRunRequest,
@@ -1018,59 +959,6 @@ impl ProjectStorage {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn search_godot_logs(
-        &self,
-        request: &SearchGodotLogsRequest,
-    ) -> Result<Vec<GodotLogSearchResult>, String> {
-        let query = fts_query(&request.query);
-        if query.is_empty() {
-            return Err("Godot log search requires searchable text".to_owned());
-        }
-        let limit = request.limit.unwrap_or(20).clamp(1, 100);
-        let connection = self.connection()?;
-        let mut statement = connection
-            .prepare(
-                "SELECT e.id, e.run_id, e.timestamp, e.level, e.source,
-                        e.message, e.stack_trace, bm25(godot_log_fts)
-                 FROM godot_log_fts
-                 JOIN godot_log_events e ON e.rowid = godot_log_fts.rowid
-                 WHERE godot_log_fts MATCH ?1
-                   AND (?2 IS NULL OR e.run_id = ?2)
-                 ORDER BY bm25(godot_log_fts)
-                 LIMIT ?3",
-            )
-            .map_err(database_error)?;
-        statement
-            .query_map(params![query, request.run_id, limit as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, f64>(7)?,
-                ))
-            })
-            .map_err(database_error)?
-            .map(|row| {
-                let row = row.map_err(database_error)?;
-                Ok(GodotLogSearchResult {
-                    id: row.0,
-                    run_id: row.1,
-                    timestamp: from_database_u64(row.2, "Godot log timestamp")?,
-                    level: row.3,
-                    source: row.4,
-                    message: row.5,
-                    stack_trace: row.6,
-                    rank: row.7,
-                })
-            })
-            .collect()
-    }
-
     pub fn upsert_memory(&self, request: &UpsertMemoryRequest) -> Result<MemoryRecord, String> {
         validate_memory(request)?;
         let (_write_guard, mut connection) = self.write_connection()?;
@@ -1189,6 +1077,37 @@ impl ProjectStorage {
             )
             .map_err(database_error)?;
         transaction.commit().map_err(database_error)
+    }
+
+    /// Memories whose vector is missing, so hybrid search has silently degraded to lexical only.
+    ///
+    /// A vector is absent when the embedding worker was unavailable while the memory was stored,
+    /// or when `upsert_memory` invalidated it after a content or scope change. Nothing else
+    /// regenerates one, so maintenance uses this to re-embed them.
+    pub fn memories_missing_embeddings(&self, limit: usize) -> Result<Vec<MemoryRecord>, String> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT m.id FROM memory_items m
+                 LEFT JOIN memory_embeddings e ON e.memory_id = m.id
+                 WHERE e.memory_id IS NULL
+                 ORDER BY m.updated_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(database_error)?;
+        let ids = statement
+            .query_map([limit as i64], |row| row.get::<_, String>(0))
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        drop(statement);
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(record) = memory_by_id(&connection, &id)? {
+                records.push(record);
+            }
+        }
+        Ok(records)
     }
 
     pub fn search_memory(
@@ -1529,6 +1448,8 @@ impl ProjectStorage {
             blobs_removed,
             godot_runs_removed: old_runs.len(),
             backups_removed,
+            // Re-embedding needs the memory worker, so the caller fills this in.
+            memory_embeddings_restored: 0,
         })
     }
 
@@ -1640,9 +1561,9 @@ fn migrate_project(connection: &Connection) -> Result<(), String> {
     let current = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(database_error)?;
-    if current > 2 {
+    if current > 3 {
         return Err(format!(
-            "The database schema version {current} is newer than supported version 2"
+            "The database schema version {current} is newer than supported version 3"
         ));
     }
     if current == 0 {
@@ -1653,6 +1574,11 @@ fn migrate_project(connection: &Connection) -> Result<(), String> {
     if current <= 1 {
         connection
             .execute_batch(PROJECT_SCHEMA_V2)
+            .map_err(database_error)?;
+    }
+    if current <= 2 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V3)
             .map_err(database_error)?;
     }
     Ok(())
@@ -1703,40 +1629,6 @@ fn require_task(connection: &Connection, task_id: &str) -> Result<(), String> {
         .is_some();
     if !exists {
         return Err("The task was not found".to_owned());
-    }
-    Ok(())
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn validate_worktree(request: &TaskWorktreeRequest) -> Result<(), String> {
-    if request.branch_name.trim().is_empty()
-        || request.branch_name.len() > 255
-        || request.branch_name.chars().any(char::is_control)
-    {
-        return Err("The worktree branch name is required".to_owned());
-    }
-    let path = Path::new(&request.worktree_path);
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| component == std::path::Component::ParentDir)
-    {
-        return Err("The worktree path must be absolute and cannot contain traversal".to_owned());
-    }
-    validate_commit(&request.base_commit)?;
-    if let Some(commit) = &request.head_commit {
-        validate_commit(commit)?;
-    }
-    if let Some(commit) = &request.merged_commit {
-        validate_commit(commit)?;
-    }
-    Ok(())
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn validate_commit(commit: &str) -> Result<(), String> {
-    if ![40, 64].contains(&commit.len()) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("Git commit IDs must be complete 40 or 64 character hashes".to_owned());
     }
     Ok(())
 }
@@ -2068,56 +1960,6 @@ mod tests {
 
     #[test]
     fn validation_covers_every_storage_boundary_branch() {
-        let commit = "a".repeat(40);
-        let valid_worktree = TaskWorktreeRequest {
-            task_id: "task".to_owned(),
-            branch_name: "gofer/task".to_owned(),
-            worktree_path: std::env::temp_dir()
-                .join("gofer-worktree")
-                .display()
-                .to_string(),
-            base_commit: commit.clone(),
-            head_commit: Some(commit.clone()),
-            merged_commit: Some("b".repeat(64)),
-        };
-        assert!(validate_worktree(&valid_worktree).is_ok());
-        for request in [
-            TaskWorktreeRequest {
-                branch_name: " ".to_owned(),
-                ..valid_worktree.clone()
-            },
-            TaskWorktreeRequest {
-                branch_name: "x".repeat(256),
-                ..valid_worktree.clone()
-            },
-            TaskWorktreeRequest {
-                branch_name: "bad\nbranch".to_owned(),
-                ..valid_worktree.clone()
-            },
-            TaskWorktreeRequest {
-                worktree_path: "relative".to_owned(),
-                ..valid_worktree.clone()
-            },
-            TaskWorktreeRequest {
-                worktree_path: std::env::temp_dir()
-                    .join("..")
-                    .join("escape")
-                    .display()
-                    .to_string(),
-                ..valid_worktree.clone()
-            },
-            TaskWorktreeRequest {
-                base_commit: "short".to_owned(),
-                ..valid_worktree.clone()
-            },
-            TaskWorktreeRequest {
-                head_commit: Some("z".repeat(40)),
-                ..valid_worktree.clone()
-            },
-        ] {
-            assert!(validate_worktree(&request).is_err());
-        }
-
         let valid_log = GodotLogEntry {
             timestamp: 1,
             level: "info".to_owned(),
@@ -2283,15 +2125,6 @@ mod tests {
         );
         assert!(
             storage
-                .search_godot_logs(&SearchGodotLogsRequest {
-                    query: "---".to_owned(),
-                    run_id: None,
-                    limit: None,
-                })
-                .is_err()
-        );
-        assert!(
-            storage
                 .search_memory(&SearchMemoryRequest {
                     query: " ".to_owned(),
                     task_id: None,
@@ -2385,7 +2218,7 @@ mod tests {
             .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
             .expect("sqlite-vec version");
 
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(vec_version, "v0.1.9");
     }
 
@@ -2415,11 +2248,11 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .expect("schema version");
         assert_eq!(title, "Existing task");
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
-    fn task_titles_and_worktrees_are_persisted() {
+    fn task_titles_are_derived_from_the_first_message() {
         let directory = TempDir::new().expect("temporary directory");
         let storage = storage(&directory);
         storage
@@ -2437,24 +2270,10 @@ mod tests {
             })
             .expect("save chat");
         let task = storage.list_tasks().expect("tasks").remove(0);
-        let worktree_path = directory.path().join("worktrees").join("player");
 
-        let updated = storage
-            .save_task_worktree(&TaskWorktreeRequest {
-                task_id: task.id,
-                branch_name: "gofer/player-controller".to_owned(),
-                worktree_path: worktree_path.to_string_lossy().into_owned(),
-                base_commit: "aabbccddaabbccddaabbccddaabbccddaabbccdd".to_owned(),
-                head_commit: Some("1122334411223344112233441122334411223344".to_owned()),
-                merged_commit: None,
-            })
-            .expect("save worktree");
-
-        assert_eq!(updated.title, "Build the player controller");
-        assert_eq!(
-            updated.worktree.expect("worktree").branch_name,
-            "gofer/player-controller"
-        );
+        assert_eq!(task.title, "Build the player controller");
+        // A non-repository workspace records no worktree; git.rs covers the repository path.
+        assert!(task.worktree.is_none());
     }
 
     #[test]
@@ -2525,15 +2344,6 @@ mod tests {
             )
             .expect("indexed warnings");
         assert_eq!(indexed, 1);
-        let matches = storage
-            .search_godot_logs(&SearchGodotLogsRequest {
-                query: "missing animation".to_owned(),
-                run_id: Some(run.id.clone()),
-                limit: Some(10),
-            })
-            .expect("search Godot logs");
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].level, "warning");
         storage
             .finish_godot_run(&FinishGodotRunRequest {
                 run_id: run.id,
@@ -2600,6 +2410,90 @@ mod tests {
             })
             .expect("embedding count");
         assert_eq!(embeddings, 0);
+    }
+
+    #[test]
+    fn memories_without_vectors_are_reported_and_deletions_clear_the_vector_index() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let memory = storage
+            .upsert_memory(&UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "fact".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "The player scene lives in scenes/player.tscn".to_owned(),
+                provenance: serde_json::json!({"source": "user"}),
+                superseded_by: None,
+            })
+            .expect("save memory");
+
+        let pending = storage
+            .memories_missing_embeddings(10)
+            .expect("pending memories");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, memory.id);
+        assert_eq!(
+            pending[0].content,
+            "The player scene lives in scenes/player.tscn"
+        );
+
+        let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        vector[0] = 1.0;
+        storage
+            .save_memory_embedding(&SaveMemoryEmbeddingRequest {
+                memory_id: memory.id.clone(),
+                model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                vector,
+            })
+            .expect("save embedding");
+        assert!(
+            storage
+                .memories_missing_embeddings(10)
+                .expect("pending memories")
+                .is_empty()
+        );
+
+        // Rewriting the content invalidates the vector, which must make it pending again.
+        storage
+            .upsert_memory(&UpsertMemoryRequest {
+                id: Some(memory.id.clone()),
+                task_id: None,
+                kind: "fact".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "The player scene moved to scenes/actors/player.tscn".to_owned(),
+                provenance: serde_json::json!({"source": "user"}),
+                superseded_by: None,
+            })
+            .expect("update memory");
+        assert_eq!(
+            storage
+                .memories_missing_embeddings(10)
+                .expect("pending memories")
+                .len(),
+            1
+        );
+
+        let connection = storage.connection().expect("connection");
+        connection
+            .execute(
+                "INSERT INTO memory_vectors (memory_id, embedding, scope_key)
+                 VALUES (?1, ?2, 'project')",
+                params![
+                    memory.id,
+                    vector_bytes(&vec![0.5; MEMORY_EMBEDDING_DIMENSIONS])
+                ],
+            )
+            .expect("orphan vector");
+        connection
+            .execute("DELETE FROM memory_items WHERE id = ?1", [&memory.id])
+            .expect("delete memory");
+        let vectors = connection
+            .query_row("SELECT count(*) FROM memory_vectors", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .expect("vector count");
+        assert_eq!(vectors, 0);
     }
 
     #[test]

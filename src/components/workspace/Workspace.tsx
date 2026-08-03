@@ -5,17 +5,14 @@ import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
 import {invoke, isTauri, listen} from '../../services/desktop'
 import type {TaskSummary} from '../../models/app'
-import type {ChatAttachment, DraftAttachment, Message, StoredChat} from '../../models/chat'
+import type {ChatAttachment, DraftAttachment, Message} from '../../models/chat'
 import {messageUsage} from '../../utils/chat-format'
-import {
-    attachmentData,
-    clearLegacyChat,
-    isStoredChat,
-    loadLegacyChat,
-    nextStoredMessageId
-} from '../../services/chat-storage'
-import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS, normalizeSettings} from '../../models/settings'
-import type {AiModelOption, GoferSettings, ThinkingLevel} from '../../models/settings'
+import {attachmentData} from '../../services/chat-storage'
+import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS} from '../../models/settings'
+import {useAiConnection} from '../../hooks/useAiConnection'
+import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
+import {useChatPersistence} from '../../hooks/useChatPersistence'
+import {useGodotProcess} from '../../hooks/useGodotProcess'
 import {ChatConversation} from './ChatConversation'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
 import {WorkspaceHeader} from './WorkspaceHeader'
@@ -29,286 +26,61 @@ type WorkspaceProps = Readonly<{
 const CHAT_ATTACHMENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 const MAX_CHAT_ATTACHMENTS = 5
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const DEFAULT_CONTEXT_WINDOW = 120_064
 
 export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspaceProps) {
     const [draft, setDraft] = useState('')
     const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
-    const [attachmentPreviews, setAttachmentPreviews] = useState<Readonly<Record<string, string>>>(
-        {}
-    )
     const [isSavingAttachments, setIsSavingAttachments] = useState(false)
-    const [messages, setMessages] = useState<readonly Message[]>([])
-    const [isChatLoaded, setIsChatLoaded] = useState(() => !isTauri())
     const [isStreaming, setIsStreaming] = useState(false)
     const [streamError, setStreamError] = useState<string>()
-    const [settings, setSettings] = useState<GoferSettings>()
-    const [models, setModels] = useState<readonly AiModelOption[]>([])
-    const [agentMessages, setAgentMessages] = useState<readonly unknown[]>([])
-    const [taskId, setTaskId] = useState<string>()
-    const [isGodotRunning, setIsGodotRunning] = useState(false)
-    const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'offline'>(
-        () => (isTauri() ? 'connecting' : 'offline')
-    )
-    const nextMessageId = useRef(1)
     const nextRequestId = useRef(1)
     const activeRequestId = useRef<number | undefined>(undefined)
-    const requestedAttachmentPreviews = useRef(new Set<string>())
-    const isWorkspaceMounted = useRef(false)
-    const pendingChatSave = useRef<StoredChat | undefined>(undefined)
-    const isChatSaveRunning = useRef(false)
     const attachmentInputRef = useRef<HTMLInputElement>(null)
     const messageScrollRef = useRef<HTMLElement>(null)
+
+    const reportError = useCallback((message: string) => {
+        setStreamError(message)
+    }, [])
+    const clearError = useCallback(() => {
+        setStreamError(undefined)
+    }, [])
+
+    const {
+        messages,
+        setMessages,
+        agentMessages,
+        setAgentMessages,
+        taskId,
+        takeMessageId,
+        isMounted
+    } = useChatPersistence({onError: reportError, onTasksChanged})
+    const {attachmentPreviews, addPreviews} = useAttachmentPreviews({messages, isMounted})
+    const {settings, models, connectionState, connect, applyModel, applyThinkingLevel} =
+        useAiConnection({onError: reportError, onConnected: clearError})
+    const {isGodotRunning, runGodot, stopGodot} = useGodotProcess({
+        taskId,
+        onError: reportError,
+        onStart: clearError
+    })
+
     const chatScroll = useChatStreamScroll({
         scrollRef: messageScrollRef,
         enabled: messages.length > 0
     })
 
     useEffect(() => {
-        isWorkspaceMounted.current = true
-        return () => {
-            isWorkspaceMounted.current = false
-        }
-    }, [])
-
-    useEffect(() => {
         chatScroll.scrollIfLocked()
     }, [messages, chatScroll.scrollIfLocked])
 
-    const savePendingChat = useCallback(async () => {
-        if (isChatSaveRunning.current) return
-        isChatSaveRunning.current = true
-        try {
-            while (pendingChatSave.current) {
-                const chat = pendingChatSave.current
-                pendingChatSave.current = undefined
-                try {
-                    await invoke('save_chat', {chat})
-                    if (isWorkspaceMounted.current) onTasksChanged?.()
-                } catch (error) {
-                    if (isWorkspaceMounted.current)
-                        setStreamError(`Chat history could not be saved: ${String(error)}`)
-                }
-            }
-        } finally {
-            isChatSaveRunning.current = false
-        }
-    }, [onTasksChanged])
-
-    useEffect(() => {
-        if (!isTauri()) return
-        let isCancelled = false
-        const load = async () => {
-            try {
-                const response = await invoke('load_chat')
-                const stored = isStoredChat(response) ? response : {messages: [], agentMessages: []}
-                const legacy = loadLegacyChat()
-                const chat =
-                    (
-                        stored.messages.length === 0
-                        && stored.agentMessages.length === 0
-                        && (legacy.messages.length > 0 || legacy.agentMessages.length > 0)
-                    ) ?
-                        await invoke('import_legacy_chat', {chat: legacy})
-                    :   stored
-                if (isCancelled) return
-                setMessages(chat.messages)
-                setAgentMessages(chat.agentMessages)
-                setTaskId(chat.taskId)
-                nextMessageId.current = nextStoredMessageId(chat.messages)
-                clearLegacyChat()
-            } catch (error) {
-                if (isCancelled) return
-                const legacy = loadLegacyChat()
-                setMessages(legacy.messages)
-                setAgentMessages(legacy.agentMessages)
-                nextMessageId.current = nextStoredMessageId(legacy.messages)
-                setStreamError(`Chat history could not be loaded: ${String(error)}`)
-            } finally {
-                if (!isCancelled) setIsChatLoaded(true)
-            }
-        }
-        void load()
-        return () => {
-            isCancelled = true
-        }
-    }, [])
-
-    useEffect(() => {
-        if (!isTauri()) return
-        let isCancelled = false
-        let unlisten: (() => void) | undefined
-        void listen('godot-process-event', event => {
-            if (isCancelled) return
-            if (event.payload.eventType === 'started') setIsGodotRunning(true)
-            if (event.payload.eventType === 'finished') setIsGodotRunning(false)
-            if (event.payload.level === 'error' && event.payload.message) {
-                setStreamError(`Godot: ${event.payload.message}`)
-            }
-        }).then(dispose => {
-            if (isCancelled) {
-                dispose()
-                return
-            }
-            unlisten = dispose
-        })
-        return () => {
-            isCancelled = true
-            unlisten?.()
-        }
-    }, [])
-
-    const runGodot = useCallback(() => {
-        setStreamError(undefined)
-        void invoke('launch_godot', {request: {taskId, editor: false}}).catch((error: unknown) => {
-            setIsGodotRunning(false)
-            setStreamError(`Godot could not be launched: ${String(error)}`)
-        })
-    }, [taskId])
-
-    const stopGodot = useCallback(() => {
-        void invoke('cancel_godot').catch((error: unknown) => {
-            setStreamError(`Godot could not be stopped: ${String(error)}`)
-        })
-    }, [])
-
-    const applyModel = useCallback(async (model: AiModelOption, previous?: GoferSettings) => {
-        if (!previous) return
-        const nextSettings: GoferSettings = {
-            ...previous,
-            ai: {
-                ...previous.ai,
-                model: model.id,
-                modelName: model.name,
-                contextWindow: model.contextWindow,
-                maxTokens: model.maxTokens,
-                reasoning: model.reasoning,
-                supportsReasoningEffort: model.supportsReasoningEffort,
-                input: model.input,
-                thinkingLevel: model.reasoning ? previous.ai.thinkingLevel : 'off'
-            }
-        }
-        setSettings(nextSettings)
-        try {
-            await invoke('save_settings', {
-                request: {settings: nextSettings, apiKey: {action: 'keep'}}
-            })
-            setStreamError(undefined)
-        } catch (error) {
-            setStreamError(`The model selection could not be saved: ${String(error)}`)
-        }
-    }, [])
-
-    const applyThinkingLevel = useCallback(
-        async (thinkingLevel: ThinkingLevel, previous?: GoferSettings) => {
-            if (!previous) return
-            const nextSettings: GoferSettings = {
-                ...previous,
-                ai: {
-                    ...previous.ai,
-                    thinkingLevel
-                }
-            }
-            setSettings(nextSettings)
-            try {
-                await invoke('save_settings', {
-                    request: {settings: nextSettings, apiKey: {action: 'keep'}}
-                })
-                setStreamError(undefined)
-            } catch (error) {
-                setStreamError(`The reasoning level could not be saved: ${String(error)}`)
-            }
+    const updateAssistant = useCallback(
+        (id: number, update: (message: Message) => Message) => {
+            setMessages(previous =>
+                previous.map(message => (message.id === id ? update(message) : message))
+            )
         },
-        []
+        [setMessages]
     )
-
-    const connect = useCallback(async () => {
-        if (!isTauri()) return
-        await Promise.resolve()
-        setConnectionState('connecting')
-        setStreamError(undefined)
-        try {
-            const response = await invoke('load_settings')
-            const loadedSettings = normalizeSettings(response.settings)
-            setSettings(loadedSettings)
-            const available = await invoke('list_ai_models', {
-                request: {settings: loadedSettings, apiKey: {action: 'keep'}}
-            })
-            setModels(available)
-            setConnectionState('connected')
-            if (
-                available.length === 1
-                && !available.some(model => model.id === loadedSettings.ai.model)
-            ) {
-                const onlyModel = available[0]
-                if (onlyModel) await applyModel(onlyModel, loadedSettings)
-            }
-        } catch (error) {
-            setConnectionState('offline')
-            setStreamError(`Local AI is unavailable: ${String(error)}`)
-        }
-    }, [applyModel])
-
-    useEffect(() => {
-        const timeout = window.setTimeout(() => {
-            void connect()
-        }, 0)
-        return () => {
-            window.clearTimeout(timeout)
-        }
-    }, [connect])
-
-    useEffect(() => {
-        if (!isChatLoaded || !isTauri()) return
-        const timeout = window.setTimeout(() => {
-            pendingChatSave.current = {
-                ...(taskId !== undefined && {taskId}),
-                messages,
-                agentMessages
-            }
-            void savePendingChat()
-        }, 150)
-        return () => {
-            window.clearTimeout(timeout)
-        }
-    }, [agentMessages, isChatLoaded, messages, savePendingChat, taskId])
-
-    useEffect(() => {
-        if (!isTauri()) return
-        const attachments = messages.flatMap(message =>
-            (message.attachments ?? []).filter(
-                attachment => !requestedAttachmentPreviews.current.has(attachment.id)
-            )
-        )
-        if (attachments.length === 0) return
-        for (const attachment of attachments) requestedAttachmentPreviews.current.add(attachment.id)
-        const load = async () => {
-            const previews = await Promise.all(
-                attachments.map(async attachment => {
-                    try {
-                        const preview = await invoke('read_chat_attachment', {attachment})
-                        return [attachment.id, preview] as const
-                    } catch {
-                        return undefined
-                    }
-                })
-            )
-            if (!isWorkspaceMounted.current) return
-            setAttachmentPreviews(previous => {
-                const next = {...previous}
-                for (const entry of previews) {
-                    if (entry) next[entry[0]] = entry[1]
-                }
-                return next
-            })
-        }
-        void load()
-    }, [messages])
-
-    const updateAssistant = useCallback((id: number, update: (message: Message) => Message) => {
-        setMessages(previous =>
-            previous.map(message => (message.id === id ? update(message) : message))
-        )
-    }, [])
 
     const runRequest = useCallback(
         (
@@ -317,14 +89,14 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             attachments: readonly ChatAttachment[] = []
         ) => {
             const userMessage: Message = {
-                id: nextMessageId.current++,
+                id: takeMessageId(),
                 sender: 'user',
                 text: prompt,
                 timestamp: Date.now(),
                 ...(attachments.length > 0 && {attachments})
             }
             const assistantMessage: Message = {
-                id: nextMessageId.current++,
+                id: takeMessageId(),
                 sender: 'assistant',
                 text: '',
                 timestamp: Date.now(),
@@ -451,7 +223,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             }
             void run()
         },
-        [agentMessages, taskId, updateAssistant]
+        [agentMessages, setAgentMessages, setMessages, takeMessageId, taskId, updateAssistant]
     )
 
     const submitMessage = async (value: string) => {
@@ -475,12 +247,11 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     })
                 )
             )
-            setAttachmentPreviews(previous => ({
-                ...previous,
-                ...Object.fromEntries(
+            addPreviews(
+                Object.fromEntries(
                     draftAttachments.map(attachment => [attachment.id, attachment.previewUrl])
                 )
-            }))
+            )
             runRequest(
                 prompt,
                 messages,
@@ -562,7 +333,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     }
 
     const usage = messageUsage(messages)
-    const contextWindow = settings?.ai.contextWindow ?? 120_064
+    const contextWindow = settings?.ai.contextWindow ?? DEFAULT_CONTEXT_WINDOW
     const selectedModel = settings?.ai.modelName ?? settings?.ai.model ?? 'Loading model…'
     const thinkingLevel = settings?.ai.thinkingLevel ?? 'off'
     const thinkingLevels = settings?.ai.reasoning ? ALL_THINKING_LEVELS : NO_THINKING_LEVELS

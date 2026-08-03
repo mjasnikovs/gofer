@@ -93,11 +93,14 @@ fn embed_with(
         };
         let response: WorkerResponse = serde_json::from_str(response)
             .map_err(|error| format!("The memory worker returned invalid JSON: {error}"))?;
+        // A response carrying a different id belongs to an earlier request, so skip it before
+        // reading its error. Only a line the worker could not correlate at all answers without
+        // an id, and that failure does belong to this request.
+        if response.id.is_some_and(|received| received != id) {
+            continue;
+        }
         if let Some(error) = response.error {
             return Err(format!("Memory embedding failed: {error}"));
-        }
-        if response.id != Some(id) {
-            continue;
         }
         return response
             .vectors
@@ -302,6 +305,35 @@ mod tests {
                     .contains(expected)
             );
         }
+    }
+
+    #[test]
+    fn a_stale_error_is_skipped_while_an_uncorrelated_error_is_reported() {
+        let _test = MEMORY_TEST_LOCK.lock().expect("memory test lock");
+        let cache = Path::new("/tmp/cache");
+
+        // An error answering an earlier request must not fail the request in flight.
+        let id = NEXT_REQUEST_ID.load(Ordering::Relaxed);
+        let (fake, _) = worker(format!(
+            "{RESPONSE_PREFIX}{{\"id\":{},\"error\":\"stale failure\"}}\n{RESPONSE_PREFIX}{{\"id\":{id},\"vectors\":[[4.0]]}}\n",
+            id.wrapping_sub(1)
+        ));
+        *WORKER.lock().expect("memory worker lock") = Some(fake);
+        assert_eq!(
+            embed_documents(&["text".to_owned()], cache).expect("current vector"),
+            vec![vec![4.0]]
+        );
+
+        // A failure the worker could not correlate has no id and does belong to this request.
+        let (fake, _) = worker(format!(
+            "{RESPONSE_PREFIX}{{\"error\":\"unparseable request\"}}\n"
+        ));
+        *WORKER.lock().expect("memory worker lock") = Some(fake);
+        assert!(
+            embed_documents(&["text".to_owned()], cache)
+                .unwrap_err()
+                .contains("unparseable request")
+        );
     }
 
     #[test]

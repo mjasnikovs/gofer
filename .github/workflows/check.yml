@@ -39,14 +39,8 @@ jobs:
                   install-chromedriver: true
             - name: Install pinned Godot
               env:
-                  GODOT_URL: https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
-                  GODOT_SHA256: c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba
-              run: |
-                  curl --fail --location --output godot.zip "$GODOT_URL"
-                  echo "$GODOT_SHA256  godot.zip" | sha256sum --check
-                  unzip -q godot.zip -d "$RUNNER_TEMP/godot"
-                  chmod +x "$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64"
-                  echo "GOFER_GODOT_BINARY=$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64" >> "$GITHUB_ENV"
+                  GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
+              run: node scripts/install-godot.mjs
             - name: Run required checks with zero retries
               env:
                   GOFER_CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}
@@ -73,14 +67,8 @@ jobs:
               run: npm ci
             - name: Install pinned Godot
               env:
-                  GODOT_URL: https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
-                  GODOT_SHA256: c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba
-              run: |
-                  curl --fail --location --output godot.zip "$GODOT_URL"
-                  echo "$GODOT_SHA256  godot.zip" | sha256sum --check
-                  unzip -q godot.zip -d "$RUNNER_TEMP/godot"
-                  chmod +x "$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64"
-                  echo "GOFER_GODOT_BINARY=$RUNNER_TEMP/godot/Godot_v4.7.1-stable_linux.x86_64" >> "$GITHUB_ENV"
+                  GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
+              run: node scripts/install-godot.mjs
             - name: Build the release-mode WebDriver application
               run: npm run build:desktop:test
             - name: Run the packaged application with zero retries

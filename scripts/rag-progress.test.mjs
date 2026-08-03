@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {createProgressReporter} from './rag-progress.mjs'
+import {createProgressReporter, runWarmup} from './rag-progress.mjs'
 
 function setup() {
     const events = []
@@ -79,4 +79,51 @@ test('throttles intermediate updates and always reports final readiness', () => 
         total: 100,
         progress: 100
     })
+})
+
+test('a successful warmup reports starting, download progress, and readiness', async () => {
+    const events = []
+    const failures = []
+
+    const succeeded = await runWarmup({
+        warmup: async ({allowModelDownloads, onDownloadProgress}) => {
+            allowModelDownloads([{expectedBytes: 100}, {expectedBytes: 100}])
+            onDownloadProgress({model: 'a', file: 'one', loaded: 50, total: 100})
+        },
+        emit: event => events.push(event),
+        fail: message => failures.push(message)
+    })
+
+    assert.equal(succeeded, true)
+    assert.deepEqual(failures, [])
+    assert.deepEqual(events[0], {status: 'starting', model: 'Gofer RAG'})
+    assert.equal(events[1].status, 'downloading')
+    assert.equal(events[1].total, 200)
+    assert.deepEqual(events.at(-1), {
+        status: 'ready',
+        model: '2 models',
+        loaded: 200,
+        total: 200,
+        progress: 100
+    })
+})
+
+test('a failing warmup reports the message and never claims readiness', async () => {
+    const events = []
+    const failures = []
+
+    const succeeded = await runWarmup({
+        warmup: async () => {
+            throw new Error('the model host is unreachable')
+        },
+        emit: event => events.push(event),
+        fail: message => failures.push(message)
+    })
+
+    assert.equal(succeeded, false)
+    assert.deepEqual(failures, ['the model host is unreachable'])
+    assert.equal(
+        events.some(event => event.status === 'ready'),
+        false
+    )
 })

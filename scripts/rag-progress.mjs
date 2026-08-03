@@ -57,3 +57,25 @@ export function createProgressReporter({emit, now = Date.now, emitIntervalMs = 2
 
     return {approveDownloads, reportProgress, reportReady}
 }
+
+/**
+ * Drives one RAG warmup, reporting progress through `emit` and failures through `fail`.
+ *
+ * `warmup` is injected so tests exercise the reporting contract without downloading models.
+ * Returns whether the warmup succeeded.
+ */
+export async function runWarmup({warmup, emit, fail}) {
+    const reporter = createProgressReporter({emit})
+    try {
+        emit({status: 'starting', model: 'Gofer RAG'})
+        await warmup({
+            allowModelDownloads: reporter.approveDownloads,
+            onDownloadProgress: reporter.reportProgress
+        })
+        reporter.reportReady()
+        return true
+    } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+        return false
+    }
+}

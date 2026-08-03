@@ -263,7 +263,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             setNotice({
                 status: 'success',
                 title: 'Storage maintenance complete',
-                description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, and ${String(result.backupsRemoved)} old backups removed.`
+                description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, and ${String(result.backupsRemoved)} old backups removed. ${String(result.memoryEmbeddingsRestored)} memory embeddings restored.`
             })
         } catch (error) {
             setNotice({

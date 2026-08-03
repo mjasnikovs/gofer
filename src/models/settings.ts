@@ -76,6 +76,7 @@ export type StorageMaintenanceResult = Readonly<{
     blobsRemoved: number
     godotRunsRemoved: number
     backupsRemoved: number
+    memoryEmbeddingsRestored: number
 }>
 
 export const ALL_THINKING_LEVELS: readonly ThinkingLevel[] = [

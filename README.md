@@ -2,7 +2,7 @@
 
 Gofer is a Tauri desktop workspace for an AI agent that operates Godot 4.7 on a user's behalf. It
 launches projects in the active task's isolated Git worktree, streams process output into the UI,
-and persists searchable compressed run logs.
+and persists compressed run logs.
 
 ## Stack
 
@@ -69,8 +69,9 @@ other tasks; selecting one changes only the project's current task pointer. The 
 commits pending task changes and creates a merge commit on a clean main worktree.
 
 Godot runs are tied to tasks. Raw log batches are written as project-scoped `.jsonl.zst` segments,
-while warning and error records are indexed with SQLite FTS5 for fast search. Normal informational
-output therefore does not cause unbounded growth in the relational tables.
+while warning and error records are indexed with SQLite FTS5. The index is maintained but not yet
+queried: the Logs panel that reads it arrives with the Godot editor integration. Normal
+informational output therefore does not cause unbounded growth in the relational tables.
 
 Project memory is canonical SQLite data with explicit project/task scope, kind, lifecycle state,
 provenance, and supersession. FTS5 provides exact retrieval. Normalized 1,024-dimensional Qwen3
@@ -84,7 +85,8 @@ active-task memories. SQLite remains the canonical store; no external database s
 
 Settings can create a consistent project backup containing SQLite data, attachments, logs, and a
 manifest. Maintenance removes unreferenced attachments after 24 hours, completed Godot runs after 30
-days, and retains the five newest backups.
+days, retains the five newest backups, and re-embeds memories whose vector is missing because the
+embedding worker was unavailable or because an edit invalidated it.
 
 ## Quality gates
 

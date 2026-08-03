@@ -1,15 +1,8 @@
-import {isAbsolute, resolve} from 'node:path'
+import {resolve} from 'node:path'
 import {spawnSync} from 'node:child_process'
+import {resolveGodotBinary} from './godot-binary.mjs'
 
-const binary = process.env.GOFER_GODOT_BINARY
-if (!binary) throw new Error('GOFER_GODOT_BINARY must be the absolute pinned Godot binary path')
-if (!isAbsolute(binary)) throw new Error('GOFER_GODOT_BINARY must be an absolute path')
-
-const version = spawnSync(binary, ['--version'], {encoding: 'utf8'})
-if (version.status !== 0) throw new Error(version.stderr || 'Could not execute GOFER_GODOT_BINARY')
-if (!version.stdout.startsWith('4.7.1.stable')) {
-    throw new Error(`Expected Godot 4.7.1-stable, received ${version.stdout.trim()}`)
-}
+const binary = resolveGodotBinary()
 
 const project = resolve('fixtures/godot-project')
 const result = spawnSync(

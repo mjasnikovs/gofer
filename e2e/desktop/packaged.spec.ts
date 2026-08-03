@@ -16,9 +16,12 @@ async function sendMessage(text: string) {
     await browser.keys('Enter')
 }
 
+// The backend resolves the bridge address from GOFER_TEST_GODOT_ADDRESS, so the renderer cannot
+// choose where the transport connects.
 async function sendGodotCommand(command: string, params: Record<string, unknown>) {
-    const address = process.env.GOFER_TEST_GODOT_ADDRESS
-    if (!address) throw new Error('Packaged Godot bridge address is unavailable')
+    if (!process.env.GOFER_TEST_GODOT_ADDRESS) {
+        throw new Error('Packaged Godot bridge address is unavailable')
+    }
     return browser.execute(
         async payload => {
             const invoke = window.__TAURI__?.core?.invoke
@@ -26,7 +29,6 @@ async function sendGodotCommand(command: string, params: Record<string, unknown>
             return invoke('send_godot_command', payload)
         },
         {
-            address,
             request: {
                 protocolVersion: 1,
                 id: `packaged-${String(godotRequestId++)}`,

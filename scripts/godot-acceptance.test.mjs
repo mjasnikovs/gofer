@@ -2,18 +2,12 @@ import assert from 'node:assert/strict'
 import {cp, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises'
 import {createServer, createConnection} from 'node:net'
 import {tmpdir} from 'node:os'
-import {isAbsolute, join, resolve} from 'node:path'
-import {spawn, spawnSync} from 'node:child_process'
+import {join, resolve} from 'node:path'
+import {spawn} from 'node:child_process'
 import test from 'node:test'
+import {resolveGodotBinary} from './godot-binary.mjs'
 
-const binary = process.env.GOFER_GODOT_BINARY
-if (!binary || !isAbsolute(binary)) {
-    throw new Error('GOFER_GODOT_BINARY must be the absolute pinned Godot binary path')
-}
-const version = spawnSync(binary, ['--version'], {encoding: 'utf8'})
-if (version.status !== 0 || !version.stdout.startsWith('4.7.1.stable')) {
-    throw new Error('Godot acceptance tests require 4.7.1-stable')
-}
+const binary = resolveGodotBinary()
 
 async function availablePort() {
     const server = createServer()

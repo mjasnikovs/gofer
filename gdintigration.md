@@ -1,0 +1,292 @@
+# Gofer ↔ Godot 4.7.1 Integration
+
+## Summary
+
+Build one Gofer-managed, task-bound Godot editor session combining four direct transports:
+
+1. Gofer’s versioned WebSocket RPC for editor/plugin operations.
+2. Godot’s native TCP LSP for GDScript intelligence.
+3. Godot’s native TCP DAP for debugging.
+4. Confined filesystem access for project files.
+
+There will be no MCP, FastMCP, Python server, HTTP tool endpoint, or MCP client configuration. A
+packaged gdformat executable is the only Python-derived sidecar and requires no user-installed
+Python.
+
+Godot officially exposes dedicated --lsp-port and --dap-port editor options, and recommends
+connecting to LSP over TCP. Godot command-line reference
+(https://docs.godotengine.org/en/latest/tutorials/editor/command_line_tutorial.html), GDScript LSP
+reference (https://docs.godotengine.org/en/4.7/classes/class_gdscriptlanguageprotocol.html). The
+editor-plugin/main-thread and runtime-helper patterns will be selectively adapted from the
+MIT-licensed godot-ai architecture
+(https://github.com/hi-godot/godot-ai/blob/main/docs/plugin-architecture.md), with attribution.
+
+Target: exactly Godot 4.7.1-stable, GDScript, one managed editor, one active Gofer task/worktree.
+
+## Architecture and Interfaces
+
+### Session ownership
+
+- Replace the standalone Godot process flag and one-shot bridge with a Rust GodotSessionManager.
+- Session states: offline, staging, starting, importing, ready, playing, debugPaused, stopping,
+  error.
+- Bind the session to the active task’s canonical worktree path. Every operation verifies that
+  binding.
+- Lazily start the session from Connect, Run, or the first Godot-dependent action.
+- Task switching prompts to stop the current game/editor, cleans temporary integration state, then
+  starts the new worktree session.
+- Reject additional editors, unsupported Godot versions, non-loopback transports, and paths outside
+  the active worktree.
+
+### Godot addon and protocol
+
+- Bundle the canonical addon with Gofer, then copy it to res://addons/gofer with a managed manifest
+  and content hashes.
+- Add the addon path to Git’s per-repository exclude data; never edit .gitignore.
+- Temporarily add Gofer’s plugin and runtime-autoload entries to project.godot.
+- Store a cleanup ledger in Gofer application data recording what Gofer introduced and whether
+  entries existed beforehand.
+- On normal stop or crash recovery, remove only Gofer-owned entries and files. Refuse to overwrite
+  an unmanaged addons/gofer.
+- Introduce protocol v2 because authentication, persistent events, transport framing, and lifecycle
+  semantics differ from the current fixture protocol.
+- Rust binds a random loopback WebSocket port before launching Godot and passes its URL plus a
+  256-bit session token through the editor process environment.
+- The addon connects outward, authenticates during the handshake, reports project
+  path/version/capabilities, queues requests, and executes editor API calls from _process() on
+  Godot’s main thread.
+
+- Cap JSON payloads at 1 MiB and screenshot frames at 16 MiB; screenshots are PNG, maximum 1920 px
+  on the longest edge.
+- Use structured errors with stable codes, retryability, readiness, and actionable details.
+
+### Public desktop API
+
+Expose narrowly scoped Tauri commands:
+
+- start_godot_session
+- stop_godot_session
+- get_godot_session
+- call_godot
+- subscribe_godot_events
+- unsubscribe_godot_events
+- respond_tool_approval
+- query_godot_docs
+
+call_godot uses named, serde-tagged request/response unions by domain and operation. Ordered logs,
+diagnostics, debugger changes, filesystem changes, approvals, and session state use a Tauri channel
+rather than high-volume global events. Tauri permissions remain restricted to the main window and
+these exact commands.
+
+Use a shared tagged GodotValue representation for primitives, arrays, dictionaries with non-string
+keys, vectors/transforms/colors, resources, node/object references, and unsupported opaque values.
+Every scene mutation carries expectedRevision; stale writes return revision_conflict.
+
+### Capability domains
+
+- session: state, capabilities, readiness, selection, undo, redo.
+- scene: list, create, open, close, hierarchy, save, save-as, reload.
+- node: inspect, create, duplicate, rename, reparent, delete, properties, groups, signals.
+- project: project settings, autoloads, Input Map, plugins, display/rendering settings.
+- editor: machine-wide EditorSettings search/read/write.
+- resource: search, inspect, dependencies, import state, rescan, reimport, assign.
+- script: LSP diagnostics/navigation/completion/rename plus formatting.
+- debug: launch, attach, breakpoints, pause, continue, restart, stop, stepping, stack, scopes,
+  variables, evaluate, exception state.
+- runtime: remote scene tree/node inspection, input simulation, performance monitors, run state,
+  screenshot.
+- logs: editor, game, importer, LSP, DAP, and plugin output with cursors and severity filtering.
+- files: tree, search, read, create, atomic write/patch, move, delete, external-change notification.
+- docs: gofer-rag retrieval with ranked passages and official documentation source metadata.
+
+Edited scene hierarchy and runtime scene hierarchy remain separate concepts throughout the API and
+UI.
+
+## Small Executable Implementation Steps
+
+1. Freeze protocol v2
+    - Define handshake, request, response, event, error, tagged values, revisions, limits, and
+      compatibility rules.
+    - Add golden fixtures consumed by Rust, TypeScript, and GDScript.
+    - Done when all three implementations accept/reject the same fixtures.
+
+2. Package and stage the addon
+    - Create the minimal Gofer EditorPlugin, manifest, cleanup ledger, Git exclusion, targeted
+      project.godot editor, and crash repair.
+    - Preserve unrelated project settings and concurrent edits.
+    - Done when repeated install/start/stop cycles leave a clean worktree and unmanaged collisions
+      fail safely.
+
+3. Create the session supervisor
+    - Verify Godot 4.7.1, bind the RPC listener, allocate LSP/DAP ports, launch the editor with
+      --editor, --path, --lsp-port, and --dap-port, and supervise shutdown.
+    - Retry port collisions three times; otherwise return a structured startup error.
+    - Done when session state survives renderer reload and cleans up after editor crashes.
+
+4. Implement persistent editor RPC
+    - Add authenticated handshake, request correlation, timeouts, heartbeats, event sequencing,
+      cancellation, payload limits, and reconnect rules.
+    - Replace arbitrary renderer-supplied bridge addresses and retire the current one-shot
+      send_godot_command.
+    - Done when invalid tokens, wrong projects, oversized payloads, stale replies, and disconnects
+      are covered.
+
+5. Ship read-only editor inspection
+    - Add editor readiness/selection, edited scene hierarchy, node metadata/properties, project
+      settings, EditorSettings, resources/import state, and logs.
+    - Paginate large trees/property sets.
+    - Done when the real fixture editor can be completely inspected without modifying its project.
+
+6. Ship undoable scene authoring
+    - Implement scene and node mutations through EditorUndoRedoManager.
+    - Increment scene revisions, expose dirty state, and keep save as a separate explicit operation.
+    - Block scene mutations while importing, playing, disconnected, or revision-stale.
+    - Done when create/edit/reparent/delete, undo/redo, save, reload, and conflict cases pass.
+
+7. Centralize filesystem operations
+    - Move typed AI/UI file writes through Rust with canonical-path validation, atomic replacement,
+      content hashes, and optimistic concurrency.
+    - Add a debounced workspace watcher so Monaco and LSP notice changes made by Gofer, Godot,
+      users, or autonomous confined shell commands.
+    - Dirty Monaco buffers receive a conflict state instead of being overwritten.
+    - Done when symlink escapes, traversal, stale saves, and external edits are covered.
+
+8. Connect native Godot LSP
+    - Implement Content-Length JSON-RPC framing, request correlation, cancellation, diagnostics, and
+      document lifecycle using lsp-types.
+    - Support hover, completion/resolve, signature help, definition, declaration, references,
+      highlights, document symbols, prepare-rename, and rename.
+    - Synthesize workspace symbol search by indexing each file’s document symbols because Godot 4.7
+      reports no native workspace-symbol provider.
+    - Apply multi-file rename edits through validated filesystem transactions with rollback on
+      failure.
+    - Done when a real editor reports diagnostics and navigation across multiple fixture scripts.
+
+9. Add deterministic formatting
+    - Pin gdtoolkit/gdformat 4.5.0 and package standalone platform sidecars with checksums and
+      licenses.
+    - Send the current buffer over stdin, capture formatted stdout, show a diff, and apply only
+      after explicit user/AI action.
+    - Never let the formatter edit the source file directly; formatter failure leaves the buffer
+      untouched. gdtoolkit package (https://pypi.org/project/gdtoolkit/)
+    - Done when valid 4.7 fixture syntax is idempotent and invalid syntax produces no mutation.
+
+10. Integrate Monaco
+    - Add Monaco tabs, dirty buffers, file hashes, save/reload/diff flows, GDScript language
+      registration, LSP providers, diagnostics markers, references, rename preview, and breakpoint
+      gutter.
+
+    - Save writes the file, sends didSave, and asks the addon to rescan/reload scripts.
+    - Done when UI and AI edits converge without duplicate or stale LSP document versions.
+
+11. Connect Godot’s native DAP
+    - Use DAP framing and the exact Godot 4.7 sequence: initialize, launch/attach, setBreakpoints,
+      configurationDone.
+    - Support restart/terminate, pause/continue, step-in/step-over, stack trace, scopes, variables,
+      evaluate, breakpoint and exception events.
+    - Emulate step-out by bounded step-over requests until stack depth decreases; stop immediately
+      on another breakpoint, exception, termination, or safety limit.
+    - Reflect verified breakpoint lines back into Monaco and the agent response.
+    - Done when the fixture stops on a breakpoint, exposes locals/members/globals, evaluates an
+      expression, steps, restarts, and terminates.
+
+12. Complete the runtime feedback loop
+    - Add the temporary runtime helper through the debugger channel.
+    - Implement remote tree/node inspection, keyboard/mouse/gamepad actions, run/stop/restart,
+      performance monitors, and game/editor viewport PNG capture.
+    - Capture manually and automatically after successful run/input actions; do not implement
+      continuous video.
+    - Done when an input changes fixture state and the following screenshot and remote-tree result
+      prove it.
+
+13. Implement configuration editors
+    - Provide typed search/get/set/reset for project.godot, autoloads, Input Map, plugins, and
+      EditorSettings.
+    - Persist project settings normally in the task worktree. Mark restart-required settings.
+    - Machine-wide EditorSettings writes always require approval when initiated by AI.
+    - Done when values survive restart and temporary Gofer entries still clean up independently.
+
+14. Add the AI tool router
+    - Change the per-request Node worker protocol to duplex NDJSON: Rust sends startup context; Node
+      emits typed tool requests; Rust returns results while streaming existing agent events.
+
+    - Register compact domain tools: godot_session, godot_scene, godot_node, godot_project,
+      godot_resource, godot_script, godot_debug, godot_runtime, godot_logs, and godot_docs_search.
+
+    - UI and AI invoke the same Rust handlers; no second implementation exists.
+    - Done when an AI turn edits a scene, fixes an LSP diagnostic, runs to a breakpoint, inspects
+      variables, and captures the result.
+
+15. Enforce the agreed safety model
+    - Auto-allow reads, LSP/DAP control, runtime actions, typed file writes/edits, undoable scene
+      changes, saves, worktree project settings, and RAG.
+    - Require AI approval for typed deletes, addon/plugin changes, machine-wide EditorSettings
+      writes, and non-worktree-impacting operations.
+    - Reject outside-worktree files rather than offering approval.
+    - Direct UI actions count as user authorization; destructive UI actions still use confirmation
+      dialogs.
+    - Preserve confined bash unchanged and document it as an explicit autonomous exception that can
+      perform destructive work inside the task worktree.
+
+16. Expose gofer-rag
+    - Call retrieve(), not query(), so documentation retrieval does not make a second LLM request.
+    - Return ranked passages, scores, chapter/source metadata, and bounded text to the agent and
+      Docs panel.
+    - Done when the same query produces usable citations in both UI and agent tool output.
+
+17. Build the full inspector workspace
+    - Use Astryx’s IDE frame: 260 px resizable explorer, flexible center, 380 px resizable
+      inspector, and 240 px collapsible bottom panel.
+    - Explorer tabs: edited Scene, Runtime, Files.
+    - Center tabs: Chat, Monaco scripts, Game screenshot, Docs.
+    - Inspector tabs: Node/Resource, Project Settings, Editor Settings.
+    - Bottom tabs: Problems, Debugger, Output, Import.
+    - At 1024 px and below, overlay the inspector; preserve the current 960 px minimum window.
+    - Use dense TreeList, List/Item, and tables rather than card-wrapped rows.
+    - Done when keyboard navigation, focus management, loading/error/empty states, and accessibility
+      tests pass.
+
+18. Migrate and release
+    - Replace the current Run button with “ensure editor session, then DAP launch.”
+    - Migrate stored run logging to session/run identifiers while retaining existing searchable log
+      history.
+    - Remove protocol-v1 bridge code after v2 acceptance coverage replaces it.
+    - Add third-party notices for selectively adapted godot-ai, Godot protocol references, Monaco,
+      and gdformat.
+    - Run npm run check plus packaged cross-platform acceptance tests.
+
+- Monaco tests for diagnostics, rename, breakpoint gutter, dirty-buffer conflicts, formatting
+  preview, and save.
+- AI-worker tests for duplex tool calls, cancellation, approval rejection, image tool results, and
+  autonomous shell behavior.
+- Packaged Linux, Windows, and macOS journeys using the pinned Godot artifacts already listed in the
+  repository.
+- Final acceptance journey:
+    1. Connect to a task worktree.
+    2. Inspect and mutate a scene, undo it, redo it, and explicitly save.
+    3. Create/edit a script, fix diagnostics, format it, rename a symbol, and navigate references.
+    4. Set a breakpoint, run, inspect stack/variables, evaluate, step, and continue.
+    5. Inspect the runtime tree, inject input, and capture the changed game screen.
+    6. Edit project settings and approve one machine-wide editor setting.
+    7. Retrieve relevant Godot documentation.
+    8. Switch tasks and verify complete cleanup/rebinding.
+
+## Explicit Assumptions and Exclusions
+
+- Supported engine: exactly Godot 4.7.1-stable; other versions fail with a clear compatibility
+  message.
+- Supported language intelligence/debugging: GDScript only. C# files remain visible/editable as
+  text.
+- One Gofer-managed editor session; no routing among multiple external editors.
+- Scene/node edits are in-memory and undoable until explicit save.
+- Game view is snapshot-based, not video streaming.
+- No MCP or Python service is introduced.
+- No export/deployment pipeline or dedicated animation, theme, material, particle, audio, camera,
+  tilemap, or production-preset authoring suite in this release.
+- The formatter is the pinned standalone gdformat sidecar; Godot 4.7’s LSP itself does not provide
+  formatting.
+- Workspace-wide symbols and DAP step-out are explicit Gofer adaptations because Godot 4.7 does not
+  provide them natively.
+- Machine-wide EditorSettings are outside Git/worktree rollback and therefore remain approval-gated.
+- Confined bash is deliberately autonomous inside the active task worktree, even when an equivalent
+  typed delete would require approval.

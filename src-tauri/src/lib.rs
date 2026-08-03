@@ -6,16 +6,20 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 mod git;
 mod godot;
+// The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
+// entirely. `test` keeps its loopback and protocol-version coverage in the default suite.
+#[cfg(any(feature = "webdriver", test))]
 mod godot_bridge;
 mod memory;
 mod process;
 pub mod protocol;
+mod rag;
 mod storage;
 
 use process::{ProcessSpawner, SystemProcessSpawner};
@@ -28,7 +32,6 @@ use storage::{
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 const API_KEY_USERNAME: &str = "ai-default";
 const AI_EVENT_PREFIX: &str = "GOFER_AI_EVENT:";
-const RAG_EVENT_PREFIX: &str = "GOFER_RAG_EVENT:";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
 const SETTINGS_VERSION: u32 = 1;
@@ -39,8 +42,7 @@ const MAX_CHAT_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_CHAT_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_AGENT_MESSAGES_BYTES: usize = 8 * 1024 * 1024;
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
-static RAG_INITIALIZING: AtomicBool = AtomicBool::new(false);
-static ACTIVE_RAG_INITIALIZATION: Mutex<Option<Arc<RagInitialization>>> = Mutex::new(None);
+const MEMORY_BACKFILL_LIMIT: usize = 200;
 static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_AI_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -226,23 +228,6 @@ struct AiStreamPayload {
     event: serde_json::Value,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum CacheState {
-    Installed,
-    Incomplete,
-    NotInstalled,
-    Busy,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CacheStatus {
-    path: String,
-    size_bytes: u64,
-    state: CacheState,
-}
-
 #[derive(Deserialize)]
 struct ModelsResponse {
     data: Vec<Model>,
@@ -293,89 +278,6 @@ struct PiModel {
     max_tokens: u64,
     #[serde(default = "default_model_input")]
     input: Vec<String>,
-}
-
-struct InitializationGuard;
-
-impl Drop for InitializationGuard {
-    fn drop(&mut self) {
-        RAG_INITIALIZING.store(false, Ordering::Release);
-    }
-}
-
-struct RagInitialization {
-    result: Mutex<Option<Result<(), String>>>,
-    completed: Condvar,
-}
-
-impl RagInitialization {
-    fn new() -> Self {
-        Self {
-            result: Mutex::new(None),
-            completed: Condvar::new(),
-        }
-    }
-
-    fn wait(&self) -> Result<(), String> {
-        let mut stored = self
-            .result
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        while stored.is_none() {
-            stored = self
-                .completed
-                .wait(stored)
-                .unwrap_or_else(|error| error.into_inner());
-        }
-        stored
-            .clone()
-            .expect("completed RAG initialization must have a result")
-    }
-}
-
-struct ActiveRagInitializationGuard {
-    initialization: Arc<RagInitialization>,
-    finished: bool,
-}
-
-impl ActiveRagInitializationGuard {
-    fn finish(mut self, result: Result<(), String>) {
-        self.finish_with(result);
-        self.finished = true;
-    }
-
-    fn finish_with(&self, completion: Result<(), String>) {
-        let mut active = ACTIVE_RAG_INITIALIZATION
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut result = self
-            .initialization
-            .result
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *result = Some(completion);
-        if active
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &self.initialization))
-        {
-            *active = None;
-        }
-        RAG_INITIALIZING.store(false, Ordering::Release);
-        drop(active);
-        drop(result);
-        self.initialization.completed.notify_all();
-    }
-}
-
-impl Drop for ActiveRagInitializationGuard {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.finish_with(Err(
-            "Gofer RAG initialization ended before producing a result".to_owned(),
-        ));
-    }
 }
 
 struct AiRequestGuard;
@@ -477,15 +379,24 @@ async fn save_settings(
     .map_err(|error| format!("Could not save Gofer settings: {error}"))?
 }
 
-#[tauri::command]
-async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestResult, String> {
+/// A validated settings payload paired with a ready-to-send request to its models endpoint.
+struct ModelsRequest {
+    settings: GoferSettings,
+    builder: reqwest::RequestBuilder,
+}
+
+/// Validates settings, resolves the credential, and builds the models-endpoint request.
+///
+/// Sending is left to the caller because the two commands classify transport failures
+/// differently: the connection test reports them as a status, model listing as an error.
+async fn prepare_models_request(request: SettingsRequest) -> Result<ModelsRequest, String> {
     let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
         let settings = validate_settings(request.settings)?;
         let api_key = resolve_api_key(&request.api_key)?;
         Ok::<_, String>((settings, api_key))
     })
     .await
-    .map_err(|error| format!("AI connection validation task failed: {error}"))??;
+    .map_err(|error| format!("AI settings validation task failed: {error}"))??;
     let base_url = format!("{}/", settings.ai.base_url.trim_end_matches('/'));
     let models_url = reqwest::Url::parse(&base_url)
         .and_then(|url| url.join("models"))
@@ -494,12 +405,18 @@ async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestRe
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| format!("Could not create the AI connection client: {error}"))?;
-    let mut request_builder = client.get(models_url);
+    let mut builder = client.get(models_url);
     if let Some(api_key) = api_key {
-        request_builder = request_builder.bearer_auth(api_key);
+        builder = builder.bearer_auth(api_key);
     }
+    Ok(ModelsRequest { settings, builder })
+}
 
-    let response = match request_builder.send().await {
+#[tauri::command]
+async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestResult, String> {
+    let ModelsRequest { settings, builder } = prepare_models_request(request).await?;
+
+    let response = match builder.send().await {
         Ok(response) => response,
         Err(error) => {
             return Ok(ConnectionTestResult {
@@ -552,26 +469,8 @@ async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestRe
 
 #[tauri::command]
 async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, String> {
-    let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
-        let settings = validate_settings(request.settings)?;
-        let api_key = resolve_api_key(&request.api_key)?;
-        Ok::<_, String>((settings, api_key))
-    })
-    .await
-    .map_err(|error| format!("AI model validation task failed: {error}"))??;
-    let base_url = format!("{}/", settings.ai.base_url.trim_end_matches('/'));
-    let models_url = reqwest::Url::parse(&base_url)
-        .and_then(|url| url.join("models"))
-        .map_err(|error| format!("Could not construct the models endpoint: {error}"))?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| format!("Could not create the AI connection client: {error}"))?;
-    let mut request_builder = client.get(models_url);
-    if let Some(api_key) = api_key {
-        request_builder = request_builder.bearer_auth(api_key);
-    }
-    let response = request_builder
+    let ModelsRequest { settings, builder } = prepare_models_request(request).await?;
+    let response = builder
         .send()
         .await
         .map_err(|error| format!("The AI server could not be reached: {error}"))?;
@@ -754,7 +653,10 @@ fn create_project_backup(app: AppHandle) -> Result<BackupResult, String> {
 
 #[tauri::command(async)]
 fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, String> {
-    project_storage(&app)?.run_maintenance()
+    let storage = project_storage(&app)?;
+    let mut result = storage.run_maintenance()?;
+    result.memory_embeddings_restored = backfill_memory_embeddings(&storage);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -770,11 +672,17 @@ async fn launch_godot(
     .map_err(|error| format!("Godot process task failed: {error}"))?
 }
 
+/// One-shot bridge call used only by the packaged WebDriver journey.
+///
+/// The renderer no longer supplies the bridge address: the backend reads it from the environment
+/// the test harness owns, so a compromised renderer cannot aim the transport. The command is
+/// compiled out of release builds entirely, and `gdintigration.md` step 4 retires it once the
+/// authenticated protocol v2 session lands.
+#[cfg(any(feature = "webdriver", test))]
 #[tauri::command(async)]
-fn send_godot_command(
-    address: String,
-    request: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+fn send_godot_command(request: serde_json::Value) -> Result<serde_json::Value, String> {
+    let address = std::env::var("GOFER_TEST_GODOT_ADDRESS")
+        .map_err(|_| "The packaged Godot bridge address is not configured".to_owned())?;
     godot_bridge::send(&address, &request)
 }
 
@@ -819,70 +727,24 @@ fn cancel_ai_request_with<R: Runtime>(app: &AppHandle<R>, request_id: u64) -> Re
 // coverage-critical-end: cancellation
 
 #[tauri::command]
-async fn get_rag_cache_status() -> Result<CacheStatus, String> {
-    tauri::async_runtime::spawn_blocking(cache_status)
+async fn get_rag_cache_status() -> Result<rag::CacheStatus, String> {
+    tauri::async_runtime::spawn_blocking(rag::cache_status)
         .await
         .map_err(|error| format!("Could not inspect the Gofer RAG cache: {error}"))?
 }
 
 #[tauri::command]
-async fn delete_rag_cache() -> Result<CacheStatus, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        if RAG_INITIALIZING
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(
-                "The model cache cannot be deleted while another model operation is running"
-                    .to_owned(),
-            );
-        }
-        let operation = InitializationGuard;
-
-        let path = rag_cache_path()?;
-        delete_cache_path(&path)?;
-        drop(operation);
-        cache_status()
-    })
-    .await
-    .map_err(|error| format!("Could not delete the Gofer RAG cache: {error}"))?
+async fn delete_rag_cache() -> Result<rag::CacheStatus, String> {
+    tauri::async_runtime::spawn_blocking(rag::delete_cache)
+        .await
+        .map_err(|error| format!("Could not delete the Gofer RAG cache: {error}"))?
 }
 
 #[tauri::command]
 async fn initialize_rag(app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || run_rag_initialization(|| run_rag_warmup(&app)))
+    tauri::async_runtime::spawn_blocking(move || rag::run_initialization(|| rag::run_warmup(&app)))
         .await
         .map_err(|error| format!("Gofer RAG initialization task failed: {error}"))?
-}
-
-fn run_rag_initialization(operation: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
-    let (initialization, is_leader) = {
-        let mut active = ACTIVE_RAG_INITIALIZATION
-            .lock()
-            .map_err(|_| "The RAG initialization lock is poisoned".to_owned())?;
-        if let Some(initialization) = active.as_ref() {
-            (Arc::clone(initialization), false)
-        } else {
-            RAG_INITIALIZING
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .map_err(|_| "Another model operation is already running".to_owned())?;
-            let initialization = Arc::new(RagInitialization::new());
-            *active = Some(Arc::clone(&initialization));
-            (initialization, true)
-        }
-    };
-
-    if !is_leader {
-        return initialization.wait();
-    }
-
-    let guard = ActiveRagInitializationGuard {
-        initialization,
-        finished: false,
-    };
-    let result = operation();
-    guard.finish(result.clone());
-    result
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1393,198 +1255,6 @@ fn resolve_api_key(update: &ApiKeyUpdate) -> Result<Option<String>, String> {
 }
 // coverage-critical-end: credential
 
-fn rag_cache_path() -> Result<PathBuf, String> {
-    if let Some(configured) = std::env::var_os("GOFER_RAG_CACHE_DIR") {
-        let path = PathBuf::from(configured);
-        if !path.is_absolute() {
-            return Err("GOFER_RAG_CACHE_DIR must be an absolute path".to_owned());
-        }
-        validate_cache_path(path)
-    } else {
-        let cache_root = dirs::cache_dir().ok_or_else(|| {
-            "The operating system user cache directory could not be resolved".to_owned()
-        })?;
-        validate_cache_path(cache_root.join("gofer-rag"))
-    }
-}
-
-// coverage-critical-start: cache
-fn validate_cache_path(path: PathBuf) -> Result<PathBuf, String> {
-    if path
-        .components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
-        return Err(format!(
-            "Refusing to use a cache path containing traversal components: {}",
-            path.display()
-        ));
-    }
-    if path.parent().is_none() || path.parent() == Some(Path::new("")) {
-        return Err(format!(
-            "Refusing to use an unsafe cache path: {}",
-            path.display()
-        ));
-    }
-    let safety_path = path.canonicalize().unwrap_or_else(|_| path.clone());
-    let home = dirs::home_dir().and_then(|home| home.canonicalize().ok());
-    if home.as_deref() == Some(safety_path.as_path()) {
-        return Err("Refusing to use the home directory as the Gofer RAG cache".to_owned());
-    }
-    Ok(path)
-}
-
-fn cache_status() -> Result<CacheStatus, String> {
-    let path = rag_cache_path()?;
-    let busy = RAG_INITIALIZING.load(Ordering::Acquire);
-    cache_status_for_path(&path, busy)
-}
-
-fn cache_status_for_path(path: &Path, busy: bool) -> Result<CacheStatus, String> {
-    let state = if busy {
-        CacheState::Busy
-    } else if !path.exists() {
-        CacheState::NotInstalled
-    } else if required_model_files(path).iter().all(|file| file.is_file()) {
-        CacheState::Installed
-    } else {
-        CacheState::Incomplete
-    };
-    let size_bytes = if path.exists() {
-        directory_size(path)?
-    } else {
-        0
-    };
-    Ok(CacheStatus {
-        path: path.display().to_string(),
-        size_bytes,
-        state,
-    })
-}
-
-fn delete_cache_path(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "Refusing to delete the symlink at {}",
-            path.display()
-        ));
-    }
-    if !metadata.is_dir() {
-        return Err(format!(
-            "The Gofer RAG cache path is not a directory: {}",
-            path.display()
-        ));
-    }
-    fs::remove_dir_all(path)
-        .map_err(|error| format!("Could not delete {}: {error}", path.display()))
-}
-// coverage-critical-end: cache
-
-fn required_model_files(cache: &Path) -> [PathBuf; 7] {
-    [
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/config.json"),
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/tokenizer.json"),
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/onnx/model_fp16.onnx"),
-        cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/onnx/model_fp16.onnx_data"),
-        cache.join("onnx-community/bge-reranker-v2-m3-ONNX/config.json"),
-        cache.join("onnx-community/bge-reranker-v2-m3-ONNX/tokenizer.json"),
-        cache.join("onnx-community/bge-reranker-v2-m3-ONNX/onnx/model_quantized.onnx"),
-    ]
-}
-
-fn directory_size(path: &Path) -> Result<u64, String> {
-    let mut total = 0;
-    for entry in fs::read_dir(path)
-        .map_err(|error| format!("Could not read cache directory {}: {error}", path.display()))?
-    {
-        let entry =
-            entry.map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-        let metadata = entry
-            .path()
-            .symlink_metadata()
-            .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            total += directory_size(&entry.path())?;
-        } else if metadata.is_file() {
-            total += metadata.len();
-        }
-    }
-    Ok(total)
-}
-
-fn run_rag_warmup(app: &AppHandle) -> Result<(), String> {
-    run_rag_warmup_with(app, &SystemProcessSpawner)
-}
-
-fn run_rag_warmup_with<R: Runtime>(
-    app: &AppHandle<R>,
-    spawner: &impl ProcessSpawner,
-) -> Result<(), String> {
-    #[cfg(feature = "webdriver")]
-    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
-        return Ok(());
-    }
-
-    let worker = rag_worker_path()?;
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
-    let mut child = spawner
-        .spawn(node.as_ref(), &[worker.into_os_string()], false)
-        .map_err(|error| {
-            format!(
-                "Could not start Node.js with '{node}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY."
-            )
-        })?;
-    let stdout = child
-        .take_stdout()
-        .ok_or_else(|| "Could not read Gofer RAG worker output".to_owned())?;
-    let stderr = child
-        .take_stderr()
-        .ok_or_else(|| "Could not read Gofer RAG worker errors".to_owned())?;
-    let stderr_reader = std::thread::spawn(move || {
-        let mut output = String::new();
-        let _ = BufReader::new(stderr).read_to_string(&mut output);
-        output
-    });
-
-    for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|error| format!("Could not read Gofer RAG progress: {error}"))?;
-        let Some(payload) = line.strip_prefix(RAG_EVENT_PREFIX) else {
-            continue;
-        };
-        let progress: serde_json::Value = serde_json::from_str(payload)
-            .map_err(|error| format!("Gofer RAG returned invalid progress data: {error}"))?;
-        app.emit_to("main", "rag-download-progress", progress)
-            .map_err(|error| format!("Could not report Gofer RAG progress: {error}"))?;
-    }
-
-    let status = child
-        .wait()
-        .map_err(|error| format!("Could not wait for Gofer RAG initialization: {error}"))?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| "Could not collect Gofer RAG worker errors".to_owned())?;
-
-    if status.success {
-        return Ok(());
-    }
-
-    let detail = stderr.trim();
-    if detail.is_empty() {
-        return Err(format!(
-            "Gofer RAG initialization exited with {}",
-            status.description
-        ));
-    }
-    Err(format!("Gofer RAG initialization failed: {detail}"))
-}
-
 fn run_ai_worker(
     app: &AppHandle,
     request_id: u64,
@@ -1696,7 +1366,7 @@ fn retrieve_memory_context(
     if prompt.trim().is_empty() {
         return Err("No text is available for memory retrieval".to_owned());
     }
-    let vector = memory::embed_query(prompt, &rag_cache_path()?).ok();
+    let vector = memory::embed_query(prompt, &rag::cache_path()?).ok();
     let results = storage.search_memory(&SearchMemoryRequest {
         query: prompt.to_owned(),
         task_id: task_id.map(str::to_owned),
@@ -1741,38 +1411,50 @@ fn remember_completed_turn(
         provenance: serde_json::json!({"source": "completed-ai-turn"}),
         superseded_by: None,
     })?;
-    if let Ok(mut vectors) = memory::embed_documents(&[content], &rag_cache_path()?)
-        && let Some(vector) = vectors.pop()
-    {
-        storage.save_memory_embedding(&SaveMemoryEmbeddingRequest {
-            memory_id: record.id,
-            model: memory::MODEL.to_owned(),
-            vector,
-        })?;
+    // A failure here must not fail the AI turn, but it must not vanish either: the memory stays
+    // lexical-only until maintenance re-embeds it, so say so instead of silently degrading.
+    match embed_memory(storage, &record.id, &content) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            eprintln!(
+                "Storing the memory embedding failed, retry with storage maintenance: {error}"
+            );
+            Err(error)
+        }
     }
-    Ok(())
+}
+
+fn embed_memory(storage: &ProjectStorage, memory_id: &str, content: &str) -> Result<(), String> {
+    let vector = memory::embed_documents(&[content.to_owned()], &rag::cache_path()?)?
+        .pop()
+        .ok_or_else(|| "The memory worker returned no document vector".to_owned())?;
+    storage.save_memory_embedding(&SaveMemoryEmbeddingRequest {
+        memory_id: memory_id.to_owned(),
+        model: memory::MODEL.to_owned(),
+        vector,
+    })
+}
+
+/// Re-embeds memories that lost or never received a vector, returning how many were restored.
+///
+/// Embedding needs the memory worker, so this cannot live in `storage`. It stops at the first
+/// failure because every remaining memory would fail the same way when the worker is unavailable.
+fn backfill_memory_embeddings(storage: &ProjectStorage) -> usize {
+    let Ok(pending) = storage.memories_missing_embeddings(MEMORY_BACKFILL_LIMIT) else {
+        return 0;
+    };
+    let mut restored = 0;
+    for memory in pending {
+        if embed_memory(storage, &memory.id, &memory.content).is_err() {
+            break;
+        }
+        restored += 1;
+    }
+    restored
 }
 
 fn truncate_text(text: &str, maximum: usize) -> String {
     text.chars().take(maximum).collect()
-}
-
-fn rag_worker_path() -> Result<PathBuf, String> {
-    let configured = std::env::var_os("GOFER_RAG_WORKER").map(PathBuf::from);
-    let path = configured.unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("scripts")
-            .join("rag-warmup.mjs")
-    });
-
-    if path.is_file() {
-        return Ok(path);
-    }
-    Err(format!(
-        "Gofer RAG worker was not found at {}. Run npm install, or set GOFER_RAG_WORKER.",
-        path.display()
-    ))
 }
 
 fn ai_worker_path() -> Result<PathBuf, String> {
@@ -1807,37 +1489,51 @@ pub fn run() {
         .plugin(tauri_plugin_wdio::init())
         .plugin(tauri_plugin_wdio_webdriver::init());
 
+    let builder = builder.setup(|app| {
+        let storage = open_project_storage(app.handle()).map_err(std::io::Error::other)?;
+        app.manage(storage);
+        Ok(())
+    });
+
+    // The command list is written once and the test-only bridge command is appended, so the two
+    // builds cannot drift apart. `generate_handler!` takes a path list, which no attribute can be
+    // applied to, hence the macro instead of a `#[cfg]` on one entry.
+    macro_rules! gofer_commands {
+        ($($test_only:path),*) => {
+            tauri::generate_handler![
+                activate_chat_task,
+                cancel_ai_request,
+                cancel_godot,
+                create_chat_task,
+                create_project_backup,
+                delete_rag_cache,
+                get_rag_cache_status,
+                import_legacy_chat,
+                initialize_rag,
+                list_ai_models,
+                list_project_tasks,
+                launch_godot,
+                load_chat,
+                load_settings,
+                merge_task_worktree,
+                read_chat_attachment,
+                run_storage_maintenance,
+                save_chat,
+                save_settings,
+                save_chat_attachment,
+                send_ai_message,
+                test_ai_connection,
+                $($test_only),*
+            ]
+        };
+    }
+
+    #[cfg(feature = "webdriver")]
+    let builder = builder.invoke_handler(gofer_commands![send_godot_command]);
+    #[cfg(not(feature = "webdriver"))]
+    let builder = builder.invoke_handler(gofer_commands![]);
+
     builder
-        .setup(|app| {
-            let storage = open_project_storage(app.handle()).map_err(std::io::Error::other)?;
-            app.manage(storage);
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            activate_chat_task,
-            cancel_ai_request,
-            cancel_godot,
-            create_chat_task,
-            create_project_backup,
-            delete_rag_cache,
-            get_rag_cache_status,
-            import_legacy_chat,
-            initialize_rag,
-            list_ai_models,
-            list_project_tasks,
-            launch_godot,
-            load_chat,
-            load_settings,
-            merge_task_worktree,
-            read_chat_attachment,
-            run_storage_maintenance,
-            save_chat,
-            save_settings,
-            save_chat_attachment,
-            send_godot_command,
-            send_ai_message,
-            test_ai_connection,
-        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -2127,24 +1823,24 @@ mod tests {
             "",
             true,
         );
-        run_rag_warmup_with(app.handle(), &success).expect("fake RAG warmup");
+        rag::run_warmup_with(app.handle(), &success).expect("fake RAG warmup");
 
         let invalid = FakeProcessSpawner::new("GOFER_RAG_EVENT:not-json\n", "", true);
         assert!(
-            run_rag_warmup_with(app.handle(), &invalid)
+            rag::run_warmup_with(app.handle(), &invalid)
                 .unwrap_err()
                 .contains("invalid progress data")
         );
 
         let failed = FakeProcessSpawner::new("", "download failed\n", false);
         assert_eq!(
-            run_rag_warmup_with(app.handle(), &failed).unwrap_err(),
+            rag::run_warmup_with(app.handle(), &failed).unwrap_err(),
             "Gofer RAG initialization failed: download failed"
         );
 
         let silent = FakeProcessSpawner::new("", "", false);
         assert!(
-            run_rag_warmup_with(app.handle(), &silent)
+            rag::run_warmup_with(app.handle(), &silent)
                 .unwrap_err()
                 .contains("exit status: 1")
         );
@@ -2281,6 +1977,9 @@ mod tests {
             )
             .expect("write response");
         });
+        // The backend owns the address, so the test configures the environment the command reads.
+        // SAFETY: this test owns the process-wide override while it executes.
+        unsafe { std::env::set_var("GOFER_TEST_GODOT_ADDRESS", address.to_string()) };
         let app = mock_builder()
             .invoke_handler(tauri::generate_handler![send_godot_command])
             .build(tauri::generate_context!())
@@ -2297,7 +1996,6 @@ mod tests {
                 error: CallbackFn(1),
                 url: "tauri://localhost".parse().expect("mock URL"),
                 body: InvokeBody::Json(serde_json::json!({
-                    "address": address.to_string(),
                     "request": {
                         "protocolVersion": 1,
                         "id": "ipc-1",
@@ -2314,6 +2012,8 @@ mod tests {
         .expect("deserialize command response");
         assert_eq!(response["result"]["acceptedVersion"], 1);
         server.join().expect("fake Godot bridge");
+        // SAFETY: restore the test process environment after the assertion.
+        unsafe { std::env::remove_var("GOFER_TEST_GODOT_ADDRESS") };
     }
 
     fn chat_attachment() -> ChatAttachment {
@@ -2687,175 +2387,6 @@ mod tests {
                 .contains("are invalid")
         );
     }
-
-    #[test]
-    fn cache_path_rejects_unsafe_targets() {
-        assert!(validate_cache_path(std::env::temp_dir().join("gofer-safe-cache")).is_ok());
-        assert!(
-            validate_cache_path(PathBuf::from("/"))
-                .unwrap_err()
-                .contains("unsafe cache path")
-        );
-        assert!(
-            validate_cache_path(PathBuf::from("/tmp/gofer/../other"))
-                .unwrap_err()
-                .contains("traversal components")
-        );
-        assert!(
-            validate_cache_path(PathBuf::from("relative-cache"))
-                .unwrap_err()
-                .contains("unsafe cache path")
-        );
-        if let Some(home) = dirs::home_dir() {
-            assert!(
-                validate_cache_path(home)
-                    .unwrap_err()
-                    .contains("home directory")
-            );
-        }
-    }
-
-    #[test]
-    fn cache_status_distinguishes_missing_incomplete_installed_and_busy() {
-        let directory = TempDir::new().expect("temporary directory");
-        let cache = directory.path().join("cache");
-        let missing = cache_status_for_path(&cache, false).expect("missing status");
-        assert_eq!(missing.state, CacheState::NotInstalled);
-        assert_eq!(missing.size_bytes, 0);
-
-        fs::create_dir(&cache).expect("create cache");
-        fs::write(cache.join("partial.bin"), [1_u8, 2, 3]).expect("write partial cache");
-        let incomplete = cache_status_for_path(&cache, false).expect("incomplete status");
-        assert_eq!(incomplete.state, CacheState::Incomplete);
-        assert_eq!(incomplete.size_bytes, 3);
-
-        for file in required_model_files(&cache) {
-            fs::create_dir_all(file.parent().expect("model parent")).expect("create model parent");
-            fs::write(file, [0_u8; 2]).expect("write model file");
-        }
-        assert_eq!(
-            cache_status_for_path(&cache, false)
-                .expect("installed status")
-                .state,
-            CacheState::Installed
-        );
-        assert_eq!(
-            cache_status_for_path(&cache, true)
-                .expect("busy status")
-                .state,
-            CacheState::Busy
-        );
-    }
-
-    #[test]
-    fn concurrent_rag_initialization_joins_the_active_operation() {
-        let (started_sender, started_receiver) = std::sync::mpsc::channel();
-        let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        let leader = thread::spawn(move || {
-            run_rag_initialization(|| {
-                started_sender
-                    .send(())
-                    .expect("report initialization start");
-                release_receiver.recv().expect("release initialization");
-                Err("warmup failed".to_owned())
-            })
-        });
-        started_receiver.recv().expect("initialization start");
-
-        let follower_operation_ran = Arc::new(AtomicBool::new(false));
-        let follower_flag = Arc::clone(&follower_operation_ran);
-        let follower = thread::spawn(move || {
-            run_rag_initialization(|| {
-                follower_flag.store(true, Ordering::Release);
-                Ok(())
-            })
-        });
-
-        let follower_joined = (0..1_000).any(|_| {
-            let reference_count = ACTIVE_RAG_INITIALIZATION
-                .lock()
-                .expect("active initialization")
-                .as_ref()
-                .map(Arc::strong_count)
-                .unwrap_or_default();
-            if reference_count >= 3 {
-                return true;
-            }
-            thread::sleep(Duration::from_millis(1));
-            false
-        });
-        assert!(
-            follower_joined,
-            "follower did not join active initialization"
-        );
-
-        release_sender.send(()).expect("release leader");
-        assert_eq!(
-            leader.join().expect("leader result"),
-            Err("warmup failed".to_owned())
-        );
-        assert_eq!(
-            follower.join().expect("follower result"),
-            Err("warmup failed".to_owned())
-        );
-        assert!(!follower_operation_ran.load(Ordering::Acquire));
-        assert!(!RAG_INITIALIZING.load(Ordering::Acquire));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn directory_size_ignores_symlinks() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().expect("temporary directory");
-        let cache = directory.path().join("cache");
-        let outside = directory.path().join("outside.bin");
-        fs::create_dir(&cache).expect("create cache");
-        fs::write(cache.join("inside.bin"), [0_u8; 4]).expect("write inside file");
-        fs::write(&outside, [0_u8; 20]).expect("write outside file");
-        symlink(&outside, cache.join("link.bin")).expect("create symlink");
-
-        assert_eq!(directory_size(&cache).expect("cache size"), 4);
-    }
-
-    #[test]
-    fn cache_deletion_is_safe_and_idempotent() {
-        let directory = TempDir::new().expect("temporary directory");
-        let cache = directory.path().join("cache");
-        delete_cache_path(&cache).expect("missing cache deletion");
-        fs::create_dir(&cache).expect("create cache");
-        fs::write(cache.join("model.bin"), [0_u8; 4]).expect("write cache file");
-        delete_cache_path(&cache).expect("cache deletion");
-        assert!(!cache.exists());
-
-        let file = directory.path().join("file");
-        fs::write(&file, []).expect("write regular file");
-        assert!(
-            delete_cache_path(&file)
-                .unwrap_err()
-                .contains("not a directory")
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cache_deletion_refuses_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().expect("temporary directory");
-        let target = directory.path().join("target");
-        let link = directory.path().join("cache");
-        fs::create_dir(&target).expect("create target");
-        symlink(&target, &link).expect("create cache symlink");
-
-        assert!(
-            delete_cache_path(&link)
-                .unwrap_err()
-                .contains("Refusing to delete the symlink")
-        );
-        assert!(target.exists());
-    }
-
     #[tokio::test]
     async fn connection_test_reports_available_model_and_sends_bearer_key() {
         let (base_url, server) = mock_server("200 OK", r#"{"data":[{"id":"wanted"}]}"#);

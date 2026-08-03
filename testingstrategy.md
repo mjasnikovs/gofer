@@ -10,22 +10,26 @@ must also receive a shared-contract or integration test that exercises that boun
 
 ## Current baseline
 
-Verified on August 1, 2026, the enforced suites contain:
+Verified on August 3, 2026, the enforced suites contain:
 
-- 17 frontend tests: 15 React component/accessibility tests and 2 router tests
-- 20 Node tests covering the AI worker/provider, protocol, RAG progress, and workspace confinement
-- 63 Rust tests, including shared-protocol, injected-process, and actual Tauri mock-runtime IPC
+- 18 frontend tests: 16 React component/accessibility tests and 2 router tests
+- 28 Node tests covering the AI worker/provider, protocol, RAG progress and warmup, memory
+  embedding, and workspace confinement
+- 66 Rust tests, including shared-protocol, injected-process, and actual Tauri mock-runtime IPC
   tests
 - 1 Godot shared-fixture suite and 1 real-process acceptance test covering every mandatory bridge
   scenario
 - 5 Playwright visual/accessibility states and 1 WebdriverIO browser-mode desktop journey
 
-The Rust suite measures 83.84% line coverage and 77.42% branch coverage. Critical attachment, cache,
-cancellation, credential, path, and protocol regions each measure 100% branch coverage. The
-repository includes the versioned shared protocol, a loopback-only Rust transport, a real Godot
-scene-control bridge, a checked-in Godot fixture, and real-process acceptance coverage. It also has
-a typed renderer adapter, Tauri mock-runtime IPC coverage, selected visual regressions, automated
-accessibility scans, enforced Node coverage, and browser-mode WebdriverIO coverage.
+The Node suite measures 97.78% line coverage and 89.28% branch coverage; `workspace-confinement.mjs`
+holds its separate 100% gate. The Rust coverage percentages are produced by the `rust-coverage` CI
+job, which enforces at least 80% line and 75% branch coverage plus 100% branch coverage for the
+marked critical regions. Critical attachment, cache, cancellation, credential, path, and protocol
+regions each measure 100% branch coverage. The repository includes the versioned shared protocol, a
+loopback-only Rust transport, a real Godot scene-control bridge, a checked-in Godot fixture, and
+real-process acceptance coverage. It also has a typed renderer adapter, Tauri mock-runtime IPC
+coverage, selected visual regressions, automated accessibility scans, enforced Node coverage, and
+browser-mode WebdriverIO coverage.
 
 The repository has a clean-checkout Linux check workflow and active checked-in commit/push hooks. A
 second Linux job builds and launches a release-mode application through WebdriverIO's embedded
@@ -33,8 +37,14 @@ driver using isolated application data and a test-feature-only prepared RAG cach
 journey covers deterministic AI streaming and tool events, an image attachment, real Godot project
 mutation and saving, cancellation, and chat/settings restoration in a second application process. A
 nightly matrix repeats the packaged journey and real Godot acceptance suites on Linux, Windows, and
-macOS. These new workflows have not yet run on GitHub-hosted runners because they are not on
-`origin/master`; platform verification remains pending their first push and nightly dispatch.
+macOS. These workflows are on `origin/master`. Every job installs Godot through
+`scripts/install-godot.mjs`, which reads the single pinned manifest in
+`protocol/godot-artifacts.json` and verifies its SHA-256 and reported version, so no workflow
+carries its own copy of the pins.
+
+Locally, `npm run test:godot` accepts the pinned Godot from `PATH` when `GOFER_GODOT_BINARY` is
+unset. The version is verified either way, so `npm run check` — which the commit and push hooks run
+— works on a developer machine that already has Godot 4.7.1-stable installed.
 
 ## Cross-language contract
 

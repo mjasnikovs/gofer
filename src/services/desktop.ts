@@ -79,7 +79,8 @@ type DesktopCommandMap = Readonly<{
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
     save_settings: CommandSpec<{request: SettingsRequest}, SettingsResponse>
-    send_godot_command: CommandSpec<{address: string; request: ProtocolRequest}, unknown>
+    // Only registered in WebDriver builds; the backend owns the bridge address.
+    send_godot_command: CommandSpec<{request: ProtocolRequest}, unknown>
     send_ai_message: CommandSpec<{request: SendAiMessageRequest}, void>
     test_ai_connection: CommandSpec<{request: SettingsRequest}, ConnectionTestResult>
 }>
