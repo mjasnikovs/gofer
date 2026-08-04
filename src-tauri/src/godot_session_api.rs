@@ -11,7 +11,7 @@ use crate::godot_session::{self, LaunchRequest, SessionError, SessionInfo, Sessi
 use crate::storage::ProjectStorage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -142,11 +142,12 @@ pub fn start_session<R: Runtime>(
 }
 
 /// Stops the active session and removes the staged addon.
-pub fn stop_session() -> Result<(), SessionError> {
+pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> {
     let worktree = current_worktree();
     let result = godot_session::stop();
     if let Some(worktree) = worktree {
-        let _ = AddonStager::new(ledger_path_for(&worktree)).unstage(&worktree);
+        // Unstaging must read the same ledger staging wrote, or the addon is left in the worktree.
+        let _ = AddonStager::new(ledger_path(app)).unstage(&worktree);
     }
     stop_event_subscription();
     result
@@ -251,12 +252,6 @@ fn ledger_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {
         .app_data_dir()
         .map(|path| path.join(LEDGER_FILE_NAME))
         .unwrap_or_else(|_| PathBuf::from(LEDGER_FILE_NAME))
-}
-
-fn ledger_path_for(_worktree: &Path) -> PathBuf {
-    // The ledger lives in Gofer's application data, not the worktree. Fall back to a local file
-    // only when the application data path cannot be resolved.
-    PathBuf::from(LEDGER_FILE_NAME)
 }
 
 fn current_worktree() -> Option<PathBuf> {

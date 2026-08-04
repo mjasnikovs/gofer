@@ -18,7 +18,7 @@ Verified on August 3, 2026, the enforced suites contain:
 - 66 Rust tests, including shared-protocol, injected-process, and actual Tauri mock-runtime IPC
   tests
 - 1 Godot shared-fixture suite and 1 real-process acceptance test covering every mandatory bridge
-  scenario
+  scenario, plus 3 editor acceptance tests that drive the staged addon through the real editor RPC
 - 5 Playwright visual/accessibility states and 1 WebdriverIO browser-mode desktop journey
 
 The Node suite measures 97.78% line coverage and 89.28% branch coverage; `workspace-confinement.mjs`
@@ -140,12 +140,23 @@ current supported patch on August 1, 2026. Pin the complete version, download UR
 digest independently for Linux, Windows, and macOS. A version update is an intentional repository
 change that updates those pins and reruns the full Godot acceptance suite.
 
-Godot testing has two layers:
+Godot testing has three layers:
 
 1. Headless script tests for bridge/plugin logic, scene inspection, mutation, serialization, and
    error responses.
 2. Protocol acceptance tests that start a real Godot process, connect through the real transport,
    send commands, and verify both the response and resulting project files.
+3. Editor acceptance tests in `src-tauri/src/godot_addon_acceptance.rs`, which stage the addon with
+   `AddonStager`, launch the pinned editor, and drive protocol v2 through the real `RpcSession`.
+
+Layer 3 exists because the layers above it mock whichever side of the editor boundary they are not
+testing, and a mock written by the author of the code it stands in for agrees with that code by
+construction. It caught an addon whose undo called a method Godot never exposed to scripting, a
+handshake whose engine version and project path no real editor could satisfy, and a supervisor that
+closed the connection on its own heartbeat — all while every other suite was green. Keep its
+assertions on observable results: the edited scene, the saved file, the refusal code. It is gated
+behind the `godot-acceptance` Cargo feature so `npm run test:rust` needs no engine, and runs in
+`npm run test:godot` once the Node journeys have proven the binary.
 
 Mandatory acceptance scenarios:
 

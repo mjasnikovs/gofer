@@ -9,12 +9,15 @@ extends EditorPlugin
 ## main thread.
 
 const PROTOCOL_VERSION := 2
+const HANDSHAKE_ID := "handshake-1"
 
 var _peer: StreamPeerTCP
 var _status: int = -1
 var _pending_line: String = ""
 var _ready_notified: bool = false
 var _readiness: String = "starting"
+# Gofer assigns the session id in its handshake response; events carry it as their envelope id.
+var _session_id: String = "gofer-session"
 
 # Edited scene state. A revision starts at 0 when a scene is opened or created and increments on
 # every accepted mutation. Save keeps the revision and clears dirty; reload resets both.
@@ -23,6 +26,8 @@ var _scene_revision: int = 0
 var _scene_dirty: bool = false
 var _undo_depth: int = 0
 var _redo_depth: int = 0
+# Play mode is not a protocol readiness, so it is tracked apart from `_readiness`.
+var _playing: bool = false
 
 const MUTATING_COMMANDS: Array[String] = [
     "session.undo",
@@ -80,6 +85,8 @@ func _process(_delta: float) -> void:
         _ready_notified = true
         _set_readiness("ready")
 
+    _track_play_state()
+
     var available := _peer.get_available_bytes()
     while available > 0:
         var byte := _peer.get_8()
@@ -104,6 +111,14 @@ func _rpc_token() -> String:
 func _project_path() -> String:
     return ProjectSettings.globalize_path("res://")
 
+## Reports the engine as `major.minor.patch.channel`, which is the shape the protocol validates.
+##
+## The `string` field of `Engine.get_version_info()` reads "4.7.1-stable (official)" — a display
+## string, not a version the handshake can carry.
+func _engine_version() -> String:
+    var info := Engine.get_version_info()
+    return "%d.%d.%d.%s" % [info["major"], info["minor"], info["patch"], info["status"]]
+
 func _addon_version() -> String:
     var config := ConfigFile.new()
     var path: String = get_script().get_path().get_base_dir().path_join("plugin.cfg")
@@ -115,13 +130,13 @@ func _send_handshake() -> void:
     var handshake := {
         "protocolVersion": PROTOCOL_VERSION,
         "kind": "handshake",
-        "id": "handshake-1",
+        "id": HANDSHAKE_ID,
         "token": _rpc_token(),
         "acceptedVersions": [PROTOCOL_VERSION],
         "client": {
             "name": "gofer-godot-addon",
             "addonVersion": _addon_version(),
-            "engineVersion": Engine.get_version_info()["string"],
+            "engineVersion": _engine_version(),
             "projectPath": _project_path(),
             "capabilities": ["session", "scene", "node", "project"]
         }
@@ -140,6 +155,11 @@ func _handle_line(line: String) -> void:
     var kind: String = envelope.get("kind", "")
     if kind == "request":
         _handle_request(envelope)
+    elif kind == "response" and envelope.get("id", "") == HANDSHAKE_ID:
+        var result := envelope.get("result", {}) as Dictionary
+        var session_id: String = result.get("sessionId", "")
+        if not session_id.is_empty():
+            _session_id = session_id
 
 func _handle_request(envelope: Dictionary) -> void:
     var id: String = envelope.get("id", "")
@@ -220,6 +240,16 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
                 "details": {}
             }
         }
+    if _playing:
+        return {
+            "_gofer_error": {
+                "code": "session_playing",
+                "message": "The project is running and the scene cannot be mutated",
+                "retryable": true,
+                "readiness": "ready",
+                "details": {}
+            }
+        }
     if expected_revision == null:
         return {
             "_gofer_error": {
@@ -242,16 +272,33 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
         }
     return {}
 
-func _bump_revision() -> void:
+## Advances the edited-scene revision and reports the change. Undo and redo depths belong to the
+## caller, because a mutation, an undo, and a redo each move them differently.
+func _advance_revision() -> void:
     _scene_revision += 1
     _scene_dirty = true
+    _send_event("scene.changed", {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_dirty})
+
+func _bump_revision() -> void:
     _undo_depth += 1
     _redo_depth = 0
-    _send_event("scene.changed", {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_dirty})
+    _advance_revision()
 
 func _set_readiness(readiness: String) -> void:
     _readiness = readiness
     _send_event("session.%s" % readiness, {"readiness": readiness})
+
+## Godot raises no signal when the project starts or stops running, so the plugin polls the editor
+## and reports the transition. Gofer maps these events onto its own session lifecycle.
+func _track_play_state() -> void:
+    var playing := EditorInterface.is_playing_scene()
+    if playing == _playing:
+        return
+    _playing = playing
+    if playing:
+        _send_event("session.playing", {"readiness": _readiness})
+    else:
+        _send_event("session.ready", {"readiness": _readiness})
 
 func _unknown_command_error(command: String) -> Dictionary:
     return {
@@ -276,39 +323,72 @@ func _session_state() -> Dictionary:
 
 func _undo() -> Dictionary:
     if _undo_depth <= 0:
-        return {
-            "_gofer_error": {
-                "code": "undo_unavailable",
-                "message": "Nothing to undo",
-                "retryable": false,
-                "readiness": "ready",
-                "details": {}
-            }
-        }
-    var undo := get_undo_redo()
-    undo.undo()
+        return _history_error("undo_unavailable", "Nothing to undo")
+    var history := _scene_history()
+    if history == null or not history.undo():
+        return _history_error("undo_unavailable", "The editor refused to undo the last action")
     _undo_depth -= 1
     _redo_depth += 1
-    _bump_revision()
+    _after_history_step()
     return {"undoDepth": _undo_depth, "redoDepth": _redo_depth}
 
 func _redo() -> Dictionary:
     if _redo_depth <= 0:
-        return {
-            "_gofer_error": {
-                "code": "redo_unavailable",
-                "message": "Nothing to redo",
-                "retryable": false,
-                "readiness": "ready",
-                "details": {}
-            }
-        }
-    var undo := get_undo_redo()
-    undo.redo()
+        return _history_error("redo_unavailable", "Nothing to redo")
+    var history := _scene_history()
+    if history == null or not history.redo():
+        return _history_error("redo_unavailable", "The editor refused to redo the next action")
     _undo_depth += 1
     _redo_depth -= 1
-    _bump_revision()
+    _after_history_step()
     return {"undoDepth": _undo_depth, "redoDepth": _redo_depth}
+
+## Settles the editor after the scene history moved under it.
+##
+## `EditorUndoRedoManager` tracks a saved version per history and derives the scene's unsaved marker
+## by counting actions from it. Stepping the underlying `UndoRedo` directly leaves that count
+## pointing past the end of the manager's own action list, so the marker is set explicitly instead:
+## a scene that just moved through its history is unsaved either way.
+func _after_history_step() -> void:
+    EditorInterface.mark_scene_as_unsaved()
+    _advance_revision()
+
+func _history_error(code: String, message: String) -> Dictionary:
+    return {
+        "_gofer_error": {
+            "code": code,
+            "message": message,
+            "retryable": false,
+            "readiness": "ready",
+            "details": {"undoDepth": _undo_depth, "redoDepth": _redo_depth}
+        }
+    }
+
+## Returns the undo history the edited scene records into.
+##
+## `EditorUndoRedoManager` routes each action to a per-scene history and keeps its own `undo` and
+## `redo` unbound from scripting, so stepping happens on the underlying `UndoRedo`. Actions are
+## pinned to the edited scene through `create_action`'s custom context (see `_begin_action`), so the
+## same context resolves the history to step through here.
+func _scene_history() -> UndoRedo:
+    var root := _edited_root()
+    if root == null:
+        return null
+    var manager := get_undo_redo()
+    var history_id := manager.get_object_history_id(root)
+    if history_id == EditorUndoRedoManager.INVALID_HISTORY:
+        return null
+    return manager.get_history_undo_redo(history_id)
+
+## Opens an undoable action pinned to the edited scene's history.
+##
+## The do/undo callables live on this plugin rather than on scene nodes, which would otherwise route
+## the action into the global history and leave `_scene_history` stepping through an empty one.
+func _begin_action(name: String) -> EditorUndoRedoManager:
+    var manager := get_undo_redo()
+    manager.create_action(name, UndoRedo.MERGE_DISABLE, _edited_root(), false)
+    manager.force_fixed_history()
+    return manager
 
 func _project_settings() -> Dictionary:
     return {
@@ -513,8 +593,7 @@ func _node_create(params: Dictionary) -> Dictionary:
     node.name = node_name
 
     var root := _edited_root()
-    var undo := get_undo_redo()
-    undo.create_action("Create %s" % node_name)
+    var undo := _begin_action("Create %s" % node_name)
     undo.add_do_method(self, "_do_attach", parent, node, root, index)
     undo.add_undo_method(self, "_do_detach", parent, node)
     undo.add_do_reference(node)
@@ -552,8 +631,7 @@ func _node_duplicate(params: Dictionary) -> Dictionary:
         copy.name = new_name
 
     var root := _edited_root()
-    var undo := get_undo_redo()
-    undo.create_action("Duplicate %s" % node.name)
+    var undo := _begin_action("Duplicate %s" % node.name)
     undo.add_do_method(self, "_do_attach", parent, copy, root, index + 1)
     undo.add_undo_method(self, "_do_detach", parent, copy)
     undo.add_do_reference(copy)
@@ -586,8 +664,7 @@ func _node_rename(params: Dictionary) -> Dictionary:
         return _node_not_found_error(node_path_str)
     var old_name := String(node.name)
 
-    var undo := get_undo_redo()
-    undo.create_action("Rename %s" % old_name)
+    var undo := _begin_action("Rename %s" % old_name)
     undo.add_do_method(node, "set_name", new_name)
     undo.add_undo_method(node, "set_name", old_name)
     undo.commit_action()
@@ -626,8 +703,7 @@ func _node_reparent(params: Dictionary) -> Dictionary:
     var old_index := node.get_index()
     var root := _edited_root()
 
-    var undo := get_undo_redo()
-    undo.create_action("Reparent %s" % node.name)
+    var undo := _begin_action("Reparent %s" % node.name)
     undo.add_do_method(self, "_do_reparent", node, new_parent, root, index)
     undo.add_undo_method(self, "_undo_reparent", node, old_parent, root, old_index)
     undo.add_undo_reference(node)
@@ -661,8 +737,7 @@ func _node_delete(params: Dictionary) -> Dictionary:
     var index := node.get_index()
     var root := _edited_root()
 
-    var undo := get_undo_redo()
-    undo.create_action("Delete %s" % node.name)
+    var undo := _begin_action("Delete %s" % node.name)
     undo.add_do_method(self, "_do_detach", parent, node)
     undo.add_undo_method(self, "_do_attach", parent, node, root, index)
     undo.add_undo_reference(node)
@@ -705,21 +780,21 @@ func _node_set_property(params: Dictionary) -> Dictionary:
             }
         }
 
-    var new_value: Variant = _from_tagged(value)
-    if new_value == null and value != null and value.get("type", "") != "null":
+    var decoded := _decode_value(value)
+    if not decoded["ok"]:
         return {
             "_gofer_error": {
                 "code": "unsupported_value",
-                "message": "The supplied value type is not supported",
+                "message": decoded["message"],
                 "retryable": false,
                 "readiness": "ready",
-                "details": {}
+                "details": {"property": property}
             }
         }
+    var new_value: Variant = decoded["value"]
 
     var old_value: Variant = node.get(property)
-    var undo := get_undo_redo()
-    undo.create_action("Set %s.%s" % [node.name, property])
+    var undo := _begin_action("Set %s.%s" % [node.name, property])
     undo.add_do_method(node, "set", property, new_value)
     undo.add_undo_method(node, "set", property, old_value)
     undo.commit_action()
@@ -846,94 +921,103 @@ func _node_summary(node: Node) -> Dictionary:
         "children": children
     }
 
-func _from_tagged(value: Variant) -> Variant:
+## Decodes one tagged protocol value into a Variant.
+##
+## Returns `{"ok": bool, "value": Variant, "message": String}`. A malformed payload is rejected
+## rather than coerced, so a bad Vector2 never lands on a node as (0, 0).
+func _decode_value(value: Variant) -> Dictionary:
     if typeof(value) != TYPE_DICTIONARY:
-        return null
+        return _decode_failed("A value must be a tagged object with a type and a value")
     var dict := value as Dictionary
     var kind: String = dict.get("type", "")
     var payload: Variant = dict.get("value", null)
     match kind:
         "null":
-            return null
+            return _decoded(null)
         "bool":
-            return payload if typeof(payload) == TYPE_BOOL else null
+            if typeof(payload) != TYPE_BOOL:
+                return _decode_failed("A bool value requires a boolean payload")
+            return _decoded(payload)
         "int":
-            return int(payload) if typeof(payload) in [TYPE_INT, TYPE_FLOAT] else null
+            if not typeof(payload) in [TYPE_INT, TYPE_FLOAT]:
+                return _decode_failed("An int value requires a numeric payload")
+            return _decoded(int(payload))
         "float":
-            return float(payload) if typeof(payload) in [TYPE_INT, TYPE_FLOAT] else null
+            if not typeof(payload) in [TYPE_INT, TYPE_FLOAT]:
+                return _decode_failed("A float value requires a numeric payload")
+            return _decoded(float(payload))
         "string":
-            return payload if typeof(payload) == TYPE_STRING else null
+            if typeof(payload) != TYPE_STRING:
+                return _decode_failed("A string value requires a string payload")
+            return _decoded(payload)
         "vector2":
-            return _to_vector2(payload)
+            var v2 := _numbers(payload, 2)
+            return _decode_failed("A vector2 value requires two numbers") if v2.is_empty() else _decoded(Vector2(v2[0], v2[1]))
         "vector2i":
-            return _to_vector2i(payload)
+            var v2i := _numbers(payload, 2)
+            return _decode_failed("A vector2i value requires two numbers") if v2i.is_empty() else _decoded(Vector2i(int(v2i[0]), int(v2i[1])))
         "vector3":
-            return _to_vector3(payload)
+            var v3 := _numbers(payload, 3)
+            return _decode_failed("A vector3 value requires three numbers") if v3.is_empty() else _decoded(Vector3(v3[0], v3[1], v3[2]))
         "vector3i":
-            return _to_vector3i(payload)
+            var v3i := _numbers(payload, 3)
+            return _decode_failed("A vector3i value requires three numbers") if v3i.is_empty() else _decoded(Vector3i(int(v3i[0]), int(v3i[1]), int(v3i[2])))
         "vector4":
-            return _to_vector4(payload)
+            var v4 := _numbers(payload, 4)
+            return _decode_failed("A vector4 value requires four numbers") if v4.is_empty() else _decoded(Vector4(v4[0], v4[1], v4[2], v4[3]))
         "color":
-            return _to_color(payload)
+            var rgba := _numbers(payload, 4)
+            return _decode_failed("A color value requires four numbers") if rgba.is_empty() else _decoded(Color(rgba[0], rgba[1], rgba[2], rgba[3]))
         "resource":
             if typeof(payload) != TYPE_DICTIONARY:
-                return null
-            var path: String = payload.get("path", "")
+                return _decode_failed("A resource value requires an object carrying a path")
+            var path: String = (payload as Dictionary).get("path", "")
             if path.is_empty():
-                return null
-            return load(path)
-    return null
+                return _decode_failed("A resource value requires a non-empty path")
+            var resource := load(path)
+            if resource == null:
+                return _decode_failed("Resource %s could not be loaded" % path)
+            return _decoded(resource)
+    return _decode_failed("Value type '%s' is not supported" % kind)
 
-func _to_vector2(payload: Variant) -> Vector2:
-    if typeof(payload) != TYPE_ARRAY or (payload as Array).size() != 2:
-        return Vector2.ZERO
-    var arr := payload as Array
-    return Vector2(float(arr[0]), float(arr[1]))
+func _decoded(value: Variant) -> Dictionary:
+    return {"ok": true, "value": value, "message": ""}
 
-func _to_vector2i(payload: Variant) -> Vector2i:
-    if typeof(payload) != TYPE_ARRAY or (payload as Array).size() != 2:
-        return Vector2i.ZERO
-    var arr := payload as Array
-    return Vector2i(int(arr[0]), int(arr[1]))
+func _decode_failed(message: String) -> Dictionary:
+    return {"ok": false, "value": null, "message": message}
 
-func _to_vector3(payload: Variant) -> Vector3:
-    if typeof(payload) != TYPE_ARRAY or (payload as Array).size() != 3:
-        return Vector3.ZERO
-    var arr := payload as Array
-    return Vector3(float(arr[0]), float(arr[1]), float(arr[2]))
-
-func _to_vector3i(payload: Variant) -> Vector3i:
-    if typeof(payload) != TYPE_ARRAY or (payload as Array).size() != 3:
-        return Vector3i.ZERO
-    var arr := payload as Array
-    return Vector3i(int(arr[0]), int(arr[1]), int(arr[2]))
-
-func _to_vector4(payload: Variant) -> Vector4:
-    if typeof(payload) != TYPE_ARRAY or (payload as Array).size() != 4:
-        return Vector4.ZERO
-    var arr := payload as Array
-    return Vector4(float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3]))
-
-func _to_color(payload: Variant) -> Color:
-    if typeof(payload) != TYPE_ARRAY or (payload as Array).size() != 4:
-        return Color.WHITE
-    var arr := payload as Array
-    return Color(float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3]))
+## Returns `size` floats from `payload`, or an empty array when the payload is not that many
+## numbers. Callers treat empty as malformed, so a zero-length component list is never valid.
+func _numbers(payload: Variant, size: int) -> PackedFloat64Array:
+    if typeof(payload) != TYPE_ARRAY:
+        return PackedFloat64Array()
+    var array := payload as Array
+    if array.size() != size:
+        return PackedFloat64Array()
+    var numbers := PackedFloat64Array()
+    for item in array:
+        if not typeof(item) in [TYPE_INT, TYPE_FLOAT]:
+            return PackedFloat64Array()
+        numbers.append(float(item))
+    return numbers
 
 func _send_event(event: String, data: Dictionary) -> void:
     var envelope := {
         "protocolVersion": PROTOCOL_VERSION,
         "kind": "event",
+        "id": _session_id,
         "sequence": _next_sequence(),
         "event": event,
         "data": data
     }
     _put_json(envelope)
 
+# Sequences start at 0 and increase by one per session, so Gofer can spot a dropped event as a gap.
 var _sequence: int = 0
 func _next_sequence() -> int:
+    var sequence := _sequence
     _sequence += 1
-    return _sequence
+    return sequence
 
 func _put_json(value: Variant) -> void:
     if _peer == null or _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:

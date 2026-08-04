@@ -16,6 +16,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 webdriver = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+# Launches a real Godot editor from the test suite. Off by default so `cargo test` stays fast and
+# needs no engine; `npm run test:godot` turns it on.
+godot-acceptance = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

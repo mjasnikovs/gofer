@@ -88,6 +88,9 @@ type GodotSessionState =
     | 'stopping'
     | 'error'
 
+// The backend reserves a request body for future start options; today it carries no fields.
+type StartGodotSessionRequest = Readonly<Record<string, never>>
+
 type GodotSessionResponse = Readonly<{
     state: GodotSessionState
     rpcAddress: string
@@ -162,7 +165,7 @@ type DesktopCommandMap = Readonly<{
     // Only registered in WebDriver builds; the backend owns the bridge address.
     send_godot_command: CommandSpec<{request: ProtocolRequest}, unknown>
     send_ai_message: CommandSpec<{request: SendAiMessageRequest}, void>
-    start_godot_session: CommandSpec<undefined, GodotSessionResponse>
+    start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionResponse>
     stop_godot_session: CommandSpec<undefined, void>
     subscribe_godot_events: CommandSpec<{events: Channel<SessionEvent>}, void>
     test_ai_connection: CommandSpec<{request: SettingsRequest}, ConnectionTestResult>

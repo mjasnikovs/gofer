@@ -463,8 +463,10 @@ pub fn retrieve_query_with(
         max_passages: query.max_passages,
         max_text_chars: query.max_text_chars,
     };
-    let payload = serde_json::to_vec(&request)
+    let mut payload = serde_json::to_vec(&request)
         .map_err(|error| format!("Could not serialize the Gofer RAG query: {error}"))?;
+    // The worker reads one request per line.
+    payload.push(b'\n');
     stdin
         .write_all(&payload)
         .map_err(|error| format!("Could not send the Gofer RAG query: {error}"))?;
@@ -535,7 +537,9 @@ fn retrieve_worker_path() -> Result<PathBuf, String> {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("scripts")
-            .join("rag-retrieve.mjs")
+            // `rag-retrieve.mjs` holds the injectable request handling; only the worker reads
+            // stdin and loads gofer-rag, so spawning the module itself would produce no output.
+            .join("rag-retrieve-worker.mjs")
     });
 
     if path.is_file() {
@@ -803,6 +807,23 @@ mod tests {
 
         fn kill(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn sidecar_paths_resolve_to_executable_workers() {
+        // Both modules split injectable request handling from the entry point that reads stdin.
+        // Spawning the handling half would exit silently without ever answering.
+        for path in [
+            worker_path().expect("warmup worker"),
+            retrieve_worker_path().expect("retrieve worker"),
+        ] {
+            let source = fs::read_to_string(&path).expect("read worker");
+            assert!(
+                source.contains("process.stdout"),
+                "{} does not write a response, so it is not the entry point",
+                path.display()
+            );
         }
     }
 

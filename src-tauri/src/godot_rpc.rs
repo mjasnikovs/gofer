@@ -16,12 +16,16 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
+pub(crate) const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
+/// The id Gofer reuses for every heartbeat request. The addon answers it like any other request, so
+/// the correlation table never holds an entry for it and its reply is recognized by this id alone.
+const HEARTBEAT_ID: &str = "heartbeat";
 const CONNECT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
 const MAX_RECONNECT_ATTEMPTS: usize = 3;
@@ -361,7 +365,7 @@ fn handle_connection(
             };
             return false;
         }
-        if project_path != state.project_path {
+        if !same_project(&state.project_path, project_path) {
             let _ = write_envelope(
                 &mut writer,
                 &wrong_project(&id, &state.project_path, project_path),
@@ -416,8 +420,14 @@ fn handle_connection(
             let last = last_heartbeat.lock().expect("heartbeat lock");
             Instant::now().duration_since(*last) > Duration::from_millis(HEARTBEAT_INTERVAL_MS)
         };
-        if heartbeat_due && write_envelope(&mut writer, &heartbeat_request()).is_err() {
-            break;
+        if heartbeat_due {
+            if write_envelope(&mut writer, &heartbeat_request()).is_err() {
+                break;
+            }
+            // Restart the interval on the write, not on the reply, so one silent addon costs one
+            // heartbeat per interval instead of one per poll. A dead connection is caught by the
+            // read timeout, which is three intervals wide.
+            *last_heartbeat.lock().expect("heartbeat lock") = Instant::now();
         }
 
         match request_rx.recv_timeout(Duration::from_millis(HEARTBEAT_INTERVAL_MS / 4)) {
@@ -482,9 +492,7 @@ fn read_envelopes(
                 break;
             }
         };
-        if envelope.get("kind").and_then(Value::as_str) == Some("event")
-            && envelope.get("event").and_then(Value::as_str) == Some("session.heartbeat")
-        {
+        if is_heartbeat(&envelope) {
             *last_heartbeat.lock().expect("heartbeat lock") = Instant::now();
             continue;
         }
@@ -493,6 +501,34 @@ fn read_envelopes(
             close_with_error(&state, error);
             break;
         }
+    }
+}
+
+/// Decides whether the addon is editing the worktree this session owns.
+///
+/// Godot globalizes `res://` with a trailing separator, and the supervisor holds the canonical
+/// worktree, so the two spellings of one directory never match as strings. Both sides are
+/// normalized instead: a session must reject a different project, not a different spelling.
+fn same_project(expected: &str, reported: &str) -> bool {
+    if reported.is_empty() {
+        return false;
+    }
+    let normalize = |value: &str| {
+        let trimmed = value.trim_end_matches(['/', '\\']);
+        let path = Path::new(if trimmed.is_empty() { value } else { trimmed });
+        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    };
+    normalize(expected) == normalize(reported)
+}
+
+/// Recognizes the liveness traffic that carries no correlated request: the addon's reply to a
+/// heartbeat request, and an unsolicited heartbeat event.
+fn is_heartbeat(envelope: &Value) -> bool {
+    let kind = envelope.get("kind").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "response" | "error" => envelope.get("id").and_then(Value::as_str) == Some(HEARTBEAT_ID),
+        "event" => envelope.get("event").and_then(Value::as_str) == Some("session.heartbeat"),
+        _ => false,
     }
 }
 
@@ -673,7 +709,7 @@ fn heartbeat_request() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "kind": "request",
-        "id": "heartbeat",
+        "id": HEARTBEAT_ID,
         "command": "session.heartbeat",
         "params": {},
         "timeoutMs": HEARTBEAT_INTERVAL_MS,
@@ -899,6 +935,32 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_trailing_separator_godot_reports() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let worktree = directory.path().canonicalize().expect("canonical worktree");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let token = "a1".repeat(32);
+        let session = RpcSession::start(listener, token.clone(), worktree.display().to_string());
+
+        // `ProjectSettings.globalize_path("res://")` always ends in a separator.
+        let mut addon = addon_client(address);
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&handshake(&token, &format!("{}/", worktree.display()))).unwrap()
+        )
+        .unwrap();
+
+        let mut reader = BufReader::new(addon);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["kind"], "response", "{response}");
+        session.stop();
+    }
+
+    #[test]
     fn rejects_oversized_payload() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("listener address");
@@ -1002,6 +1064,78 @@ mod tests {
         };
         let result = session.call(request);
         assert!(result.is_err(), "{result:?}");
+        session.stop();
+    }
+
+    #[test]
+    fn heartbeat_replies_keep_the_session_open() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let token = "a1".repeat(32);
+        let project_path = "/tmp/gofer/project".to_owned();
+        let session = RpcSession::start(listener, token.clone(), project_path.clone());
+
+        let mut addon = addon_client(address);
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&handshake(&token, &project_path)).unwrap()
+        )
+        .unwrap();
+
+        let mut reader = BufReader::new(addon.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+
+        // The addon answers the heartbeat like any other request. It has no pending entry, so a
+        // correlation-only reader would treat the reply as a stale reply and close the session.
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&json!({
+                "protocolVersion": 2,
+                "kind": "response",
+                "id": "heartbeat",
+                "result": {}
+            }))
+            .unwrap()
+        )
+        .unwrap();
+
+        thread::sleep(Duration::from_millis(100));
+
+        let request = CallRequest {
+            id: "request-1".to_owned(),
+            command: "scene.list".to_owned(),
+            params: json!({}),
+            expected_revision: None,
+            timeout_ms: Some(500),
+        };
+
+        let addon_handle = thread::spawn(move || {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["command"], "scene.list");
+            writeln!(
+                addon,
+                "{}",
+                serde_json::to_string(&json!({
+                    "protocolVersion": 2,
+                    "kind": "response",
+                    "id": "request-1",
+                    "result": {"scenes": []}
+                }))
+                .unwrap()
+            )
+            .unwrap();
+        });
+
+        let result = session
+            .call(request)
+            .expect("session survives a heartbeat reply");
+        assert_eq!(result.id, "request-1");
+        addon_handle.join().unwrap();
         session.stop();
     }
 
