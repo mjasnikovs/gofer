@@ -14,6 +14,7 @@ pub mod addon;
 mod files;
 mod git;
 mod godot;
+mod godot_session;
 // The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
 // entirely. `test` keeps its loopback and protocol-version coverage in the default suite.
 #[cfg(any(feature = "webdriver", test))]

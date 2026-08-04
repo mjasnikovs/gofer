@@ -149,7 +149,7 @@ UI.
     - Done when repeated install/start/stop cycles leave a clean worktree and unmanaged collisions
       fail safely.
 
-3. Create the session supervisor
+3. Create the session supervisor — DONE
     - Verify Godot 4.7.1, bind the RPC listener, allocate LSP/DAP ports, launch the editor with
       --editor, --path, --lsp-port, and --dap-port, and supervise shutdown. `discover_binary`
       currently accepts any Godot that answers --version and only records the value, so the version

@@ -34,6 +34,18 @@ pub trait ProcessSpawner: Send + Sync {
         arguments: &[OsString],
         piped_stdin: bool,
     ) -> io::Result<Box<dyn ChildProcess>>;
+
+    /// Like [`spawn`], but with additional environment variables set for the child only.
+    fn spawn_with_env(
+        &self,
+        program: &OsStr,
+        arguments: &[OsString],
+        piped_stdin: bool,
+        env: &[(OsString, OsString)],
+    ) -> io::Result<Box<dyn ChildProcess>> {
+        let _ = env;
+        self.spawn(program, arguments, piped_stdin)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -54,17 +66,31 @@ impl ProcessSpawner for SystemProcessSpawner {
         arguments: &[OsString],
         piped_stdin: bool,
     ) -> io::Result<Box<dyn ChildProcess>> {
+        self.spawn_with_env(program, arguments, piped_stdin, &[])
+    }
+
+    fn spawn_with_env(
+        &self,
+        program: &OsStr,
+        arguments: &[OsString],
+        piped_stdin: bool,
+        env: &[(OsString, OsString)],
+    ) -> io::Result<Box<dyn ChildProcess>> {
         let stdin = if piped_stdin {
             Stdio::piped()
         } else {
             Stdio::null()
         };
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(arguments)
             .stdin(stdin)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let child = command.spawn()?;
         Ok(Box::new(SystemChildProcess(child)))
     }
 }
