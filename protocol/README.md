@@ -155,6 +155,26 @@ values that cannot round-trip, so the agent sees what a value is without pretend
 edited. Tagged values are validated where a command contract places them; the envelope validators do
 not walk `params`, `result`, or `data`.
 
+### Runtime feedback
+
+The `runtime` domain is the one domain whose requests the addon does not answer from the editor
+process. `runtime.get_tree`, `runtime.inspect_node`, `runtime.input`, `runtime.capture`, and
+`runtime.get_monitors` are forwarded over Godot's remote-debugger channel to the GoferRuntime
+autoload inside the running game, which answers on a `gofer` message capture; `runtime.run`,
+`runtime.stop`, `runtime.restart`, and `runtime.get_state` drive the editor's play controls. The RPC
+contract does not change: deferred requests are correlated by `id` and answered whenever the game
+replies, a stopped or never-started game answers `runtime_not_running` (retryable), and a game that
+never replies answers `runtime_timeout` (retryable). `runtime.ready` and `runtime.stopped` events
+track the helper's lifecycle.
+
+A successful `runtime.run` or `runtime.restart` response carries the game's first rendered frame,
+and a successful `runtime.input` response carries a frame captured after the events were dispatched
+and rendered — capture is manual (`runtime.capture`) and automatic after successful run/input
+actions, never continuous video. Frames use the `frame` shape from
+`response-runtime-screenshot.json`: PNG, base64, at most 1920 px on the longest edge. The game
+helper is inert when the debugger is not attached, so a game launched outside the editor answers
+`runtime_not_running` like a stopped one.
+
 ### Compatibility rules
 
 - Receivers ignore unknown fields at every level, so optional fields may be added within version 2.

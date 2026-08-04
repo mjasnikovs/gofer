@@ -29,6 +29,8 @@ mod godot_lsp_acceptance;
 // Drives the native debug adapter inside a real editor running the fixture game, same gate.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_dap_acceptance;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_runtime_acceptance;
 // The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
 // entirely. `test` keeps its loopback and protocol-version coverage in the default suite.
 #[cfg(any(feature = "webdriver", test))]

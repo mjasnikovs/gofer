@@ -39,12 +39,16 @@ const EXCLUDE_MARKER: &str = "# Gofer: the managed Godot addon is never part of 
 
 /// The addon as shipped. `include_str!` keeps the files in the binary, so staging needs no
 /// installation directory and cannot be tampered with between releases.
-const ADDON_FILES: [(&str, &str); 3] = [
+const ADDON_FILES: [(&str, &str); 4] = [
     (
         "addons/gofer/plugin.cfg",
         include_str!("../addon/plugin.cfg"),
     ),
     ("addons/gofer/plugin.gd", include_str!("../addon/plugin.gd")),
+    (
+        "addons/gofer/protocol.gd",
+        include_str!("../addon/protocol.gd"),
+    ),
     (
         "addons/gofer/runtime.gd",
         include_str!("../addon/runtime.gd"),
@@ -855,7 +859,11 @@ mod tests {
         fixture.stager.stage(&fixture.workspace).expect("stage");
 
         // The editor imports the staged scripts and records a UID cache file next to each one.
-        for sidecar in ["addons/gofer/plugin.gd.uid", "addons/gofer/runtime.gd.uid"] {
+        for sidecar in [
+            "addons/gofer/plugin.gd.uid",
+            "addons/gofer/protocol.gd.uid",
+            "addons/gofer/runtime.gd.uid",
+        ] {
             fixture
                 .workspace
                 .write(sidecar, "uid://goferacceptance\n", None)
@@ -1236,6 +1244,7 @@ mod tests {
             vec![
                 "addons/gofer/plugin.cfg".to_owned(),
                 "addons/gofer/plugin.gd".to_owned(),
+                "addons/gofer/protocol.gd".to_owned(),
                 "addons/gofer/runtime.gd".to_owned(),
                 MANIFEST_PATH.to_owned(),
             ]

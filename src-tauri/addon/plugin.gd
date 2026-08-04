@@ -7,9 +7,15 @@ extends EditorPlugin
 ## stops. It connects outward to Gofer's loopback RPC server using the port and token passed in the
 ## process environment, then answers inspection and undoable scene-authoring requests on Godot's
 ## main thread.
+##
+## Runtime requests need the game process, so they cross Godot's remote-debugger channel: the
+## GoferDebuggerBridge registered below forwards them to the staged GoferRuntime autoload inside
+## the running game and correlates its replies with the RPC requests that are waiting on them.
 
 const PROTOCOL_VERSION := 2
 const HANDSHAKE_ID := "handshake-1"
+## The encoders the game process needs too, so they live beside both scripts instead of in either.
+const Protocol := preload("res://addons/gofer/protocol.gd")
 
 var _peer: StreamPeerTCP
 var _status: int = -1
@@ -28,6 +34,32 @@ var _undo_depth: int = 0
 var _redo_depth: int = 0
 # Play mode is not a protocol readiness, so it is tracked apart from `_readiness`.
 var _playing: bool = false
+
+# Runtime bridge state. `_runtime_session_id` names the debugger session of the running game and
+# `_runtime_ready` flips when its GoferRuntime autoload announces itself. `_runtime_pending` holds
+# RPC requests waiting on the game — forwarded queries, launches waiting for the helper, and the
+# first-frame capture chained onto every launch — each with a deadline `_process` sweeps.
+var _debugger_bridge: GoferDebuggerBridge
+var _runtime_session_id: int = -1
+var _runtime_ready: bool = false
+var _runtime_pending: Array[Dictionary] = []
+
+## Forwarded runtime requests outlive a few slow frames, launches outlive a cold game boot.
+const RUNTIME_REQUEST_TIMEOUT_MS := 20000
+const RUNTIME_LAUNCH_TIMEOUT_MS := 30000
+
+## The commands `_handle_request` routes to the runtime bridge instead of answering synchronously.
+const RUNTIME_COMMANDS: Array[String] = [
+    "runtime.run",
+    "runtime.stop",
+    "runtime.restart",
+    "runtime.get_state",
+    "runtime.get_tree",
+    "runtime.inspect_node",
+    "runtime.input",
+    "runtime.capture",
+    "runtime.get_monitors",
+]
 
 ## The plugin's own directory name, protected so a configuration command cannot sever the session
 ## that carries it.
@@ -72,8 +104,50 @@ const MUTATING_COMMANDS: Array[String] = [
     "node.disconnect_signal",
 ]
 
+## The editor half of the debugger channel. Godot calls `_setup_session` as debugger sessions
+## come up, delivers game messages whose prefix `_has_capture` claims to `_capture`, and the
+## plugin answers through `get_session(id).send_message`. The plugin itself is held by weak
+## reference: the bridge must never keep the addon alive past `_exit_tree`.
+##
+## The bridge pattern — a capture prefix, a hello beacon before the editor sends anything, and a
+## persistent session-stopped connection across play/stop/play cycles — is selectively adapted
+## from the MIT-licensed godot-ai project (https://github.com/hi-godot/godot-ai).
+class GoferDebuggerBridge extends EditorDebuggerPlugin:
+    var _plugin: WeakRef
+
+    func _init(plugin: EditorPlugin) -> void:
+        _plugin = weakref(plugin)
+
+    func _has_capture(capture: String) -> bool:
+        return capture == "gofer"
+
+    func _capture(message: String, data: Array, session_id: int) -> bool:
+        var plugin = _plugin.get_ref()
+        if plugin != null:
+            plugin._on_runtime_debugger_message(message, data, session_id)
+        return true
+
+    func _setup_session(session_id: int) -> void:
+        var session := get_session(session_id)
+        if session != null:
+            # The editor reuses one session across play/stop/play cycles, so the connection must
+            # survive every stop; a one-shot would be consumed by the first restart.
+            var stopped := _on_session_stopped.bind(session_id)
+            if not session.stopped.is_connected(stopped):
+                session.stopped.connect(stopped)
+        var plugin = _plugin.get_ref()
+        if plugin != null:
+            plugin._on_runtime_debugger_session_started(session_id)
+
+    func _on_session_stopped(session_id: int) -> void:
+        var plugin = _plugin.get_ref()
+        if plugin != null:
+            plugin._on_runtime_debugger_session_stopped(session_id)
+
 func _enter_tree() -> void:
     print("GOFER_ADDON_READY:%d" % PROTOCOL_VERSION)
+    _debugger_bridge = GoferDebuggerBridge.new(self)
+    add_debugger_plugin(_debugger_bridge)
     _peer = StreamPeerTCP.new()
     var port := _rpc_port()
     if port > 0:
@@ -83,6 +157,9 @@ func _enter_tree() -> void:
 
 func _exit_tree() -> void:
     print("GOFER_ADDON_STOPPED")
+    if _debugger_bridge != null:
+        remove_debugger_plugin(_debugger_bridge)
+        _debugger_bridge = null
     if _peer:
         _peer.disconnect_from_host()
     set_process(false)
@@ -91,6 +168,7 @@ func _get_plugin_name() -> String:
     return "Gofer"
 
 func _process(_delta: float) -> void:
+    _sweep_runtime_pending()
     if _peer == null:
         return
     _peer.poll()
@@ -162,7 +240,7 @@ func _send_handshake() -> void:
             "addonVersion": _addon_version(),
             "engineVersion": _engine_version(),
             "projectPath": _project_path(),
-            "capabilities": ["session", "scene", "node", "project", "editor"]
+            "capabilities": ["session", "scene", "node", "project", "editor", "runtime"]
         }
     }
     _put_json(handshake)
@@ -191,20 +269,42 @@ func _handle_request(envelope: Dictionary) -> void:
     var params := envelope.get("params", {}) as Dictionary
     var expected_revision = envelope.get("expectedRevision", null)
 
+    if RUNTIME_COMMANDS.has(command):
+        _handle_runtime_request(id, command, params)
+        return
+
     var result: Variant = _dispatch_command(command, params, expected_revision)
+    if result is Dictionary and result.has("_gofer_error"):
+        _respond_error_dict(id, result["_gofer_error"])
+    elif MUTATING_COMMANDS.has(command):
+        _respond_result(id, result, _scene_revision)
+    else:
+        _respond_result(id, result)
+
+## Answers an RPC request. Deferred runtime requests use these helpers when the game eventually
+## answers; synchronous handlers go through the `_gofer_error` convention in `_dispatch_command`.
+func _respond_result(id: String, result: Variant, revision: Variant = null) -> void:
     var response := {
         "protocolVersion": PROTOCOL_VERSION,
         "kind": "response",
         "id": id,
+        "result": result,
     }
-    if result is Dictionary and result.has("_gofer_error"):
-        response["kind"] = "error"
-        response["error"] = result["_gofer_error"]
-    else:
-        response["result"] = result
-        if MUTATING_COMMANDS.has(command):
-            response["revision"] = _scene_revision
+    if revision != null:
+        response["revision"] = revision
     _put_json(response)
+
+func _respond_error_dict(id: String, error: Dictionary) -> void:
+    _put_json({"protocolVersion": PROTOCOL_VERSION, "kind": "error", "id": id, "error": error})
+
+func _respond_error(id: String, code: String, message: String, retryable: bool, details: Dictionary = {}) -> void:
+    _respond_error_dict(id, {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "readiness": _readiness,
+        "details": details,
+    })
 
 func _dispatch_command(command: String, params: Dictionary, expected_revision: Variant) -> Dictionary:
     if MUTATING_COMMANDS.has(command):
@@ -348,6 +448,11 @@ func _set_readiness(readiness: String) -> void:
 ## and reports the transition. Gofer maps these events onto its own session lifecycle.
 func _track_play_state() -> void:
     var playing := EditorInterface.is_playing_scene()
+    # The session's stopped signal is the primary teardown path; this play-state poll is the
+    # fallback for a game that died without one (a crash or a kill), which would otherwise leave
+    # readiness stuck on a helper that no longer exists — a case godot-ai handles the same way.
+    if _runtime_ready and not playing:
+        _on_runtime_debugger_session_stopped(_runtime_session_id)
     if playing == _playing:
         return
     _playing = playing
@@ -355,6 +460,217 @@ func _track_play_state() -> void:
         _send_event("session.playing", {"readiness": _readiness})
     else:
         _send_event("session.ready", {"readiness": _readiness})
+
+## Routes one `runtime.*` request. Some commands the editor answers immediately; the rest are
+## deferred — the response leaves when the game answers, the launch completes, or the deadline
+## `_sweep_runtime_pending` enforces expires.
+func _handle_runtime_request(id: String, command: String, params: Dictionary) -> void:
+    match command:
+        "runtime.get_state":
+            _respond_result(id, {
+                "running": EditorInterface.is_playing_scene(),
+                "runtimeReady": _runtime_ready,
+            })
+        "runtime.run":
+            _runtime_launch(id, false)
+        "runtime.restart":
+            _runtime_launch(id, true)
+        "runtime.stop":
+            _runtime_stop()
+            _respond_result(id, {"running": false})
+        "runtime.capture":
+            var source := str(params.get("source", "game"))
+            if source == "editor":
+                var frame := _editor_frame()
+                if frame.has("_gofer_error"):
+                    _respond_error_dict(id, frame["_gofer_error"])
+                else:
+                    _respond_result(id, frame)
+            elif source == "game":
+                _runtime_forward(id, "capture", params)
+            else:
+                _respond_error(id, "unsupported_value", "A capture source must be 'game' or 'editor'", false)
+        "runtime.get_tree":
+            _runtime_forward(id, "tree", params)
+        "runtime.inspect_node":
+            _runtime_forward(id, "inspect", params)
+        "runtime.input":
+            _runtime_forward(id, "input", params)
+        "runtime.get_monitors":
+            _runtime_forward(id, "monitors", params)
+        _:
+            # `RUNTIME_COMMANDS` and this match are two lists of the same commands. A command in
+            # one and not the other would leave its caller waiting out the whole timeout for a
+            # response that is never coming, so the mismatch answers instead of hanging.
+            _respond_error_dict(id, _unknown_command_error(command)["_gofer_error"])
+
+## Stops the game. The helper it carried is gone from this moment on, so readiness drops here
+## rather than when the debugger session finally tears down: the next game's announcement has to
+## read as a first one. Launches waiting on the stopped game are answered rather than left to
+## expire.
+func _runtime_stop() -> void:
+    if EditorInterface.is_playing_scene():
+        EditorInterface.stop_playing_scene()
+    _runtime_ready = false
+    _fail_pending(["run", "restart", "run_frame"], "The game was stopped before it finished launching")
+
+## Starts (or restarts) the game. The response waits for the GoferRuntime autoload to announce
+## itself, then rides back with the first rendered frame attached — the launch is only proven once
+## the game has produced pixels.
+func _runtime_launch(id: String, restart: bool) -> void:
+    var playing := EditorInterface.is_playing_scene()
+    if playing and not restart:
+        _respond_error(id, "already_running", "The project is already running; stop it or use runtime.restart", true)
+        return
+    if playing:
+        # Stopping is asynchronous; the sweep starts the new instance once the old one is gone.
+        _runtime_stop()
+        _runtime_pending.append({"id": id, "kind": "restart", "deadline": _runtime_deadline(RUNTIME_LAUNCH_TIMEOUT_MS)})
+        return
+    EditorInterface.play_main_scene()
+    _runtime_pending.append({"id": id, "kind": "run", "deadline": _runtime_deadline(RUNTIME_LAUNCH_TIMEOUT_MS)})
+
+## Forwards a request to the running game. Without a live helper the request fails immediately —
+## the caller can start the game and retry, so the error is retryable.
+func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
+    if not _runtime_ready or _runtime_session_id < 0:
+        _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
+        return
+    _runtime_pending.append({"id": id, "kind": "game", "deadline": _runtime_deadline(RUNTIME_REQUEST_TIMEOUT_MS)})
+    _send_runtime_message({"id": id, "op": op, "params": params})
+
+func _runtime_deadline(budget_ms: int) -> int:
+    return Time.get_ticks_msec() + budget_ms
+
+func _send_runtime_message(payload: Dictionary) -> void:
+    if _debugger_bridge == null or _runtime_session_id < 0:
+        return
+    var session := _debugger_bridge.get_session(_runtime_session_id)
+    if session == null:
+        return
+    session.send_message("gofer:request", [payload])
+
+## A new debugger session means a new game process: any readiness the previous helper reported
+## belonged to it, so it is dropped, and the new helper is pinged in case its announcement raced
+## the session setup.
+func _on_runtime_debugger_session_started(session_id: int) -> void:
+    if _runtime_session_id != session_id:
+        _runtime_ready = false
+    _runtime_session_id = session_id
+    _send_runtime_message({"id": "", "op": "ping", "params": {}})
+
+func _on_runtime_debugger_session_stopped(session_id: int) -> void:
+    if session_id != _runtime_session_id:
+        return
+    _runtime_session_id = -1
+    _runtime_ready = false
+    # Forwarded queries died with the game. A launch is kept: a restart is waiting for exactly this
+    # teardown, and a run may already belong to the instance replacing it.
+    _fail_pending(["game"], "The game stopped before it could answer")
+    _send_event("runtime.stopped", {})
+
+## Answers and drops every pending entry of the named kinds; the rest stay waiting. The game they
+## were waiting on is gone either way, so the failure is the retryable one the caller can act on.
+func _fail_pending(kinds: Array, message: String) -> void:
+    var kept: Array[Dictionary] = []
+    for pending in _runtime_pending:
+        if kinds.has(pending["kind"]):
+            _respond_error(pending["id"], "runtime_not_running", message, true)
+        else:
+            kept.append(pending)
+    _runtime_pending = kept
+
+func _on_runtime_debugger_message(message: String, data: Array, session_id: int) -> void:
+    if data.is_empty() or typeof(data[0]) != TYPE_DICTIONARY:
+        return
+    var payload: Dictionary = data[0]
+    if message == "gofer:ready":
+        var first := not _runtime_ready
+        _runtime_session_id = session_id
+        _runtime_ready = true
+        if first:
+            _send_event("runtime.ready", {"protocolVersion": payload.get("protocolVersion", 0)})
+        _complete_pending_run()
+    elif message == "gofer:response":
+        _complete_runtime_response(payload)
+
+## A launch is answered once the helper is up, with the game's first rendered frame chained on.
+## The frame is best-effort: a game that cannot produce one still counts as launched.
+func _complete_pending_run() -> void:
+    for index in range(_runtime_pending.size()):
+        var pending := _runtime_pending[index]
+        if pending["kind"] != "run":
+            continue
+        _runtime_pending.remove_at(index)
+        _runtime_pending.append({
+            "id": pending["id"],
+            "kind": "run_frame",
+            "deadline": _runtime_deadline(RUNTIME_REQUEST_TIMEOUT_MS),
+        })
+        _send_runtime_message({"id": pending["id"], "op": "capture", "params": {}})
+        return
+
+func _complete_runtime_response(payload: Dictionary) -> void:
+    var id := str(payload.get("id", ""))
+    for index in range(_runtime_pending.size()):
+        var pending := _runtime_pending[index]
+        if str(pending["id"]) != id:
+            continue
+        _runtime_pending.remove_at(index)
+        if pending["kind"] == "run_frame":
+            var launch := {"running": true}
+            if payload.get("ok", false) and payload.has("frame"):
+                launch["frame"] = payload["frame"]
+            _respond_result(id, launch)
+            return
+        if payload.get("ok", false):
+            var result := payload.duplicate()
+            result.erase("id")
+            result.erase("ok")
+            _respond_result(id, result)
+        else:
+            _respond_error(
+                id,
+                str(payload.get("code", "runtime_failed")),
+                str(payload.get("message", "The runtime helper refused the request")),
+                false
+            )
+        return
+
+## Moves the launch state machine and fails whatever outlived its deadline. This runs even while
+## the RPC link is down: a restart must still start the new game once the old one has stopped.
+func _sweep_runtime_pending() -> void:
+    if _runtime_pending.is_empty():
+        return
+    var now := Time.get_ticks_msec()
+    var kept: Array[Dictionary] = []
+    for pending in _runtime_pending:
+        if int(pending["deadline"]) < now:
+            _respond_error(pending["id"], "runtime_timeout", "The game did not answer in time", true)
+        elif pending["kind"] == "restart" and not EditorInterface.is_playing_scene():
+            EditorInterface.play_main_scene()
+            pending["kind"] = "run"
+            kept.append(pending)
+        else:
+            kept.append(pending)
+    _runtime_pending = kept
+
+## Captures the editor's own viewport. A headless editor has no pixels to read, which is an
+## environment fact rather than a transient failure, so the error is not retryable.
+func _editor_frame() -> Dictionary:
+    if DisplayServer.get_name() == "headless":
+        return _config_error("capture_unavailable", "The editor is headless and has no viewport to capture")
+    var base := EditorInterface.get_base_control()
+    if base == null or base.get_viewport() == null:
+        return _config_error("capture_unavailable", "The editor viewport is not available")
+    return _png_frame(base.get_viewport().get_texture().get_image())
+
+## Wraps the shared frame encoder in the editor half's error convention.
+func _png_frame(image: Image) -> Dictionary:
+    var encoded := Protocol.encode_frame(image)
+    if not encoded["ok"]:
+        return _config_error(str(encoded["code"]), str(encoded["message"]))
+    return {"frame": encoded["frame"]}
 
 func _unknown_command_error(command: String) -> Dictionary:
     return {
@@ -520,7 +836,7 @@ func _project_search_settings(params: Dictionary) -> Dictionary:
             matches.append(
                 {
                     "name": name,
-                    "value": _encode_value(ProjectSettings.get_setting(name)),
+                    "value": Protocol.encode(ProjectSettings.get_setting(name)),
                     "restartRequired": (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
                 }
             )
@@ -536,7 +852,7 @@ func _project_get_setting(params: Dictionary) -> Dictionary:
         )
     return {
         "name": name,
-        "value": _encode_value(ProjectSettings.get_setting(name)),
+        "value": Protocol.encode(ProjectSettings.get_setting(name)),
         "restartRequired": _restart_required(name)
     }
 
@@ -808,7 +1124,7 @@ func _editor_search_settings(params: Dictionary) -> Dictionary:
             continue
         total += 1
         if matches.size() < MAX_SEARCH_RESULTS:
-            matches.append({"name": name, "value": _encode_value(settings.get_setting(name))})
+            matches.append({"name": name, "value": Protocol.encode(settings.get_setting(name))})
     return {"settings": matches, "totalMatches": total, "truncated": total > matches.size()}
 
 func _editor_get_setting(params: Dictionary) -> Dictionary:
@@ -820,7 +1136,7 @@ func _editor_get_setting(params: Dictionary) -> Dictionary:
         return _config_error(
             "setting_not_found", "Editor setting '%s' does not exist" % name, {"name": name}
         )
-    return {"name": name, "value": _encode_value(settings.get_setting(name))}
+    return {"name": name, "value": Protocol.encode(settings.get_setting(name))}
 
 func _editor_set_setting(params: Dictionary) -> Dictionary:
     var name := str(params.get("name", ""))
@@ -1361,110 +1677,6 @@ func _node_summary(node: Node) -> Dictionary:
         "children": children
     }
 
-## Encodes every item of an array-like value.
-func _encode_items(value: Variant) -> Array:
-    var encoded: Array = []
-    for item in value:
-        encoded.append(_encode_value(item))
-    return encoded
-
-## Encodes a Variant as a tagged protocol value, the mirror of `_decode_value`. A reference to an
-## object — a node, a resource without a path, anything live — is described rather than encoded,
-## and anything else becomes `opaque`; those tags are read-only, because nothing on the far side
-## can rebuild what they point at.
-func _encode_value(value: Variant) -> Dictionary:
-    match typeof(value):
-        TYPE_NIL:
-            return {"type": "null", "value": null}
-        TYPE_BOOL:
-            return {"type": "bool", "value": value}
-        TYPE_INT:
-            return {"type": "int", "value": value}
-        TYPE_FLOAT:
-            return {"type": "float", "value": value}
-        TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH:
-            return {"type": "string", "value": str(value)}
-        TYPE_VECTOR2:
-            return {"type": "vector2", "value": [value.x, value.y]}
-        TYPE_VECTOR2I:
-            return {"type": "vector2i", "value": [value.x, value.y]}
-        TYPE_VECTOR3:
-            return {"type": "vector3", "value": [value.x, value.y, value.z]}
-        TYPE_VECTOR3I:
-            return {"type": "vector3i", "value": [value.x, value.y, value.z]}
-        TYPE_VECTOR4, TYPE_QUATERNION:
-            var kind := "vector4" if typeof(value) == TYPE_VECTOR4 else "quaternion"
-            return {"type": kind, "value": [value.x, value.y, value.z, value.w]}
-        TYPE_VECTOR4I:
-            return {"type": "vector4i", "value": [value.x, value.y, value.z, value.w]}
-        TYPE_COLOR:
-            return {"type": "color", "value": [value.r, value.g, value.b, value.a]}
-        TYPE_RECT2:
-            return {"type": "rect2", "value": [value.position.x, value.position.y, value.size.x, value.size.y]}
-        TYPE_RECT2I:
-            return {"type": "rect2i", "value": [value.position.x, value.position.y, value.size.x, value.size.y]}
-        TYPE_PLANE:
-            return {"type": "plane", "value": [value.normal.x, value.normal.y, value.normal.z, value.d]}
-        TYPE_TRANSFORM2D:
-            return {
-                "type": "transform2d",
-                "value": [value.x.x, value.x.y, value.y.x, value.y.y, value.origin.x, value.origin.y]
-            }
-        TYPE_BASIS:
-            return {
-                "type": "basis",
-                "value": [
-                    value.x.x, value.x.y, value.x.z,
-                    value.y.x, value.y.y, value.y.z,
-                    value.z.x, value.z.y, value.z.z
-                ]
-            }
-        TYPE_TRANSFORM3D:
-            return {
-                "type": "transform3d",
-                "value": [
-                    value.basis.x.x, value.basis.x.y, value.basis.x.z,
-                    value.basis.y.x, value.basis.y.y, value.basis.y.z,
-                    value.basis.z.x, value.basis.z.y, value.basis.z.z,
-                    value.origin.x, value.origin.y, value.origin.z
-                ]
-            }
-        TYPE_ARRAY, TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY, \
-        TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY, \
-        TYPE_PACKED_VECTOR2_ARRAY, TYPE_PACKED_VECTOR3_ARRAY, TYPE_PACKED_COLOR_ARRAY, \
-        TYPE_PACKED_VECTOR4_ARRAY:
-            return {"type": "array", "value": _encode_items(value)}
-        TYPE_DICTIONARY:
-            var entries: Array = []
-            for key in value:
-                entries.append({"key": _encode_value(key), "value": _encode_value(value[key])})
-            return {"type": "dictionary", "value": entries}
-        TYPE_OBJECT:
-            if value is Resource and not (value as Resource).resource_path.is_empty():
-                return {
-                    "type": "resource",
-                    "value": {
-                        "path": (value as Resource).resource_path, "resourceType": value.get_class()
-                    }
-                }
-            if value is Node:
-                return {
-                    "type": "node",
-                    "value": {
-                        "path": str((value as Node).get_path()),
-                        "nodeType": value.get_class(),
-                        "instanceId": value.get_instance_id()
-                    }
-                }
-            return {
-                "type": "object",
-                "value": {"className": value.get_class(), "instanceId": value.get_instance_id()}
-            }
-    return {
-        "type": "opaque",
-        "value": {"typeName": type_string(typeof(value)), "text": var_to_str(value)}
-    }
-
 ## Summarizes input events for the wire. Key events name their physical key so they can be rebuilt
 ## with `OS.find_keycode_from_string` on the way back in.
 func _encode_input_events(events: Array) -> Array:
@@ -1647,7 +1859,7 @@ func _fit_to_declared_type(value: Variant, declared: int) -> Dictionary:
         "expected %s, received %s" % [type_string(declared), type_string(typeof(value))]
     )
 
-## Rebuilds a Basis from nine numbers laid out as three columns, the order `_encode_value` writes.
+## Rebuilds a Basis from nine numbers laid out as three columns, the order `Protocol.encode` writes.
 func _basis_from(numbers: PackedFloat64Array) -> Basis:
     return Basis(
         Vector3(numbers[0], numbers[1], numbers[2]),
@@ -1667,7 +1879,7 @@ func _decode_items(payload: Variant) -> Dictionary:
         items.append(decoded["value"])
     return _decoded(items)
 
-## Rebuilds a Dictionary from the `{"key": ..., "value": ...}` entries `_encode_value` writes.
+## Rebuilds a Dictionary from the `{"key": ..., "value": ...}` entries `Protocol.encode` writes.
 func _decode_dictionary(payload: Variant) -> Dictionary:
     if typeof(payload) != TYPE_ARRAY:
         return _decode_failed("A dictionary value requires an array of key and value entries")

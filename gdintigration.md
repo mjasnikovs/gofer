@@ -136,8 +136,11 @@ UI.
     - Land the canonical-path validation and atomic replacement core from step 7 first. Staging
       writes project files, and a second write implementation is exactly what step 14 forbids.
     - Preserve unrelated project settings and concurrent edits.
-    - `src-tauri/addon/` holds the shipped `plugin.cfg`, `plugin.gd`, and `runtime.gd`, embedded
-      with `include_str!` so staging needs no installation directory.
+    - `src-tauri/addon/` holds the shipped `plugin.cfg`, `plugin.gd`, `protocol.gd`, and
+      `runtime.gd`, embedded with `include_str!` so staging needs no installation directory.
+      `protocol.gd` carries what the editor plugin and the in-game helper must encode identically —
+      tagged values and PNG frames — because they run in two processes and the game cannot load an
+      `EditorPlugin` script.
     - `src-tauri/src/addon.rs` is the stager: `AddonStager::stage` installs through `Workspace`,
       `unstage` removes only ledger-recorded entries, and `repair` clears leftovers from a crashed
       session. Staging itself re-stages over a leftover entry, so it is also the repair path.
@@ -320,14 +323,43 @@ UI.
       while a session is live routes the new instance to a secondary debugger session that DAP does
       not hear.
 
-12. Complete the runtime feedback loop
+12. Complete the runtime feedback loop — DONE
     - Add the temporary runtime helper through the debugger channel.
     - Implement remote tree/node inspection, keyboard/mouse/gamepad actions, run/stop/restart,
       performance monitors, and game/editor viewport PNG capture.
     - Capture manually and automatically after successful run/input actions; do not implement
       continuous video.
+    - The staged `runtime.gd` autoload registers a `gofer` message capture with `EngineDebugger` and
+      answers `{id, op, params}` requests from a coroutine, so input and capture ops can await
+      rendered frames while the capture callback returns immediately. The engine strips the capture
+      prefix before invoking the callable, so the helper decodes the message with `trim_prefix` —
+      the tolerant decode the MIT-licensed godot-ai helper uses. Run standalone (no debugger
+      attached), the helper stays inert.
+    - `plugin.gd` registers a `GoferDebuggerBridge` (`EditorDebuggerPlugin` inner class, holding the
+      plugin by weak reference) that owns the editor half of the channel. `runtime.*` RPC requests
+      are deferred instead of answered synchronously: forwarded queries are correlated by the RPC
+      request id, `runtime.run`/`runtime.restart` ride a small state machine (stop → wait for the
+      old game → play → wait for the helper's `gofer:ready` beacon → chained first-frame capture),
+      and `_process` sweeps every pending entry against a deadline. Deadlines answer
+      `runtime_timeout`, a missing helper answers `runtime_not_running`, and both are retryable.
+    - The session-stopped connection persists across play/stop/play cycles because the editor reuses
+      one debugger session (a one-shot connection is consumed by the first restart), and a
+      play-state poll in `_track_play_state` is the teardown fallback for a game that dies without a
+      stopped signal — both adaptations of godot-ai's session bookkeeping, with attribution in the
+      addon comments.
+    - Launch and input responses carry a frame automatically; `runtime.capture` answers one on
+      demand from the game, or from the editor viewport with `source: "editor"` (a headless editor
+      honestly refuses with `capture_unavailable`). Frames are PNG, base64, at most 1920 px on the
+      longest edge, and capped well under the 16 MiB image envelope after base64 inflation; remote
+      tree dumps truncate past 2048 nodes or 32 levels rather than risk the 1 MiB envelope.
     - Done when an input changes fixture state and the following screenshot and remote-tree result
-      prove it.
+      prove it — proven by
+      `godot_runtime_acceptance::the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots`,
+      which launches the pinned editor, starts the fixture game through `runtime.run`, and drives
+      the full loop: remote tree with the autoloaded helper, key/mouse/gamepad input changing the
+      probe label, performance monitors, manual and automatic PNG captures, refused editor capture
+      in a headless editor, a restart that resets fixture state, and a stop that returns inspection
+      to `runtime_not_running`.
 
 13. Implement configuration editors — DONE
     - Provide typed search/get/set/reset for project.godot, autoloads, Input Map, plugins, and
