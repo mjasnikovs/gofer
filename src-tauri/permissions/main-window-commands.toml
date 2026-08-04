@@ -11,6 +11,7 @@ commands.allow = [
     "delete_rag_cache",
     "delete_workspace_path",
     "edit_workspace_file",
+    "format_gdscript",
     "get_godot_session",
     "get_rag_cache_status",
     "import_legacy_chat",

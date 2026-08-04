@@ -128,6 +128,15 @@ type ToolApprovalRequest = Readonly<{
     approved: boolean
 }>
 
+// The backend returns the formatted buffer for the caller to diff; applying it is a separate,
+// explicit workspace write.
+type FormatGdscriptRequest = Readonly<{source: string}>
+
+type FormatGdscriptResponse = Readonly<{
+    formatted: string
+    changed: boolean
+}>
+
 type StoredChatPayload = Omit<StoredChat, 'taskId'>
     & Readonly<{
         taskId?: string | undefined
@@ -143,6 +152,7 @@ type DesktopCommandMap = Readonly<{
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
+    format_gdscript: CommandSpec<{request: FormatGdscriptRequest}, FormatGdscriptResponse>
     get_godot_session: CommandSpec<undefined, GodotSessionResponse | undefined>
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>

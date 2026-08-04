@@ -234,16 +234,30 @@ UI.
       consumed by its unit suite and the acceptance journey only.
     - Done when a real editor reports diagnostics and navigation across multiple fixture scripts.
 
-9. Add deterministic formatting
+9. Add deterministic formatting — DONE
     - Prove the pin before adopting it. gdtoolkit 4.5.0 is the newest release (2025-10-09) and its
       changelog stops at 4.5-era grammar, so run the 4.7 fixture scripts through it first; if new
       syntax fails to parse, the formatter ships disabled rather than corrupting buffers.
     - Upstream publishes only wheels and sdists, so “standalone sidecar” means building a frozen
-      executable per platform in CI, with checksums and bundled licenses.
+      executable per platform in CI, with checksums and bundled licenses. The per-platform CI
+      packaging lands with the step 18 release work; the runtime contract it must satisfy is already
+      fixed.
     - Send the current buffer through `gdformat -`, which reads stdin, capture formatted stdout,
       show a diff, and apply only after explicit user/AI action.
     - Never let the formatter edit the source file directly; formatter failure leaves the buffer
       untouched. gdtoolkit package (https://pypi.org/project/gdtoolkit/)
+    - The pin proof lives in `fixtures/gdformat/`: `probe.gd` exercises 4.7-era syntax (typed
+      dictionaries and arrays, lambdas, typed loop variables, `match`, `await`, ternary, `super`),
+      every fixture parses, the formatter's own output is idempotent, and invalid syntax exits
+      non-zero with no stdout.
+    - `src-tauri/src/gdformat.rs` is the sidecar layer: `resolve` takes `GOFER_GDFORMAT` or the
+      bundled resource directory (never PATH, which would bypass the pin), `verify_version` requires
+      exactly `gdformat 4.5.0`, and `format_source` pipes the buffer through stdin with a 1 MiB
+      source cap, a 4 MiB output cap, and a 30 s deadline that kills a hung formatter. Missing or
+      wrong-version binaries report `formatter_unavailable`, the explicitly allowed disabled state.
+    - The `format_gdscript` command returns the formatted buffer with a `changed` flag; the renderer
+      diffs it and applies through `write_workspace_file`, so the formatter never touches the
+      source. The diff/apply UI arrives with Monaco in step 10.
     - Done when valid 4.7 fixture syntax is idempotent and invalid syntax produces no mutation.
 
 10. Integrate Monaco

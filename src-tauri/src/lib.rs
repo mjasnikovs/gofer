@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 pub mod addon;
 mod files;
+mod gdformat;
 mod git;
 mod godot;
 mod godot_lsp;
@@ -894,6 +895,48 @@ fn unwatch_workspace_files() -> Result<(), files::FileError> {
     Ok(())
 }
 
+/// Formats a GDScript buffer through the pinned gdformat sidecar. The formatted text is returned
+/// for the caller to diff; applying it is a separate, explicit workspace write, so a formatter
+/// failure can never mutate the source. A missing or wrong-version sidecar reports
+/// `formatter_unavailable` — formatting is the one feature allowed to ship disabled.
+#[tauri::command(async)]
+fn format_gdscript(
+    app: AppHandle,
+    request: gdformat::FormatRequest,
+) -> Result<gdformat::FormatResponse, gdformat::GdformatError> {
+    let binary = gdformat_binary(&app)?;
+    gdformat::format_source(&SystemProcessSpawner, &binary, &request.source)
+}
+
+/// Resolves the sidecar once per binary path so each format call does not pay for a second
+/// process spawn just to re-prove the pin.
+fn gdformat_binary<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<std::path::PathBuf, gdformat::GdformatError> {
+    let resource_dir = app.path().resource_dir().ok();
+    let binary = gdformat::resolve(std::env::var_os(gdformat::ENV_OVERRIDE), resource_dir)?;
+    let mut verified = GDFORMAT_VERIFIED
+        .lock()
+        .map_err(|_| gdformat_lock_error())?;
+    if verified.as_deref() == Some(binary.as_path()) {
+        return Ok(binary);
+    }
+    gdformat::verify_version(&SystemProcessSpawner, &binary)?;
+    *verified = Some(binary.clone());
+    Ok(binary)
+}
+
+fn gdformat_lock_error() -> gdformat::GdformatError {
+    gdformat::GdformatError {
+        code: "formatter_unavailable",
+        message: "The gdformat sidecar state lock is poisoned".to_owned(),
+        retryable: false,
+        details: serde_json::json!({}),
+    }
+}
+
+static GDFORMAT_VERIFIED: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
 fn workspace_watch()
 -> Result<std::sync::MutexGuard<'static, Option<files::WatchHandle>>, files::FileError> {
     WORKSPACE_WATCH
@@ -1736,6 +1779,7 @@ pub fn run() {
                 delete_rag_cache,
                 delete_workspace_path,
                 edit_workspace_file,
+                format_gdscript,
                 get_godot_session,
                 get_rag_cache_status,
                 import_legacy_chat,
