@@ -9,6 +9,7 @@
 //! prevents cdylib/staticlib builds from treating them as dead code until those commands land.
 #![allow(dead_code)]
 
+use crate::godot_rpc;
 use crate::process::{ChildProcess, ProcessSpawner};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -104,6 +105,9 @@ struct GodotSession {
     worktree: PathBuf,
     token: String,
     child: Arc<Mutex<Box<dyn ChildProcess>>>,
+    rpc: godot_rpc::RpcSession,
+    #[allow(dead_code)]
+    events: std::sync::mpsc::Receiver<godot_rpc::EventEnvelope>,
 }
 
 struct StartGuard;
@@ -183,7 +187,6 @@ fn start_with(
             )
         })?
         .port();
-    drop(rpc_listener);
 
     let lsp_port = allocate_loopback_port("LSP")?;
     let dap_port = allocate_loopback_port("DAP")?;
@@ -234,6 +237,9 @@ fn start_with(
         .ok_or_else(|| SessionError::new("godot_stderr_missing", "Could not read Godot errors"))?;
 
     let child = Arc::new(Mutex::new(child));
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let project_path = worktree.display().to_string();
+    let rpc = godot_rpc::RpcSession::start(rpc_listener, token.clone(), project_path, events_tx);
     let session = GodotSession {
         state: SessionState::Starting,
         rpc_address,
@@ -243,6 +249,8 @@ fn start_with(
         worktree,
         token,
         child,
+        rpc,
+        events: events_rx,
     };
 
     let info = session_info(&session);
@@ -269,6 +277,7 @@ pub fn stop() -> Result<(), SessionError> {
         .map_err(|_| SessionError::new("lock_poisoned", "The session lock is poisoned"))?
         .take()
         .ok_or_else(|| SessionError::new("session_not_active", "No Godot session is active"))?;
+    active.rpc.stop();
     active
         .child
         .lock()

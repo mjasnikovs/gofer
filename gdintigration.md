@@ -160,12 +160,12 @@ UI.
     - Retry port collisions three times; otherwise return a structured startup error.
     - Done when session state survives renderer reload and cleans up after editor crashes.
 
-4. Implement persistent editor RPC
+4. Implement persistent editor RPC — DONE
     - Add authenticated handshake, request correlation, timeouts, heartbeats, event sequencing,
       cancellation, payload limits, and reconnect rules.
     - Leave the one-shot `send_godot_command` in place until step 18. It is already
       backend-addressed rather than renderer-addressed, it exists only behind the `webdriver`
-      feature, and it carries the packaged journey’s real Godot mutation and save coverage.
+      feature, and it carries the packaged journey's real Godot mutation and save coverage.
     - Done when invalid tokens, wrong projects, oversized payloads, stale replies, and disconnects
       are covered.
 

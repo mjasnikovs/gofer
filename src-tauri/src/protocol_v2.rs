@@ -190,7 +190,7 @@ pub enum Readiness {
 }
 
 impl Readiness {
-    fn parse(readiness: &str) -> Option<Self> {
+    pub(crate) fn parse(readiness: &str) -> Option<Self> {
         match readiness {
             "ready" => Some(Self::Ready),
             "starting" => Some(Self::Starting),
