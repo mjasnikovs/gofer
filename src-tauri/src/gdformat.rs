@@ -40,6 +40,9 @@ const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const FORMAT_TIMEOUT: Duration = Duration::from_secs(30);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// How long the exited child's pipes get to deliver their last bytes. Exceeding it means a
+/// stream never closed — a truncated read, never a silently empty result.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(windows)]
 fn binary_name() -> &'static str {
@@ -141,6 +144,7 @@ pub fn verify_version(spawner: &dyn ProcessSpawner, binary: &Path) -> Result<(),
         &[OsString::from("--version")],
         None,
         VERSION_TIMEOUT,
+        DRAIN_TIMEOUT,
     )?;
     if !output.status.success {
         return Err(unavailable(binary, "did not answer --version"));
@@ -208,6 +212,7 @@ pub fn format_source(
         &[OsString::from("-")],
         Some(source.as_bytes().to_vec()),
         FORMAT_TIMEOUT,
+        DRAIN_TIMEOUT,
     )?;
     if !output.status.success {
         return Err(GdformatError::new(
@@ -218,6 +223,16 @@ pub fn format_source(
             "exitCode": output.status.code,
             "diagnostics": output.stderr,
         })));
+    }
+    if output.stdout.is_empty() && !source.is_empty() {
+        // gdformat always echoes the whole buffer on success. Empty stdout means the output was
+        // lost, not that the script formats to nothing — returning it would offer the caller a
+        // diff that wipes the file.
+        return Err(GdformatError::new(
+            "invalid_output",
+            "gdformat exited successfully without output; the buffer was left unchanged",
+        )
+        .retryable());
     }
     let formatted = String::from_utf8(output.stdout).map_err(|_| {
         GdformatError::new(
@@ -252,6 +267,7 @@ fn run(
     arguments: &[OsString],
     input: Option<Vec<u8>>,
     timeout: Duration,
+    drain: Duration,
 ) -> Result<RunOutput, GdformatError> {
     let mut child = spawner
         .spawn(binary, arguments, input.is_some())
@@ -280,22 +296,36 @@ fn run(
             let _ = stdin.write_all(&bytes);
         });
     }
-    spawn_reader(child.take_stdout(), sender.clone(), StreamEvent::Stdout);
-    spawn_reader(child.take_stderr(), sender, StreamEvent::Stderr);
+    let mut expected = 0;
+    expected += usize::from(spawn_reader(
+        child.take_stdout(),
+        sender.clone(),
+        StreamEvent::Stdout,
+    ));
+    expected += usize::from(spawn_reader(
+        child.take_stderr(),
+        sender,
+        StreamEvent::Stderr,
+    ));
     let status = wait_with_deadline(child.as_mut(), timeout)?;
-    collect(receiver, status)
+    collect(receiver, status, expected, drain)
 }
 
+/// Returns whether a reader thread was started, so [`collect`] knows exactly how many events to
+/// wait for instead of guessing from a timeout.
 fn spawn_reader(
     stream: Option<crate::process::ProcessReader>,
     sender: mpsc::Sender<StreamEvent>,
     wrap: fn(io::Result<Vec<u8>>) -> StreamEvent,
-) {
-    let Some(mut stream) = stream else { return };
+) -> bool {
+    let Some(mut stream) = stream else {
+        return false;
+    };
     thread::spawn(move || {
         let result = read_capped(&mut stream, MAX_OUTPUT_BYTES);
         let _ = sender.send(wrap(result));
     });
+    true
 }
 
 fn read_capped(stream: &mut dyn Read, cap: usize) -> io::Result<Vec<u8>> {
@@ -348,14 +378,17 @@ fn wait_with_deadline(
 fn collect(
     receiver: Receiver<StreamEvent>,
     status: ProcessStatus,
+    expected: usize,
+    drain: Duration,
 ) -> Result<RunOutput, GdformatError> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    // The child has exited, so both pipes are closed and the reader threads deliver exactly one
-    // event each; a missing event means the stream was never piped, which the empty default
-    // already represents.
-    for _ in 0..2 {
-        match receiver.recv_timeout(POLL_INTERVAL * 100) {
+    // The child has exited, so each piped stream's reader thread delivers exactly one event. If
+    // one never arrives the pipe is still held open — by an inherited descriptor, say — and the
+    // read is truncated. Defaulting to empty here would hand the caller a blank "formatted"
+    // buffer that looks like a legitimate result, so a missing event is an error instead.
+    for _ in 0..expected {
+        match receiver.recv_timeout(drain) {
             Ok(StreamEvent::Stdout(Ok(bytes))) => stdout = bytes,
             Ok(StreamEvent::Stderr(Ok(bytes))) => stderr = bytes,
             Ok(StreamEvent::Stdout(Err(error))) | Ok(StreamEvent::Stderr(Err(error))) => {
@@ -364,7 +397,13 @@ fn collect(
                     format!("The gdformat sidecar output could not be read: {error}"),
                 ));
             }
-            Err(_) => break,
+            Err(_) => {
+                return Err(GdformatError::new(
+                    "invalid_output",
+                    "The gdformat sidecar output never finished; the buffer was left unchanged",
+                )
+                .retryable());
+            }
         }
     }
     Ok(RunOutput {
@@ -650,7 +689,7 @@ mod tests {
     #[test]
     fn format_rejects_oversized_buffers_before_spawning() {
         let spawner = FakeSpawner::default();
-        let source = "pass\n".repeat(MAX_SOURCE_BYTES);
+        let source = "pass\n".repeat(MAX_SOURCE_BYTES / 5 + 1);
         let error = format_source(&spawner, &binary(), &source).expect_err("oversized must fail");
         assert_eq!(error.code, "payload_too_large");
         assert!(!error.retryable);
@@ -701,11 +740,73 @@ mod tests {
             &[OsString::from("-")],
             Some(b"pass\n".to_vec()),
             Duration::from_millis(50),
+            DRAIN_TIMEOUT,
         )
         .expect_err("a hung formatter must time out");
         assert_eq!(error.code, "formatter_timeout");
         assert!(error.retryable);
         assert!(started.elapsed() < FORMAT_TIMEOUT);
+    }
+
+    #[test]
+    fn format_rejects_a_successful_run_without_output() {
+        let (fake, _) = child(b"", b"", success());
+        let spawner = FakeSpawner {
+            child: Mutex::new(Some(fake)),
+            spawn_error: None,
+        };
+        let error = format_source(&spawner, &binary(), "func f():\n\tpass\n")
+            .expect_err("empty output must never become a buffer-wiping diff");
+        assert_eq!(error.code, "invalid_output");
+        assert!(error.retryable);
+        // An empty buffer legitimately formats to nothing.
+        let (fake, _) = child(b"", b"", success());
+        let spawner = FakeSpawner {
+            child: Mutex::new(Some(fake)),
+            spawn_error: None,
+        };
+        let response = format_source(&spawner, &binary(), "").expect("empty source formats");
+        assert!(!response.changed);
+        assert_eq!(response.formatted, "");
+    }
+
+    #[test]
+    fn format_rejects_a_stream_that_never_closes() {
+        let fake = FakeChild {
+            stdin: Some(Box::new(RecordingWriter(Arc::new(Mutex::new(Vec::new()))))),
+            // A descriptor held open past the child's exit: the reader never reaches EOF.
+            stdout: Some(Box::new(BlockingReader)),
+            stderr: Some(Box::new(Cursor::new(Vec::new()))),
+            status: success(),
+            exits: true,
+            killed: false,
+        };
+        let spawner = FakeSpawner {
+            child: Mutex::new(Some(fake)),
+            spawn_error: None,
+        };
+        let error = run(
+            &spawner,
+            binary().as_os_str(),
+            &[OsString::from("-")],
+            Some(b"pass\n".to_vec()),
+            FORMAT_TIMEOUT,
+            Duration::from_millis(50),
+        )
+        .expect_err("a truncated read must not look like an empty result");
+        assert_eq!(error.code, "invalid_output");
+        assert!(error.retryable);
+    }
+
+    /// Stands in for a pipe whose write end outlives the child: readable forever, never EOF.
+    struct BlockingReader;
+
+    impl Read for BlockingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            thread::sleep(POLL_INTERVAL);
+            buffer[0] = b'x';
+            Ok(1)
+        }
     }
 
     #[test]
