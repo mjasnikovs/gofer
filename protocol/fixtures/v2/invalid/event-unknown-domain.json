@@ -1,0 +1,8 @@
+{
+    "protocolVersion": 2,
+    "kind": "event",
+    "id": "session-4f21",
+    "sequence": 4,
+    "event": "shader.compiled",
+    "data": {}
+}

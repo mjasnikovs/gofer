@@ -1,0 +1,222 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://gofer.local/protocol/v2/value.schema.json",
+    "title": "Gofer protocol v2 tagged Godot value",
+    "type": "object",
+    "required": ["type"],
+    "properties": {"type": {"type": "string"}},
+    "additionalProperties": true,
+    "oneOf": [
+        {
+            "properties": {"type": {"const": "null"}, "value": {"type": "null"}}
+        },
+        {
+            "required": ["value"],
+            "properties": {"type": {"const": "bool"}, "value": {"type": "boolean"}}
+        },
+        {
+            "required": ["value"],
+            "properties": {"type": {"const": "int"}, "value": {"type": "integer"}}
+        },
+        {
+            "required": ["value"],
+            "properties": {"type": {"const": "float"}, "value": {"type": "number"}}
+        },
+        {
+            "required": ["value"],
+            "properties": {"type": {"const": "string"}, "value": {"type": "string"}}
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "array"},
+                "value": {"type": "array", "items": {"$ref": "#"}}
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "dictionary"},
+                "value": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["key", "value"],
+                        "properties": {"key": {"$ref": "#"}, "value": {"$ref": "#"}},
+                        "additionalProperties": true
+                    }
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "vector2"},
+                "value": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {"type": "number"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "vector2i"},
+                "value": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {"type": "integer"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "vector3"},
+                "value": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "items": {"type": "number"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "vector3i"},
+                "value": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "items": {"type": "integer"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"enum": ["vector4", "quaternion", "color", "plane", "rect2"]},
+                "value": {
+                    "type": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {"type": "number"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"enum": ["vector4i", "rect2i"]},
+                "value": {
+                    "type": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {"type": "integer"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "transform2d"},
+                "value": {
+                    "type": "array",
+                    "minItems": 6,
+                    "maxItems": 6,
+                    "items": {"type": "number"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "basis"},
+                "value": {
+                    "type": "array",
+                    "minItems": 9,
+                    "maxItems": 9,
+                    "items": {"type": "number"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "transform3d"},
+                "value": {
+                    "type": "array",
+                    "minItems": 12,
+                    "maxItems": 12,
+                    "items": {"type": "number"}
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "resource"},
+                "value": {
+                    "type": "object",
+                    "required": ["path", "resourceType"],
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "resourceType": {"type": "string", "minLength": 1},
+                        "uid": {"type": "string", "minLength": 1}
+                    },
+                    "additionalProperties": true
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "node"},
+                "value": {
+                    "type": "object",
+                    "required": ["path", "nodeType"],
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "nodeType": {"type": "string", "minLength": 1},
+                        "instanceId": {"type": "integer"}
+                    },
+                    "additionalProperties": true
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "object"},
+                "value": {
+                    "type": "object",
+                    "required": ["className", "instanceId"],
+                    "properties": {
+                        "className": {"type": "string", "minLength": 1},
+                        "instanceId": {"type": "integer"}
+                    },
+                    "additionalProperties": true
+                }
+            }
+        },
+        {
+            "required": ["value"],
+            "properties": {
+                "type": {"const": "opaque"},
+                "value": {
+                    "type": "object",
+                    "required": ["typeName", "text"],
+                    "properties": {
+                        "typeName": {"type": "string", "minLength": 1},
+                        "text": {"type": "string"}
+                    },
+                    "additionalProperties": true
+                }
+            }
+        }
+    ]
+}

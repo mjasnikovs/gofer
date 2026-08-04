@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "event",
+    "id": "session-4f21",
+    "event": "logs.appended",
+    "data": {"channel": "editor"}
+}

@@ -6,53 +6,71 @@ import Ajv2020 from 'ajv/dist/2020.js'
 import {ProtocolError, requireSupportedProtocolVersion} from './protocol.mjs'
 
 const root = new URL('../protocol/', import.meta.url)
-const schemaDirectory = new URL('schemas/', root)
-const fixtureDirectory = new URL('fixtures/', root)
-const schemaNames = ['request', 'response', 'event', 'error']
+const schemaNames = {
+    v1: ['request', 'response', 'event', 'error'],
+    v2: ['handshake', 'request', 'response', 'event', 'error', 'value']
+}
+const versions = Object.keys(schemaNames)
 
 async function json(path) {
     return JSON.parse(await readFile(path, 'utf8'))
 }
 
-async function validators() {
+async function validators(version) {
     const ajv = new Ajv2020({allErrors: true, strict: true})
+    const directory = new URL(`schemas/${version}/`, root)
     return Object.fromEntries(
         await Promise.all(
-            schemaNames.map(async name => {
-                const schema = await json(new URL(`${name}.schema.json`, schemaDirectory))
+            schemaNames[version].map(async name => {
+                const schema = await json(new URL(`${name}.schema.json`, directory))
                 return [name, ajv.compile(schema)]
             })
         )
     )
 }
 
-async function fixturePaths(kind) {
-    const directory = new URL(`${kind}/`, fixtureDirectory)
+async function fixturePaths(version, kind) {
+    const directory = new URL(`fixtures/${version}/${kind}/`, root)
     return (await readdir(directory)).map(name => join(directory.pathname, name))
 }
 
+function schemaName(path) {
+    return path.split('/').at(-1).split('-')[0]
+}
+
 test('all valid golden fixtures match their canonical schemas', async () => {
-    const schemas = await validators()
-    for (const path of await fixturePaths('valid')) {
-        const name = path.split('/').at(-1).split('-')[0]
-        assert.equal(
-            schemas[name](await json(path)),
-            true,
-            `${path}: ${JSON.stringify(schemas[name].errors)}`
-        )
+    for (const version of versions) {
+        const schemas = await validators(version)
+        const paths = await fixturePaths(version, 'valid')
+        assert.ok(paths.length > 0, version)
+        for (const path of paths) {
+            const schema = schemas[schemaName(path)]
+            assert.ok(schema, path)
+            assert.equal(
+                schema(await json(path)),
+                true,
+                `${path}: ${JSON.stringify(schema.errors)}`
+            )
+        }
     }
 })
 
 test('all invalid golden fixtures are rejected by their canonical schemas', async () => {
-    const schemas = await validators()
-    for (const path of await fixturePaths('invalid')) {
-        const name = path.split('/').at(-1).split('-')[0]
-        assert.equal(schemas[name](await json(path)), false, path)
+    for (const version of versions) {
+        const schemas = await validators(version)
+        for (const path of await fixturePaths(version, 'invalid')) {
+            assert.equal(schemas[schemaName(path)](await json(path)), false, path)
+        }
     }
 })
 
+test('every protocol v2 envelope kind and value shape has a valid fixture', async () => {
+    const covered = new Set((await fixturePaths('v2', 'valid')).map(path => schemaName(path)))
+    assert.deepEqual([...covered].sort(), [...schemaNames.v2].sort())
+})
+
 test('unsupported versions are rejected before dispatch with a structured error', async () => {
-    const [path] = await fixturePaths('unsupported')
+    const [path] = await fixturePaths('v1', 'unsupported')
     const payload = await json(path)
     assert.throws(
         () => requireSupportedProtocolVersion(payload),
@@ -70,4 +88,15 @@ test('unsupported versions are rejected before dispatch with a structured error'
             return true
         }
     )
+})
+
+test('unsupported protocol v2 versions never match the frozen schemas', async () => {
+    const schemas = await validators('v2')
+    const paths = await fixturePaths('v2', 'unsupported')
+    assert.ok(paths.length > 0)
+    for (const path of paths) {
+        const payload = await json(path)
+        assert.equal(schemas[schemaName(path)](payload), false, path)
+        assert.notEqual(payload.protocolVersion, 2, path)
+    }
 })

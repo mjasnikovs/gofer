@@ -1,0 +1,15 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://gofer.local/protocol/v2/response.schema.json",
+    "title": "Gofer protocol v2 response",
+    "type": "object",
+    "required": ["protocolVersion", "kind", "id", "result"],
+    "properties": {
+        "protocolVersion": {"const": 2},
+        "kind": {"const": "response"},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "result": {},
+        "revision": {"type": "integer", "minimum": 0}
+    },
+    "additionalProperties": true
+}

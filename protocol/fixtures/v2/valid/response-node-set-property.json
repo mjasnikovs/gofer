@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "response",
+    "id": "request-2",
+    "result": {"changed": true},
+    "revision": 8
+}

@@ -1,0 +1,15 @@
+{
+    "protocolVersion": 2,
+    "kind": "response",
+    "id": "handshake-1",
+    "result": {
+        "sessionId": "session-4f21",
+        "acceptedVersion": 2,
+        "heartbeatIntervalMs": 5000,
+        "limits": {
+            "maxEnvelopeBytes": 1048576,
+            "maxImageEnvelopeBytes": 16777216,
+            "maxImageEdgePixels": 1920
+        }
+    }
+}

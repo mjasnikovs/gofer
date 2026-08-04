@@ -1,0 +1,8 @@
+{
+    "protocolVersion": 2,
+    "kind": "event",
+    "id": "session-4f21",
+    "sequence": 12,
+    "event": "debug.stopped",
+    "data": {"reason": "breakpoint", "threadId": 1, "line": 42}
+}

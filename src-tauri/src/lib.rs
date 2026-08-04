@@ -19,6 +19,7 @@ mod godot_bridge;
 mod memory;
 mod process;
 pub mod protocol;
+pub mod protocol_v2;
 mod rag;
 mod storage;
 

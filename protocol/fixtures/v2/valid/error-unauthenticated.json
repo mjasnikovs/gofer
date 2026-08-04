@@ -1,0 +1,12 @@
+{
+    "protocolVersion": 2,
+    "kind": "error",
+    "id": "handshake-1",
+    "error": {
+        "code": "unauthenticated",
+        "message": "The session token does not match this editor session",
+        "retryable": false,
+        "readiness": "unavailable",
+        "details": {}
+    }
+}

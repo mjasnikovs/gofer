@@ -149,7 +149,7 @@ mod tests {
 
     fn fixtures(kind: &str) -> Vec<PathBuf> {
         let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../protocol/fixtures")
+            .join("../protocol/fixtures/v1")
             .join(kind);
         let mut paths: Vec<_> = fs::read_dir(directory)
             .expect("read protocol fixture directory")
