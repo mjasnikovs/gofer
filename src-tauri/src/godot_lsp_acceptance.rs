@@ -235,19 +235,20 @@ fn the_editor_reports_diagnostics_and_navigation_across_scripts() {
     client
         .open_document(&broken, BROKEN)
         .expect("open broken.gd");
+    // The budget is for broken.gd's diagnostics, not for each notification: a chatty editor that
+    // never mentions broken.gd must fail on time, and with the editor output attached.
     let deadline = Instant::now() + DIAGNOSTICS_TIMEOUT;
     let reported = loop {
-        let params = diagnostics
-            .recv_timeout(DIAGNOSTICS_TIMEOUT)
-            .expect("the editor must publish diagnostics");
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let params = diagnostics.recv_timeout(remaining).unwrap_or_else(|_| {
+            panic!(
+                "no diagnostics for broken.gd arrived\n--- editor output ---\n{}",
+                editor.output()
+            )
+        });
         if params.uri == broken && !params.diagnostics.is_empty() {
             break params;
         }
-        assert!(
-            Instant::now() < deadline,
-            "no diagnostics for broken.gd arrived\n--- editor output ---\n{}",
-            editor.output()
-        );
     };
     assert!(
         reported

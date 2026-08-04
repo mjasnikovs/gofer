@@ -19,10 +19,11 @@
 
 use crate::files::{FileError, FileStamp, Workspace};
 use lsp_types::{
-    CompletionItem, CompletionResponse, DocumentChanges, DocumentHighlight, DocumentSymbol,
-    DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location, OneOf, Position,
-    PrepareRenameResponse, PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelp,
-    SymbolKind, TextEdit, Url, WorkspaceEdit,
+    AnnotatedTextEdit, CompletionItem, CompletionResponse, DocumentChangeOperation,
+    DocumentChanges, DocumentHighlight, DocumentSymbol, DocumentSymbolResponse,
+    GotoDefinitionResponse, Hover, Location, OneOf, Position, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelp, SymbolKind, TextEdit, Url,
+    WorkspaceEdit,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -619,36 +620,49 @@ pub fn plan_workspace_edit(
     workspace: &Workspace,
     edit: &WorkspaceEdit,
 ) -> Result<Vec<PlannedFile>, LspError> {
+    // `documentChanges` wins outright when the server sends both: the protocol says so, and
+    // merging the two would plan the same file twice and fail its own concurrency check.
     let mut changes: Vec<(Url, Vec<TextEdit>)> = Vec::new();
-    if let Some(map) = &edit.changes {
-        for (uri, edits) in map {
-            changes.push((uri.clone(), edits.clone()));
+    match &edit.document_changes {
+        Some(DocumentChanges::Edits(edits)) => {
+            for text in edits {
+                changes.push((text.text_document.uri.clone(), text_edits(&text.edits)));
+            }
         }
-    }
-    if let Some(document_changes) = &edit.document_changes {
-        match document_changes {
-            DocumentChanges::Edits(edits) => {
-                for text in edits {
-                    let edits = text
-                        .edits
-                        .iter()
-                        .map(|edit| match edit {
-                            OneOf::Left(edit) => edit.clone(),
-                            OneOf::Right(annotated) => annotated.text_edit.clone(),
-                        })
-                        .collect();
-                    changes.push((text.text_document.uri.clone(), edits));
+        Some(DocumentChanges::Operations(operations)) => {
+            for operation in operations {
+                match operation {
+                    DocumentChangeOperation::Edit(text) => {
+                        changes.push((text.text_document.uri.clone(), text_edits(&text.edits)));
+                    }
+                    // File creation, rename, and deletion have no typed counterpart in the
+                    // workspace transaction yet, so they are refused rather than half-applied.
+                    DocumentChangeOperation::Op(_) => {
+                        return Err(unsupported_resource_operations());
+                    }
                 }
             }
-            // File creation, rename, and deletion operations have no typed counterpart in the
-            // workspace transaction yet, so they are refused rather than half-applied.
-            DocumentChanges::Operations(_) => return Err(unsupported_resource_operations()),
+        }
+        None => {
+            if let Some(map) = &edit.changes {
+                for (uri, edits) in map {
+                    changes.push((uri.clone(), edits.clone()));
+                }
+            }
         }
     }
 
-    let mut planned = Vec::with_capacity(changes.len());
+    let mut planned: Vec<PlannedFile> = Vec::with_capacity(changes.len());
     for (uri, mut edits) in changes {
         let relative = relative_path(workspace, &uri)?;
+        // Two entries for one file would each claim the pre-edit hash, so the second write would
+        // lose to the first and roll the whole rename back. Refuse it while it is still explicable.
+        if planned.iter().any(|file| file.path == relative) {
+            return Err(
+                LspError::new("duplicate_edit_target", "The edit names one file twice")
+                    .with_details(json!({"path": relative})),
+            );
+        }
         let contents = workspace.read(&relative).map_err(file_error)?;
         // Apply right-to-left so earlier offsets stay valid as later text shifts.
         edits.sort_by(|a, b| {
@@ -802,6 +816,17 @@ fn relative_path(workspace: &Workspace, uri: &Url) -> Result<String, LspError> {
         );
     }
     Ok(label)
+}
+
+/// Drops the change annotations Gofer has no use for, leaving plain text edits.
+fn text_edits(edits: &[OneOf<TextEdit, AnnotatedTextEdit>]) -> Vec<TextEdit> {
+    edits
+        .iter()
+        .map(|edit| match edit {
+            OneOf::Left(edit) => edit.clone(),
+            OneOf::Right(annotated) => annotated.text_edit.clone(),
+        })
+        .collect()
 }
 
 fn flatten_nested(
@@ -1567,12 +1592,72 @@ mod tests {
         let planned = plan_workspace_edit(&workspace, &edit).expect("plan");
         assert_eq!(planned[0].updated_text, "var score := 0\n");
 
+        // An edit-only `documentChanges` array in the operations form is still just text edits.
+        let edit: WorkspaceEdit = serde_json::from_value(json!({
+            "documentChanges": [
+                {
+                    "textDocument": {"uri": uri, "version": 3},
+                    "edits": [{
+                        "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 9}},
+                        "newText": "score"
+                    }]
+                },
+                {"kind": "create", "uri": uri}
+            ]
+        }))
+        .expect("parse edit");
+        let error = plan_workspace_edit(&workspace, &edit).expect_err("resource op");
+        assert_eq!(error.code, "unsupported_resource_operations");
+
         let edit: WorkspaceEdit = serde_json::from_value(json!({
             "documentChanges": [{"kind": "create", "uri": uri}]
         }))
         .expect("parse edit");
         let error = plan_workspace_edit(&workspace, &edit).expect_err("resource op");
         assert_eq!(error.code, "unsupported_resource_operations");
+    }
+
+    #[test]
+    fn prefers_document_changes_and_refuses_a_file_named_twice() {
+        let (_directory, workspace) = workspace();
+        workspace
+            .write("one.gd", "var total := 0\n", None)
+            .expect("write");
+        let uri = file_uri(&workspace, "one.gd").expect("uri");
+        let rename = json!([{
+            "range": {"start": {"line": 0, "character": 4}, "end": {"line": 0, "character": 9}},
+            "newText": "score"
+        }]);
+
+        // A server that sends both forms describes the same rename twice. Merging them would plan
+        // one.gd twice and lose the second write to the first, so documentChanges wins alone.
+        let both: WorkspaceEdit = serde_json::from_value(json!({
+            "changes": {uri.as_str(): rename},
+            "documentChanges": [{
+                "textDocument": {"uri": uri, "version": 3},
+                "edits": rename
+            }]
+        }))
+        .expect("parse edit");
+        let planned = plan_workspace_edit(&workspace, &both).expect("plan");
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].updated_text, "var score := 0\n");
+        commit_planned_edit(&workspace, &planned).expect("commit");
+        assert_eq!(
+            workspace.read("one.gd").expect("read").text,
+            "var score := 0\n"
+        );
+
+        let twice: WorkspaceEdit = serde_json::from_value(json!({
+            "documentChanges": [
+                {"textDocument": {"uri": uri, "version": 3}, "edits": rename},
+                {"textDocument": {"uri": uri, "version": 3}, "edits": rename}
+            ]
+        }))
+        .expect("parse edit");
+        let error = plan_workspace_edit(&workspace, &twice).expect_err("duplicate target");
+        assert_eq!(error.code, "duplicate_edit_target");
+        assert_eq!(error.details["path"], "one.gd");
     }
 
     #[test]
