@@ -272,7 +272,7 @@ UI.
       no `worker-src` and inherits `default-src 'self'`.
     - Done when UI and AI edits converge without duplicate or stale LSP document versions.
 
-11. Connect Godot’s native DAP
+11. Connect Godot’s native DAP — DONE
     - Use DAP framing and the exact Godot 4.7 sequence: initialize, launch/attach, setBreakpoints,
       configurationDone.
     - Support restart/terminate, pause/continue, step-in/step-over, stack trace, scopes, variables,
@@ -283,8 +283,36 @@ UI.
     - Use the `breakpointLocations` request to validate candidate lines, and `disconnect` to detach
       without terminating the running game.
     - Reflect verified breakpoint lines back into Monaco and the agent response.
+    - `src-tauri/src/godot_dap.rs` is the client: `DapClient::connect` refuses non-loopback
+      transports and `initialize` is a separate call so the caller can subscribe to events before
+      the `initialized` event rides out with the response. Godot defers some answers rather than
+      answering slowly: `launch` is only answered once `configurationDone` spawns the game (the
+      response keeps the launch `request_seq`, so `launch` blocks on its own thread while the caller
+      sends `configuration_done`), and `stackTrace`/`variables`/`evaluate` are held until the
+      debuggee answers over the remote debugger channel — requests default to a 30 s timeout, 60 s
+      for launch and restart. Source objects carry `name` and `checksums` because Godot reads both
+      unconditionally and logs engine errors when they are missing; `breakpointLocations` answers
+      arrive under a `breakpoints` key instead of the specification’s `breakpointLocations`, so both
+      are accepted. Stopped reasons are `breakpoint`, `step`, `exception`, and `paused`, always on
+      thread 1. `step_out` is emulated with bounded `next` requests (256-step safety limit) until
+      the stack depth decreases, stopping immediately on another breakpoint, an exception, a pause,
+      or termination. Mid-session `setBreakpoints` takes effect on the debuggee but Godot does not
+      broadcast `breakpoint` events for it, so the response is the source of truth for verified
+      lines. `disconnect` sends `terminateDebuggee` to record intent, but Godot stops a launched
+      game on disconnect regardless; only attached sessions genuinely detach. `restart` nests the
+      last launch arguments the way Godot’s `arguments.arguments` handler expects, and `--headless`
+      rides in `playArgs` because the editor does not forward it to the game it spawns.
+    - The Tauri commands that expose this arrive with Monaco and the runtime loop in later steps;
+      until then the module is consumed by its unit suite and the acceptance journey only.
     - Done when the fixture stops on a breakpoint, exposes locals/members/globals, evaluates an
-      expression, steps, restarts, and terminates.
+      expression, steps, restarts, and terminates — proven by
+      `godot_dap_acceptance::the_editor_runs_breaks_steps_and_terminates`, which launches the pinned
+      editor with `--dap-port`, runs the fixture game headless, and drives the full loop: breakpoint
+      hit on a two-frame stack, Locals/Members/Globals, evaluate, emulated step-out back into
+      `_process`, mid-session breakpoint clear, pause/continue, terminate, and a restart that hits
+      the restored breakpoint again. Restart is only driven with no session active: relaunching
+      while a session is live routes the new instance to a secondary debugger session that DAP does
+      not hear.
 
 12. Complete the runtime feedback loop
     - Add the temporary runtime helper through the debugger channel.
