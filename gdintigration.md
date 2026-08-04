@@ -209,7 +209,7 @@ UI.
       conflict state reaches a buffer only once step 10 lands Monaco.
     - Done when symlink escapes, traversal, stale saves, and external edits are covered.
 
-8. Connect native Godot LSP
+8. Connect native Godot LSP — DONE
     - Implement Content-Length JSON-RPC framing, request correlation, cancellation, diagnostics, and
       document lifecycle using lsp-types.
     - Support hover, completion/resolve, signature help, definition, declaration, references,
@@ -221,6 +221,17 @@ UI.
       session enables threading.
     - Apply multi-file rename edits through validated filesystem transactions with rollback on
       failure.
+    - `src-tauri/src/godot_lsp.rs` is the client: `LspClient::connect` refuses non-loopback
+      transports, requests default to a 30 s timeout (60 s for initialize) because the server
+      answers from the editor main loop in 100 ms poll slices, `cancel` sends `$/cancelRequest`, and
+      didSave carries the document text because Godot reads `text` from those parameters.
+      `workspace_symbols` synthesizes the missing provider by indexing each script's document
+      symbols, and rename edits land through `plan_workspace_edit`/`commit_planned_edit`: plan
+      first, then one optimistic-concurrency transaction that rolls every earlier file back when a
+      later one conflicts. LSP positions are mapped as UTF-16 code units, so astral characters
+      cannot corrupt edit offsets.
+    - The Tauri commands that expose this arrive with Monaco in step 10; until then the module is
+      consumed by its unit suite and the acceptance journey only.
     - Done when a real editor reports diagnostics and navigation across multiple fixture scripts.
 
 9. Add deterministic formatting

@@ -14,12 +14,16 @@ pub mod addon;
 mod files;
 mod git;
 mod godot;
+mod godot_lsp;
 mod godot_rpc;
 mod godot_session;
 mod godot_session_api;
 // Drives the staged addon inside a real editor. Gated so the default gate needs no Godot binary.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_addon_acceptance;
+// Drives the native language server inside a real editor, under the same gate.
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_lsp_acceptance;
 // The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
 // entirely. `test` keeps its loopback and protocol-version coverage in the default suite.
 #[cfg(any(feature = "webdriver", test))]
