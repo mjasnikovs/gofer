@@ -578,6 +578,68 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("reserved_setting")
         );
 
+        // A setting the engine declared keeps the type it declared.
+        assert!(
+            session
+                .error(
+                    "project.set_setting",
+                    json!({"name": "application/config/name", "value": {"type": "int", "value": 5}}),
+                    None
+                )
+                .starts_with("type_mismatch"),
+            "an int must not land on a String setting"
+        );
+        assert_eq!(
+            session.call(
+                "project.get_setting",
+                json!({"name": "application/config/name"})
+            )["value"],
+            json!({"type": "string", "value": "Gofer Protocol Fixture"}),
+            "a refused write must leave the setting alone"
+        );
+
+        // A packed array crosses the wire as a plain array and is rebuilt from the type the
+        // setting was declared with, so a value read out can be written straight back.
+        let tags = session.call(
+            "project.get_setting",
+            json!({"name": "application/config/tags"}),
+        );
+        assert_eq!(tags["value"], json!({"type": "array", "value": []}));
+        session.call(
+            "project.set_setting",
+            json!({
+                "name": "application/config/tags",
+                "value": {"type": "array", "value": [{"type": "string", "value": "gofer-acceptance"}]}
+            }),
+        );
+        assert_eq!(
+            session.call(
+                "project.get_setting",
+                json!({"name": "application/config/tags"})
+            )["value"],
+            json!({"type": "array", "value": [{"type": "string", "value": "gofer-acceptance"}]})
+        );
+        assert!(
+            session
+                .error(
+                    "project.set_setting",
+                    json!({
+                        "name": "application/config/tags",
+                        "value": {"type": "array", "value": [{"type": "int", "value": 3}]}
+                    }),
+                    None
+                )
+                .starts_with("type_mismatch"),
+            "a mistyped element must be refused, not coerced"
+        );
+
+        // Search answers with settings only: the property list opens with a category header.
+        let searched = session.call("project.search_settings", json!({"query": ""}));
+        for entry in searched["settings"].as_array().expect("settings") {
+            let name = entry["name"].as_str().expect("name");
+            session.call("project.get_setting", json!({"name": name}));
+        }
+
         // Autoloads: Gofer's own is visible but protected; ordinary ones come and go.
         let autoloads = session.call("project.list_autoloads", json!({}));
         let managed = find_named(&autoloads, "autoloads", "GoferRuntime");
@@ -585,7 +647,17 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         assert_eq!(managed["enabled"], true);
         session.call(
             "project.set_autoload",
-            json!({"name": "AcceptanceHelper", "path": "res://acceptance_helper.gd"}),
+            json!({"name": "AcceptanceHelper", "path": "res://tests/bridge.gd"}),
+        );
+        assert!(
+            session
+                .error(
+                    "project.set_autoload",
+                    json!({"name": "Ghost", "path": "res://nothing_is_here.gd"}),
+                    None
+                )
+                .starts_with("autoload_path_not_found"),
+            "an autoload that points nowhere breaks the next editor start"
         );
         assert_eq!(
             find_named(
@@ -655,6 +727,35 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("builtin_input_action")
         );
 
+        // A built-in action is rebound and then handed back: reset drops the override so the
+        // engine's own binding applies again, which is why project.godot must not keep it.
+        session.call(
+            "project.set_input_action",
+            json!({"name": "ui_accept", "events": [{"kind": "key", "key": "F9"}]}),
+        );
+        assert_eq!(
+            find_named(
+                &session.call("project.list_input_actions", json!({})),
+                "actions",
+                "ui_accept"
+            )["events"],
+            json!([{"kind": "key", "key": "F9"}])
+        );
+        assert_eq!(
+            session.call("project.reset_input_action", json!({"name": "ui_accept"}))["reset"],
+            true
+        );
+        assert!(
+            session
+                .error(
+                    "project.reset_input_action",
+                    json!({"name": "acceptance_custom"}),
+                    None
+                )
+                .starts_with("custom_input_action"),
+            "a custom action has no built-in binding to return to"
+        );
+
         // Plugins: the Gofer plugin reports itself and refuses to be disabled mid-session.
         let plugins = session.call("project.list_plugins", json!({}));
         let gofer = find_named(&plugins, "plugins", "gofer");
@@ -707,11 +808,16 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         saved.contains("[gofer_acceptance]") && saved.contains("persisted=\"survives-restart\""),
         "the setting must persist in project.godot:\n{saved}"
     );
+    assert!(
+        saved.contains("config/tags=PackedStringArray(\"gofer-acceptance\")"),
+        "a packed array must persist as the type it was read as:\n{saved}"
+    );
     for gone in [
         "GoferRuntime",
         "addons/gofer",
         "AcceptanceHelper",
         "acceptance_jump",
+        "ui_accept",
     ] {
         assert!(
             !saved.contains(gone),

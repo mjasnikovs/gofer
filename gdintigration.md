@@ -302,19 +302,29 @@ UI.
     - Machine-wide EditorSettings writes always require approval when initiated by AI.
     - The addon answers `project.search_settings`/`get_setting`/`set_setting`/`reset_setting`,
       `project.list_autoloads`/`set_autoload`/`remove_autoload`,
-      `project.list_input_actions`/`set_input_action`/`remove_input_action`,
+      `project.list_input_actions`/`set_input_action`/`remove_input_action`/`reset_input_action`,
       `project.list_plugins`/`set_plugin_enabled`, and
       `editor.search_settings`/`get_setting`/`set_setting`. Return values cross the wire tagged
       through a new `_encode_value` that mirrors `_decode_value`, with an `opaque` fallback for
-      values that cannot round-trip.
+      values that cannot round-trip; object references (`node`, `object`, `resource` without a path)
+      are read-only, because nothing on the far side can rebuild them.
     - Project writes persist immediately through `ProjectSettings.save()` and report
       `restartRequired` from `PROPERTY_USAGE_RESTART_IF_CHANGED`. Setting families with their own
       typed command (`autoload/`, `input/`, `editor_plugins/`) refuse the generic write with
       `reserved_setting`, so a malformed autoload or Input Map entry can never reach project.godot.
+    - A write keeps the type the engine declared. A setting that reverts to a non-null default is an
+      engine setting, and a value of another type answers `type_mismatch` rather than putting
+      `config/name=5` in project.godot; an int is promoted onto a float setting, a string onto a
+      StringName or NodePath, and a plain `array` is rebuilt into whichever packed array the setting
+      declares, element types checked, so a value read out can be written straight back. An autoload
+      path that names no file answers `autoload_path_not_found`, because the next editor start is
+      where a dangling one surfaces.
     - Gofer's own entries are protected from the inside: the GoferRuntime autoload and the gofer
       plugin answer `gofer_managed` to modification, and built-in `ui_*` input actions answer
-      `builtin_input_action` to removal. EditorSettings writes stay machine-wide and persist on a
-      normal editor exit; the AI approval gate for them arrives with step 15.
+      `builtin_input_action` to removal — their override is dropped with `reset_input_action`
+      instead, which returns them to the bindings `InputMap` ships. EditorSettings writes stay
+      machine-wide and persist on a normal editor exit; the AI approval gate for them arrives with
+      step 15.
     - Unstage now also removes the `.uid` sidecars Godot writes next to staged scripts, so a
       stop/start cycle on one worktree no longer strands `addons/gofer` as a foreign leftover.
     - Done when values survive restart and temporary Gofer entries still clean up independently —

@@ -37,6 +37,22 @@ const GOFER_AUTOLOAD_NAME := "GoferRuntime"
 ## Search results are capped so a broad query cannot exceed the 1 MiB envelope limit.
 const MAX_SEARCH_RESULTS := 50
 
+## The element type of each packed array, keyed by the type of the packed array itself. The wire
+## carries every array as a plain `array`, so this is what a setting declared as a packed array is
+## rebuilt from.
+const PACKED_ARRAY_ELEMENTS := {
+    TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
+    TYPE_PACKED_INT32_ARRAY: TYPE_INT,
+    TYPE_PACKED_INT64_ARRAY: TYPE_INT,
+    TYPE_PACKED_FLOAT32_ARRAY: TYPE_FLOAT,
+    TYPE_PACKED_FLOAT64_ARRAY: TYPE_FLOAT,
+    TYPE_PACKED_STRING_ARRAY: TYPE_STRING,
+    TYPE_PACKED_VECTOR2_ARRAY: TYPE_VECTOR2,
+    TYPE_PACKED_VECTOR3_ARRAY: TYPE_VECTOR3,
+    TYPE_PACKED_VECTOR4_ARRAY: TYPE_VECTOR4,
+    TYPE_PACKED_COLOR_ARRAY: TYPE_COLOR,
+}
+
 const MUTATING_COMMANDS: Array[String] = [
     "session.undo",
     "session.redo",
@@ -225,6 +241,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _project_set_input_action(params)
         "project.remove_input_action":
             return _project_remove_input_action(params)
+        "project.reset_input_action":
+            return _project_reset_input_action(params)
         "project.list_plugins":
             return _project_list_plugins()
         "project.set_plugin_enabled":
@@ -476,13 +494,24 @@ func _restart_required(name: String) -> bool:
             return (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
     return false
 
+## The Variant type the engine declared a setting with, or `TYPE_NIL` when nothing declared it.
+##
+## Only a declared setting has a default to revert to; a setting the project or Gofer invented
+## reverts to null, which is how the two are told apart. Writing a value of the wrong type into a
+## declared setting is what puts `config/name=5` in project.godot, so the write path refuses it.
+func _declared_setting_type(name: String) -> int:
+    if not ProjectSettings.property_can_revert(name):
+        return TYPE_NIL
+    return typeof(ProjectSettings.property_get_revert(name))
+
 func _project_search_settings(params: Dictionary) -> Dictionary:
     var query := str(params.get("query", "")).to_lower()
     var matches: Array = []
     var total := 0
     for info in ProjectSettings.get_property_list():
         var name := str(info.get("name", ""))
-        if name.is_empty():
+        # The property list opens with a category header that is not a setting at all.
+        if name.is_empty() or not ProjectSettings.has_setting(name):
             continue
         if not query.is_empty() and not name.to_lower().contains(query):
             continue
@@ -525,7 +554,15 @@ func _project_set_setting(params: Dictionary) -> Dictionary:
     var decoded := _decode_value(params["value"])
     if not decoded["ok"]:
         return _config_error("unsupported_value", decoded["message"], {"name": name})
-    ProjectSettings.set_setting(name, decoded["value"])
+    var declared := _declared_setting_type(name)
+    var fitted := _fit_to_declared_type(decoded["value"], declared)
+    if not fitted["ok"]:
+        return _config_error(
+            "type_mismatch",
+            "Project setting '%s': %s" % [name, fitted["message"]],
+            {"name": name, "expected": type_string(declared)}
+        )
+    ProjectSettings.set_setting(name, fitted["value"])
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
@@ -593,6 +630,12 @@ func _project_set_autoload(params: Dictionary) -> Dictionary:
     if not path.begins_with("res://"):
         return _config_error(
             "invalid_params", "Autoload path '%s' must start with res://" % path, {"path": path}
+        )
+    # An autoload that points nowhere is only discovered on the next editor start, which then
+    # fails to load the project the session depends on.
+    if not FileAccess.file_exists(path):
+        return _config_error(
+            "autoload_path_not_found", "No file at '%s'" % path, {"name": name, "path": path}
         )
     ProjectSettings.set_setting("autoload/" + name, ("*" if enabled else "") + path)
     var failure := _save_project_or_error()
@@ -664,8 +707,9 @@ func _project_set_input_action(params: Dictionary) -> Dictionary:
         return failure
     return {"name": name, "deadzone": deadzone, "events": _encode_input_events(events)}
 
-## Removes an input action from project.godot. A built-in ui_ action cannot be deleted, only
-## reverted to its default binding.
+## Removes an input action from project.godot. A built-in ui_ action cannot be deleted; its
+## binding is changed with `project.set_input_action` and given back with
+## `project.reset_input_action`.
 func _project_remove_input_action(params: Dictionary) -> Dictionary:
     var name := str(params.get("name", ""))
     if name.is_empty():
@@ -678,14 +722,41 @@ func _project_remove_input_action(params: Dictionary) -> Dictionary:
     if name.begins_with("ui_"):
         return _config_error(
             "builtin_input_action",
-            "'%s' is a built-in action; only its binding can be changed" % name,
-            {"name": name}
+            "'%s' is a built-in action; change its binding, or reset it with %s"
+            % [name, "project.reset_input_action"],
+            {"name": name, "command": "project.reset_input_action"}
         )
     ProjectSettings.set_setting(setting, null)
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
     return {"name": name, "removed": true}
+
+## Drops an action's entry from project.godot. A built-in action keeps working on the bindings
+## `InputMap` ships, which is what makes this a revert; a custom action simply disappears, so
+## `remove` is the honest name for it and this command refuses it.
+func _project_reset_input_action(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty():
+        return _config_error("invalid_params", "project.reset_input_action requires name")
+    if not name.begins_with("ui_"):
+        return _config_error(
+            "custom_input_action",
+            "'%s' has no built-in binding to return to; remove it with %s"
+            % [name, "project.remove_input_action"],
+            {"name": name, "command": "project.remove_input_action"}
+        )
+    var setting := "input/" + name
+    if not ProjectSettings.has_setting(setting):
+        return _config_error(
+            "input_action_not_found", "No input action named '%s'" % name, {"name": name}
+        )
+    ProjectSettings.set_setting(setting, null)
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    # The editor's own InputMap keeps the overridden binding until it reloads the project.
+    return {"name": name, "reset": true, "restartRequired": true}
 
 func _project_list_plugins() -> Dictionary:
     var plugins: Array = []
@@ -1290,8 +1361,17 @@ func _node_summary(node: Node) -> Dictionary:
         "children": children
     }
 
-## Encodes a Variant as a tagged protocol value, the mirror of `_decode_value`. Values that cannot
-## round-trip become `opaque` so the caller sees what they are without pretending they are editable.
+## Encodes every item of an array-like value.
+func _encode_items(value: Variant) -> Array:
+    var encoded: Array = []
+    for item in value:
+        encoded.append(_encode_value(item))
+    return encoded
+
+## Encodes a Variant as a tagged protocol value, the mirror of `_decode_value`. A reference to an
+## object — a node, a resource without a path, anything live — is described rather than encoded,
+## and anything else becomes `opaque`; those tags are read-only, because nothing on the far side
+## can rebuild what they point at.
 func _encode_value(value: Variant) -> Dictionary:
     match typeof(value):
         TYPE_NIL:
@@ -1353,10 +1433,7 @@ func _encode_value(value: Variant) -> Dictionary:
         TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY, \
         TYPE_PACKED_VECTOR2_ARRAY, TYPE_PACKED_VECTOR3_ARRAY, TYPE_PACKED_COLOR_ARRAY, \
         TYPE_PACKED_VECTOR4_ARRAY:
-            var encoded: Array = []
-            for item in value:
-                encoded.append(_encode_value(item))
-            return {"type": "array", "value": encoded}
+            return {"type": "array", "value": _encode_items(value)}
         TYPE_DICTIONARY:
             var entries: Array = []
             for key in value:
@@ -1490,9 +1567,43 @@ func _decode_value(value: Variant) -> Dictionary:
         "vector4":
             var v4 := _numbers(payload, 4)
             return _decode_failed("A vector4 value requires four numbers") if v4.is_empty() else _decoded(Vector4(v4[0], v4[1], v4[2], v4[3]))
+        "vector4i":
+            var v4i := _numbers(payload, 4)
+            return _decode_failed("A vector4i value requires four numbers") if v4i.is_empty() else _decoded(Vector4i(int(v4i[0]), int(v4i[1]), int(v4i[2]), int(v4i[3])))
+        "quaternion":
+            var quaternion := _numbers(payload, 4)
+            return _decode_failed("A quaternion value requires four numbers") if quaternion.is_empty() else _decoded(Quaternion(quaternion[0], quaternion[1], quaternion[2], quaternion[3]))
         "color":
             var rgba := _numbers(payload, 4)
             return _decode_failed("A color value requires four numbers") if rgba.is_empty() else _decoded(Color(rgba[0], rgba[1], rgba[2], rgba[3]))
+        "rect2":
+            var r2 := _numbers(payload, 4)
+            return _decode_failed("A rect2 value requires four numbers") if r2.is_empty() else _decoded(Rect2(r2[0], r2[1], r2[2], r2[3]))
+        "rect2i":
+            var r2i := _numbers(payload, 4)
+            return _decode_failed("A rect2i value requires four numbers") if r2i.is_empty() else _decoded(Rect2i(int(r2i[0]), int(r2i[1]), int(r2i[2]), int(r2i[3])))
+        "plane":
+            var plane := _numbers(payload, 4)
+            return _decode_failed("A plane value requires four numbers") if plane.is_empty() else _decoded(Plane(Vector3(plane[0], plane[1], plane[2]), plane[3]))
+        "transform2d":
+            var t2d := _numbers(payload, 6)
+            if t2d.is_empty():
+                return _decode_failed("A transform2d value requires six numbers")
+            return _decoded(Transform2D(Vector2(t2d[0], t2d[1]), Vector2(t2d[2], t2d[3]), Vector2(t2d[4], t2d[5])))
+        "basis":
+            var basis := _numbers(payload, 9)
+            if basis.is_empty():
+                return _decode_failed("A basis value requires nine numbers")
+            return _decoded(_basis_from(basis))
+        "transform3d":
+            var t3d := _numbers(payload, 12)
+            if t3d.is_empty():
+                return _decode_failed("A transform3d value requires twelve numbers")
+            return _decoded(Transform3D(_basis_from(t3d), Vector3(t3d[9], t3d[10], t3d[11])))
+        "array":
+            return _decode_items(payload)
+        "dictionary":
+            return _decode_dictionary(payload)
         "resource":
             if typeof(payload) != TYPE_DICTIONARY:
                 return _decode_failed("A resource value requires an object carrying a path")
@@ -1504,6 +1615,75 @@ func _decode_value(value: Variant) -> Dictionary:
                 return _decode_failed("Resource %s could not be loaded" % path)
             return _decoded(resource)
     return _decode_failed("Value type '%s' is not supported" % kind)
+
+## Fits a decoded value onto the type a setting was declared with, in the `_decode_value` shape.
+##
+## The wire has one array tag, so a setting the engine declared as a packed array is written back
+## with a plain array; the declared type is what says which packed array to rebuild. Every element
+## is checked first, because `type_convert` coerces a mistyped element instead of refusing it — a
+## string in a PackedInt32Array would silently become 0.
+func _fit_to_declared_type(value: Variant, declared: int) -> Dictionary:
+    if declared == TYPE_NIL or typeof(value) == declared:
+        return _decoded(value)
+    # A whole number is the natural way to write a float setting, and a string is the only way the
+    # protocol carries a StringName or a NodePath.
+    if declared == TYPE_FLOAT and typeof(value) == TYPE_INT:
+        return _decoded(float(value))
+    if typeof(value) == TYPE_STRING and declared in [TYPE_STRING_NAME, TYPE_NODE_PATH]:
+        return _decoded(type_convert(value, declared))
+    if typeof(value) == TYPE_ARRAY and PACKED_ARRAY_ELEMENTS.has(declared):
+        var element: int = PACKED_ARRAY_ELEMENTS[declared]
+        for index in (value as Array).size():
+            var actual := typeof(value[index])
+            # A whole number is a valid way to write one element of a float array.
+            if actual == element or (element == TYPE_FLOAT and actual == TYPE_INT):
+                continue
+            return _decode_failed(
+                "a %s takes %s elements, but item %d is %s"
+                % [type_string(declared), type_string(element), index, type_string(actual)]
+            )
+        return _decoded(type_convert(value, declared))
+    return _decode_failed(
+        "expected %s, received %s" % [type_string(declared), type_string(typeof(value))]
+    )
+
+## Rebuilds a Basis from nine numbers laid out as three columns, the order `_encode_value` writes.
+func _basis_from(numbers: PackedFloat64Array) -> Basis:
+    return Basis(
+        Vector3(numbers[0], numbers[1], numbers[2]),
+        Vector3(numbers[3], numbers[4], numbers[5]),
+        Vector3(numbers[6], numbers[7], numbers[8])
+    )
+
+## Decodes every tagged item of an array payload into an untyped Array.
+func _decode_items(payload: Variant) -> Dictionary:
+    if typeof(payload) != TYPE_ARRAY:
+        return _decode_failed("An array value requires an array of tagged values")
+    var items: Array = []
+    for entry in payload:
+        var decoded := _decode_value(entry)
+        if not decoded["ok"]:
+            return decoded
+        items.append(decoded["value"])
+    return _decoded(items)
+
+## Rebuilds a Dictionary from the `{"key": ..., "value": ...}` entries `_encode_value` writes.
+func _decode_dictionary(payload: Variant) -> Dictionary:
+    if typeof(payload) != TYPE_ARRAY:
+        return _decode_failed("A dictionary value requires an array of key and value entries")
+    var result := {}
+    for entry in payload:
+        if typeof(entry) != TYPE_DICTIONARY or not (entry as Dictionary).has("key") \
+                or not (entry as Dictionary).has("value"):
+            return _decode_failed("A dictionary entry requires a key and a value")
+        var key := _decode_value((entry as Dictionary)["key"])
+        if not key["ok"]:
+            return key
+        var item := _decode_value((entry as Dictionary)["value"])
+        if not item["ok"]:
+            return item
+        result[key["value"]] = item["value"]
+    return _decoded(result)
 
 func _decoded(value: Variant) -> Dictionary:
     return {"ok": true, "value": value, "message": ""}
