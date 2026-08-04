@@ -130,12 +130,22 @@ UI.
     - Update the compatibility matrix in `protocol/README.md` in the same change.
     - Done when all three implementations accept/reject the same fixtures.
 
-2. Package and stage the addon
+2. Package and stage the addon — DONE
     - Create the minimal Gofer EditorPlugin, manifest, cleanup ledger, Git exclusion, targeted
       project.godot editor, and crash repair.
     - Land the canonical-path validation and atomic replacement core from step 7 first. Staging
       writes project files, and a second write implementation is exactly what step 14 forbids.
     - Preserve unrelated project settings and concurrent edits.
+    - `src-tauri/addon/` holds the shipped `plugin.cfg`, `plugin.gd`, and `runtime.gd`, embedded
+      with `include_str!` so staging needs no installation directory.
+    - `src-tauri/src/addon.rs` is the stager: `AddonStager::stage` installs through `Workspace`,
+      `unstage` removes only ledger-recorded entries, and `repair` clears leftovers from a crashed
+      session. Staging itself re-stages over a leftover entry, so it is also the repair path.
+    - The ledger is written before the worktree changes; the exclude pattern is refcounted across
+      the task worktrees sharing one Git common directory, and a pattern the user wrote is never
+      removed.
+    - The session supervisor still has to call it: nothing invokes `AddonStager` yet, and the ledger
+      path is chosen by the caller rather than by Gofer's application data layout.
     - Done when repeated install/start/stop cycles leave a clean worktree and unmanaged collisions
       fail safely.
 

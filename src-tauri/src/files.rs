@@ -62,6 +62,18 @@ impl FileError {
         Self::new("workspace_unavailable", message)
     }
 
+    /// Reports a failure raised by a layer built on top of the workspace, such as addon staging,
+    /// so every file-shaped error the renderer sees carries the same code/retryable/details shape.
+    pub fn refuse(code: &'static str, message: impl Into<String>, details: Value) -> Self {
+        Self::new(code, message).with_details(details)
+    }
+
+    /// Marks a failure worth retrying, such as a locked or momentarily unreachable file.
+    pub fn retry_later(mut self) -> Self {
+        self.retryable = true;
+        self
+    }
+
     fn invalid_path(path: &str) -> Self {
         Self::new(
             "invalid_path",
@@ -415,7 +427,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
 /// Writes through a sibling temporary file so a crash or a concurrent reader never observes a
 /// half-written file. Renaming over a symlink replaces the link with a regular file, which is the
 /// safe outcome: the worktree keeps the content it was asked to store.
-fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("The file has no parent directory"))?;

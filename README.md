@@ -88,6 +88,21 @@ manifest. Maintenance removes unreferenced attachments after 24 hours, completed
 days, retains the five newest backups, and re-embeds memories whose vector is missing because the
 embedding worker was unavailable or because an edit invalidated it.
 
+## Godot addon staging
+
+The Gofer editor addon ships inside the Rust binary and is copied into the active task worktree as
+`res://addons/gofer` with a manifest listing the content hash of every file Gofer wrote.
+`project.godot` receives exactly two entries — the `res://addons/gofer/plugin.cfg` editor plugin and
+the `GoferRuntime` autoload — and Git's per-repository `info/exclude` receives one pattern, never
+`.gitignore`. Linked worktrees share that exclude file, so the pattern is written once and removed
+only when the last task session that needed it stops.
+
+A cleanup ledger in Gofer's application-data directory records what was introduced and what existed
+beforehand, and it is written before the worktree is touched, so a crashed session is repairable.
+Cleanup removes only Gofer's own entries: a plugin enabled or an autoload added while the session
+ran survives, and an `addons/gofer` that Gofer did not install is refused rather than overwritten.
+The editor session that stages and stops the addon arrives with the session supervisor.
+
 ## Quality gates
 
 ```bash

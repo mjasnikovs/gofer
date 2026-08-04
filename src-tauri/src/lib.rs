@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+pub mod addon;
 mod files;
 mod git;
 mod godot;

@@ -111,6 +111,24 @@ pub fn discard_created_worktree(workspace_path: &Path, worktree_path: &Path, bra
     let _ = git_output(&repository_root, &["branch", "-D", branch_name]);
 }
 
+/// The Git directory shared by the main checkout and every linked worktree. Per-repository excludes
+/// live there, so an entry written for one task worktree is visible to all of them.
+pub fn common_directory(path: &Path) -> Option<PathBuf> {
+    let output = git_output(path, &["rev-parse", "--git-common-dir"]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = output_text(&output).ok()?;
+    if text.is_empty() {
+        return None;
+    }
+    let directory = PathBuf::from(text);
+    if directory.is_absolute() {
+        return Some(directory);
+    }
+    Some(path.join(directory))
+}
+
 fn repository_root(path: &Path) -> Result<Option<PathBuf>, String> {
     let output = match git_output(path, &["rev-parse", "--show-toplevel"]) {
         Ok(output) => output,
