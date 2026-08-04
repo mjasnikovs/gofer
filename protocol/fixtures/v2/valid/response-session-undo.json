@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "response",
+    "id": "request-session-undo",
+    "result": {"undoDepth": 1, "redoDepth": 1},
+    "revision": 3
+}

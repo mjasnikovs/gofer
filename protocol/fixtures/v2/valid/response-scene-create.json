@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "response",
+    "id": "request-scene-create",
+    "result": {"scene": "res://levels/second.tscn", "revision": 0, "dirty": false},
+    "revision": 0
+}

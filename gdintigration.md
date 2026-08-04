@@ -184,7 +184,7 @@ UI.
     - Add Tauri mock-runtime IPC coverage and unit tests for the active-task-worktree binding.
     - Done when the real fixture editor can be completely inspected without modifying its project.
 
-6. Ship undoable scene authoring
+6. Ship undoable scene authoring — DONE
     - Implement scene and node mutations through EditorUndoRedoManager.
     - Increment scene revisions, expose dirty state, and keep save as a separate explicit operation.
     - Block scene mutations while importing, playing, disconnected, or revision-stale.
