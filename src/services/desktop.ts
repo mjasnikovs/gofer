@@ -1,8 +1,17 @@
-import {invoke as tauriInvoke, isTauri as tauriIsTauri} from '@tauri-apps/api/core'
+import {Channel, invoke as tauriInvoke, isTauri as tauriIsTauri} from '@tauri-apps/api/core'
 import {listen as tauriListen} from '@tauri-apps/api/event'
 import type {EventCallback, UnlistenFn} from '@tauri-apps/api/event'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import type {TaskSummary} from '../models/app'
+import type {
+    DeleteWorkspacePathRequest,
+    EditWorkspaceFileRequest,
+    MoveWorkspacePathRequest,
+    WorkspaceFileChange,
+    WorkspaceFileContents,
+    WorkspaceFileStamp,
+    WriteWorkspaceFileRequest
+} from '../models/files'
 import type {
     AiStreamPayload,
     ChatAttachment,
@@ -65,6 +74,8 @@ type DesktopCommandMap = Readonly<{
     create_chat_task: CommandSpec<undefined, StoredChat>
     create_project_backup: CommandSpec<undefined, BackupResult>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
+    delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
+    edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>
     initialize_rag: CommandSpec<undefined, void>
@@ -74,7 +85,9 @@ type DesktopCommandMap = Readonly<{
     load_chat: CommandSpec<undefined, StoredChat>
     load_settings: CommandSpec<undefined, SettingsResponse>
     merge_task_worktree: CommandSpec<{taskId: string}, unknown>
+    move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
+    read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
@@ -83,6 +96,10 @@ type DesktopCommandMap = Readonly<{
     send_godot_command: CommandSpec<{request: ProtocolRequest}, unknown>
     send_ai_message: CommandSpec<{request: SendAiMessageRequest}, void>
     test_ai_connection: CommandSpec<{request: SettingsRequest}, ConnectionTestResult>
+    unwatch_workspace_files: CommandSpec<undefined, void>
+    // The backend streams settled batches of external changes down this channel.
+    watch_workspace_files: CommandSpec<{changes: Channel<readonly WorkspaceFileChange[]>}, void>
+    write_workspace_file: CommandSpec<{request: WriteWorkspaceFileRequest}, WorkspaceFileStamp>
 }>
 
 type DesktopEventMap = Readonly<{

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+mod files;
 mod git;
 mod godot;
 // The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
@@ -44,6 +45,9 @@ const MAX_CHAT_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_AGENT_MESSAGES_BYTES: usize = 8 * 1024 * 1024;
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 const MEMORY_BACKFILL_LIMIT: usize = 200;
+/// How often the worktree is polled for changes Gofer did not make itself.
+const WORKSPACE_WATCH_INTERVAL: Duration = Duration::from_millis(750);
+static WORKSPACE_WATCH: Mutex<Option<files::WatchHandle>> = Mutex::new(None);
 static AI_REQUEST_RUNNING: AtomicBool = AtomicBool::new(false);
 static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_AI_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -690,6 +694,103 @@ fn send_godot_command(request: serde_json::Value) -> Result<serde_json::Value, S
 #[tauri::command(async)]
 fn cancel_godot() -> Result<(), String> {
     godot::cancel()
+}
+
+/// Typed workspace file access. Every caller — the renderer, the AI agent, and the Godot addon —
+/// reaches the worktree through these commands so that path validation, atomic replacement, and
+/// optimistic concurrency exist exactly once.
+#[tauri::command(async)]
+fn read_workspace_file(
+    app: AppHandle,
+    path: String,
+) -> Result<files::FileContents, files::FileError> {
+    active_workspace(&app)?.read(&path)
+}
+
+#[tauri::command(async)]
+fn write_workspace_file(
+    app: AppHandle,
+    request: files::WriteFileRequest,
+) -> Result<files::FileStamp, files::FileError> {
+    active_workspace(&app)?.write(
+        &request.path,
+        &request.text,
+        request.expected_hash.as_deref(),
+    )
+}
+
+#[tauri::command(async)]
+fn edit_workspace_file(
+    app: AppHandle,
+    request: files::EditFileRequest,
+) -> Result<files::FileStamp, files::FileError> {
+    active_workspace(&app)?.edit(
+        &request.path,
+        &request.expected_hash,
+        &request.find,
+        &request.replace,
+    )
+}
+
+#[tauri::command(async)]
+fn move_workspace_path(
+    app: AppHandle,
+    request: files::MovePathRequest,
+) -> Result<(), files::FileError> {
+    active_workspace(&app)?.move_path(&request.from, &request.to)
+}
+
+#[tauri::command(async)]
+fn delete_workspace_path(
+    app: AppHandle,
+    request: files::DeletePathRequest,
+) -> Result<(), files::FileError> {
+    active_workspace(&app)?.delete(&request.path, request.expected_hash.as_deref())
+}
+
+/// Streams settled batches of changes made by Godot, the user, or a confined shell command.
+#[tauri::command(async)]
+fn watch_workspace_files(
+    app: AppHandle,
+    changes: tauri::ipc::Channel<Vec<files::FileChange>>,
+) -> Result<(), files::FileError> {
+    let workspace = active_workspace(&app)?;
+    let mut slot = workspace_watch()?;
+    if let Some(previous) = slot.take() {
+        previous.stop();
+    }
+    *slot = Some(files::spawn_watcher(
+        workspace,
+        WORKSPACE_WATCH_INTERVAL,
+        move |batch| {
+            let _ = changes.send(batch);
+        },
+    ));
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn unwatch_workspace_files() -> Result<(), files::FileError> {
+    if let Some(watch) = workspace_watch()?.take() {
+        watch.stop();
+    }
+    Ok(())
+}
+
+fn workspace_watch()
+-> Result<std::sync::MutexGuard<'static, Option<files::WatchHandle>>, files::FileError> {
+    WORKSPACE_WATCH
+        .lock()
+        .map_err(|_| files::FileError::unavailable("The workspace watch lock is poisoned"))
+}
+
+/// Binds file access to the active task's worktree, which `agent_workspace` resolves.
+fn active_workspace(app: &AppHandle) -> Result<files::Workspace, files::FileError> {
+    let storage = project_storage(app).map_err(files::FileError::unavailable)?;
+    let root = storage
+        .agent_workspace()
+        .map_err(files::FileError::unavailable)?;
+    files::Workspace::open(&root)
 }
 
 #[tauri::command(async)]
@@ -1508,6 +1609,8 @@ pub fn run() {
                 create_chat_task,
                 create_project_backup,
                 delete_rag_cache,
+                delete_workspace_path,
+                edit_workspace_file,
                 get_rag_cache_status,
                 import_legacy_chat,
                 initialize_rag,
@@ -1517,13 +1620,18 @@ pub fn run() {
                 load_chat,
                 load_settings,
                 merge_task_worktree,
+                move_workspace_path,
                 read_chat_attachment,
+                read_workspace_file,
                 run_storage_maintenance,
                 save_chat,
                 save_settings,
                 save_chat_attachment,
                 send_ai_message,
                 test_ai_connection,
+                unwatch_workspace_files,
+                watch_workspace_files,
+                write_workspace_file,
                 $($test_only),*
             ]
         };

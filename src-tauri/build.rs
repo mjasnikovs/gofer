@@ -7,6 +7,8 @@ fn main() {
             "create_chat_task",
             "create_project_backup",
             "delete_rag_cache",
+            "delete_workspace_path",
+            "edit_workspace_file",
             "get_rag_cache_status",
             "import_legacy_chat",
             "initialize_rag",
@@ -16,7 +18,9 @@ fn main() {
             "load_chat",
             "load_settings",
             "merge_task_worktree",
+            "move_workspace_path",
             "read_chat_attachment",
+            "read_workspace_file",
             "run_storage_maintenance",
             "save_chat",
             "save_chat_attachment",
@@ -24,6 +28,9 @@ fn main() {
             "send_godot_command",
             "send_ai_message",
             "test_ai_connection",
+            "unwatch_workspace_files",
+            "watch_workspace_files",
+            "write_workspace_file",
         ]),
     ))
     .expect("failed to build the Tauri application")

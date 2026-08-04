@@ -171,13 +171,23 @@ UI.
     - Block scene mutations while importing, playing, disconnected, or revision-stale.
     - Done when create/edit/reparent/delete, undo/redo, save, reload, and conflict cases pass.
 
-7. Centralize filesystem operations
+7. Centralize filesystem operations — DONE
     - Move typed AI/UI file writes through Rust with canonical-path validation, atomic replacement,
       content hashes, and optimistic concurrency. Step 2 depends on this core, so build it before
       addon staging even though it is numbered later.
     - Add a debounced workspace watcher so Monaco and LSP notice changes made by Gofer, Godot,
       users, or autonomous confined shell commands.
     - Dirty Monaco buffers receive a conflict state instead of being overwritten.
+    - `src-tauri/src/files.rs` is that single implementation: `Workspace` resolves every path
+      against the canonical worktree root, `write`/`edit`/`delete` carry the SHA-256 the caller
+      expected to replace, and `spawn_watcher` polls and debounces external changes into settled
+      batches. The watcher reports paths only — a worktree holds game assets, so callers re-read the
+      file to get its hash.
+    - The renderer reaches it through `read_workspace_file`, `write_workspace_file`,
+      `edit_workspace_file`, `move_workspace_path`, `delete_workspace_path`,
+      `watch_workspace_files`, and `unwatch_workspace_files`. The AI agent still writes through
+      `scripts/workspace-confinement.mjs` until step 14 turns the worker protocol duplex; the
+      conflict state reaches a buffer only once step 10 lands Monaco.
     - Done when symlink escapes, traversal, stale saves, and external edits are covered.
 
 8. Connect native Godot LSP
