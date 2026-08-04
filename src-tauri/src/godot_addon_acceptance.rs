@@ -166,7 +166,7 @@ fn launch(worktree: &Path, port: u16, token: &str) -> Editor {
 struct Session {
     rpc: RpcSession,
     editor: Editor,
-    _directory: TempDir,
+    _directory: Option<TempDir>,
     stager: AddonStager,
     worktree: PathBuf,
     revision: u64,
@@ -185,7 +185,14 @@ impl Session {
     fn start() -> Self {
         let directory = TempDir::new().expect("temporary directory");
         let worktree = fixture_worktree(&directory);
-        let stager = AddonStager::new(directory.path().join("ledger.json"));
+        let ledger = directory.path().join("ledger.json");
+        Self::start_on_worktree(worktree, ledger, Some(directory))
+    }
+
+    /// Launches a session against a worktree the caller prepared and keeps alive, so a test can
+    /// stop one session and start another against the same files to prove persistence.
+    fn start_on_worktree(worktree: PathBuf, ledger: PathBuf, directory: Option<TempDir>) -> Self {
+        let stager = AddonStager::new(ledger);
         let workspace = Workspace::open(&worktree).expect("open worktree");
         stager.stage(&workspace).expect("stage the Gofer addon");
         assert!(
@@ -481,5 +488,246 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         child_names(&session.call("scene.get_tree", json!({}))),
         vec!["Sprite".to_owned()],
         "a refused command must leave the scene alone"
+    );
+}
+
+/// Finds the one entry in a `{"settings": [...]}`-style result array whose `name` matches.
+fn find_named<'a>(result: &'a Value, field: &str, name: &str) -> &'a Value {
+    result[field]
+        .as_array()
+        .unwrap_or_else(|| panic!("{field} must be an array in {result}"))
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .unwrap_or_else(|| panic!("no {field} entry named {name} in {result}"))
+}
+
+#[test]
+fn configuration_editors_persist_across_restarts_and_clean_up() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+
+    {
+        let session = Session::start_on_worktree(worktree.clone(), ledger.clone(), None);
+
+        // Typed reads: values cross the wire tagged, and restart-required settings are marked.
+        let name = session.call(
+            "project.get_setting",
+            json!({"name": "application/config/name"}),
+        );
+        assert_eq!(
+            name["value"],
+            json!({"type": "string", "value": "Gofer Protocol Fixture"})
+        );
+        assert_eq!(name["restartRequired"], false);
+
+        let restart = session.call(
+            "project.search_settings",
+            json!({"query": "text_to_speech"}),
+        );
+        assert_eq!(
+            find_named(&restart, "settings", "audio/general/text_to_speech")["restartRequired"],
+            true,
+            "a restart-required setting must say so"
+        );
+        let search = session.call("project.search_settings", json!({"query": "rendering"}));
+        assert!(
+            search["totalMatches"].as_u64().expect("totalMatches")
+                >= search["settings"].as_array().expect("settings").len() as u64
+        );
+
+        // Set persists to project.godot immediately; reading it back proves the round trip.
+        let set = session.call(
+            "project.set_setting",
+            json!({
+                "name": "gofer_acceptance/persisted",
+                "value": {"type": "string", "value": "survives-restart"}
+            }),
+        );
+        assert_eq!(set["saved"], true);
+        assert_eq!(set["restartRequired"], false);
+
+        // A custom setting has no default, so resetting it removes it entirely.
+        session.call(
+            "project.set_setting",
+            json!({"name": "gofer_acceptance/temporary", "value": {"type": "int", "value": 7}}),
+        );
+        let reset = session.call(
+            "project.reset_setting",
+            json!({"name": "gofer_acceptance/temporary"}),
+        );
+        assert_eq!(reset["exists"], false);
+        assert!(
+            session
+                .error(
+                    "project.get_setting",
+                    json!({"name": "gofer_acceptance/temporary"}),
+                    None
+                )
+                .starts_with("setting_not_found")
+        );
+
+        // Settings with typed commands refuse the generic write path.
+        assert!(
+            session
+                .error(
+                    "project.set_setting",
+                    json!({"name": "input/bypass", "value": {"type": "null"}}),
+                    None
+                )
+                .starts_with("reserved_setting")
+        );
+
+        // Autoloads: Gofer's own is visible but protected; ordinary ones come and go.
+        let autoloads = session.call("project.list_autoloads", json!({}));
+        let managed = find_named(&autoloads, "autoloads", "GoferRuntime");
+        assert_eq!(managed["goferManaged"], true);
+        assert_eq!(managed["enabled"], true);
+        session.call(
+            "project.set_autoload",
+            json!({"name": "AcceptanceHelper", "path": "res://acceptance_helper.gd"}),
+        );
+        assert_eq!(
+            find_named(
+                &session.call("project.list_autoloads", json!({})),
+                "autoloads",
+                "AcceptanceHelper"
+            )["enabled"],
+            true
+        );
+        session.call(
+            "project.remove_autoload",
+            json!({"name": "AcceptanceHelper"}),
+        );
+        assert!(
+            session.call("project.list_autoloads", json!({}))["autoloads"]
+                .as_array()
+                .expect("autoloads")
+                .iter()
+                .all(|entry| entry["name"] != "AcceptanceHelper")
+        );
+        assert!(
+            session
+                .error(
+                    "project.remove_autoload",
+                    json!({"name": "GoferRuntime"}),
+                    None
+                )
+                .starts_with("gofer_managed")
+        );
+
+        // Input Map: actions round-trip as typed events, built-ins are marked and protected.
+        let action = session.call(
+            "project.set_input_action",
+            json!({"name": "acceptance_jump", "events": [{"kind": "key", "key": "Space"}]}),
+        );
+        assert_eq!(action["deadzone"], json!(0.5));
+        assert_eq!(action["events"], json!([{"kind": "key", "key": "Space"}]));
+        let actions = session.call("project.list_input_actions", json!({}));
+        assert_eq!(
+            find_named(&actions, "actions", "acceptance_jump")["builtIn"],
+            false
+        );
+        assert_eq!(
+            find_named(&actions, "actions", "ui_accept")["builtIn"],
+            true
+        );
+        assert!(
+            session
+                .error(
+                    "project.set_input_action",
+                    json!({"name": "acceptance_bad", "events": [{"kind": "key", "key": "NotAKey"}]}),
+                    None
+                )
+                .starts_with("unsupported_value")
+        );
+        session.call(
+            "project.remove_input_action",
+            json!({"name": "acceptance_jump"}),
+        );
+        assert!(
+            session
+                .error(
+                    "project.remove_input_action",
+                    json!({"name": "ui_accept"}),
+                    None
+                )
+                .starts_with("builtin_input_action")
+        );
+
+        // Plugins: the Gofer plugin reports itself and refuses to be disabled mid-session.
+        let plugins = session.call("project.list_plugins", json!({}));
+        let gofer = find_named(&plugins, "plugins", "gofer");
+        assert_eq!(gofer["enabled"], true);
+        assert_eq!(gofer["goferManaged"], true);
+        assert!(
+            session
+                .error(
+                    "project.set_plugin_enabled",
+                    json!({"plugin": "gofer", "enabled": false}),
+                    None
+                )
+                .starts_with("gofer_managed")
+        );
+        assert!(
+            session
+                .error(
+                    "project.set_plugin_enabled",
+                    json!({"plugin": "missing", "enabled": true}),
+                    None
+                )
+                .starts_with("plugin_not_found")
+        );
+
+        // Editor settings are machine-wide, so the write path is exercised by setting a value back
+        // to itself: the developer's real settings file must not change under a test.
+        let found = session.call("editor.search_settings", json!({"query": "font_size"}));
+        let candidate = found["settings"]
+            .as_array()
+            .expect("settings")
+            .iter()
+            .find(|entry| entry["value"]["type"] == "int")
+            .cloned()
+            .expect("an integer editor setting about font sizes");
+        let fetched = session.call("editor.get_setting", json!({"name": candidate["name"]}));
+        assert_eq!(fetched["value"], candidate["value"]);
+        let written = session.call(
+            "editor.set_setting",
+            json!({"name": candidate["name"], "value": candidate["value"]}),
+        );
+        assert_eq!(written["machineWide"], true);
+    }
+    // Dropping the session killed the editor and unstaged the addon.
+
+    // The write survived in project.godot while every Gofer-owned entry was removed.
+    let saved =
+        std::fs::read_to_string(worktree.join("project.godot")).expect("saved project.godot");
+    // Godot writes a dotted setting as a section plus a key, not as one literal line.
+    assert!(
+        saved.contains("[gofer_acceptance]") && saved.contains("persisted=\"survives-restart\""),
+        "the setting must persist in project.godot:\n{saved}"
+    );
+    for gone in [
+        "GoferRuntime",
+        "addons/gofer",
+        "AcceptanceHelper",
+        "acceptance_jump",
+    ] {
+        assert!(
+            !saved.contains(gone),
+            "project.godot must not keep {gone} after cleanup:\n{saved}"
+        );
+    }
+
+    // A fresh editor on the same worktree reads the value back.
+    let restarted = Session::start_on_worktree(worktree, ledger, None);
+    let persisted = restarted.call(
+        "project.get_setting",
+        json!({"name": "gofer_acceptance/persisted"}),
+    );
+    assert_eq!(
+        persisted["value"],
+        json!({"type": "string", "value": "survives-restart"}),
+        "the setting must survive an editor restart"
     );
 }

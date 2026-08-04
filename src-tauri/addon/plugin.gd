@@ -29,6 +29,14 @@ var _redo_depth: int = 0
 # Play mode is not a protocol readiness, so it is tracked apart from `_readiness`.
 var _playing: bool = false
 
+## The plugin's own directory name, protected so a configuration command cannot sever the session
+## that carries it.
+const GOFER_PLUGIN_NAME := "gofer"
+## The autoload Gofer stages; cleanup owns it, so configuration commands refuse to touch it.
+const GOFER_AUTOLOAD_NAME := "GoferRuntime"
+## Search results are capped so a broad query cannot exceed the 1 MiB envelope limit.
+const MAX_SEARCH_RESULTS := 50
+
 const MUTATING_COMMANDS: Array[String] = [
     "session.undo",
     "session.redo",
@@ -138,7 +146,7 @@ func _send_handshake() -> void:
             "addonVersion": _addon_version(),
             "engineVersion": _engine_version(),
             "projectPath": _project_path(),
-            "capabilities": ["session", "scene", "node", "project"]
+            "capabilities": ["session", "scene", "node", "project", "editor"]
         }
     }
     _put_json(handshake)
@@ -197,6 +205,36 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _redo()
         "project.get_settings":
             return _project_settings()
+        "project.search_settings":
+            return _project_search_settings(params)
+        "project.get_setting":
+            return _project_get_setting(params)
+        "project.set_setting":
+            return _project_set_setting(params)
+        "project.reset_setting":
+            return _project_reset_setting(params)
+        "project.list_autoloads":
+            return _project_list_autoloads()
+        "project.set_autoload":
+            return _project_set_autoload(params)
+        "project.remove_autoload":
+            return _project_remove_autoload(params)
+        "project.list_input_actions":
+            return _project_list_input_actions()
+        "project.set_input_action":
+            return _project_set_input_action(params)
+        "project.remove_input_action":
+            return _project_remove_input_action(params)
+        "project.list_plugins":
+            return _project_list_plugins()
+        "project.set_plugin_enabled":
+            return _project_set_plugin_enabled(params)
+        "editor.search_settings":
+            return _editor_search_settings(params)
+        "editor.get_setting":
+            return _editor_get_setting(params)
+        "editor.set_setting":
+            return _editor_set_setting(params)
         "scene.list":
             return _scene_list()
         "scene.open":
@@ -396,6 +434,337 @@ func _project_settings() -> Dictionary:
         "mainScene": ProjectSettings.get_setting_with_override("application/run/main_scene"),
         "renderingMethod": ProjectSettings.get_setting_with_override("rendering/renderer/rendering_method")
     }
+
+## Builds a structured configuration error. Configuration commands never touch the scene, so their
+## readiness is always ready and their failures are never retryable.
+func _config_error(code: String, message: String, details: Dictionary = {}) -> Dictionary:
+    return {
+        "_gofer_error": {
+            "code": code,
+            "message": message,
+            "retryable": false,
+            "readiness": "ready",
+            "details": details
+        }
+    }
+
+## Persists project.godot after a configuration change. Returns an error dictionary on failure and
+## an empty one on success, matching the `_gofer_error` convention.
+func _save_project_or_error() -> Dictionary:
+    var error := ProjectSettings.save()
+    if error != OK:
+        return _config_error("project_save_failed", "Could not save project.godot (error %d)" % error)
+    return {}
+
+## A setting under autoload/, input/, or editor_plugins/ has its own typed command that enforces
+## the structure of its value; routing the write through it keeps malformed entries out of
+## project.godot. Returns the command to use, or an empty string for ordinary settings.
+func _reserved_setting_command(name: String) -> String:
+    if name.begins_with("autoload/"):
+        return "project.set_autoload"
+    if name.begins_with("input/"):
+        return "project.set_input_action"
+    if name.begins_with("editor_plugins/"):
+        return "project.set_plugin_enabled"
+    return ""
+
+## Whether the editor asks for a restart after this setting changes. Custom settings carry no
+## property info and are therefore never restart-required.
+func _restart_required(name: String) -> bool:
+    for info in ProjectSettings.get_property_list():
+        if str(info.get("name", "")) == name:
+            return (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
+    return false
+
+func _project_search_settings(params: Dictionary) -> Dictionary:
+    var query := str(params.get("query", "")).to_lower()
+    var matches: Array = []
+    var total := 0
+    for info in ProjectSettings.get_property_list():
+        var name := str(info.get("name", ""))
+        if name.is_empty():
+            continue
+        if not query.is_empty() and not name.to_lower().contains(query):
+            continue
+        total += 1
+        if matches.size() < MAX_SEARCH_RESULTS:
+            matches.append(
+                {
+                    "name": name,
+                    "value": _encode_value(ProjectSettings.get_setting(name)),
+                    "restartRequired": (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
+                }
+            )
+    return {"settings": matches, "totalMatches": total, "truncated": total > matches.size()}
+
+func _project_get_setting(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty():
+        return _config_error("invalid_params", "project.get_setting requires name")
+    if not ProjectSettings.has_setting(name):
+        return _config_error(
+            "setting_not_found", "Project setting '%s' does not exist" % name, {"name": name}
+        )
+    return {
+        "name": name,
+        "value": _encode_value(ProjectSettings.get_setting(name)),
+        "restartRequired": _restart_required(name)
+    }
+
+func _project_set_setting(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty() or not params.has("value"):
+        return _config_error("invalid_params", "project.set_setting requires name and value")
+    var typed := _reserved_setting_command(name)
+    if not typed.is_empty():
+        return _config_error(
+            "reserved_setting",
+            "'%s' has a typed command; use %s instead" % [name, typed],
+            {"name": name, "command": typed}
+        )
+    var decoded := _decode_value(params["value"])
+    if not decoded["ok"]:
+        return _config_error("unsupported_value", decoded["message"], {"name": name})
+    ProjectSettings.set_setting(name, decoded["value"])
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    return {"name": name, "saved": true, "restartRequired": _restart_required(name)}
+
+## Restores a setting's default when it has one and removes it otherwise. An autoload, input
+## action, or plugin entry must go through its own removal command.
+func _project_reset_setting(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty():
+        return _config_error("invalid_params", "project.reset_setting requires name")
+    if not ProjectSettings.has_setting(name):
+        return _config_error(
+            "setting_not_found", "Project setting '%s' does not exist" % name, {"name": name}
+        )
+    var typed := _reserved_setting_command(name)
+    if not typed.is_empty():
+        return _config_error(
+            "reserved_setting",
+            "'%s' has a typed command; use %s instead" % [name, typed],
+            {"name": name, "command": typed}
+        )
+    if ProjectSettings.property_can_revert(name):
+        ProjectSettings.set_setting(name, ProjectSettings.property_get_revert(name))
+    else:
+        ProjectSettings.set_setting(name, null)
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    return {"name": name, "exists": ProjectSettings.has_setting(name)}
+
+func _project_list_autoloads() -> Dictionary:
+    var autoloads: Array = []
+    for info in ProjectSettings.get_property_list():
+        var setting := str(info.get("name", ""))
+        if not setting.begins_with("autoload/"):
+            continue
+        var raw := str(ProjectSettings.get_setting(setting))
+        var enabled := raw.begins_with("*")
+        autoloads.append(
+            {
+                "name": setting.trim_prefix("autoload/"),
+                "path": raw.substr(1) if enabled else raw,
+                "enabled": enabled,
+                "goferManaged": setting == "autoload/" + GOFER_AUTOLOAD_NAME
+            }
+        )
+    return {"autoloads": autoloads}
+
+func _project_set_autoload(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    var path := str(params.get("path", ""))
+    var enabled := bool(params.get("enabled", true))
+    if name.is_empty() or path.is_empty():
+        return _config_error("invalid_params", "project.set_autoload requires name and path")
+    if not name.is_valid_identifier():
+        return _config_error(
+            "invalid_params", "Autoload name '%s' is not a valid identifier" % name, {"name": name}
+        )
+    if name == GOFER_AUTOLOAD_NAME:
+        return _config_error(
+            "gofer_managed",
+            "The GoferRuntime autoload is managed by Gofer and cleaned up when the session stops"
+        )
+    if not path.begins_with("res://"):
+        return _config_error(
+            "invalid_params", "Autoload path '%s' must start with res://" % path, {"path": path}
+        )
+    ProjectSettings.set_setting("autoload/" + name, ("*" if enabled else "") + path)
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    return {"name": name, "path": path, "enabled": enabled}
+
+func _project_remove_autoload(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty():
+        return _config_error("invalid_params", "project.remove_autoload requires name")
+    if name == GOFER_AUTOLOAD_NAME:
+        return _config_error(
+            "gofer_managed",
+            "The GoferRuntime autoload is managed by Gofer and cleaned up when the session stops"
+        )
+    var setting := "autoload/" + name
+    if not ProjectSettings.has_setting(setting):
+        return _config_error("autoload_not_found", "No autoload named '%s'" % name, {"name": name})
+    ProjectSettings.set_setting(setting, null)
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    return {"name": name, "removed": true}
+
+func _project_list_input_actions() -> Dictionary:
+    var actions: Array = []
+    for info in ProjectSettings.get_property_list():
+        var setting := str(info.get("name", ""))
+        if not setting.begins_with("input/"):
+            continue
+        # Entries like input/ui_close_dialog.macos are per-platform overrides of another action.
+        if setting.contains("."):
+            continue
+        var data: Variant = ProjectSettings.get_setting(setting)
+        if typeof(data) != TYPE_DICTIONARY:
+            continue
+        var name := setting.trim_prefix("input/")
+        actions.append(
+            {
+                "name": name,
+                "deadzone": data.get("deadzone", 0.5),
+                "events": _encode_input_events(data.get("events", [])),
+                # Godot's built-in actions all carry the ui_ prefix; custom ones never should.
+                "builtIn": name.begins_with("ui_")
+            }
+        )
+    return {"actions": actions}
+
+func _project_set_input_action(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty() or name.contains("/"):
+        return _config_error("invalid_params", "project.set_input_action requires a plain action name")
+    var setting := "input/" + name
+    var existing: Variant = ProjectSettings.get_setting(setting)
+    var current: Dictionary = existing if typeof(existing) == TYPE_DICTIONARY else {}
+    var deadzone := float(params.get("deadzone", current.get("deadzone", 0.5)))
+    var events: Array[InputEvent] = []
+    if params.has("events"):
+        var decoded := _decode_input_events(params["events"])
+        if not decoded["ok"]:
+            return _config_error("unsupported_value", decoded["message"], {"name": name})
+        events = decoded["events"]
+    else:
+        events.assign(current.get("events", []))
+    ProjectSettings.set_setting(setting, {"deadzone": deadzone, "events": events})
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    return {"name": name, "deadzone": deadzone, "events": _encode_input_events(events)}
+
+## Removes an input action from project.godot. A built-in ui_ action cannot be deleted, only
+## reverted to its default binding.
+func _project_remove_input_action(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty():
+        return _config_error("invalid_params", "project.remove_input_action requires name")
+    var setting := "input/" + name
+    if not ProjectSettings.has_setting(setting):
+        return _config_error(
+            "input_action_not_found", "No input action named '%s'" % name, {"name": name}
+        )
+    if name.begins_with("ui_"):
+        return _config_error(
+            "builtin_input_action",
+            "'%s' is a built-in action; only its binding can be changed" % name,
+            {"name": name}
+        )
+    ProjectSettings.set_setting(setting, null)
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    return {"name": name, "removed": true}
+
+func _project_list_plugins() -> Dictionary:
+    var plugins: Array = []
+    var addons := DirAccess.open("res://addons")
+    if addons != null:
+        for directory in addons.get_directories():
+            if not FileAccess.file_exists("res://addons/%s/plugin.cfg" % directory):
+                continue
+            plugins.append(
+                {
+                    "name": directory,
+                    "enabled": EditorInterface.is_plugin_enabled(directory),
+                    "goferManaged": directory == GOFER_PLUGIN_NAME
+                }
+            )
+    return {"plugins": plugins}
+
+func _project_set_plugin_enabled(params: Dictionary) -> Dictionary:
+    var plugin := str(params.get("plugin", ""))
+    if plugin.is_empty() or not params.has("enabled"):
+        return _config_error("invalid_params", "project.set_plugin_enabled requires plugin and enabled")
+    var enabled := bool(params["enabled"])
+    if plugin == GOFER_PLUGIN_NAME and not enabled:
+        return _config_error(
+            "gofer_managed", "Disabling the Gofer plugin would sever the session carrying this call"
+        )
+    if not FileAccess.file_exists("res://addons/%s/plugin.cfg" % plugin):
+        return _config_error("plugin_not_found", "No plugin named '%s'" % plugin, {"plugin": plugin})
+    if EditorInterface.is_plugin_enabled(plugin) == enabled:
+        return {"plugin": plugin, "enabled": enabled, "changed": false}
+    EditorInterface.set_plugin_enabled(plugin, enabled)
+    var failure := _save_project_or_error()
+    if not failure.is_empty():
+        return failure
+    return {"plugin": plugin, "enabled": enabled, "changed": true}
+
+## EditorSettings are machine-wide and shared by every project this editor opens. They persist
+## when the editor exits normally, so these commands never write them to disk themselves.
+func _editor_search_settings(params: Dictionary) -> Dictionary:
+    var query := str(params.get("query", "")).to_lower()
+    var settings := EditorInterface.get_editor_settings()
+    var matches: Array = []
+    var total := 0
+    for info in settings.get_property_list():
+        var name := str(info.get("name", ""))
+        if name.is_empty() or not settings.has_setting(name):
+            continue
+        if not query.is_empty() and not name.to_lower().contains(query):
+            continue
+        total += 1
+        if matches.size() < MAX_SEARCH_RESULTS:
+            matches.append({"name": name, "value": _encode_value(settings.get_setting(name))})
+    return {"settings": matches, "totalMatches": total, "truncated": total > matches.size()}
+
+func _editor_get_setting(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty():
+        return _config_error("invalid_params", "editor.get_setting requires name")
+    var settings := EditorInterface.get_editor_settings()
+    if not settings.has_setting(name):
+        return _config_error(
+            "setting_not_found", "Editor setting '%s' does not exist" % name, {"name": name}
+        )
+    return {"name": name, "value": _encode_value(settings.get_setting(name))}
+
+func _editor_set_setting(params: Dictionary) -> Dictionary:
+    var name := str(params.get("name", ""))
+    if name.is_empty() or not params.has("value"):
+        return _config_error("invalid_params", "editor.set_setting requires name and value")
+    var settings := EditorInterface.get_editor_settings()
+    if not settings.has_setting(name):
+        return _config_error(
+            "setting_not_found", "Editor setting '%s' does not exist" % name, {"name": name}
+        )
+    var decoded := _decode_value(params["value"])
+    if not decoded["ok"]:
+        return _config_error("unsupported_value", decoded["message"], {"name": name})
+    settings.set_setting(name, decoded["value"])
+    return {"name": name, "machineWide": true}
 
 func _scene_list() -> Dictionary:
     return {"scenes": Array(EditorInterface.get_open_scenes())}
@@ -920,6 +1289,162 @@ func _node_summary(node: Node) -> Dictionary:
         "path": _node_path(node),
         "children": children
     }
+
+## Encodes a Variant as a tagged protocol value, the mirror of `_decode_value`. Values that cannot
+## round-trip become `opaque` so the caller sees what they are without pretending they are editable.
+func _encode_value(value: Variant) -> Dictionary:
+    match typeof(value):
+        TYPE_NIL:
+            return {"type": "null", "value": null}
+        TYPE_BOOL:
+            return {"type": "bool", "value": value}
+        TYPE_INT:
+            return {"type": "int", "value": value}
+        TYPE_FLOAT:
+            return {"type": "float", "value": value}
+        TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH:
+            return {"type": "string", "value": str(value)}
+        TYPE_VECTOR2:
+            return {"type": "vector2", "value": [value.x, value.y]}
+        TYPE_VECTOR2I:
+            return {"type": "vector2i", "value": [value.x, value.y]}
+        TYPE_VECTOR3:
+            return {"type": "vector3", "value": [value.x, value.y, value.z]}
+        TYPE_VECTOR3I:
+            return {"type": "vector3i", "value": [value.x, value.y, value.z]}
+        TYPE_VECTOR4, TYPE_QUATERNION:
+            var kind := "vector4" if typeof(value) == TYPE_VECTOR4 else "quaternion"
+            return {"type": kind, "value": [value.x, value.y, value.z, value.w]}
+        TYPE_VECTOR4I:
+            return {"type": "vector4i", "value": [value.x, value.y, value.z, value.w]}
+        TYPE_COLOR:
+            return {"type": "color", "value": [value.r, value.g, value.b, value.a]}
+        TYPE_RECT2:
+            return {"type": "rect2", "value": [value.position.x, value.position.y, value.size.x, value.size.y]}
+        TYPE_RECT2I:
+            return {"type": "rect2i", "value": [value.position.x, value.position.y, value.size.x, value.size.y]}
+        TYPE_PLANE:
+            return {"type": "plane", "value": [value.normal.x, value.normal.y, value.normal.z, value.d]}
+        TYPE_TRANSFORM2D:
+            return {
+                "type": "transform2d",
+                "value": [value.x.x, value.x.y, value.y.x, value.y.y, value.origin.x, value.origin.y]
+            }
+        TYPE_BASIS:
+            return {
+                "type": "basis",
+                "value": [
+                    value.x.x, value.x.y, value.x.z,
+                    value.y.x, value.y.y, value.y.z,
+                    value.z.x, value.z.y, value.z.z
+                ]
+            }
+        TYPE_TRANSFORM3D:
+            return {
+                "type": "transform3d",
+                "value": [
+                    value.basis.x.x, value.basis.x.y, value.basis.x.z,
+                    value.basis.y.x, value.basis.y.y, value.basis.y.z,
+                    value.basis.z.x, value.basis.z.y, value.basis.z.z,
+                    value.origin.x, value.origin.y, value.origin.z
+                ]
+            }
+        TYPE_ARRAY, TYPE_PACKED_BYTE_ARRAY, TYPE_PACKED_INT32_ARRAY, TYPE_PACKED_INT64_ARRAY, \
+        TYPE_PACKED_FLOAT32_ARRAY, TYPE_PACKED_FLOAT64_ARRAY, TYPE_PACKED_STRING_ARRAY, \
+        TYPE_PACKED_VECTOR2_ARRAY, TYPE_PACKED_VECTOR3_ARRAY, TYPE_PACKED_COLOR_ARRAY, \
+        TYPE_PACKED_VECTOR4_ARRAY:
+            var encoded: Array = []
+            for item in value:
+                encoded.append(_encode_value(item))
+            return {"type": "array", "value": encoded}
+        TYPE_DICTIONARY:
+            var entries: Array = []
+            for key in value:
+                entries.append({"key": _encode_value(key), "value": _encode_value(value[key])})
+            return {"type": "dictionary", "value": entries}
+        TYPE_OBJECT:
+            if value is Resource and not (value as Resource).resource_path.is_empty():
+                return {
+                    "type": "resource",
+                    "value": {
+                        "path": (value as Resource).resource_path, "resourceType": value.get_class()
+                    }
+                }
+            if value is Node:
+                return {
+                    "type": "node",
+                    "value": {
+                        "path": str((value as Node).get_path()),
+                        "nodeType": value.get_class(),
+                        "instanceId": value.get_instance_id()
+                    }
+                }
+            return {
+                "type": "object",
+                "value": {"className": value.get_class(), "instanceId": value.get_instance_id()}
+            }
+    return {
+        "type": "opaque",
+        "value": {"typeName": type_string(typeof(value)), "text": var_to_str(value)}
+    }
+
+## Summarizes input events for the wire. Key events name their physical key so they can be rebuilt
+## with `OS.find_keycode_from_string` on the way back in.
+func _encode_input_events(events: Array) -> Array:
+    var encoded: Array = []
+    for event in events:
+        if event is InputEventKey:
+            var key := OS.get_keycode_string(event.physical_keycode)
+            if key.is_empty():
+                key = OS.get_keycode_string(event.keycode)
+            encoded.append({"kind": "key", "key": key})
+        elif event is InputEventMouseButton:
+            encoded.append({"kind": "mouse_button", "button": event.button_index})
+        elif event is InputEventJoypadButton:
+            encoded.append({"kind": "joypad_button", "button": event.button_index})
+        elif event is InputEventJoypadMotion:
+            encoded.append({"kind": "joypad_motion", "axis": event.axis, "axisValue": event.axis_value})
+        elif event is InputEvent:
+            encoded.append({"kind": "other", "description": event.as_text()})
+    return encoded
+
+## Builds typed input events from their wire summaries. Returns the same ok/value/message shape as
+## `_decode_value`, with `events` in place of `value`, so malformed events are rejected rather than
+## coerced into an empty binding.
+func _decode_input_events(raw: Variant) -> Dictionary:
+    if typeof(raw) != TYPE_ARRAY:
+        return _decode_failed("events must be an array of input event objects")
+    var events: Array[InputEvent] = []
+    for entry in raw:
+        if typeof(entry) != TYPE_DICTIONARY:
+            return _decode_failed("an input event must be an object carrying a kind")
+        var kind := str(entry.get("kind", ""))
+        match kind:
+            "key":
+                var key_name := str(entry.get("key", ""))
+                var code := OS.find_keycode_from_string(key_name)
+                if code == KEY_NONE:
+                    return _decode_failed("Unknown key '%s'" % key_name)
+                var key_event := InputEventKey.new()
+                key_event.physical_keycode = code
+                events.append(key_event)
+            "mouse_button":
+                var mouse_button := int(entry.get("button", 0))
+                if mouse_button < 1:
+                    return _decode_failed("A mouse_button event requires a button index of 1 or higher")
+                var mouse_event := InputEventMouseButton.new()
+                mouse_event.button_index = mouse_button
+                events.append(mouse_event)
+            "joypad_button":
+                var pad_button := int(entry.get("button", -1))
+                if pad_button < 0:
+                    return _decode_failed("A joypad_button event requires a button index")
+                var joypad_event := InputEventJoypadButton.new()
+                joypad_event.button_index = pad_button
+                events.append(joypad_event)
+            _:
+                return _decode_failed("Input event kind '%s' is not supported" % kind)
+    return {"ok": true, "events": events, "message": ""}
 
 ## Decodes one tagged protocol value into a Variant.
 ##

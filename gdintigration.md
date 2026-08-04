@@ -295,12 +295,32 @@ UI.
     - Done when an input changes fixture state and the following screenshot and remote-tree result
       prove it.
 
-13. Implement configuration editors
+13. Implement configuration editors — DONE
     - Provide typed search/get/set/reset for project.godot, autoloads, Input Map, plugins, and
       EditorSettings.
     - Persist project settings normally in the task worktree. Mark restart-required settings.
     - Machine-wide EditorSettings writes always require approval when initiated by AI.
-    - Done when values survive restart and temporary Gofer entries still clean up independently.
+    - The addon answers `project.search_settings`/`get_setting`/`set_setting`/`reset_setting`,
+      `project.list_autoloads`/`set_autoload`/`remove_autoload`,
+      `project.list_input_actions`/`set_input_action`/`remove_input_action`,
+      `project.list_plugins`/`set_plugin_enabled`, and
+      `editor.search_settings`/`get_setting`/`set_setting`. Return values cross the wire tagged
+      through a new `_encode_value` that mirrors `_decode_value`, with an `opaque` fallback for
+      values that cannot round-trip.
+    - Project writes persist immediately through `ProjectSettings.save()` and report
+      `restartRequired` from `PROPERTY_USAGE_RESTART_IF_CHANGED`. Setting families with their own
+      typed command (`autoload/`, `input/`, `editor_plugins/`) refuse the generic write with
+      `reserved_setting`, so a malformed autoload or Input Map entry can never reach project.godot.
+    - Gofer's own entries are protected from the inside: the GoferRuntime autoload and the gofer
+      plugin answer `gofer_managed` to modification, and built-in `ui_*` input actions answer
+      `builtin_input_action` to removal. EditorSettings writes stay machine-wide and persist on a
+      normal editor exit; the AI approval gate for them arrives with step 15.
+    - Unstage now also removes the `.uid` sidecars Godot writes next to staged scripts, so a
+      stop/start cycle on one worktree no longer strands `addons/gofer` as a foreign leftover.
+    - Done when values survive restart and temporary Gofer entries still clean up independently —
+      proven by `configuration_editors_persist_across_restarts_and_clean_up`, which writes through a
+      real editor, verifies project.godot is clean after unstage, and reads the value back from a
+      fresh editor on the same worktree.
 
 14. Add the AI tool router
     - Change the per-request Node worker protocol to duplex NDJSON: Rust sends startup context; Node

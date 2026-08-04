@@ -357,6 +357,10 @@ fn revert(entry: &LedgerEntry, remaining: &[LedgerEntry]) -> Result<(), FileErro
         restore_project_file(&workspace, entry)?;
         for path in &entry.files {
             ignore_missing(workspace.delete(path, None))?;
+            // Godot 4.4+ writes a `<file>.uid` sidecar next to every script it imports. The
+            // sidecar belongs to the Gofer-owned file and must leave with it, or the addon
+            // directory survives unstage as what looks like a foreign leftover.
+            ignore_missing(workspace.delete(&format!("{path}.uid"), None))?;
         }
         for directory in &entry.directories {
             // A directory the user filled with their own files stays.
@@ -842,6 +846,31 @@ mod tests {
                 .stager
                 .unstage(fixture.workspace.root())
                 .expect("second unstage")
+        );
+    }
+
+    #[test]
+    fn unstage_removes_the_uid_sidecars_godot_writes_next_to_staged_scripts() {
+        let fixture = fixture();
+        fixture.stager.stage(&fixture.workspace).expect("stage");
+
+        // The editor imports the staged scripts and records a UID cache file next to each one.
+        for sidecar in ["addons/gofer/plugin.gd.uid", "addons/gofer/runtime.gd.uid"] {
+            fixture
+                .workspace
+                .write(sidecar, "uid://goferacceptance\n", None)
+                .expect("uid sidecar");
+        }
+
+        assert!(
+            fixture
+                .stager
+                .unstage(fixture.workspace.root())
+                .expect("unstage")
+        );
+        assert!(
+            !fixture.workspace.root().join("addons").exists(),
+            "no sidecar may strand the addon directory"
         );
     }
 
