@@ -6,12 +6,17 @@
 //! `launch`/`attach`, `setBreakpoints`, `configurationDone` — followed by the debug control flow
 //! (pause/continue, stepping, stack/scopes/variables, evaluate, restart/terminate, disconnect).
 //!
-//! Four Godot behaviors shape the design:
+//! Five Godot behaviors shape the design:
 //!
 //! - Some responses are deferred, not just slow. `launch` is only answered once
 //!   `configurationDone` actually spawns the game (the response keeps the launch `request_seq`),
-//!   and `stackTrace`/`variables`/`evaluate` are held until the debuggee answers over the remote
-//!   debugger channel. Timeouts are generous and every call site can widen them.
+//!   and `stackTrace`/`evaluate` are held until the debuggee answers over the remote debugger
+//!   channel. Timeouts are generous and every call site can widen them.
+//! - `variables` is the exception: rather than hold the request, Godot rejects a reference it has
+//!   not received from the debuggee yet with a plain error. `scopes` answers straight from the
+//!   stack dump and only *starts* the remote scope fetch, so the very next `variables` loses that
+//!   race. [`DapClient::variables`] therefore retries a rejection for [`SETTLE_TIMEOUT`] before
+//!   surfacing it.
 //! - Godot has no `stepOut` handler, so [`DapClient::step_out`] emulates it with bounded
 //!   step-over requests until the stack depth decreases. It stops immediately on another
 //!   breakpoint, an exception, a pause, termination, or the safety limit.
@@ -52,6 +57,9 @@ const MAX_HEADER_LINES: usize = 32;
 pub const MAX_STEP_OUT_STEPS: u32 = 256;
 /// Godot only supports debugging one thread and hardcodes it to id 1.
 pub const MAIN_THREAD_ID: i64 = 1;
+/// How long a request that depends on the debuggee's scope dump keeps retrying a rejection.
+pub const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+const SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A structured, actionable debug-adapter failure.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -471,12 +479,23 @@ impl DapClient {
     }
 
     /// Lists the variables under a scope or structured variable reference.
+    ///
+    /// A reference the debuggee has not dumped yet is rejected rather than held, and `scopes`
+    /// hands out references before that dump lands, so the rejection is retried for
+    /// [`SETTLE_TIMEOUT`]. A reference that is genuinely wrong keeps failing and surfaces the
+    /// adapter's own error once the window closes.
     pub fn variables(&self, variables_reference: i64) -> Result<Vec<Variable>, DapError> {
-        let body = self.request(
-            "variables",
-            json!({"variablesReference": variables_reference}),
-        )?;
-        parse_body(&body, "variables")
+        let arguments = json!({"variablesReference": variables_reference});
+        let deadline = Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            match self.request("variables", arguments.clone()) {
+                Ok(body) => return parse_body(&body, "variables"),
+                Err(error) if error.code == "dap_server_error" && Instant::now() < deadline => {
+                    thread::sleep(SETTLE_INTERVAL);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Evaluates an expression in the debuggee, in the context of `frame_id` when given (the most
@@ -927,10 +946,10 @@ fn read_message(reader: &mut BufReader<TcpStream>) -> Result<Option<Value>, DapE
 fn write_message(writer: &mut TcpStream, message: &Value) -> Result<(), DapError> {
     let body = serde_json::to_vec(message)
         .map_err(|error| DapError::new("serialize_failed", format!("{error}")))?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    frame.extend_from_slice(&body);
     writer
-        .write_all(header.as_bytes())
-        .and_then(|()| writer.write_all(&body))
+        .write_all(&frame)
         .and_then(|()| writer.flush())
         .map_err(|error| {
             DapError::new(
@@ -976,6 +995,7 @@ mod tests {
         let (sender, receiver) = channel();
         let join = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept client");
+            let _ = stream.set_nodelay(true);
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut writer = stream;
             let mut server_seq = 100u64;
@@ -984,7 +1004,14 @@ mod tests {
                 if message.get("type").and_then(Value::as_str) != Some("request") {
                     continue;
                 }
-                match handler(&message, &mut writer) {
+                // Teardown is answered for every handler: a silent `disconnect` would make each
+                // test pay the full shutdown timeout for nothing.
+                let action = if message["command"] == "disconnect" {
+                    FakeAction::Result(json!({}))
+                } else {
+                    handler(&message, &mut writer)
+                };
+                match action {
                     FakeAction::Result(body) => {
                         server_seq += 1;
                         let reply = json!({
@@ -1357,6 +1384,87 @@ mod tests {
         assert_eq!(request["arguments"]["frameId"], 10);
         client.shutdown();
         server.join.join().expect("server thread");
+    }
+
+    #[test]
+    fn variables_retries_until_the_debuggee_dump_lands() {
+        // Godot hands out scope references from the stack dump but rejects them until the
+        // debuggee has answered the remote scope fetch that `scopes` only started.
+        let attempts = Arc::new(Mutex::new(0u32));
+        let server_attempts = Arc::clone(&attempts);
+        let server = start_fake_server(move |message, writer| {
+            match message["command"].as_str().unwrap_or_default() {
+                "initialize" => handshake_handler(message, writer),
+                "variables" => {
+                    let mut attempts = server_attempts.lock().expect("attempts");
+                    *attempts += 1;
+                    if *attempts < 3 {
+                        return FakeAction::Error("unknown");
+                    }
+                    FakeAction::Result(json!({"variables": [
+                        {"name": "amount", "value": "1", "type": "int", "variablesReference": 0}
+                    ]}))
+                }
+                _ => FakeAction::Ignore,
+            }
+        });
+        let client = connected_client(&server);
+
+        let variables = client.variables(100).expect("variables settle");
+        assert_eq!(variables[0].name, "amount");
+        assert_eq!(*attempts.lock().expect("attempts"), 3);
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    #[test]
+    fn variables_surfaces_a_reference_that_never_settles() {
+        let server = start_fake_server(|message, writer| {
+            match message["command"].as_str().unwrap_or_default() {
+                "initialize" => handshake_handler(message, writer),
+                "variables" => FakeAction::Error("unknown"),
+                _ => FakeAction::Ignore,
+            }
+        });
+        let client = connected_client(&server);
+
+        let started = Instant::now();
+        let error = client
+            .variables(999)
+            .expect_err("a bad reference must surface");
+        assert_eq!(error.code, "dap_server_error");
+        assert!(
+            started.elapsed() >= SETTLE_TIMEOUT,
+            "the retry window must be exhausted first"
+        );
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    #[test]
+    fn writes_each_message_as_one_frame() {
+        // Header and body in separate writes make Nagle hold the body until the peer's delayed
+        // ACK, which costs tens of milliseconds on every single request.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let receiver = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("read timeout");
+            let mut buffer = [0u8; 512];
+            let read = stream.read(&mut buffer).expect("read");
+            String::from_utf8_lossy(&buffer[..read]).into_owned()
+        });
+        let mut stream = TcpStream::connect(address).expect("connect");
+        write_message(&mut stream, &json!({"seq": 1, "type": "request"})).expect("write");
+
+        let frame = receiver.join().expect("receiver");
+        let (header, body) = frame
+            .split_once("\r\n\r\n")
+            .expect("one frame, headers and body");
+        assert_eq!(header, format!("Content-Length: {}", body.len()));
+        assert_eq!(body, r#"{"seq":1,"type":"request"}"#);
     }
 
     #[test]

@@ -288,20 +288,26 @@ UI.
       the `initialized` event rides out with the response. Godot defers some answers rather than
       answering slowly: `launch` is only answered once `configurationDone` spawns the game (the
       response keeps the launch `request_seq`, so `launch` blocks on its own thread while the caller
-      sends `configuration_done`), and `stackTrace`/`variables`/`evaluate` are held until the
-      debuggee answers over the remote debugger channel — requests default to a 30 s timeout, 60 s
-      for launch and restart. Source objects carry `name` and `checksums` because Godot reads both
-      unconditionally and logs engine errors when they are missing; `breakpointLocations` answers
-      arrive under a `breakpoints` key instead of the specification’s `breakpointLocations`, so both
-      are accepted. Stopped reasons are `breakpoint`, `step`, `exception`, and `paused`, always on
-      thread 1. `step_out` is emulated with bounded `next` requests (256-step safety limit) until
-      the stack depth decreases, stopping immediately on another breakpoint, an exception, a pause,
-      or termination. Mid-session `setBreakpoints` takes effect on the debuggee but Godot does not
-      broadcast `breakpoint` events for it, so the response is the source of truth for verified
-      lines. `disconnect` sends `terminateDebuggee` to record intent, but Godot stops a launched
-      game on disconnect regardless; only attached sessions genuinely detach. `restart` nests the
-      last launch arguments the way Godot’s `arguments.arguments` handler expects, and `--headless`
-      rides in `playArgs` because the editor does not forward it to the game it spawns.
+      sends `configuration_done`), and `stackTrace`/`evaluate` are held until the debuggee answers
+      over the remote debugger channel — requests default to a 30 s timeout, 60 s for launch and
+      restart. `variables` is the exception: Godot rejects a reference the debuggee has not dumped
+      yet instead of holding the request, and `scopes` answers straight from the stack dump while
+      only starting the remote scope fetch, so the next `variables` loses that race and is retried
+      for 5 s before the rejection surfaces. Each message is written as a single frame, header and
+      body together: two writes make Nagle hold the body until the peer's delayed ACK and cost tens
+      of milliseconds per request. Source objects carry `name` and `checksums` because Godot reads
+      both unconditionally and logs engine errors when they are missing; `breakpointLocations`
+      answers arrive under a `breakpoints` key instead of the specification’s `breakpointLocations`,
+      so both are accepted. Stopped reasons are `breakpoint`, `step`, `exception`, and `paused`,
+      always on thread 1. `step_out` is emulated with bounded `next` requests (256-step safety
+      limit) until the stack depth decreases, stopping immediately on another breakpoint, an
+      exception, a pause, or termination. Mid-session `setBreakpoints` takes effect on the debuggee
+      but Godot does not broadcast `breakpoint` events for it, so the response is the source of
+      truth for verified lines. `disconnect` sends `terminateDebuggee` to record intent, but Godot
+      stops a launched game on disconnect regardless; only attached sessions genuinely detach.
+      `restart` nests the last launch arguments the way Godot’s `arguments.arguments` handler
+      expects, and `--headless` rides in `playArgs` because the editor does not forward it to the
+      game it spawns.
     - The Tauri commands that expose this arrive with Monaco and the runtime loop in later steps;
       until then the module is consumed by its unit suite and the acceptance journey only.
     - Done when the fixture stops on a breakpoint, exposes locals/members/globals, evaluates an
