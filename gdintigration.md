@@ -169,10 +169,19 @@ UI.
     - Done when invalid tokens, wrong projects, oversized payloads, stale replies, and disconnects
       are covered.
 
-5. Ship read-only editor inspection
-    - Add editor readiness/selection, edited scene hierarchy, node metadata/properties, project
-      settings, EditorSettings, resources/import state, and logs.
-    - Paginate large trees/property sets.
+5. Ship read-only editor inspection — DONE
+    - Expose the public desktop API: `start_godot_session`, `stop_godot_session`,
+      `get_godot_session`, `call_godot`, `subscribe_godot_events`, `unsubscribe_godot_events`, and
+      `respond_tool_approval`.
+    - Bind every session to the active task's isolated worktree; fail with a structured error
+      instead of falling back to the root workspace.
+    - Integrate `AddonStager` into session start/stop so the Gofer addon is staged before Godot
+      launches and removed when the session stops.
+    - Stream addon events through a Tauri channel and transition session state from addon
+      `session.*` events.
+    - Implement read-only inspection commands in the addon for `session.get_state`,
+      `project.get_settings`, and `scene.get_tree`.
+    - Add Tauri mock-runtime IPC coverage and unit tests for the active-task-worktree binding.
     - Done when the real fixture editor can be completely inspected without modifying its project.
 
 6. Ship undoable scene authoring

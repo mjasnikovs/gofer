@@ -77,6 +77,54 @@ type ProtocolRequest = Readonly<{
     params: Readonly<Record<string, unknown>>
 }>
 
+type GodotSessionState =
+    | 'offline'
+    | 'staging'
+    | 'starting'
+    | 'importing'
+    | 'ready'
+    | 'playing'
+    | 'debugPaused'
+    | 'stopping'
+    | 'error'
+
+type GodotSessionResponse = Readonly<{
+    state: GodotSessionState
+    rpcAddress: string
+    lspPort: number
+    dapPort: number
+    godotVersion: string | undefined
+    worktree: string
+}>
+
+type CallGodotRequest = Readonly<{
+    id: string
+    command: string
+    params: Readonly<Record<string, unknown>>
+    expectedRevision?: number | undefined
+    timeoutMs?: number | undefined
+}>
+
+type CallGodotResponse = Readonly<{
+    id: string
+    result: Readonly<Record<string, unknown>>
+    revision?: number | undefined
+}>
+
+type SessionEvent =
+    | Readonly<{type: 'stateChanged'; state: GodotSessionState}>
+    | Readonly<{
+          type: 'rpcEvent'
+          sequence: number
+          event: string
+          data: Readonly<Record<string, unknown>>
+      }>
+
+type ToolApprovalRequest = Readonly<{
+    approvalId: string
+    approved: boolean
+}>
+
 type StoredChatPayload = Omit<StoredChat, 'taskId'>
     & Readonly<{
         taskId?: string | undefined
@@ -84,6 +132,7 @@ type StoredChatPayload = Omit<StoredChat, 'taskId'>
 
 type DesktopCommandMap = Readonly<{
     activate_chat_task: CommandSpec<{taskId: string}, StoredChat>
+    call_godot: CommandSpec<{request: CallGodotRequest}, CallGodotResponse>
     cancel_ai_request: CommandSpec<{requestId: number}, boolean>
     cancel_godot: CommandSpec<undefined, void>
     create_chat_task: CommandSpec<undefined, StoredChat>
@@ -91,6 +140,7 @@ type DesktopCommandMap = Readonly<{
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
+    get_godot_session: CommandSpec<undefined, GodotSessionResponse | undefined>
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>
     initialize_rag: CommandSpec<undefined, void>
@@ -104,6 +154,7 @@ type DesktopCommandMap = Readonly<{
     query_godot_docs: CommandSpec<{request: GodotDocsQuery}, GodotDocsResponse>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
+    respond_tool_approval: CommandSpec<{request: ToolApprovalRequest}, void>
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
@@ -111,7 +162,11 @@ type DesktopCommandMap = Readonly<{
     // Only registered in WebDriver builds; the backend owns the bridge address.
     send_godot_command: CommandSpec<{request: ProtocolRequest}, unknown>
     send_ai_message: CommandSpec<{request: SendAiMessageRequest}, void>
+    start_godot_session: CommandSpec<undefined, GodotSessionResponse>
+    stop_godot_session: CommandSpec<undefined, void>
+    subscribe_godot_events: CommandSpec<{events: Channel<SessionEvent>}, void>
     test_ai_connection: CommandSpec<{request: SettingsRequest}, ConnectionTestResult>
+    unsubscribe_godot_events: CommandSpec<undefined, void>
     unwatch_workspace_files: CommandSpec<undefined, void>
     // The backend streams settled batches of external changes down this channel.
     watch_workspace_files: CommandSpec<{changes: Channel<readonly WorkspaceFileChange[]>}, void>
@@ -121,6 +176,7 @@ type DesktopCommandMap = Readonly<{
 type DesktopEventMap = Readonly<{
     'ai-stream-event': AiStreamPayload
     'godot-process-event': GodotProcessEvent
+    'godot-session-event': SessionEvent
     'rag-download-progress': DownloadProgress
 }>
 

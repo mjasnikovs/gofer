@@ -39,7 +39,7 @@ pub struct RpcError {
 }
 
 impl RpcError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code: code.to_owned(),
             message: message.into(),
@@ -108,7 +108,7 @@ struct SharedState {
     token: String,
     project_path: String,
     pending: HashMap<String, PendingRequest>,
-    events: std::sync::mpsc::Sender<EventEnvelope>,
+    events: Vec<std::sync::mpsc::Sender<EventEnvelope>>,
     connection: ConnectionState,
     closed: bool,
     next_sequence: u64,
@@ -125,18 +125,13 @@ pub struct RpcSession {
 
 impl RpcSession {
     /// Start accepting the addon connection on `listener`. The addon must present `token` and
-    /// report `project_path` during the handshake. Events are delivered through `events`.
-    pub fn start(
-        listener: TcpListener,
-        token: String,
-        project_path: String,
-        events: std::sync::mpsc::Sender<EventEnvelope>,
-    ) -> Self {
+    /// report `project_path` during the handshake.
+    pub fn start(listener: TcpListener, token: String, project_path: String) -> Self {
         let state = Arc::new(Mutex::new(SharedState {
             token,
             project_path,
             pending: HashMap::new(),
-            events,
+            events: Vec::new(),
             connection: ConnectionState::Idle,
             closed: false,
             next_sequence: 0,
@@ -201,6 +196,15 @@ impl RpcSession {
             .ok()
             .map(|state| state.readiness)
             .unwrap_or(Readiness::Unavailable)
+    }
+
+    /// Subscribe to addon events. Events are broadcast to every active subscriber.
+    pub fn subscribe_events(&self) -> std::sync::mpsc::Receiver<EventEnvelope> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        if let Ok(mut state) = self.state.lock() {
+            state.events.push(sender);
+        }
+        receiver
     }
 
     /// Stop the session, close the connection, and fail any pending requests.
@@ -554,11 +558,14 @@ fn dispatch_envelope(state: &Arc<Mutex<SharedState>>, envelope: Value) -> Result
                 .to_owned();
             let data = envelope.get("data").cloned().unwrap_or_default();
             state.next_sequence = sequence + 1;
-            let _ = state.events.send(EventEnvelope {
+            let envelope = EventEnvelope {
                 sequence,
                 event,
                 data,
-            });
+            };
+            state
+                .events
+                .retain(|sender| sender.send(envelope.clone()).is_ok());
         }
         _ => {
             return Err(RpcError::new(
@@ -792,8 +799,7 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let project_path = "/tmp/gofer/project".to_owned();
         let token = "a1".repeat(32);
-        let (events_tx, _events_rx) = std::sync::mpsc::channel();
-        let session = RpcSession::start(listener, token.clone(), project_path.clone(), events_tx);
+        let session = RpcSession::start(listener, token.clone(), project_path.clone());
 
         let mut addon = addon_client(address);
         writeln!(
@@ -848,13 +854,7 @@ mod tests {
     fn rejects_invalid_handshake_token() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("listener address");
-        let (events_tx, _events_rx) = std::sync::mpsc::channel();
-        let session = RpcSession::start(
-            listener,
-            "a1".repeat(32),
-            "/tmp/gofer/project".to_owned(),
-            events_tx,
-        );
+        let session = RpcSession::start(listener, "a1".repeat(32), "/tmp/gofer/project".to_owned());
 
         let mut addon = addon_client(address);
         writeln!(
@@ -879,13 +879,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("listener address");
         let token = "a1".repeat(32);
-        let (events_tx, _events_rx) = std::sync::mpsc::channel();
-        let session = RpcSession::start(
-            listener,
-            token.clone(),
-            "/tmp/gofer/project".to_owned(),
-            events_tx,
-        );
+        let session = RpcSession::start(listener, token.clone(), "/tmp/gofer/project".to_owned());
 
         let mut addon = addon_client(address);
         writeln!(
@@ -909,13 +903,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("listener address");
         let token = "a1".repeat(32);
-        let (events_tx, _events_rx) = std::sync::mpsc::channel();
-        let session = RpcSession::start(
-            listener,
-            token.clone(),
-            "/tmp/gofer/project".to_owned(),
-            events_tx,
-        );
+        let session = RpcSession::start(listener, token.clone(), "/tmp/gofer/project".to_owned());
 
         let mut addon = addon_client(address);
         let giant = "x".repeat(MAX_ENVELOPE_BYTES + 100);
@@ -940,8 +928,7 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let token = "a1".repeat(32);
         let project_path = "/tmp/gofer/project".to_owned();
-        let (events_tx, _events_rx) = std::sync::mpsc::channel();
-        let session = RpcSession::start(listener, token.clone(), project_path.clone(), events_tx);
+        let session = RpcSession::start(listener, token.clone(), project_path.clone());
 
         let mut addon = addon_client(address);
         writeln!(
@@ -977,8 +964,7 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let token = "a1".repeat(32);
         let project_path = "/tmp/gofer/project".to_owned();
-        let (events_tx, _events_rx) = std::sync::mpsc::channel();
-        let session = RpcSession::start(listener, token.clone(), project_path.clone(), events_tx);
+        let session = RpcSession::start(listener, token.clone(), project_path.clone());
 
         let mut addon = addon_client(address);
         writeln!(
@@ -1016,6 +1002,49 @@ mod tests {
         };
         let result = session.call(request);
         assert!(result.is_err(), "{result:?}");
+        session.stop();
+    }
+
+    #[test]
+    fn broadcasts_events_to_subscribers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let token = "a1".repeat(32);
+        let project_path = "/tmp/gofer/project".to_owned();
+        let session = RpcSession::start(listener, token.clone(), project_path.clone());
+        let events = session.subscribe_events();
+
+        let mut addon = addon_client(address);
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&handshake(&token, &project_path)).unwrap()
+        )
+        .unwrap();
+
+        let mut reader = BufReader::new(addon.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&json!({
+                "protocolVersion": 2,
+                "kind": "event",
+                "sequence": 1,
+                "event": "session.ready",
+                "data": {"ready": true}
+            }))
+            .unwrap()
+        )
+        .unwrap();
+
+        let event = events
+            .recv_timeout(Duration::from_millis(200))
+            .expect("event");
+        assert_eq!(event.sequence, 1);
+        assert_eq!(event.event, "session.ready");
         session.stop();
     }
 }

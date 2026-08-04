@@ -31,7 +31,7 @@ static ACTIVE_SESSION: Mutex<Option<GodotSession>> = Mutex::new(None);
 static SESSION_STARTING: AtomicBool = AtomicBool::new(false);
 
 /// The lifecycle states of a Godot editor session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionState {
     #[default]
@@ -57,7 +57,7 @@ pub struct SessionError {
 }
 
 impl SessionError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -96,7 +96,7 @@ pub struct SessionInfo {
     pub worktree: String,
 }
 
-struct GodotSession {
+pub struct GodotSession {
     state: SessionState,
     rpc_address: String,
     lsp_port: u16,
@@ -105,9 +105,7 @@ struct GodotSession {
     worktree: PathBuf,
     token: String,
     child: Arc<Mutex<Box<dyn ChildProcess>>>,
-    rpc: godot_rpc::RpcSession,
-    #[allow(dead_code)]
-    events: std::sync::mpsc::Receiver<godot_rpc::EventEnvelope>,
+    pub rpc: godot_rpc::RpcSession,
 }
 
 struct StartGuard;
@@ -237,9 +235,8 @@ fn start_with(
         .ok_or_else(|| SessionError::new("godot_stderr_missing", "Could not read Godot errors"))?;
 
     let child = Arc::new(Mutex::new(child));
-    let (events_tx, events_rx) = std::sync::mpsc::channel();
     let project_path = worktree.display().to_string();
-    let rpc = godot_rpc::RpcSession::start(rpc_listener, token.clone(), project_path, events_tx);
+    let rpc = godot_rpc::RpcSession::start(rpc_listener, token.clone(), project_path);
     let session = GodotSession {
         state: SessionState::Starting,
         rpc_address,
@@ -250,7 +247,6 @@ fn start_with(
         token,
         child,
         rpc,
-        events: events_rx,
     };
 
     let info = session_info(&session);
@@ -268,6 +264,31 @@ pub fn current_state() -> SessionState {
         .ok()
         .and_then(|session| session.as_ref().map(|session| session.state))
         .unwrap_or(SessionState::Offline)
+}
+
+/// Returns a clone of the current session summary, if any.
+pub fn current_info() -> Option<SessionInfo> {
+    ACTIVE_SESSION
+        .lock()
+        .ok()
+        .and_then(|session| session.as_ref().map(session_info))
+}
+
+/// Updates the lifecycle state of the active session.
+pub fn set_state(state: SessionState) {
+    if let Ok(mut session) = ACTIVE_SESSION.lock()
+        && let Some(session) = session.as_mut()
+    {
+        session.state = state;
+    }
+}
+
+/// Returns a clone of the active RPC session, if any.
+pub fn rpc_session() -> Option<godot_rpc::RpcSession> {
+    ACTIVE_SESSION
+        .lock()
+        .ok()
+        .and_then(|session| session.as_ref().map(|session| session.rpc.clone()))
 }
 
 /// Stops the active session by killing the Godot child process.

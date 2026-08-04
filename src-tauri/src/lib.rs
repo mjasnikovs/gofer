@@ -16,6 +16,7 @@ mod git;
 mod godot;
 mod godot_rpc;
 mod godot_session;
+mod godot_session_api;
 // The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
 // entirely. `test` keeps its loopback and protocol-version coverage in the default suite.
 #[cfg(any(feature = "webdriver", test))]
@@ -699,6 +700,110 @@ fn cancel_godot() -> Result<(), String> {
     godot::cancel()
 }
 
+/// Starts a Godot editor session bound to the active task's isolated worktree.
+#[tauri::command]
+async fn start_godot_session<R: Runtime>(
+    app: AppHandle<R>,
+    request: godot_session_api::StartGodotSessionRequest,
+) -> Result<godot_session_api::GodotSessionResponse, godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(move || godot_session_api::start_session(&app, request))
+        .await
+        .map_err(|error| {
+            godot_session::SessionError::new(
+                "start_task_failed",
+                format!("Godot session start task failed: {error}"),
+            )
+        })?
+}
+
+/// Stops the active Godot editor session and cleans up the staged addon.
+#[tauri::command]
+async fn stop_godot_session() -> Result<(), godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(godot_session_api::stop_session)
+        .await
+        .map_err(|error| {
+            godot_session::SessionError::new(
+                "stop_task_failed",
+                format!("Godot session stop task failed: {error}"),
+            )
+        })?
+}
+
+/// Returns the active Godot editor session, if any.
+#[tauri::command]
+async fn get_godot_session()
+-> Result<Option<godot_session_api::GodotSessionResponse>, godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(godot_session_api::get_session)
+        .await
+        .map_err(|error| {
+            godot_session::SessionError::new(
+                "get_session_task_failed",
+                format!("Godot session query task failed: {error}"),
+            )
+        })?
+}
+
+/// Sends one tagged RPC call to the connected Godot addon.
+#[tauri::command]
+async fn call_godot(
+    request: godot_session_api::CallGodotRequest,
+) -> Result<godot_session_api::CallGodotResponse, godot_rpc::RpcError> {
+    tauri::async_runtime::spawn_blocking(move || godot_session_api::call_godot(request))
+        .await
+        .map_err(|error| {
+            godot_rpc::RpcError::new(
+                "call_task_failed",
+                format!("Godot RPC call task failed: {error}"),
+            )
+        })?
+}
+
+/// Subscribes to addon events through a Tauri channel.
+#[tauri::command]
+async fn subscribe_godot_events<R: Runtime>(
+    app: AppHandle<R>,
+    events: tauri::ipc::Channel<godot_session_api::SessionEvent>,
+) -> Result<(), godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        godot_session_api::subscribe_godot_events(&app, events)
+    })
+    .await
+    .map_err(|error| {
+        godot_session::SessionError::new(
+            "subscribe_task_failed",
+            format!("Godot event subscription task failed: {error}"),
+        )
+    })?
+}
+
+/// Stops the active event subscription.
+#[tauri::command]
+async fn unsubscribe_godot_events() -> Result<(), godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(godot_session_api::unsubscribe_godot_events)
+        .await
+        .map_err(|error| {
+            godot_session::SessionError::new(
+                "unsubscribe_task_failed",
+                format!("Godot event unsubscription task failed: {error}"),
+            )
+        })?
+}
+
+/// Acknowledges a pending tool approval request.
+#[tauri::command]
+async fn respond_tool_approval(
+    request: godot_session_api::ToolApprovalRequest,
+) -> Result<(), godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(move || godot_session_api::respond_tool_approval(request))
+        .await
+        .map_err(|error| {
+            godot_session::SessionError::new(
+                "approval_task_failed",
+                format!("Tool approval task failed: {error}"),
+            )
+        })?
+}
+
 /// Typed workspace file access. Every caller — the renderer, the AI agent, and the Godot addon —
 /// reaches the worktree through these commands so that path validation, atomic replacement, and
 /// optimistic concurrency exist exactly once.
@@ -893,7 +998,7 @@ fn validate_app_data_path(path: PathBuf) -> Result<PathBuf, String> {
 }
 // coverage-critical-end: path
 
-fn app_data_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn app_data_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = configured_app_data_path()? {
         return Ok(path);
     }
@@ -1614,6 +1719,7 @@ pub fn run() {
         ($($test_only:path),*) => {
             tauri::generate_handler![
                 activate_chat_task,
+                call_godot,
                 cancel_ai_request,
                 cancel_godot,
                 create_chat_task,
@@ -1621,6 +1727,7 @@ pub fn run() {
                 delete_rag_cache,
                 delete_workspace_path,
                 edit_workspace_file,
+                get_godot_session,
                 get_rag_cache_status,
                 import_legacy_chat,
                 initialize_rag,
@@ -1634,12 +1741,17 @@ pub fn run() {
                 query_godot_docs,
                 read_chat_attachment,
                 read_workspace_file,
+                respond_tool_approval,
                 run_storage_maintenance,
                 save_chat,
                 save_settings,
                 save_chat_attachment,
                 send_ai_message,
+                start_godot_session,
+                stop_godot_session,
+                subscribe_godot_events,
                 test_ai_connection,
+                unsubscribe_godot_events,
                 unwatch_workspace_files,
                 watch_workspace_files,
                 write_workspace_file,
@@ -2134,6 +2246,108 @@ mod tests {
         server.join().expect("fake Godot bridge");
         // SAFETY: restore the test process environment after the assertion.
         unsafe { std::env::remove_var("GOFER_TEST_GODOT_ADDRESS") };
+    }
+
+    #[test]
+    fn tauri_mock_runtime_exposes_godot_session_commands() {
+        use tauri::Manager;
+        use tauri::ipc::{CallbackFn, InvokeBody};
+        use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder};
+        use tauri::webview::InvokeRequest;
+
+        let directory = TempDir::new().expect("temporary application data");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).expect("create workspace");
+        let storage = ProjectStorage::open(&directory.path().join("data"), &workspace)
+            .expect("open project storage");
+
+        let app = mock_builder()
+            .invoke_handler(tauri::generate_handler![
+                start_godot_session,
+                stop_godot_session,
+                get_godot_session,
+                call_godot,
+                respond_tool_approval
+            ])
+            .build(tauri::generate_context!())
+            .expect("build mock Tauri app");
+        app.manage(storage);
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("build mock webview");
+
+        let get_response = get_ipc_response(
+            &webview,
+            InvokeRequest {
+                cmd: "get_godot_session".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().expect("mock URL"),
+                body: InvokeBody::Json(serde_json::json!({})),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_owned(),
+            },
+        )
+        .expect("invoke get_godot_session")
+        .deserialize::<Option<godot_session_api::GodotSessionResponse>>()
+        .expect("deserialize session response");
+        assert!(get_response.is_none());
+
+        let start_error = get_ipc_response(
+            &webview,
+            InvokeRequest {
+                cmd: "start_godot_session".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().expect("mock URL"),
+                body: InvokeBody::Json(serde_json::json!({"request": {}})),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_owned(),
+            },
+        )
+        .unwrap_err();
+        assert!(start_error.to_string().contains("no_active_task_workspace"));
+
+        let call_error = get_ipc_response(
+            &webview,
+            InvokeRequest {
+                cmd: "call_godot".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().expect("mock URL"),
+                body: InvokeBody::Json(serde_json::json!({
+                    "request": {
+                        "id": "call-1",
+                        "command": "session.get_state",
+                        "params": {}
+                    }
+                })),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_owned(),
+            },
+        )
+        .unwrap_err();
+        assert!(call_error.to_string().contains("session_not_active"));
+
+        let approval_error = get_ipc_response(
+            &webview,
+            InvokeRequest {
+                cmd: "respond_tool_approval".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: "tauri://localhost".parse().expect("mock URL"),
+                body: InvokeBody::Json(serde_json::json!({
+                    "request": {
+                        "approvalId": "approval-1",
+                        "approved": true
+                    }
+                })),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_owned(),
+            },
+        )
+        .unwrap_err();
+        assert!(approval_error.to_string().contains("not_implemented"));
     }
 
     fn chat_attachment() -> ChatAttachment {

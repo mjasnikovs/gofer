@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start_godot_session"
+description = "Enables the start_godot_session command without any pre-configured scope."
+commands.allow = ["start_godot_session"]
+
+[[permission]]
+identifier = "deny-start_godot_session"
+description = "Denies the start_godot_session command without any pre-configured scope."
+commands.deny = ["start_godot_session"]

@@ -679,6 +679,33 @@ impl ProjectStorage {
             .unwrap_or_else(|| self.workspace_path.clone()))
     }
 
+    /// Resolves the active task's isolated worktree, failing when no task is active or the
+    /// worktree is missing. The Godot session supervisor uses this instead of `agent_workspace` so
+    /// it never installs the addon in the user's main checkout.
+    pub fn active_task_workspace(&self) -> Result<PathBuf, String> {
+        let connection = self.connection()?;
+        let Some(task_id) = active_task_id(&connection)? else {
+            return Err("No task is active".to_owned());
+        };
+        let worktree = connection
+            .query_row(
+                "SELECT worktree_path FROM task_worktrees WHERE task_id = ?1",
+                [&task_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .ok_or_else(|| "The active task does not have an isolated Git worktree".to_owned())?;
+        let path = PathBuf::from(worktree);
+        if !path.is_dir() {
+            return Err(format!(
+                "The active task worktree does not exist: {}",
+                path.display()
+            ));
+        }
+        Ok(path)
+    }
+
     pub fn merge_task(&self, task_id: &str) -> Result<MergeTaskResult, String> {
         let connection = self.connection()?;
         require_task(&connection, task_id)?;
@@ -2162,6 +2189,25 @@ mod tests {
                 .expect("empty vector search")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn active_task_workspace_fails_instead_of_falling_back_to_root_workspace() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+
+        // `ProjectStorage::open` ensures an active task exists, but the plain test workspace is
+        // not a Git repository so the task has no isolated worktree.
+        assert!(
+            storage
+                .active_task_workspace()
+                .unwrap_err()
+                .contains("isolated Git worktree"),
+            "active_task_workspace must fail rather than fall back"
+        );
+
+        // `agent_workspace` still falls back to the root workspace for existing UI paths.
+        assert!(storage.agent_workspace().is_ok());
     }
 
     #[test]
