@@ -852,6 +852,13 @@ async fn initialize_rag(app: AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Gofer RAG initialization task failed: {error}"))?
 }
 
+#[tauri::command]
+async fn query_godot_docs(request: rag::GodotDocsQuery) -> Result<rag::GodotDocsResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || rag::retrieve_query(request))
+        .await
+        .map_err(|error| format!("Gofer RAG query task failed: {error}"))?
+}
+
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = configured_app_data_path()? {
         return Ok(path.join(SETTINGS_FILE_NAME));
@@ -1624,6 +1631,7 @@ pub fn run() {
                 load_settings,
                 merge_task_worktree,
                 move_workspace_path,
+                query_godot_docs,
                 read_chat_attachment,
                 read_workspace_file,
                 run_storage_maintenance,

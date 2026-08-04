@@ -290,7 +290,7 @@ UI.
     - Preserve confined bash unchanged and document it as an explicit autonomous exception that can
       perform destructive work inside the task worktree.
 
-16. Expose gofer-rag
+16. Expose gofer-rag — DONE
     - Call retrieve(), not query(), so documentation retrieval does not make a second LLM request.
     - Return ranked passages, scores, chapter title and order, and bounded text to the agent and
       Docs panel. Strip the `vector` field that every RankedChunk carries; a raw embedding array

@@ -53,6 +53,21 @@ type LaunchGodotRequest = Readonly<{
     scene?: string
 }>
 
+type GodotDocsQuery = Readonly<{
+    question: string
+    maxPassages?: number | undefined
+    maxTextChars?: number | undefined
+}>
+
+type RankedPassage = Readonly<{
+    text: string
+    chapter: string
+    order: number
+    score: number
+}>
+
+type GodotDocsResponse = Readonly<{passages: readonly RankedPassage[]}>
+
 type BackupResult = Readonly<{path: string}>
 
 type ProtocolRequest = Readonly<{
@@ -86,6 +101,7 @@ type DesktopCommandMap = Readonly<{
     load_settings: CommandSpec<undefined, SettingsResponse>
     merge_task_worktree: CommandSpec<{taskId: string}, unknown>
     move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
+    query_godot_docs: CommandSpec<{request: GodotDocsQuery}, GodotDocsResponse>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>

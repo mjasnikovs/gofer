@@ -4,9 +4,9 @@
 //! coalesced warmup that downloads them. Tauri commands stay in `lib.rs` and call in here.
 
 use crate::process::{ProcessSpawner, SystemProcessSpawner};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -380,9 +380,181 @@ fn worker_path() -> Result<PathBuf, String> {
     ))
 }
 
+const RETRIEVE_RESPONSE_PREFIX: &str = "GOFER_RAG_RESULT:";
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GodotDocsQuery {
+    pub question: String,
+    #[serde(default = "default_max_passages")]
+    pub max_passages: usize,
+    #[serde(default = "default_max_text_chars")]
+    pub max_text_chars: usize,
+}
+
+fn default_max_passages() -> usize {
+    10
+}
+
+fn default_max_text_chars() -> usize {
+    2000
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedPassage {
+    pub text: String,
+    pub chapter: String,
+    pub order: u32,
+    pub score: f64,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GodotDocsResponse {
+    pub passages: Vec<RankedPassage>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrieveWorkerRequest {
+    question: String,
+    cache_dir: String,
+    max_passages: usize,
+    max_text_chars: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrieveWorkerResponse {
+    #[serde(default)]
+    passages: Vec<RankedPassage>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Queries the local Godot documentation through the gofer-rag retrieve sidecar.
+///
+/// Returns ranked passages without raw embedding vectors. Models must already be cached; run
+/// `initialize_rag` first.
+pub fn retrieve_query(query: GodotDocsQuery) -> Result<GodotDocsResponse, String> {
+    retrieve_query_with(query, &SystemProcessSpawner)
+}
+
+pub fn retrieve_query_with(
+    query: GodotDocsQuery,
+    spawner: &impl ProcessSpawner,
+) -> Result<GodotDocsResponse, String> {
+    let worker = retrieve_worker_path()?;
+    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let mut child = spawner
+        .spawn(node.as_ref(), &[worker.into_os_string()], true)
+        .map_err(|error| {
+            format!(
+                "Could not start the Gofer RAG retrieve worker with '{node}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY."
+            )
+        })?;
+    let mut stdin = child
+        .take_stdin()
+        .ok_or_else(|| "Could not write to the Gofer RAG retrieve worker".to_owned())?;
+    let request = RetrieveWorkerRequest {
+        question: query.question,
+        cache_dir: cache_path()?.display().to_string(),
+        max_passages: query.max_passages,
+        max_text_chars: query.max_text_chars,
+    };
+    let payload = serde_json::to_vec(&request)
+        .map_err(|error| format!("Could not serialize the Gofer RAG query: {error}"))?;
+    stdin
+        .write_all(&payload)
+        .map_err(|error| format!("Could not send the Gofer RAG query: {error}"))?;
+    drop(stdin);
+
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| "Could not read Gofer RAG retrieve worker output".to_owned())?;
+    let stderr = child
+        .take_stderr()
+        .ok_or_else(|| "Could not read Gofer RAG retrieve worker errors".to_owned())?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut output);
+        output
+    });
+
+    for line in BufReader::new(stdout).lines() {
+        let line = line
+            .map_err(|error| format!("Could not read Gofer RAG retrieve worker output: {error}"))?;
+        let Some(payload) = line.strip_prefix(RETRIEVE_RESPONSE_PREFIX) else {
+            continue;
+        };
+        let response: RetrieveWorkerResponse = serde_json::from_str(payload)
+            .map_err(|error| format!("Gofer RAG retrieve worker returned invalid data: {error}"))?;
+        if let Some(error) = response.error {
+            return Err(error);
+        }
+        let status = child.wait().map_err(|error| {
+            format!("Could not wait for the Gofer RAG retrieve worker: {error}")
+        })?;
+        let _ = stderr_reader
+            .join()
+            .map_err(|_| "Could not collect Gofer RAG retrieve worker errors".to_owned())?;
+        if !status.success {
+            return Err(format!(
+                "Gofer RAG retrieve worker exited with {}",
+                status.description
+            ));
+        }
+        return Ok(GodotDocsResponse {
+            passages: response.passages,
+        });
+    }
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not wait for the Gofer RAG retrieve worker: {error}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "Could not collect Gofer RAG retrieve worker errors".to_owned())?;
+    if !status.success {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return Err(format!(
+                "Gofer RAG retrieve worker exited with {}",
+                status.description
+            ));
+        }
+        return Err(format!("Gofer RAG retrieve worker failed: {detail}"));
+    }
+    Err("Gofer RAG retrieve worker exited without returning a result".to_owned())
+}
+
+fn retrieve_worker_path() -> Result<PathBuf, String> {
+    let configured = std::env::var_os("GOFER_RAG_RETRIEVE_WORKER").map(PathBuf::from);
+    let path = configured.unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("scripts")
+            .join("rag-retrieve.mjs")
+    });
+
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(format!(
+        "Gofer RAG retrieve worker was not found at {}. Run npm install, or set GOFER_RAG_RETRIEVE_WORKER.",
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::{
+        ChildProcess, ProcessOutput, ProcessReader, ProcessSpawner, ProcessStatus, ProcessWriter,
+    };
+    use std::ffi::{OsStr, OsString};
+    use std::io::{self, Cursor};
     use std::thread;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -553,5 +725,167 @@ mod tests {
                 .contains("Refusing to delete the symlink")
         );
         assert!(target.exists());
+    }
+
+    struct FakeRetrieveSpawner {
+        child: Mutex<Option<FakeRetrieveChild>>,
+        fail_spawn: bool,
+    }
+
+    struct FakeRetrieveChild {
+        stdin: Option<ProcessWriter>,
+        stdout: Option<ProcessReader>,
+        stderr: Option<ProcessReader>,
+        status: ProcessStatus,
+    }
+
+    impl FakeRetrieveSpawner {
+        fn new(stdout: &str, stderr: &str, success: bool) -> Self {
+            Self {
+                child: Mutex::new(Some(FakeRetrieveChild {
+                    stdin: Some(Box::new(Cursor::new(Vec::new()))),
+                    stdout: Some(Box::new(Cursor::new(stdout.as_bytes().to_vec()))),
+                    stderr: Some(Box::new(Cursor::new(stderr.as_bytes().to_vec()))),
+                    status: ProcessStatus {
+                        success,
+                        code: Some(if success { 0 } else { 1 }),
+                        description: if success {
+                            "exit status: 0"
+                        } else {
+                            "exit status: 1"
+                        }
+                        .to_owned(),
+                    },
+                })),
+                fail_spawn: false,
+            }
+        }
+    }
+
+    impl ProcessSpawner for FakeRetrieveSpawner {
+        fn output(&self, _: &OsStr, _: &[OsString]) -> io::Result<ProcessOutput> {
+            unreachable!("retrieve tests do not request command output")
+        }
+
+        fn spawn(&self, _: &OsStr, _: &[OsString], _: bool) -> io::Result<Box<dyn ChildProcess>> {
+            if self.fail_spawn {
+                return Err(io::Error::new(io::ErrorKind::NotFound, "fake Node missing"));
+            }
+            self.child
+                .lock()
+                .expect("fake child lock")
+                .take()
+                .map(|child| Box::new(child) as Box<dyn ChildProcess>)
+                .ok_or_else(|| std::io::Error::other("fake process already spawned"))
+        }
+    }
+
+    impl ChildProcess for FakeRetrieveChild {
+        fn take_stdin(&mut self) -> Option<ProcessWriter> {
+            self.stdin.take()
+        }
+
+        fn take_stdout(&mut self) -> Option<ProcessReader> {
+            self.stdout.take()
+        }
+
+        fn take_stderr(&mut self) -> Option<ProcessReader> {
+            self.stderr.take()
+        }
+
+        fn try_wait(&mut self) -> io::Result<Option<ProcessStatus>> {
+            Ok(Some(self.status.clone()))
+        }
+
+        fn wait(&mut self) -> io::Result<ProcessStatus> {
+            Ok(self.status.clone())
+        }
+
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn retrieve_query_parses_worker_response_and_strips_vectors() {
+        let directory = TempDir::new().expect("temporary directory");
+        let cache = directory.path().join("cache");
+        fs::create_dir(&cache).expect("create cache");
+        // SAFETY: tests own the process environment while they execute.
+        unsafe { std::env::set_var("GOFER_RAG_CACHE_DIR", cache.as_os_str()) };
+
+        let response = serde_json::json!({
+            "passages": [
+                {"text": "Tween interpolation", "chapter": "Tween", "order": 3, "score": 0.95},
+                {"text": "AnimationPlayer", "chapter": "Animation", "order": 7, "score": 0.88}
+            ]
+        });
+        let stdout = format!(
+            "{RETRIEVE_RESPONSE_PREFIX}{}\n",
+            serde_json::to_string(&response).unwrap()
+        );
+        let spawner = FakeRetrieveSpawner::new(&stdout, "", true);
+
+        let result = retrieve_query_with(
+            GodotDocsQuery {
+                question: "how do I tween?".to_owned(),
+                max_passages: 2,
+                max_text_chars: 2000,
+            },
+            &spawner,
+        )
+        .expect("retrieve query");
+
+        assert_eq!(result.passages.len(), 2);
+        assert_eq!(result.passages[0].chapter, "Tween");
+        assert_eq!(result.passages[1].score, 0.88);
+
+        // SAFETY: tests own the process environment while they execute.
+        unsafe { std::env::remove_var("GOFER_RAG_CACHE_DIR") };
+    }
+
+    #[test]
+    fn retrieve_query_propagates_worker_errors_and_failures() {
+        let directory = TempDir::new().expect("temporary directory");
+        let cache = directory.path().join("cache");
+        fs::create_dir(&cache).expect("create cache");
+        // SAFETY: tests own the process environment while they execute.
+        unsafe { std::env::set_var("GOFER_RAG_CACHE_DIR", cache.as_os_str()) };
+
+        let error_response = serde_json::json!({"error": "models are not cached"});
+        let stdout = format!(
+            "{RETRIEVE_RESPONSE_PREFIX}{}\n",
+            serde_json::to_string(&error_response).unwrap()
+        );
+        let spawner = FakeRetrieveSpawner::new(&stdout, "", true);
+        assert_eq!(
+            retrieve_query_with(
+                GodotDocsQuery {
+                    question: "x".to_owned(),
+                    max_passages: 1,
+                    max_text_chars: 100,
+                },
+                &spawner,
+            )
+            .unwrap_err(),
+            "models are not cached"
+        );
+
+        let silent = FakeRetrieveSpawner::new("", "", false);
+        assert!(
+            retrieve_query_with(
+                GodotDocsQuery {
+                    question: "x".to_owned(),
+                    max_passages: 1,
+                    max_text_chars: 100,
+                },
+                &silent,
+            )
+            .unwrap_err()
+            .contains("exited with")
+        );
+
+        // SAFETY: tests own the process environment while they execute.
+        unsafe { std::env::remove_var("GOFER_RAG_CACHE_DIR") };
     }
 }

@@ -20,6 +20,7 @@ commands.allow = [
     "load_settings",
     "merge_task_worktree",
     "move_workspace_path",
+    "query_godot_docs",
     "read_chat_attachment",
     "read_workspace_file",
     "run_storage_maintenance",
