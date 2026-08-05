@@ -31,7 +31,7 @@ real-process acceptance coverage. It also has a typed renderer adapter, Tauri mo
 coverage, selected visual regressions, automated accessibility scans, enforced Node coverage, and
 browser-mode WebdriverIO coverage.
 
-The repository has a clean-checkout Linux check workflow and active checked-in commit/push hooks. A
+The repository has a clean-checkout Linux check workflow and an active checked-in commit hook. A
 second Linux job builds and launches a release-mode application through WebdriverIO's embedded
 driver using isolated application data and a test-feature-only prepared RAG cache. The packaged
 journey covers deterministic AI streaming and tool events, an image attachment, real Godot project
@@ -45,8 +45,8 @@ Godot through `scripts/install-godot.mjs`, which reads the single pinned manifes
 carries its own copy of the pins.
 
 Locally, `npm run test:godot` accepts the pinned Godot from `PATH` when `GOFER_GODOT_BINARY` is
-unset. The version is verified either way, so `npm run check` — which the commit and push hooks run
-— works on a developer machine that already has Godot 4.7.1-stable installed.
+unset. The version is verified either way, so `npm run check` — which the commit hook runs — works
+on a developer machine that already has Godot 4.7.1-stable installed.
 
 ## Cross-language contract
 
@@ -136,6 +136,20 @@ The standalone Godot protocol suite runs the shared fixtures through a real head
 unit tests cover Godot log classification, scene-path validation, and injected process lifecycle.
 The real-process acceptance suite starts the fixture bridge and exercises every mandatory scenario
 below.
+
+`npm run test:godot:addon` runs `scripts/godot-acceptance.mjs`, which gives each acceptance test its
+own `cargo test` process and runs several at a time. The isolation is required, not an optimization:
+`godot_session`, `script`, and `debug` each hold the active session in a process-global, so two
+acceptance tests sharing a binary overwrite each other's session. Booting the editors concurrently
+instead of in a queue took the suite from 66s to 15s on 16 cores.
+
+Two of these tests run the fixture as a real windowed game, on whatever desktop the developer is
+using. Neither may assert on unqualified input: every injected event carries the `INJECTED_DEVICE`
+marker described in `protocol/README.md`, and the fixture probes count only that device, so a
+keystroke or click aimed at something else cannot change a count. The fixture also sets
+`display/window/size/no_focus`, so the game window never takes focus away from the developer in the
+first place. `godot_runtime_acceptance` asserts both halves: unmarked input is injected and is not
+counted.
 
 The checked-in fixture project is at `fixtures/godot-project`. CI uses Godot 4.7.1-stable, the
 current supported patch on August 1, 2026. Pin the complete version, download URL, and SHA-256
@@ -285,14 +299,18 @@ report remains available through `npm run test:coverage:rust:report`.
 
 ### Local enforcement
 
-Before every commit and push, active checked-in hooks run `npm run check`. The npm `prepare` script
+Before every commit, an active checked-in hook runs `npm run check`. The npm `prepare` script
 installs the repository hook path and verifies it. `GOFER_GODOT_BINARY` must point to the absolute
 pinned Godot 4.7.1-stable binary for the gate to run.
+
+There is deliberately no pre-push hook. Every commit that can be pushed has already passed the same
+gate, so a push hook only re-ran it: on this repository that meant a second set of real Godot
+editors, which is why `--no-verify` was becoming the habit that a mandatory gate cannot afford.
 
 ### Target: every push to `master`
 
 CI must rerun `npm run check` from a clean checkout. Because this project works directly on
-`master`, the local pre-push gate is mandatory.
+`master`, the local pre-commit gate is mandatory.
 
 A second CI job builds the release-mode Tauri application and launches it through the embedded
 WebDriver on Linux. It tests the built application binary, not a Vite development server or an

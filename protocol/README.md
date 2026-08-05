@@ -163,6 +163,13 @@ replies, a stopped or never-started game answers `runtime_not_running` (retryabl
 never replies answers `runtime_timeout` (retryable). `runtime.ready` and `runtime.stopped` events
 track the helper's lifecycle.
 
+Every `runtime.input` event accepts an optional integer `device`, which lands on the built event
+unchanged instead of the device the engine would have assigned. It exists so a game can tell
+injected input apart from input the desktop delivered to its window at the same moment: the game
+window is a real, focusable window, and without a marked device an assertion about injected input is
+really an assertion about nobody touching the keyboard. Omitting it keeps the previous behaviour, so
+the field is additive and needs no new `protocolVersion`.
+
 A successful `runtime.run` or `runtime.restart` response carries the game's first rendered frame,
 and a successful `runtime.input` response carries a frame captured after the events were dispatched
 and rendered — capture is manual (`runtime.capture`) and automatic after successful run/input

@@ -11,6 +11,10 @@ run/main_scene="res://main.tscn"
 
 window/size/viewport_width=320
 window/size/viewport_height=180
+; The acceptance suites run this project as a real windowed game on a developer's real desktop.
+; Without this the window takes focus the moment it maps, so the next keystroke goes into the game
+; instead of the terminal or editor the developer was typing in.
+window/size/no_focus=true
 
 [rendering]
 

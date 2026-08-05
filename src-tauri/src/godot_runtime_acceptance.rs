@@ -45,11 +45,20 @@ const PROBE_TIMEOUT_MS: u64 = 2_000;
 /// after the call returns is a formality — the budget only covers a loaded machine.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The device id this test stamps on every event it injects, and the only device the probe counts.
+///
+/// The game window is a real window on a real desktop: it can take focus, and the developer's own
+/// keyboard and mouse reach `_input` exactly like an injected event does. Counting one device
+/// instead of all input is what keeps the assertions about *this test's* input true no matter what
+/// else is happening on the machine. Any value outside the engine's own device numbering works;
+/// this one is far outside it.
+const INJECTED_DEVICE: i64 = 7777;
+
 /// The probe counts injected input by source and shows it in a Label, so both the remote tree and
 /// the screenshots have a visible, inspectable consequence of every event. It listens in `_input`
 /// rather than `_unhandled_input`: a Control under the cursor is allowed to consume mouse events,
 /// and the test has no business depending on the label's mouse filter.
-const PROBE_SCRIPT: &str = "extends Node2D\n\nvar presses := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\nfunc _input(event: InputEvent) -> void:\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
+const PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\n\nvar presses := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\n# Only the test's own input counts. Anything the desktop delivers to this window carries a device\n# the engine assigned, never this one, so a stray keystroke cannot change the assertions.\nfunc _input(event: InputEvent) -> void:\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
 
 /// The fixture scene with the probe script attached. Written into the copied worktree: the
 /// checked-in fixture deliberately stays free of scripts so the Node journeys see a project that
@@ -423,19 +432,37 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     let key = session.call(
         "runtime.input",
         json!({"events": [
-            {"kind": "key", "key": "G", "pressed": true},
-            {"kind": "key", "key": "G", "pressed": false},
+            {"kind": "key", "key": "G", "pressed": true, "device": INJECTED_DEVICE},
+            {"kind": "key", "key": "G", "pressed": false, "device": INJECTED_DEVICE},
         ]}),
     );
     assert_eq!(key["applied"], 2, "press and release are both applied");
     assert_frame(&key["frame"]);
     assert_eq!(label_text(&session), "presses: 1 (key)");
 
+    // Input this test did not stamp belongs to whoever is using the desktop the game window opened
+    // on. An unstamped event takes the same path into `_input` that a real keystroke does — the
+    // engine assigns it a device of its own — so this is the assertion that says the count above
+    // cannot be changed by a developer typing while the suite runs.
+    let stray = session.call(
+        "runtime.input",
+        json!({"events": [
+            {"kind": "key", "key": "H", "pressed": true},
+            {"kind": "key", "key": "H", "pressed": false},
+        ]}),
+    );
+    assert_eq!(stray["applied"], 2, "unstamped input is still injected");
+    assert_eq!(
+        label_text(&session),
+        "presses: 1 (key)",
+        "the probe counts this test's input and nothing else"
+    );
+
     let click = session.call(
         "runtime.input",
         json!({"events": [
-            {"kind": "mouse_button", "button": "left", "pressed": true, "position": [10, 10]},
-            {"kind": "mouse_button", "button": "left", "pressed": false, "position": [10, 10]},
+            {"kind": "mouse_button", "button": "left", "pressed": true, "position": [10, 10], "device": INJECTED_DEVICE},
+            {"kind": "mouse_button", "button": "left", "pressed": false, "position": [10, 10], "device": INJECTED_DEVICE},
         ]}),
     );
     assert_eq!(click["applied"], 2, "press and release are both applied");
@@ -444,8 +471,8 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     let pad = session.call(
         "runtime.input",
         json!({"events": [
-            {"kind": "joypad_button", "button": 0, "pressed": true},
-            {"kind": "joypad_button", "button": 0, "pressed": false},
+            {"kind": "joypad_button", "button": 0, "pressed": true, "device": INJECTED_DEVICE},
+            {"kind": "joypad_button", "button": 0, "pressed": false, "device": INJECTED_DEVICE},
         ]}),
     );
     assert_eq!(pad["applied"], 2, "press and release are both applied");
@@ -459,6 +486,16 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
             )
             .starts_with("unsupported_value"),
         "an unknown key must be refused by the helper, not injected"
+    );
+    assert!(
+        session
+            .error(
+                "runtime.input",
+                json!({"events": [{"kind": "key", "key": "G", "device": "keyboard"}]})
+            )
+            .starts_with("unsupported_value"),
+        "a device that is not a number must be refused rather than coerced to 0, which is a device \
+         the engine itself uses"
     );
     assert!(
         session

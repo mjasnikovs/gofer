@@ -57,10 +57,18 @@ const BROKEN_PATH: &str = "scripts/broken.gd";
 const MATH_PATH: &str = "scripts/math_utils.gd";
 const KEEPER_PATH: &str = "scripts/score_keeper.gd";
 
+/// The device id this journey stamps on the input it injects, and the only device the probe
+/// counts. The game window is real and focusable, so without this the developer's own keyboard
+/// would be counted alongside the injected key. See `godot_runtime_acceptance::INJECTED_DEVICE`.
+const INJECTED_DEVICE: i64 = 7777;
+
 /// The probe is the fixture game and the debugged script at once: `_tick` gives the breakpoint a
 /// two-frame stack with a local worth reading, and the input counter gives the screenshot and the
 /// remote tree a visible consequence of an injected event.
-const PROBE_SCRIPT: &str = "extends Node2D\n\nvar presses := 0\nvar counter := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\nfunc _process(_delta: float) -> void:\n\t_tick(1)\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\nfunc _input(event: InputEvent) -> void:\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
+///
+/// `INJECTED_DEVICE` is declared below `_tick` on purpose: `BREAK_LINE` points into this source,
+/// so nothing may be inserted above the line it names.
+const PROBE_SCRIPT: &str = "extends Node2D\n\nvar presses := 0\nvar counter := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\nfunc _process(_delta: float) -> void:\n\t_tick(1)\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\nconst INJECTED_DEVICE := 7777\n\nfunc _input(event: InputEvent) -> void:\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
 /// 1-based, matching the editor UI and Monaco's gutter: `counter += amount` inside `_tick`.
 const BREAK_LINE: i64 = 16;
 const PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://scripts/journey_probe.gd\" id=\"1_probe\"]\n\n[node name=\"JourneyProbe\" type=\"Node2D\"]\nscript = ExtResource(\"1_probe\")\n\n[node name=\"Label\" type=\"Label\" parent=\".\"]\noffset_right = 320.0\noffset_bottom = 40.0\n";
@@ -745,8 +753,8 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "godot_runtime",
         "input",
         json!({"events": [
-            {"kind": "key", "key": "G", "pressed": true},
-            {"kind": "key", "key": "G", "pressed": false},
+            {"kind": "key", "key": "G", "pressed": true, "device": INJECTED_DEVICE},
+            {"kind": "key", "key": "G", "pressed": false, "device": INJECTED_DEVICE},
         ]}),
     );
     assert_eq!(injected["applied"], 2);

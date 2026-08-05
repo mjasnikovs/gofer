@@ -212,6 +212,10 @@ func _op_monitors(params: Dictionary) -> Dictionary:
 
 ## Builds typed input events from their wire summaries. Returns the same ok/events/message shape
 ## the editor plugin's decoder uses, so malformed events are rejected rather than injected wrong.
+##
+## An event may carry an optional `device`, which lands on the built event unchanged. The engine
+## rewrites the default device of an event it receives, so this is the only way a game can tell
+## injected input apart from whatever the desktop delivered to its window at the same moment.
 func _decode_runtime_events(raw: Variant) -> Dictionary:
     if typeof(raw) != TYPE_ARRAY:
         return _decode_failed("events must be an array of input event objects")
@@ -274,6 +278,11 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 events.append(axis_event)
             _:
                 return _decode_failed("Input event kind '%s' is not supported" % kind)
+        var device: Variant = (entry as Dictionary).get("device", null)
+        if device != null:
+            if typeof(device) != TYPE_INT and typeof(device) != TYPE_FLOAT:
+                return _decode_failed("An input event device must be an integer")
+            (events.back() as InputEvent).device = int(device)
     return {"ok": true, "events": events, "message": ""}
 
 ## Reads a two-number array as a Vector2, defaulting to the origin when the shape is wrong —
