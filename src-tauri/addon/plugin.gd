@@ -35,6 +35,17 @@ var _redo_depth: int = 0
 # Play mode is not a protocol readiness, so it is tracked apart from `_readiness`.
 var _playing: bool = false
 
+# Requests waiting on the editor to switch scenes. `EditorInterface.open_scene_from_path` and
+# `reload_scene_from_path` only *ask* for the switch — the editor ignores the request outright
+# while it is busy with another one (an `is_changing_scene` guard GDScript cannot read). An answer
+# sent as soon as the request was made therefore claims a scene the editor may not be editing, and
+# the next command resolves its nodes against whatever scene really is. `_sweep_scene_pending`
+# re-asks until the editor obeys and answers only then, so the answer means what it says.
+var _scene_pending: Array[Dictionary] = []
+
+## A scene switch outlives a cold import of everything the scene depends on.
+const SCENE_SWITCH_TIMEOUT_MS := 30000
+
 # Runtime bridge state. `_runtime_session_id` names the debugger session of the running game and
 # `_runtime_ready` flips when its GoferRuntime autoload announces itself. `_runtime_pending` holds
 # RPC requests waiting on the game — forwarded queries, launches waiting for the helper, and the
@@ -169,6 +180,7 @@ func _get_plugin_name() -> String:
 
 func _process(_delta: float) -> void:
     _sweep_runtime_pending()
+    _sweep_scene_pending()
     if _peer == null:
         return
     _peer.poll()
@@ -184,8 +196,11 @@ func _process(_delta: float) -> void:
         return
 
     if not _ready_notified:
-        _ready_notified = true
-        _set_readiness("ready")
+        if _editor_finished_starting():
+            _ready_notified = true
+            _set_readiness("ready")
+        elif _readiness != "importing":
+            _set_readiness("importing")
 
     _track_play_state()
 
@@ -276,6 +291,8 @@ func _handle_request(envelope: Dictionary) -> void:
     var result: Variant = _dispatch_command(command, params, expected_revision)
     if result is Dictionary and result.has("_gofer_error"):
         _respond_error_dict(id, result["_gofer_error"])
+    elif result is Dictionary and result.has("_gofer_pending_scene"):
+        _defer_scene_switch(id, command, result["_gofer_pending_scene"])
     elif MUTATING_COMMANDS.has(command):
         _respond_result(id, result, _scene_revision)
     else:
@@ -441,6 +458,26 @@ func _bump_revision() -> void:
     _undo_depth += 1
     _redo_depth = 0
     _advance_revision()
+
+## Godot keeps starting up for a while after a plugin's first frame: it imports the project on a
+## background thread and, once that first scan lands, opens a scene for itself — the project's main
+## scene, or the one a previous editor session left open. That open replaces whatever scene is
+## being edited, without asking and without an event.
+##
+## A session told it was ready before that lands has its own scene swapped out from under it
+## between two commands: `scene.create` opens the new scene, the editor's startup open takes the
+## edited scene back, and the `node.create` that follows cannot resolve a root that is no longer
+## the edited scene's. So readiness waits for the import to finish and for the scene the editor
+## opens for itself to arrive.
+func _editor_finished_starting() -> bool:
+    if EditorInterface.get_resource_filesystem().is_scanning():
+        return false
+    # A project whose main scene is unset or unloadable has no startup open to wait for; the
+    # editor settles on an empty tab.
+    var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
+    if main_scene.is_empty() or not ResourceLoader.exists(main_scene):
+        return true
+    return _edited_root() != null
 
 func _set_readiness(readiness: String) -> void:
     _readiness = readiness
@@ -1185,15 +1222,11 @@ func _scene_open(params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
-    _set_readiness("importing")
-    EditorInterface.open_scene_from_path(path)
-    _current_scene_path = path
-    _scene_revision = 0
-    _scene_dirty = false
-    _undo_depth = 0
-    _redo_depth = 0
-    _set_readiness("ready")
-    return {"scene": path, "revision": _scene_revision, "dirty": _scene_dirty}
+    # A scene the editor cannot load would never satisfy the switch, so it is refused here rather
+    # than left to expire against `SCENE_SWITCH_TIMEOUT_MS`.
+    if not ResourceLoader.exists(path):
+        return _config_error("scene_not_found", "Scene %s does not exist" % path, {"path": path})
+    return _switch_edited_scene(path)
 
 func _scene_create(params: Dictionary) -> Dictionary:
     var path: String = params.get("path", "")
@@ -1250,14 +1283,10 @@ func _scene_create(params: Dictionary) -> Dictionary:
             }
         }
     root.queue_free()
-    EditorInterface.open_scene_from_path(path)
-    _current_scene_path = path
-    _scene_revision = 0
-    _scene_dirty = false
-    _undo_depth = 0
-    _redo_depth = 0
-    _set_readiness("ready")
-    return {"scene": path, "revision": _scene_revision, "dirty": _scene_dirty}
+    # The scene was written behind the editor's back, so its filesystem is told about the file
+    # before it is asked to open it — an unknown resource is one the editor refuses to load.
+    EditorInterface.get_resource_filesystem().update_file(path)
+    return _switch_edited_scene(path)
 
 func _scene_save(_params: Dictionary) -> Dictionary:
     if _current_scene_path.is_empty():
@@ -1312,14 +1341,90 @@ func _scene_reload(_params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
+    return _reload_edited_scene(_current_scene_path)
+
+## Asks the editor to edit `path` and parks the answer until it does. Re-opening the scene the
+## editor already edits is a no-op in Godot — the tab is only selected — so the wait is satisfied
+## by the root the editor already holds.
+func _switch_edited_scene(path: String) -> Dictionary:
+    return _pending_scene_switch("open", path, 0)
+
+## Asks the editor to reload `path` from disk and parks the answer until it does. A reload keeps
+## the path and replaces the root, so the wait is for a root that is not the one being discarded.
+func _reload_edited_scene(path: String) -> Dictionary:
+    var root := _edited_root()
+    var replaced := root.get_instance_id() if root != null else 0
+    return _pending_scene_switch("reload", path, replaced)
+
+func _pending_scene_switch(mode: String, path: String, replaced: int) -> Dictionary:
     _set_readiness("importing")
-    EditorInterface.reload_scene_from_path(_current_scene_path)
-    _scene_revision = 0
-    _scene_dirty = false
-    _undo_depth = 0
-    _redo_depth = 0
-    _set_readiness("ready")
-    return {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_dirty}
+    var pending := {
+        "mode": mode,
+        "path": path,
+        "replaced": replaced,
+        "deadline": Time.get_ticks_msec() + SCENE_SWITCH_TIMEOUT_MS,
+    }
+    _ask_editor_to_switch(pending)
+    return {"_gofer_pending_scene": pending}
+
+## Parks a scene-switch response until `_sweep_scene_pending` sees the editor obey it.
+func _defer_scene_switch(id: String, command: String, pending: Dictionary) -> void:
+    pending["id"] = id
+    pending["mutating"] = MUTATING_COMMANDS.has(command)
+    _scene_pending.append(pending)
+
+func _ask_editor_to_switch(pending: Dictionary) -> void:
+    if pending["mode"] == "reload":
+        EditorInterface.reload_scene_from_path(pending["path"])
+    else:
+        EditorInterface.open_scene_from_path(pending["path"])
+
+## True once the editor really edits the scene the request named, rather than having merely been
+## asked to.
+func _edited_scene_switched(pending: Dictionary) -> bool:
+    var root := _edited_root()
+    if root == null or root.scene_file_path != String(pending["path"]):
+        return false
+    return root.get_instance_id() != int(pending["replaced"])
+
+## Answers the scene switches the editor has performed and re-asks for the ones it dropped. The
+## session state a switch resets is adopted here, not when the request arrived: until the editor
+## obeys, the old scene is still the edited one and its revision still describes it.
+func _sweep_scene_pending() -> void:
+    if _scene_pending.is_empty():
+        return
+    var now := Time.get_ticks_msec()
+    var kept: Array[Dictionary] = []
+    for pending in _scene_pending:
+        if _edited_scene_switched(pending):
+            _current_scene_path = pending["path"]
+            _scene_revision = 0
+            _scene_dirty = false
+            _undo_depth = 0
+            _redo_depth = 0
+            _set_readiness("ready")
+            var result := {
+                "scene": _current_scene_path,
+                "revision": _scene_revision,
+                "dirty": _scene_dirty,
+            }
+            if pending["mutating"]:
+                _respond_result(pending["id"], result, _scene_revision)
+            else:
+                _respond_result(pending["id"], result)
+        elif int(pending["deadline"]) < now:
+            _set_readiness("ready")
+            _respond_error(
+                pending["id"],
+                "scene_switch_timeout",
+                "The editor did not open %s" % pending["path"],
+                true,
+                {"path": pending["path"]}
+            )
+        else:
+            _ask_editor_to_switch(pending)
+            kept.append(pending)
+    _scene_pending = kept
 
 func _scene_tree() -> Dictionary:
     var root := _edited_root()

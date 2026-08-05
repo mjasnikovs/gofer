@@ -124,6 +124,27 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
     worktree.canonicalize().expect("canonical worktree")
 }
 
+/// The fixture project padded with enough resources that the editor's first import scan is still
+/// running when the addon connects.
+///
+/// The window this opens is the whole point: the editor finishes starting up long after a plugin's
+/// first frame, and the scene it opens for itself when the scan lands replaces whatever scene is
+/// being edited. On the four-file fixture the scan is over before the addon connects, so the
+/// window is invisible and a session that reports ready too early looks perfectly healthy.
+fn slow_importing_worktree(directory: &TempDir) -> PathBuf {
+    let worktree = fixture_worktree(directory);
+    let padding = worktree.join("padding");
+    std::fs::create_dir_all(&padding).expect("create padding directory");
+    for index in 0..4000 {
+        std::fs::write(
+            padding.join(format!("padding_{index}.tres")),
+            "[gd_resource type=\"Resource\" format=3]\n\n[resource]\n",
+        )
+        .expect("write padding resource");
+    }
+    worktree
+}
+
 fn launch(worktree: &Path, port: u16, token: &str) -> Editor {
     let arguments = [
         OsString::from("--editor"),
@@ -313,6 +334,45 @@ fn child_names(tree: &Value) -> Vec<String> {
         .iter()
         .map(|child| child["name"].as_str().expect("child name").to_owned())
         .collect()
+}
+
+/// A ready session owns the edited scene; the editor must not still be about to open one.
+///
+/// Godot imports the project on a background thread and, when that first scan lands, opens a scene
+/// for itself — the main scene, or the one a previous editor session left open — replacing
+/// whatever is being edited, with no event and nobody asked. An addon that reports ready on its
+/// first frame hands the session that window: `scene.create` opens the new scene, the editor's own
+/// open takes the edited scene back, and the `node.create` that follows cannot resolve a root that
+/// belongs to a scene the editor is no longer editing. Which side of the window a command lands on
+/// is decided by how long the import takes, which is why it read as an editor-timing flake.
+#[test]
+fn a_ready_session_owns_the_edited_scene() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = slow_importing_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
+    let scene = "res://owned.tscn";
+
+    // Ready means started up: the scene the editor opens for itself is already the edited one, so
+    // there is no second open still coming.
+    assert_eq!(
+        session.call("scene.get_tree", json!({}))["root"]["name"],
+        "ProtocolFixture",
+        "the editor must have finished opening its own scene before the session is ready"
+    );
+
+    // And so the scene the session opens stays the edited one, which is the only reason the node
+    // below can be addressed at all.
+    session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/owned", "name": "Marker", "type": "Marker2D"}),
+    );
+    assert_eq!(
+        child_names(&session.call("scene.get_tree", json!({}))),
+        vec!["Marker".to_owned()],
+        "the created node must appear in the scene the session opened"
+    );
 }
 
 #[test]
