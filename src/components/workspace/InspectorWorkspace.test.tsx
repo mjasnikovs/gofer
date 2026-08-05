@@ -566,13 +566,17 @@ describe('InspectorWorkspace', () => {
 
         await user.click(hide)
 
-        const show = screen.getByRole('button', {name: 'Show panel'})
+        // The click's state update is committed on React's schedule, not on the promise this
+        // interaction returns: on a loaded machine the label is still the old one when the click
+        // resolves. Waiting for the button asserts what the user sees rather than how fast the
+        // machine running the test happens to be.
+        const show = await screen.findByRole('button', {name: 'Show panel'})
         expect(show).toHaveAttribute('aria-expanded', 'false')
         expect(screen.queryByText('No problems')).not.toBeInTheDocument()
         expect(screen.getByRole('button', {name: 'Problems'})).toBeInTheDocument()
 
         await user.click(show)
-        expect(screen.getByText('No problems')).toBeInTheDocument()
+        expect(await screen.findByText('No problems')).toBeInTheDocument()
     })
 
     it('reaches and activates the centre tabs from the keyboard', async () => {

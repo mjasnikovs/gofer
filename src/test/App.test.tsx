@@ -145,7 +145,16 @@ describe('SettingsPage', () => {
         const keepRequest = tauri.invoke.mock.calls.find(call => call[0] === 'test_ai_connection')
         expect(keepRequest?.[1]).toMatchObject({request: {apiKey: {action: 'keep'}}})
 
+        // Each click below sends the intent the *previous* interaction set, and React commits that
+        // state on its own schedule rather than by the time the interaction's promise resolves. On
+        // a loaded machine an unwaited click reads the state before it lands and tests the previous
+        // intent twice, so every interaction here waits for the render that proves it took effect.
         await user.type(screen.getByPlaceholderText('Stored securely'), ' new-secret ')
+        // `toHaveValue` rather than `findByDisplayValue`: the surrounding spaces are the point of
+        // this key, and the display-value query normalizes them away before it compares.
+        await waitFor(() => {
+            expect(screen.getByPlaceholderText('Stored securely')).toHaveValue(' new-secret ')
+        })
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
         const setRequest = tauri.invoke.mock.calls
             .filter(call => call[0] === 'test_ai_connection')
@@ -155,6 +164,9 @@ describe('SettingsPage', () => {
         })
 
         await user.click(screen.getByRole('button', {name: 'Remove stored API key'}))
+        // The button renames itself once the stored key is marked for removal: that render is the
+        // proof the intent is `clear` before the connection test reads it.
+        expect(await screen.findByRole('button', {name: 'Keep stored API key'})).toBeInTheDocument()
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
         const clearRequest = tauri.invoke.mock.calls
             .filter(call => call[0] === 'test_ai_connection')
