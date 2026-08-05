@@ -3,11 +3,10 @@ import {readdir, readFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import test from 'node:test'
 import Ajv2020 from 'ajv/dist/2020.js'
-import {ProtocolError, requireSupportedProtocolVersion} from './protocol.mjs'
 
+// Version 1 retired with the one-shot bridge it served; version 2 is the only wire contract left.
 const root = new URL('../protocol/', import.meta.url)
 const schemaNames = {
-    v1: ['request', 'response', 'event', 'error'],
     v2: ['handshake', 'request', 'response', 'event', 'error', 'value']
 }
 const versions = Object.keys(schemaNames)
@@ -67,27 +66,6 @@ test('all invalid golden fixtures are rejected by their canonical schemas', asyn
 test('every protocol v2 envelope kind and value shape has a valid fixture', async () => {
     const covered = new Set((await fixturePaths('v2', 'valid')).map(path => schemaName(path)))
     assert.deepEqual([...covered].sort(), [...schemaNames.v2].sort())
-})
-
-test('unsupported versions are rejected before dispatch with a structured error', async () => {
-    const [path] = await fixturePaths('v1', 'unsupported')
-    const payload = await json(path)
-    assert.throws(
-        () => requireSupportedProtocolVersion(payload),
-        error => {
-            assert.ok(error instanceof ProtocolError)
-            assert.deepEqual(error.toPayload(payload.id), {
-                protocolVersion: 1,
-                id: 'request-8',
-                error: {
-                    code: 'unsupported_protocol_version',
-                    message: 'Protocol version 2 is not supported',
-                    details: {supportedVersions: [1]}
-                }
-            })
-            return true
-        }
-    )
 })
 
 test('unsupported protocol v2 versions never match the frozen schemas', async () => {

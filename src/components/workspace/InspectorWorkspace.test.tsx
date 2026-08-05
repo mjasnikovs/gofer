@@ -43,6 +43,8 @@ type CallRequest = Readonly<{
     path?: string
     command?: string
     params?: Readonly<Record<string, unknown>>
+    op?: string
+    query?: string
 }>
 
 const SCRIPT = 'extends Node\n\nfunc _ready():\n\tpass\n'
@@ -60,11 +62,23 @@ const SCENE_TREE = {
 type Backend = Readonly<{
     session: {started: boolean}
     calls: string[]
+    debugCalls: string[]
 }>
+
+const SESSION = {
+    sessionId: 'session-1',
+    state: 'ready',
+    rpcAddress: '127.0.0.1:7000',
+    lspPort: 6005,
+    dapPort: 6006,
+    godotVersion: '4.7.1.stable',
+    worktree: '/tmp/task'
+}
 
 function backend(): Backend {
     const session = {started: false}
     const calls: string[] = []
+    const debugCalls: string[] = []
     tauri.invoke.mockImplementation(async (command, args) => {
         const request = (args as {request?: CallRequest} | undefined)?.request ?? {}
         switch (command) {
@@ -84,17 +98,65 @@ function backend(): Backend {
                     version: 1
                 }
             case 'get_godot_session':
-                return undefined
+                return session.started ? SESSION : undefined
             case 'start_godot_session':
                 session.started = true
-                return {
-                    state: 'ready',
-                    rpcAddress: '127.0.0.1:7000',
-                    lspPort: 6005,
-                    dapPort: 6006,
-                    godotVersion: '4.7.1.stable',
-                    worktree: '/tmp/task'
+                return SESSION
+            case 'call_godot_debug': {
+                const op = request.op ?? ''
+                debugCalls.push(op)
+                switch (op) {
+                    case 'launch':
+                        return {op: 'launched', breakpoints: []}
+                    case 'awaitStop':
+                        return {
+                            op: 'stopped',
+                            stopped: {
+                                reason: 'breakpoint',
+                                threadId: 1,
+                                allThreadsStopped: true
+                            }
+                        }
+                    case 'stackTrace':
+                        return {
+                            op: 'stackTrace',
+                            frames: [
+                                {
+                                    id: 1,
+                                    name: '_ready',
+                                    line: 3,
+                                    column: 1,
+                                    path: 'scripts/player.gd'
+                                }
+                            ]
+                        }
+                    case 'scopes':
+                        return {
+                            op: 'scopes',
+                            scopes: [{name: 'Locals', variablesReference: 10, expensive: false}]
+                        }
+                    case 'variables':
+                        return {
+                            op: 'variables',
+                            variables: [{name: 'amount', value: '3', variablesReference: 0}]
+                        }
+                    default:
+                        return {op: 'acknowledged'}
                 }
+            }
+            case 'search_godot_log_history':
+                return (request.query ?? '').includes('Invalid') ?
+                        [
+                            {
+                                runId: 'run-1',
+                                sessionId: 'session-0',
+                                timestamp: 1_800_000_000_000,
+                                level: 'error',
+                                source: 'editorError',
+                                message: 'ERROR: Invalid call in a session that already stopped'
+                            }
+                        ]
+                    :   []
             case 'read_godot_logs':
                 return {
                     entries: [
@@ -202,7 +264,7 @@ function backend(): Backend {
                 return undefined
         }
     })
-    return {session, calls}
+    return {session, calls, debugCalls}
 }
 
 /** Publishes one diagnostic through the channel the frame subscribed with. */
@@ -425,6 +487,49 @@ describe('InspectorWorkspace', () => {
 
         expect(await screen.findByText('Godot Engine v4.7.1.stable')).toBeInTheDocument()
         expect(screen.getByText('SCRIPT ERROR: Parse error')).toBeInTheDocument()
+    })
+
+    it('runs the project by ensuring an editor session, then launching under the debugger', async () => {
+        const server = backend()
+        const user = userEvent.setup()
+        renderWorkspace()
+
+        // No session is running: Run is one action, because the debug adapter belongs to the
+        // editor and there is nothing to launch the game with until the editor is up.
+        await user.click(await screen.findByRole('button', {name: 'Run project'}))
+
+        await waitFor(() => {
+            expect(server.session.started).toBe(true)
+        })
+        await waitFor(() => {
+            expect(server.debugCalls).toContain('launch')
+        })
+        // The bottom panel follows the game to the debugger, where the stop it hit is readable.
+        expect(await screen.findByText('Stopped: breakpoint')).toBeInTheDocument()
+        expect(await screen.findByText('amount')).toBeInTheDocument()
+
+        await user.click(screen.getByRole('button', {name: 'Stop project'}))
+        await waitFor(() => {
+            expect(server.debugCalls).toContain('terminate')
+        })
+    })
+
+    it('searches recorded output from sessions that have already stopped', async () => {
+        backend()
+        const user = userEvent.setup()
+        renderWorkspace()
+
+        await user.click(screen.getByRole('button', {name: 'Output'}))
+        await user.click(screen.getByRole('radio', {name: 'History'}))
+
+        // The archive answers with no editor running at all, which is when it is worth having.
+        expect(screen.getByText('Nothing found')).toBeInTheDocument()
+        await user.type(screen.getByRole('textbox', {name: 'Search recorded output'}), 'Invalid')
+
+        expect(
+            await screen.findByText('ERROR: Invalid call in a session that already stopped')
+        ).toBeInTheDocument()
+        expect(screen.getByText(/session session-0/)).toBeInTheDocument()
     })
 
     it('cites documentation by chapter, because retrieval exposes no URL', async () => {

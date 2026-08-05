@@ -1,10 +1,9 @@
 extends SceneTree
 
-# Protocol version 1 is the legacy one-shot bridge contract; version 2 is the persistent editor
-# session contract frozen in protocol/README.md. Both are validated against the same golden
-# fixtures Rust and TypeScript consume.
+# Version 2 is the persistent editor session contract frozen in protocol/README.md, and the only
+# one left: version 1 retired with the one-shot bridge it served. The same golden fixtures Rust and
+# TypeScript consume are validated here.
 
-const SUPPORTED_PROTOCOL_VERSIONS := [1]
 const SUPPORTED_V2_VERSIONS := [2]
 
 const MAX_ENVELOPE_BYTES := 1048576
@@ -75,10 +74,6 @@ const OBJECT_VALUES := {
 func _initialize() -> void:
     var failures: Array[String] = []
     var protocol_path := ProjectSettings.globalize_path("res://../../protocol/fixtures")
-    var v1_path := protocol_path.path_join("v1")
-    _test_fixtures(v1_path.path_join("valid"), true, failures)
-    _test_fixtures(v1_path.path_join("invalid"), false, failures)
-    _test_unsupported(v1_path.path_join("unsupported/request-version-2.json"), failures)
     var v2_path := protocol_path.path_join("v2")
     _test_v2_fixtures(v2_path.path_join("valid"), true, failures)
     _test_v2_fixtures(v2_path.path_join("invalid"), false, failures)
@@ -91,29 +86,6 @@ func _initialize() -> void:
     for failure in failures:
         push_error(failure)
     quit(1)
-
-func _test_fixtures(directory: String, expected: bool, failures: Array[String]) -> void:
-    var files := DirAccess.get_files_at(directory)
-    files.sort()
-    for filename in files:
-        if not filename.ends_with(".json"):
-            continue
-        var payload: Variant = _read_json(directory.path_join(filename), failures)
-        if payload == null:
-            continue
-        var kind := filename.get_slice("-", 0)
-        if _validate(payload, kind) != expected:
-            failures.append("Unexpected validation result for %s/%s" % [directory, filename])
-
-func _test_unsupported(path: String, failures: Array[String]) -> void:
-    var payload: Variant = _read_json(path, failures)
-    if payload == null:
-        return
-    var error := _validate_version(payload)
-    if error.get("code") != "unsupported_protocol_version":
-        failures.append("Unsupported versions must use the unsupported_protocol_version code")
-    if error.get("details", {}).get("supportedVersions") != SUPPORTED_PROTOCOL_VERSIONS:
-        failures.append("Unsupported version errors must list supportedVersions")
 
 func _test_v2_fixtures(directory: String, expected: bool, failures: Array[String]) -> void:
     var files := DirAccess.get_files_at(directory)
@@ -174,45 +146,6 @@ func _read_json(path: String, failures: Array[String]) -> Variant:
     if payload == null:
         failures.append("Could not parse fixture: %s" % path)
     return payload
-
-func _validate(payload: Variant, kind: String) -> bool:
-    if typeof(payload) != TYPE_DICTIONARY:
-        return false
-    if not _is_positive_integer(payload.get("protocolVersion")):
-        return false
-    if not _is_non_empty_string(payload.get("id")):
-        return false
-    if kind == "request":
-        return _is_non_empty_string(payload.get("command")) and typeof(payload.get("params")) == TYPE_DICTIONARY
-    if kind == "response":
-        return payload.has("result")
-    if kind == "event":
-        return (
-            _is_non_negative_integer(payload.get("sequence"))
-            and _is_non_empty_string(payload.get("event"))
-            and typeof(payload.get("data")) == TYPE_DICTIONARY
-        )
-    if kind == "error":
-        return _validate_error(payload.get("error"))
-    return false
-
-func _validate_error(value: Variant) -> bool:
-    if typeof(value) != TYPE_DICTIONARY:
-        return false
-    var code: Variant = value.get("code")
-    if not _is_non_empty_string(code) or not _is_snake_case(code):
-        return false
-    return _is_non_empty_string(value.get("message")) and typeof(value.get("details")) == TYPE_DICTIONARY
-
-func _validate_version(payload: Dictionary) -> Dictionary:
-    var version: Variant = payload.get("protocolVersion")
-    if _is_integer(version) and int(version) in SUPPORTED_PROTOCOL_VERSIONS:
-        return {}
-    return {
-        "code": "unsupported_protocol_version",
-        "message": "Protocol version %s is not supported" % version,
-        "details": {"supportedVersions": SUPPORTED_PROTOCOL_VERSIONS}
-    }
 
 func _validate_v2_version(payload: Dictionary) -> Dictionary:
     var version: Variant = payload.get("protocolVersion")

@@ -602,7 +602,7 @@ UI.
       The Playwright `inspector workspace` journey screenshots the assembled frame and runs axe over
       it.
 
-18. Migrate and release
+18. Migrate and release — DONE
     - Replace the current Run button with “ensure editor session, then DAP launch.”
     - Migrate stored run logging to session/run identifiers while retaining existing searchable log
       history.
@@ -612,6 +612,52 @@ UI.
     - Add third-party notices for selectively adapted godot-ai, Godot protocol references, Monaco,
       and gdformat.
     - Run npm run check plus packaged cross-platform acceptance tests.
+    - The Run button moved from the header to the frame's session toolbar, because that is where the
+      session and the gutter breakpoints already live: `InspectorWorkspace` now owns the one
+      `useDebugSession` the debugger panel drives, and Run is `useGodotSession.ensureReady()` —
+      start the editor if none is running, poll the backend until the addon reports ready — followed
+      by that session's own `launch`. The bottom panel follows the game to the Debugger tab. The
+      Game tab's Run/Restart/Stop remain the editor's play controls, which capture frames and stop
+      at no breakpoint. `godot.rs`, `launch_godot`, `cancel_godot`, and `useGodotProcess` are gone
+      with the standalone process they drove.
+    - Run logging moved with it. Schema v4 adds `godot_runs.session_id` by `ALTER TABLE`, so every
+      run recorded before Gofer managed the editor keeps its segments and its FTS rows and simply
+      names no session. `godot_session_api` opens a run when the editor starts and closes it when
+      the editor stops, draining the session's bounded log buffer into storage on a timer with a
+      final pass after the stop, because the lines that explain a crash arrive last. Blank lines are
+      dropped rather than sent: storage refuses an empty message, and one blank line would otherwise
+      lose the batch around it. A storage failure never fails the session — it is reported into the
+      session buffer, where the user is already looking.
+    - The index that was “maintained but not yet queried” is now queried: `search_godot_log_history`
+      answers from FTS5 with the run and session that produced each hit, the needle is passed as a
+      quoted phrase so `ERROR: res://x.gd` is words rather than a match expression, and the Output
+      panel gained a Session/History switch that works with no editor running at all.
+    - The packaged journey drives the shipped path. `wdio.packaged.conf.ts` commits the Godot
+      fixture project into a Git repository and points the application at it with
+      `GOFER_WORKSPACE_DIR`, so the application creates its own task worktree;
+      `GOFER_GODOT_HEADLESS` (WebDriver builds only, so a shipped Gofer can never start an editor
+      the user cannot see) lets the supervisor launch a real editor without a display. The spec then
+      calls `start_godot_session`, waits for the addon's own `session.get_state`, and mutates and
+      saves through `call_godot` — the renderer's command, not a test-only transport — before
+      asserting the file on disk and that stopping left no `addons/gofer` behind.
+      `send_godot_command`, `godot_bridge.rs`, `protocol.rs`, the v1 schemas and fixtures,
+      `scripts/protocol.mjs`, the bridge fixture, and the Node bridge acceptance test are all
+      removed, and `protocol/README.md` keeps one row for version 1 so a payload in an old log can
+      still be identified.
+    - Driving the real thing found three defects no unit test could: the version gate rejected
+      `4.7.1.stable.official.<hash>`, which is what every published release reports, so no user
+      could start a session at all; the editor settings lookup used one file name
+      (`editor_settings-4.tres` under `Godot/`) where Godot 4.7 writes `editor_settings-4.7.tres`
+      under a directory whose case differs by platform, and a machine with no settings file failed
+      instead of using the engine's own loopback default; and the LSP remote-host parser matched a
+      bare key where a real file writes `network/language_server/remote_host = "…"`, so the loopback
+      check never actually read the setting. The packaged fixture worker also still waited for stdin
+      to close, which step 14's duplex channel never does, and the workspace remounted when the
+      first task list arrived — discarding a message that had not reached the debounced save.
+    - Done when `npm run check` and the packaged journey both pass — they do, including the addon,
+      LSP, DAP, runtime, script, and AI acceptance suites against the pinned editor. The
+      cross-platform halves (Windows and macOS packaged runs, and the frozen per-platform `gdformat`
+      executables step 9 specified) remain CI work: this machine can only prove the Linux journey.
 
 Every step also satisfies the gates `npm run check` already enforces: marked `coverage-critical`
 regions hold 100% branch coverage, no test is ignored, and the Node suites keep their 80% line and

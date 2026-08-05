@@ -5,8 +5,6 @@ import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import {Token} from '@astryxdesign/core/Token'
 import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
-import PlayIcon from '@heroicons/react/24/outline/PlayIcon'
-import StopIcon from '@heroicons/react/24/outline/StopIcon'
 import type {TaskSummary} from '../../models/app'
 
 export type ConnectionState = 'connecting' | 'connected' | 'offline'
@@ -14,21 +12,15 @@ export type ConnectionState = 'connecting' | 'connected' | 'offline'
 type WorkspaceHeaderProps = Readonly<{
     activeTask?: TaskSummary
     connectionState: ConnectionState
-    isGodotRunning: boolean
     onConnect: () => void
     onMergeTask: () => void
-    onRunGodot: () => void
-    onStopGodot: () => void
 }>
 
 export function WorkspaceHeader({
     activeTask,
     connectionState,
-    isGodotRunning,
     onConnect,
-    onMergeTask,
-    onRunGodot,
-    onStopGodot
+    onMergeTask
 }: WorkspaceHeaderProps) {
     const connectionVariant =
         connectionState === 'connected' ? 'success'
@@ -81,18 +73,6 @@ export function WorkspaceHeader({
                         clickAction={onConnect}
                     />
                 :   null}
-                <Button
-                    label={isGodotRunning ? 'Stop Godot' : 'Run project'}
-                    variant={isGodotRunning ? 'destructive' : 'secondary'}
-                    size='sm'
-                    icon={
-                        <Icon
-                            icon={isGodotRunning ? StopIcon : PlayIcon}
-                            size='sm'
-                        />
-                    }
-                    clickAction={isGodotRunning ? onStopGodot : onRunGodot}
-                />
                 {activeTask?.worktree && !activeTask.worktree.mergedCommit ?
                     <Button
                         label='Merge task'

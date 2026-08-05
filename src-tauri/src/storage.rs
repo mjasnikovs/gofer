@@ -193,6 +193,18 @@ PRAGMA user_version = 3;
 COMMIT;
 "#;
 
+// Run logging moved from the retired standalone Godot process to the managed editor session, so a
+// stored run now names the session that produced it as well as itself. The column is added rather
+// than the table rebuilt: runs recorded before the migration keep their segments and their FTS
+// rows, and a NULL `session_id` is exactly what "recorded before Gofer managed sessions" means.
+const PROJECT_SCHEMA_V4: &str = r#"
+BEGIN;
+ALTER TABLE godot_runs ADD COLUMN session_id TEXT;
+CREATE INDEX godot_runs_session ON godot_runs(session_id, started_at DESC);
+PRAGMA user_version = 4;
+COMMIT;
+"#;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredAttachment {
@@ -252,6 +264,10 @@ pub struct TaskRecord {
 #[serde(rename_all = "camelCase")]
 pub struct StartGodotRunRequest {
     pub task_id: Option<String>,
+    /// The editor session that produced the run. Absent only for runs recorded before Gofer
+    /// managed the editor itself.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub godot_version: Option<String>,
     #[serde(default = "empty_object")]
     pub metadata: Value,
@@ -262,6 +278,7 @@ pub struct StartGodotRunRequest {
 pub struct GodotRunRecord {
     pub id: String,
     pub task_id: Option<String>,
+    pub session_id: Option<String>,
     pub status: String,
     pub godot_version: Option<String>,
     pub project_path: String,
@@ -294,6 +311,30 @@ pub struct AppendGodotLogsResult {
     pub segment_id: String,
     pub entry_count: usize,
     pub indexed_event_count: usize,
+}
+
+/// A full-text query over the stored warning and error history of every recorded run.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchGodotLogsRequest {
+    pub query: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One indexed log event, reported with the run and session identifiers that produced it. A run
+/// recorded before Gofer managed the editor has no session, which is how history predating the
+/// migration stays readable instead of being hidden.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GodotLogSearchHit {
+    pub run_id: String,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub timestamp: u64,
+    pub level: String,
+    pub source: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -834,11 +875,13 @@ impl ProjectStorage {
         connection
             .execute(
                 "INSERT INTO godot_runs
-                 (id, task_id, status, godot_version, project_path, started_at, metadata_json)
-                 VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6)",
+                 (id, task_id, session_id, status, godot_version, project_path, started_at,
+                  metadata_json)
+                 VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?7)",
                 params![
                     id,
                     task_id,
+                    request.session_id,
                     request.godot_version,
                     project_path.to_string_lossy(),
                     started_at,
@@ -849,6 +892,7 @@ impl ProjectStorage {
         Ok(GodotRunRecord {
             id,
             task_id,
+            session_id: request.session_id.clone(),
             status: "running".to_owned(),
             godot_version: request.godot_version.clone(),
             project_path: project_path.to_string_lossy().into_owned(),
@@ -961,6 +1005,65 @@ impl ProjectStorage {
             entry_count: request.entries.len(),
             indexed_event_count,
         })
+    }
+
+    /// Searches the indexed warning and error history of every stored run.
+    ///
+    /// The live session buffer only holds what the current editor printed, so this is the one way
+    /// back to output from a session that has already stopped. The needle is passed to FTS5 as a
+    /// quoted phrase: a user typing `ERROR: res://x.gd` is asking for those words, not writing a
+    /// match expression whose operators would make the query fail.
+    pub fn search_godot_logs(
+        &self,
+        request: &SearchGodotLogsRequest,
+    ) -> Result<Vec<GodotLogSearchHit>, String> {
+        let needle = request.query.trim();
+        if needle.is_empty() {
+            return Err("A Godot log search needs a query".to_owned());
+        }
+        let phrase = format!("\"{}\"", needle.replace('"', "\"\""));
+        let limit = request.limit.unwrap_or(50).clamp(1, 200);
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT events.run_id, runs.session_id, runs.task_id, events.timestamp,
+                        events.level, events.source, events.message
+                 FROM godot_log_fts
+                 JOIN godot_log_events AS events ON events.rowid = godot_log_fts.rowid
+                 JOIN godot_runs AS runs ON runs.id = events.run_id
+                 WHERE godot_log_fts MATCH ?1
+                 ORDER BY events.timestamp DESC, events.rowid DESC
+                 LIMIT ?2",
+            )
+            .map_err(database_error)?;
+        let hits = statement
+            .query_map(params![phrase, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        hits.into_iter()
+            .map(|hit| {
+                Ok(GodotLogSearchHit {
+                    run_id: hit.0,
+                    session_id: hit.1,
+                    task_id: hit.2,
+                    timestamp: from_database_u64(hit.3, "log timestamp")?,
+                    level: hit.4,
+                    source: hit.5,
+                    message: hit.6,
+                })
+            })
+            .collect()
     }
 
     pub fn finish_godot_run(&self, request: &FinishGodotRunRequest) -> Result<(), String> {
@@ -1588,9 +1691,9 @@ fn migrate_project(connection: &Connection) -> Result<(), String> {
     let current = connection
         .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
         .map_err(database_error)?;
-    if current > 3 {
+    if current > 4 {
         return Err(format!(
-            "The database schema version {current} is newer than supported version 3"
+            "The database schema version {current} is newer than supported version 4"
         ));
     }
     if current == 0 {
@@ -1606,6 +1709,11 @@ fn migrate_project(connection: &Connection) -> Result<(), String> {
     if current <= 2 {
         connection
             .execute_batch(PROJECT_SCHEMA_V3)
+            .map_err(database_error)?;
+    }
+    if current <= 3 {
+        connection
+            .execute_batch(PROJECT_SCHEMA_V4)
             .map_err(database_error)?;
     }
     Ok(())
@@ -2125,6 +2233,7 @@ mod tests {
                 .start_godot_run_in(
                     &StartGodotRunRequest {
                         task_id: None,
+                        session_id: None,
                         godot_version: None,
                         metadata: serde_json::json!([]),
                     },
@@ -2264,7 +2373,7 @@ mod tests {
             .query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
             .expect("sqlite-vec version");
 
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(vec_version, "v0.1.9");
     }
 
@@ -2294,7 +2403,54 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .expect("schema version");
         assert_eq!(title, "Existing task");
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+
+    /// Run logging moved from the standalone Godot process to the managed editor session. The
+    /// history recorded before that move has to stay exactly as searchable as it was, which is why
+    /// the migration adds a column instead of rebuilding the table.
+    #[test]
+    fn recorded_run_history_survives_the_session_identifier_migration() {
+        register_sqlite_vec();
+        let connection = Connection::open_in_memory().expect("in-memory database");
+        for schema in [PROJECT_SCHEMA_V1, PROJECT_SCHEMA_V2, PROJECT_SCHEMA_V3] {
+            connection.execute_batch(schema).expect("earlier schema");
+        }
+        connection
+            .execute(
+                "INSERT INTO godot_runs (id, task_id, status, project_path, started_at)
+                 VALUES ('run-1', NULL, 'completed', '/tmp/project', 1)",
+                [],
+            )
+            .expect("existing run");
+        connection
+            .execute(
+                "INSERT INTO godot_log_events (id, run_id, timestamp, level, source, message)
+                 VALUES ('event-1', 'run-1', 2, 'error', NULL, 'Invalid call')",
+                [],
+            )
+            .expect("existing log event");
+
+        migrate_project(&connection).expect("migrate project");
+
+        let (session_id, message) = connection
+            .query_row(
+                "SELECT session_id, (SELECT message FROM godot_log_events WHERE run_id = runs.id)
+                 FROM godot_runs AS runs WHERE runs.id = 'run-1'",
+                [],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("migrated run");
+        assert!(session_id.is_none(), "a run predating sessions has none");
+        assert_eq!(message, "Invalid call");
+        let indexed = connection
+            .query_row(
+                "SELECT count(*) FROM godot_log_fts WHERE godot_log_fts MATCH 'Invalid'",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .expect("indexed history");
+        assert_eq!(indexed, 1, "the full-text index must survive the migration");
     }
 
     #[test]
@@ -2329,6 +2485,7 @@ mod tests {
         let run = storage
             .start_godot_run(&StartGodotRunRequest {
                 task_id: None,
+                session_id: Some("session-1".to_owned()),
                 godot_version: Some("4.7".to_owned()),
                 metadata: serde_json::json!({"scene": "main.tscn"}),
             })
@@ -2390,6 +2547,38 @@ mod tests {
             )
             .expect("indexed warnings");
         assert_eq!(indexed, 1);
+
+        // The stored history is what survives the editor that produced it, so a search names the
+        // session as well as the run. A phrase the user typed carries FTS5 operators (`:` and `.`)
+        // that would make a bare match expression fail, which is why the needle is quoted.
+        let hits = storage
+            .search_godot_logs(&SearchGodotLogsRequest {
+                query: "Invalid call".to_owned(),
+                limit: None,
+            })
+            .expect("search stored logs");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].run_id, run.id);
+        assert_eq!(hits[0].session_id.as_deref(), Some("session-1"));
+        assert_eq!(hits[0].level, "error");
+        assert!(
+            storage
+                .search_godot_logs(&SearchGodotLogsRequest {
+                    query: "  ".to_owned(),
+                    limit: Some(10),
+                })
+                .is_err()
+        );
+        assert!(
+            storage
+                .search_godot_logs(&SearchGodotLogsRequest {
+                    query: "player.gd:12 OR".to_owned(),
+                    limit: Some(1),
+                })
+                .expect("an operator-looking phrase is a phrase")
+                .is_empty()
+        );
+
         storage
             .finish_godot_run(&FinishGodotRunRequest {
                 run_id: run.id,

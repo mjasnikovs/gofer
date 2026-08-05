@@ -16,6 +16,8 @@ export type GodotSessionState =
     | 'error'
 
 export type GodotSessionSummary = Readonly<{
+    /** Names the editor session; stored run logging is keyed by it. */
+    sessionId: string
     state: GodotSessionState
     rpcAddress: string
     lspPort: number
@@ -152,6 +154,26 @@ export type GodotLogPage = Readonly<{
     cursor: number
     /** Lines the ring buffer discarded. A cursor older than the oldest line resumes silently. */
     dropped: number
+}>
+
+/** A full-text query over the stored warning and error history of every recorded run. */
+export type GodotLogSearchRequest = Readonly<{
+    query: string
+    limit?: number | undefined
+}>
+
+/**
+ * One archived log event. `sessionId` is absent for runs recorded before Gofer managed the editor
+ * session itself, which is how history predating that change stays readable.
+ */
+export type GodotLogSearchHit = Readonly<{
+    runId: string
+    sessionId?: string | undefined
+    taskId?: string | undefined
+    timestamp: number
+    level: string
+    source?: string | undefined
+    message: string
 }>
 
 export type DebugStopped = Readonly<{

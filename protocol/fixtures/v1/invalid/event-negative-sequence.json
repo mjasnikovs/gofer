@@ -1,7 +1,0 @@
-{
-    "protocolVersion": 1,
-    "id": "request-6",
-    "sequence": -1,
-    "event": "text_delta",
-    "data": {"text": "invalid"}
-}

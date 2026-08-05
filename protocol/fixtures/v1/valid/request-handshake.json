@@ -1,6 +1,0 @@
-{
-    "protocolVersion": 1,
-    "id": "request-1",
-    "command": "handshake",
-    "params": {"client": "gofer", "acceptedVersions": [1]}
-}

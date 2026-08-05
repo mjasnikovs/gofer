@@ -17,7 +17,6 @@ mod debug;
 mod files;
 mod gdformat;
 mod git;
-mod godot;
 mod godot_dap;
 mod godot_lsp;
 mod godot_rpc;
@@ -40,13 +39,8 @@ mod godot_runtime_acceptance;
 // Drives one AI turn through the router into that same editor: the step 14 done-criteria.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_ai_acceptance;
-// The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
-// entirely. `test` keeps its loopback and protocol-version coverage in the default suite.
-#[cfg(any(feature = "webdriver", test))]
-mod godot_bridge;
 mod memory;
 mod process;
-pub mod protocol;
 pub mod protocol_v2;
 mod rag;
 mod script;
@@ -54,9 +48,8 @@ mod storage;
 
 use process::{ProcessSpawner, SystemProcessSpawner};
 use storage::{
-    BackupResult, GodotRunRecord, MaintenanceResult, MergeTaskResult, ProjectStorage,
-    SaveMemoryEmbeddingRequest, SearchMemoryRequest, StoredAttachment, StoredChat, TaskRecord,
-    UpsertMemoryRequest,
+    BackupResult, MaintenanceResult, MergeTaskResult, ProjectStorage, SaveMemoryEmbeddingRequest,
+    SearchMemoryRequest, StoredAttachment, StoredChat, TaskRecord, UpsertMemoryRequest,
 };
 
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
@@ -699,36 +692,17 @@ fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, String> 
     Ok(result)
 }
 
-#[tauri::command]
-async fn launch_godot(
-    app: AppHandle,
-    request: godot::LaunchGodotRequest,
-) -> Result<GodotRunRecord, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let storage = project_storage(&app)?;
-        godot::launch(&app, storage, request)
-    })
-    .await
-    .map_err(|error| format!("Godot process task failed: {error}"))?
-}
-
-/// One-shot bridge call used only by the packaged WebDriver journey.
+/// Searches the stored warning and error history of every recorded run.
 ///
-/// The renderer no longer supplies the bridge address: the backend reads it from the environment
-/// the test harness owns, so a compromised renderer cannot aim the transport. The command is
-/// compiled out of release builds entirely, and `gdintigration.md` step 4 retires it once the
-/// authenticated protocol v2 session lands.
-#[cfg(any(feature = "webdriver", test))]
+/// `read_godot_logs` answers from the live session buffer, which holds only what the editor now
+/// running has printed. This reaches the durable index behind it, so output from a session that
+/// has already stopped is still findable.
 #[tauri::command(async)]
-fn send_godot_command(request: serde_json::Value) -> Result<serde_json::Value, String> {
-    let address = std::env::var("GOFER_TEST_GODOT_ADDRESS")
-        .map_err(|_| "The packaged Godot bridge address is not configured".to_owned())?;
-    godot_bridge::send(&address, &request)
-}
-
-#[tauri::command(async)]
-fn cancel_godot() -> Result<(), String> {
-    godot::cancel()
+fn search_godot_log_history(
+    app: AppHandle,
+    request: storage::SearchGodotLogsRequest,
+) -> Result<Vec<storage::GodotLogSearchHit>, String> {
+    project_storage(&app)?.search_godot_logs(&request)
 }
 
 /// Starts a Godot editor session bound to the active task's isolated worktree.
@@ -1172,12 +1146,20 @@ fn configured_app_data_path() -> Result<Option<PathBuf>, String> {
 
 // coverage-critical-start: path
 fn validate_app_data_path(path: PathBuf) -> Result<PathBuf, String> {
+    validate_configured_directory(
+        path,
+        "GOFER_APP_DATA_DIR must be an absolute path without traversal",
+    )
+}
+
+/// One rule for every directory an environment variable may name: absolute, no traversal.
+fn validate_configured_directory(path: PathBuf, message: &str) -> Result<PathBuf, String> {
     if !path.is_absolute()
         || path
             .components()
             .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     {
-        return Err("GOFER_APP_DATA_DIR must be an absolute path without traversal".to_owned());
+        return Err(message.to_owned());
     }
     Ok(path)
 }
@@ -1247,8 +1229,18 @@ fn project_storage<R: Runtime>(app: &AppHandle<R>) -> Result<ProjectStorage, Str
 
 fn open_project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
     let data_root = app_data_path(app)?;
-    let workspace = std::env::current_dir()
-        .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?;
+    // The workspace is normally the directory Gofer was started in. `GOFER_WORKSPACE_DIR` names it
+    // explicitly, which is how the packaged journey points a launched application at a prepared
+    // repository instead of at whatever directory the test runner happened to be in. It is
+    // validated exactly like `GOFER_APP_DATA_DIR`, because both name a directory Gofer will write.
+    let workspace = match std::env::var_os("GOFER_WORKSPACE_DIR") {
+        Some(configured) => validate_configured_directory(
+            PathBuf::from(configured),
+            "GOFER_WORKSPACE_DIR must be an absolute path without traversal",
+        )?,
+        None => std::env::current_dir()
+            .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?,
+    };
     ProjectStorage::open(&data_root, &workspace)
 }
 
@@ -1982,70 +1974,56 @@ pub fn run() {
         Ok(())
     });
 
-    // The command list is written once and the test-only bridge command is appended, so the two
-    // builds cannot drift apart. `generate_handler!` takes a path list, which no attribute can be
-    // applied to, hence the macro instead of a `#[cfg]` on one entry.
-    macro_rules! gofer_commands {
-        ($($test_only:path),*) => {
-            tauri::generate_handler![
-                activate_chat_task,
-                apply_script_rename,
-                call_godot,
-                call_godot_debug,
-                call_script_language,
-                cancel_ai_request,
-                cancel_godot,
-                close_script_document,
-                create_chat_task,
-                create_project_backup,
-                delete_rag_cache,
-                delete_workspace_path,
-                edit_workspace_file,
-                format_gdscript,
-                get_godot_session,
-                get_rag_cache_status,
-                import_legacy_chat,
-                initialize_rag,
-                list_ai_models,
-                list_project_tasks,
-                list_workspace_files,
-                launch_godot,
-                load_chat,
-                load_settings,
-                merge_task_worktree,
-                move_workspace_path,
-                open_script_document,
-                query_godot_docs,
-                read_chat_attachment,
-                read_godot_logs,
-                read_workspace_file,
-                respond_tool_approval,
-                run_storage_maintenance,
-                save_chat,
-                save_script_document,
-                save_settings,
-                save_chat_attachment,
-                send_ai_message,
-                start_godot_session,
-                stop_godot_session,
-                subscribe_godot_events,
-                subscribe_script_diagnostics,
-                test_ai_connection,
-                unsubscribe_godot_events,
-                unsubscribe_script_diagnostics,
-                unwatch_workspace_files,
-                update_script_document,
-                watch_workspace_files,
-                write_workspace_file,
-                $($test_only),*
-            ]
-        };
-    }
-
-    #[cfg(feature = "webdriver")]
-    let builder = builder.invoke_handler(gofer_commands![send_godot_command]);
-    #[cfg(not(feature = "webdriver"))]
-    let builder = builder.invoke_handler(gofer_commands![]);
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        activate_chat_task,
+        apply_script_rename,
+        call_godot,
+        call_godot_debug,
+        call_script_language,
+        cancel_ai_request,
+        close_script_document,
+        create_chat_task,
+        create_project_backup,
+        delete_rag_cache,
+        delete_workspace_path,
+        edit_workspace_file,
+        format_gdscript,
+        get_godot_session,
+        get_rag_cache_status,
+        import_legacy_chat,
+        initialize_rag,
+        list_ai_models,
+        list_project_tasks,
+        list_workspace_files,
+        load_chat,
+        load_settings,
+        merge_task_worktree,
+        move_workspace_path,
+        open_script_document,
+        query_godot_docs,
+        read_chat_attachment,
+        read_godot_logs,
+        read_workspace_file,
+        respond_tool_approval,
+        run_storage_maintenance,
+        save_chat,
+        save_script_document,
+        save_settings,
+        save_chat_attachment,
+        search_godot_log_history,
+        send_ai_message,
+        start_godot_session,
+        stop_godot_session,
+        subscribe_godot_events,
+        subscribe_script_diagnostics,
+        test_ai_connection,
+        unsubscribe_godot_events,
+        unsubscribe_script_diagnostics,
+        unwatch_workspace_files,
+        update_script_document,
+        watch_workspace_files,
+        write_workspace_file,
+    ]);
 
     builder
         .run(tauri::generate_context!())
@@ -2577,73 +2555,6 @@ mod tests {
             response.credential_store_error.as_deref(),
             Some("fake load failure")
         );
-    }
-
-    #[test]
-    fn tauri_mock_runtime_invokes_the_registered_godot_transport_command() {
-        use std::io::{BufRead, BufReader};
-        use tauri::Manager;
-        use tauri::ipc::{CallbackFn, InvokeBody};
-        use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder};
-        use tauri::webview::InvokeRequest;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Godot bridge");
-        let address = listener.local_addr().expect("fake Godot bridge address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept Rust transport");
-            let mut request = String::new();
-            BufReader::new(stream.try_clone().expect("clone stream"))
-                .read_line(&mut request)
-                .expect("read request");
-            let request: serde_json::Value = serde_json::from_str(&request).expect("parse request");
-            writeln!(
-                stream,
-                "{}",
-                serde_json::json!({
-                    "protocolVersion": 1,
-                    "id": request["id"],
-                    "result": {"acceptedVersion": 1}
-                })
-            )
-            .expect("write response");
-        });
-        // The backend owns the address, so the test configures the environment the command reads.
-        // SAFETY: this test owns the process-wide override while it executes.
-        unsafe { std::env::set_var("GOFER_TEST_GODOT_ADDRESS", address.to_string()) };
-        let app = mock_builder()
-            .invoke_handler(tauri::generate_handler![send_godot_command])
-            .build(tauri::generate_context!())
-            .expect("build mock Tauri app");
-        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
-            .build()
-            .expect("build mock webview");
-        assert!(app.get_webview_window("main").is_some());
-        let response = get_ipc_response(
-            &webview,
-            InvokeRequest {
-                cmd: "send_godot_command".into(),
-                callback: CallbackFn(0),
-                error: CallbackFn(1),
-                url: "tauri://localhost".parse().expect("mock URL"),
-                body: InvokeBody::Json(serde_json::json!({
-                    "request": {
-                        "protocolVersion": 1,
-                        "id": "ipc-1",
-                        "command": "handshake",
-                        "params": {}
-                    }
-                })),
-                headers: Default::default(),
-                invoke_key: INVOKE_KEY.to_owned(),
-            },
-        )
-        .expect("invoke registered command")
-        .deserialize::<serde_json::Value>()
-        .expect("deserialize command response");
-        assert_eq!(response["result"]["acceptedVersion"], 1);
-        server.join().expect("fake Godot bridge");
-        // SAFETY: restore the test process environment after the assertion.
-        unsafe { std::env::remove_var("GOFER_TEST_GODOT_ADDRESS") };
     }
 
     #[test]

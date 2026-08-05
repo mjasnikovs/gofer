@@ -1,24 +1,27 @@
 # Gofer protocol
 
-Two wire contracts live here, each shared by Rust, TypeScript, and Godot. The JSON Schemas define
+One wire contract lives here, shared by Rust, TypeScript, and Godot. The JSON Schemas define
 structure; the golden fixtures define observable wire behavior. Readers intentionally allow unknown
 fields, so a version may gain optional fields without breaking older readers.
 
-| Version | Status                                    | Transport                      | Used by                                |
-| ------- | ----------------------------------------- | ------------------------------ | -------------------------------------- |
-| 1       | legacy, retired with `send_godot_command` | one request per TCP connection | the packaged WebDriver fixture bridge  |
-| 2       | current                                   | one persistent TCP session     | the Gofer-managed Godot editor session |
+| Version | Status                            | Transport                      | Used by                                |
+| ------- | --------------------------------- | ------------------------------ | -------------------------------------- |
+| 1       | retired with `send_godot_command` | one request per TCP connection | the packaged WebDriver fixture bridge  |
+| 2       | current                           | one persistent TCP session     | the Gofer-managed Godot editor session |
+
+Version 1 was the one-shot bridge the packaged WebDriver journey used before that journey drove a
+real editor session. Its schemas, fixtures, and implementations were removed with the bridge; the
+row remains so a payload found in an old log can still be identified.
 
 Every receiver validates the protocol version before dispatching anything else. An unsupported
 version produces an `unsupported_protocol_version` error whose details list the versions that
-endpoint accepts. The two endpoints are independent: the v1 one-shot bridge accepts only version 1,
-and the v2 editor session accepts only version 2.
+endpoint accepts.
 
 ## Compatibility matrix
 
 | Gofer release | Accepts | Emits |
 | ------------- | ------- | ----- |
-| 0.1.x         | 1, 2    | 1, 2  |
+| 0.1.x         | 2       | 2     |
 
 Changing a required field, removing a field, changing a field's type or meaning, changing an error
 code, or changing event ordering requires a new protocol version and compatibility fixtures.
@@ -26,29 +29,22 @@ code, or changing event ordering requires a new protocol version and compatibili
 ## Layout
 
 ```
-schemas/v1  schemas/v2   canonical JSON Schemas, one per envelope kind
-fixtures/v1 fixtures/v2  valid/, invalid/, and unsupported/ golden payloads
+schemas/v2   canonical JSON Schemas, one per envelope kind
+fixtures/v2  valid/, invalid/, and unsupported/ golden payloads
 ```
 
 A fixture's file name starts with the kind it exercises (`handshake`, `request`, `response`,
 `event`, `error`, or `value`), which is how every implementation picks the validator to run.
-Fixtures are consumed by tests only: `src-tauri/src/protocol.rs`, `src-tauri/src/protocol_v2.rs`,
-`scripts/protocol.test.mjs`, `src/services/godot-protocol.test.ts`, and
-`fixtures/godot-project/tests/protocol_test.gd`. The Godot test reaches them through
-`res://../../protocol/fixtures`, which resolves for the in-repo fixture project and never for the
-shipped addon.
-
-## Version 1
-
-One newline-delimited JSON request per connection, answered by one response or error envelope.
-Envelopes carry `protocolVersion`, `id`, and the kind-specific fields (`command`/`params`, `result`,
-`sequence`/`event`/`data`, or `error`). The kind is known from context rather than from the payload.
+Fixtures are consumed by tests only: `src-tauri/src/protocol_v2.rs`, `scripts/protocol.test.mjs`,
+`src/services/godot-protocol.test.ts`, and `fixtures/godot-project/tests/protocol_test.gd`. The
+Godot test reaches them through `res://../../protocol/fixtures`, which resolves for the in-repo
+fixture project and never for the shipped addon.
 
 ## Version 2
 
 Version 2 exists because the editor session authenticates, streams events for the lifetime of an
-editor, frames many messages over one connection, and carries lifecycle state that version 1 has no
-place for.
+editor, frames many messages over one connection, and carries lifecycle state that the retired
+one-shot version 1 had no place for.
 
 ### Framing
 

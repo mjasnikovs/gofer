@@ -10,6 +10,7 @@ import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
+import {useDebugSession} from '../../hooks/useDebugSession'
 import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {useGodotSession} from '../../hooks/useGodotSession'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
@@ -106,8 +107,18 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
 
     const isNarrow = useNarrowViewport()
     const scripts = useScriptBuffers({onError})
-    const {call, isBusy, runtimeEpoch, scene, sceneEpoch, session, start, state, stop} =
-        useGodotSession({onError})
+    const {
+        call,
+        ensureReady,
+        isBusy,
+        runtimeEpoch,
+        scene,
+        sceneEpoch,
+        session,
+        start,
+        state,
+        stop
+    } = useGodotSession({onError})
 
     const explorer = useResizable({
         defaultSize: EXPLORER_WIDTH,
@@ -140,6 +151,31 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                 .map(buffer => ({path: buffer.path, lines: buffer.breakpoints})),
         [scripts.buffers]
     )
+
+    const debug = useDebugSession({breakpoints})
+
+    /**
+     * The Run control: ensure the managed editor session, then launch the game through Godot's own
+     * debug adapter.
+     *
+     * It is one action rather than two because running without an editor session is not something
+     * Gofer can do at all — the adapter belongs to the editor. Launching under the debugger is what
+     * makes the breakpoints in Monaco's gutter mean something, so the bottom panel follows the game
+     * to the debugger tab. The Game tab's controls remain the editor's own play buttons, which
+     * capture frames but stop at no breakpoint.
+     */
+    const runProject = useCallback(() => {
+        void (async () => {
+            if (!(await ensureReady())) return
+            setBottomTab('debugger')
+            setIsBottomCollapsed(false)
+            await debug.launch()
+        })()
+    }, [debug, ensureReady])
+
+    const stopProject = useCallback(() => {
+        void debug.terminate()
+    }, [debug])
 
     const openFile = useCallback(
         (path: string) => {
@@ -265,6 +301,13 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                                         />
                                     :   null}
                                     <Button
+                                        label={debug.isLaunched ? 'Stop project' : 'Run project'}
+                                        size='sm'
+                                        variant={debug.isLaunched ? 'ghost' : 'secondary'}
+                                        isDisabled={isBusy || debug.isBusy}
+                                        clickAction={debug.isLaunched ? stopProject : runProject}
+                                    />
+                                    <Button
                                         label={isOffline ? 'Start session' : 'Stop session'}
                                         size='sm'
                                         variant={isOffline ? 'primary' : 'ghost'}
@@ -339,7 +382,7 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                                 call={call}
                                 state={state}
                                 diagnostics={scripts.diagnostics}
-                                breakpoints={breakpoints}
+                                debug={debug}
                                 files={scripts.files}
                                 onOpenLocation={openLocation}
                             />

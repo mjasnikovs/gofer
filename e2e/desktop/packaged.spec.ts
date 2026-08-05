@@ -1,9 +1,22 @@
 import {expect} from '@wdio/globals'
 import {browser} from '@wdio/tauri-service'
-import {readFileSync} from 'node:fs'
+import {existsSync, readFileSync} from 'node:fs'
 import {resolve} from 'node:path'
 
+type SessionSummary = Readonly<{
+    sessionId: string
+    state: string
+    worktree: string
+}>
+
+type CallResponse = Readonly<{
+    id: string
+    result: Record<string, unknown>
+    revision?: number
+}>
+
 let godotRequestId = 1
+let revision = 0
 
 async function waitForReadyWorkspace() {
     await expect(browser.$('body')).toHaveText(expect.stringContaining('Gofer is ready'))
@@ -16,26 +29,75 @@ async function sendMessage(text: string) {
     await browser.keys('Enter')
 }
 
-// The backend resolves the bridge address from GOFER_TEST_GODOT_ADDRESS, so the renderer cannot
-// choose where the transport connects.
-async function sendGodotCommand(command: string, params: Record<string, unknown>) {
-    if (!process.env.GOFER_TEST_GODOT_ADDRESS) {
-        throw new Error('Packaged Godot bridge address is unavailable')
-    }
+/** Invokes one of the application's own commands in the packaged renderer. */
+function command<Response>(name: string, payload: Record<string, unknown>): Promise<Response> {
     return browser.execute(
-        async payload => {
+        async (invoked: string, argument: Record<string, unknown>) => {
             const invoke = window.__TAURI__?.core?.invoke
             if (!invoke) throw new Error('Tauri invoke is unavailable in the packaged renderer')
-            return invoke('send_godot_command', payload)
+            return invoke(invoked, argument)
         },
-        {
-            request: {
-                protocolVersion: 1,
-                id: `packaged-${String(godotRequestId++)}`,
-                command,
-                params
-            }
+        name,
+        payload
+    ) as Promise<Response>
+}
+
+/**
+ * One protocol v2 request to the Gofer addon inside the managed editor.
+ *
+ * This is the renderer's own `call_godot` command, not a test-only transport: the packaged journey
+ * proves the shipped path from the window to the editor rather than a parallel one.
+ */
+async function callGodot(
+    name: string,
+    params: Record<string, unknown>,
+    mutating = false,
+    timeoutMs = 60_000
+) {
+    const response = await command<CallResponse>('call_godot', {
+        request: {
+            id: `packaged-${String(godotRequestId++)}`,
+            command: name,
+            params,
+            ...(mutating && {expectedRevision: revision}),
+            timeoutMs
         }
+    })
+    if (typeof response.revision === 'number') revision = response.revision
+    return response.result
+}
+
+/** The session output the application captured, quoted when the editor never answers. */
+async function sessionOutput() {
+    const page = await command<{entries: {message: string}[]}>('read_godot_logs', {
+        query: {limit: 60}
+    })
+    return page.entries.map(entry => entry.message).join('\n')
+}
+
+/**
+ * Waits for the addon inside the editor to report a ready session.
+ *
+ * Starting a session spawns the editor; the addon connects back only once Godot has imported the
+ * project and enabled the plugin, so readiness is asked of the addon itself rather than inferred
+ * from the process being alive.
+ */
+async function awaitReadySession() {
+    const started = await command<SessionSummary>('start_godot_session', {request: {}})
+    expect(started.sessionId).not.toBe('')
+    let last = 'no reply'
+    for (let attempt = 0; attempt < 480; attempt++) {
+        try {
+            const state = await callGodot('session.get_state', {}, false, 3_000)
+            if (state['state'] === 'ready') return started
+            last = JSON.stringify(state)
+        } catch (error) {
+            last = String(error)
+        }
+        await browser.pause(250)
+    }
+    throw new Error(
+        `The packaged Godot session never became ready: ${last}\n--- session output ---\n${await sessionOutput()}`
     )
 }
 
@@ -45,20 +107,39 @@ describe('packaged desktop application', () => {
         const windows = await browser.tauri.listWindows()
         expect(windows).toContain('main')
 
-        await sendGodotCommand('handshake', {})
-        await sendGodotCommand('open_project', {scene: 'res://main.tscn'})
-        await sendGodotCommand('add_node', {name: 'PackagedNode', type: 'Node2D'})
-        await sendGodotCommand('set_property', {
-            node: 'PackagedNode',
-            property: 'position',
-            value: [12, 34]
-        })
-        await sendGodotCommand('save_scene', {})
-        const godotProject = process.env.GOFER_TEST_GODOT_PROJECT
-        if (!godotProject) throw new Error('Packaged Godot fixture path is unavailable')
-        const savedScene = readFileSync(resolve(godotProject, 'main.tscn'), 'utf8')
+        const session = await awaitReadySession()
+        const settings = await callGodot('project.get_settings', {})
+        expect(settings['projectName']).toBe('Gofer Protocol Fixture')
+
+        const scene = 'res://packaged.tscn'
+        await callGodot('scene.create', {path: scene, rootType: 'Node2D'}, true)
+        await callGodot(
+            'node.create',
+            {scene, parent: '/packaged', name: 'PackagedNode', type: 'Node2D'},
+            true
+        )
+        await callGodot(
+            'node.set_property',
+            {
+                scene,
+                node: '/packaged/PackagedNode',
+                property: 'position',
+                value: {type: 'vector2', value: [12, 34]}
+            },
+            true
+        )
+        // The scene lives in memory until it is explicitly saved, which is what makes the file on
+        // disk evidence that the whole path — window, command, RPC, editor — did the work.
+        await callGodot('scene.save', {}, true)
+
+        const savedScene = readFileSync(resolve(session.worktree, 'packaged.tscn'), 'utf8')
         expect(savedScene).toContain('PackagedNode')
         expect(savedScene).toContain('Vector2(12, 34)')
+
+        await command('stop_godot_session', {})
+        // Stopping removes what the session staged: the addon is Gofer's, the worktree is the
+        // user's, and a stopped session leaves nothing of the former in the latter.
+        expect(existsSync(resolve(session.worktree, 'addons/gofer'))).toBe(false)
 
         const attachmentData = readFileSync(resolve('src-tauri/icons/32x32.png')).toString('base64')
         await browser.execute(encoded => {
@@ -80,11 +161,24 @@ describe('packaged desktop application', () => {
 
         await sendMessage('Cancel this active operation')
         await expect(browser.$('body')).toHaveText(
+            expect.stringContaining('Cancel this active operation')
+        )
+        await expect(browser.$('body')).toHaveText(
             expect.stringContaining('Deterministic response')
         )
         const stopButton = browser.$('button[aria-label*="Stop"]')
         await stopButton.click()
         await expect(browser.$('button*=Retry')).toBeDisplayed()
-        await browser.pause(500)
+
+        // The restart journey asserts this conversation comes back, so the process must not be torn
+        // down until it is durable. Reading the stored chat is what proves that; a pause only hopes.
+        let stored: string[] = []
+        for (let attempt = 0; attempt < 60; attempt++) {
+            const chat = await command<{messages: {text: string}[]}>('load_chat', {})
+            stored = chat.messages.map(message => message.text)
+            if (stored.includes('Cancel this active operation')) break
+            await browser.pause(250)
+        }
+        expect(stored).toContain('Cancel this active operation')
     })
 })

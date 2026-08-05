@@ -200,7 +200,7 @@ describe('SettingsPage', () => {
 })
 
 describe('Workspace', () => {
-    it('disposes a process listener that finishes registering after unmount', async () => {
+    it('disposes a session listener that finishes registering after unmount', async () => {
         const dispose = vi.fn()
         let resolveListen: ((dispose: () => void) => void) | undefined
         tauri.listen.mockImplementation(
@@ -212,7 +212,7 @@ describe('Workspace', () => {
 
         const rendered = render(<Workspace />)
         await waitFor(() => {
-            expect(tauri.listen).toHaveBeenCalledWith('godot-process-event', expect.any(Function))
+            expect(tauri.listen).toHaveBeenCalledWith('godot-session-event', expect.any(Function))
         })
         rendered.unmount()
         resolveListen?.(dispose)

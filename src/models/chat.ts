@@ -97,11 +97,3 @@ export type ToolApprovalSettled = Readonly<{
     approvalId: string
     approved: boolean
 }>
-
-export type GodotProcessEvent = Readonly<{
-    runId: string
-    eventType: 'started' | 'line' | 'finished'
-    level?: 'info' | 'warning' | 'error'
-    message?: string
-    exitCode?: number
-}>

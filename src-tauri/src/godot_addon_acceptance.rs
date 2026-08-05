@@ -647,7 +647,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         assert_eq!(managed["enabled"], true);
         session.call(
             "project.set_autoload",
-            json!({"name": "AcceptanceHelper", "path": "res://tests/bridge.gd"}),
+            json!({"name": "AcceptanceHelper", "path": "res://tests/protocol_test.gd"}),
         );
         assert!(
             session

@@ -13,15 +13,11 @@ import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
-import {useDebugSession} from '../../hooks/useDebugSession'
+import type {DebugSession} from '../../hooks/useDebugSession'
+import {useLogHistory} from '../../hooks/useLogHistory'
 import {useSessionLogs} from '../../hooks/useSessionLogs'
 import {toGodotError} from '../../services/godot-session'
-import type {
-    DebugSourceBreakpoints,
-    GodotError,
-    GodotLogSeverity,
-    GodotSessionState
-} from '../../models/godot'
+import type {GodotError, GodotLogSeverity, GodotSessionState} from '../../models/godot'
 import type {ScriptDiagnostic} from '../../models/script'
 import type {WorkspaceEntry} from '../../models/script'
 import type {GodotCall} from '../../models/workspace'
@@ -37,7 +33,8 @@ type BottomPanelProps = Readonly<{
     call: GodotCall
     state: GodotSessionState
     diagnostics: Readonly<Record<string, readonly ScriptDiagnostic[]>>
-    breakpoints: readonly DebugSourceBreakpoints[]
+    /** Owned by the frame: the Run control launches the very session this panel drives. */
+    debug: DebugSession
     files: readonly WorkspaceEntry[]
     onOpenLocation: (path: string, line: number) => void
 }>
@@ -52,6 +49,8 @@ type Problem = Readonly<{
 const SEVERITY_LABEL = ['', 'Error', 'Warning', 'Information', 'Hint'] as const
 const SEVERITY_VARIANT = ['neutral', 'error', 'warning', 'accent', 'neutral'] as const
 const LOG_SEVERITIES: readonly GodotLogSeverity[] = ['info', 'warning', 'error']
+/** Which output the panel is showing: the running editor's, or every recorded session's. */
+type LogScope = 'session' | 'history'
 
 function problems(diagnostics: Readonly<Record<string, readonly ScriptDiagnostic[]>>): Problem[] {
     return Object.entries(diagnostics)
@@ -86,21 +85,25 @@ export function BottomPanel({
     call,
     state,
     diagnostics,
-    breakpoints,
+    debug,
     files,
     onOpenLocation
 }: BottomPanelProps) {
     const [minSeverity, setMinSeverity] = useState<GodotLogSeverity>('info')
     const [contains, setContains] = useState('')
+    const [scope, setScope] = useState<LogScope>('session')
     const [rescan, setRescan] = useState<GodotError>()
     const [isRescanning, setIsRescanning] = useState(false)
     const isOffline = state === 'offline' || state === 'error'
-    const debug = useDebugSession({breakpoints})
+    const isOutput = !isCollapsed && tab === 'output'
     const logs = useSessionLogs({
-        enabled: !isCollapsed && tab === 'output' && !isOffline,
+        enabled: isOutput && scope === 'session' && !isOffline,
         minSeverity,
         contains
     })
+    // The archive is searched, not followed: it holds the sessions that already stopped, so it
+    // answers a query rather than a filter over what is on screen.
+    const history = useLogHistory({enabled: isOutput && scope === 'history', query: contains})
 
     const listed = useMemo(() => problems(diagnostics), [diagnostics])
     const imported = useMemo(
@@ -450,18 +453,48 @@ export function BottomPanel({
                                         </SegmentedControl>
                                     }
                                     endContent={
-                                        <TextInput
-                                            label='Filter output'
-                                            isLabelHidden
-                                            size='sm'
-                                            placeholder='Filter output'
-                                            value={contains}
-                                            hasClear
-                                            onChange={setContains}
-                                        />
+                                        <HStack
+                                            gap={2}
+                                            align='center'
+                                        >
+                                            <SegmentedControl
+                                                label='Output source'
+                                                size='sm'
+                                                value={scope}
+                                                onChange={value => {
+                                                    setScope(
+                                                        value === 'history' ? 'history' : 'session'
+                                                    )
+                                                }}
+                                            >
+                                                <SegmentedControlItem
+                                                    value='session'
+                                                    label='Session'
+                                                />
+                                                <SegmentedControlItem
+                                                    value='history'
+                                                    label='History'
+                                                />
+                                            </SegmentedControl>
+                                            <TextInput
+                                                label={
+                                                    scope === 'history' ? 'Search recorded output'
+                                                    :   'Filter output'
+                                                }
+                                                isLabelHidden
+                                                size='sm'
+                                                placeholder={
+                                                    scope === 'history' ? 'Search recorded output'
+                                                    :   'Filter output'
+                                                }
+                                                value={contains}
+                                                hasClear
+                                                onChange={setContains}
+                                            />
+                                        </HStack>
                                     }
                                 />
-                                {logs.dropped > 0 ?
+                                {scope === 'session' && logs.dropped > 0 ?
                                     <Banner
                                         container='section'
                                         status='warning'
@@ -469,40 +502,77 @@ export function BottomPanel({
                                         description={`${String(logs.dropped)} line(s) left the session buffer before this panel read them.`}
                                     />
                                 :   null}
-                                <PanelState
-                                    label='session output'
-                                    isLoading={false}
-                                    error={logs.error}
-                                    isEmpty={logs.entries.length === 0}
-                                    emptyTitle='No output'
-                                    emptyDescription='The editor, its importer, the plugin, and the game it launches all print here.'
-                                >
-                                    <VStack
-                                        gap={0}
-                                        paddingBlock={1}
+                                {scope === 'session' ?
+                                    <PanelState
+                                        label='session output'
+                                        isLoading={false}
+                                        error={logs.error}
+                                        isEmpty={logs.entries.length === 0}
+                                        emptyTitle='No output'
+                                        emptyDescription='The editor, its importer, the plugin, and the game it launches all print here.'
                                     >
-                                        {logs.entries.map(entry => (
-                                            <Item
-                                                key={entry.sequence}
-                                                as='div'
-                                                density='compact'
-                                                marker={
-                                                    <StatusDot
-                                                        variant={
-                                                            entry.severity === 'error' ? 'error'
-                                                            : entry.severity === 'warning' ?
-                                                                'warning'
-                                                            :   'neutral'
-                                                        }
-                                                        label={entry.severity}
-                                                    />
-                                                }
-                                                label={entry.message}
-                                                labelLines={2}
-                                            />
-                                        ))}
-                                    </VStack>
-                                </PanelState>
+                                        <VStack
+                                            gap={0}
+                                            paddingBlock={1}
+                                        >
+                                            {logs.entries.map(entry => (
+                                                <Item
+                                                    key={entry.sequence}
+                                                    as='div'
+                                                    density='compact'
+                                                    marker={
+                                                        <StatusDot
+                                                            variant={
+                                                                entry.severity === 'error' ? 'error'
+                                                                : entry.severity === 'warning' ?
+                                                                    'warning'
+                                                                :   'neutral'
+                                                            }
+                                                            label={entry.severity}
+                                                        />
+                                                    }
+                                                    label={entry.message}
+                                                    labelLines={2}
+                                                />
+                                            ))}
+                                        </VStack>
+                                    </PanelState>
+                                :   <PanelState
+                                        label='recorded output'
+                                        isLoading={history.isLoading}
+                                        error={history.error}
+                                        isEmpty={history.hits.length === 0}
+                                        emptyTitle='Nothing found'
+                                        emptyDescription='Search the warnings and errors recorded for every session, including the ones that have already stopped.'
+                                    >
+                                        <VStack
+                                            gap={0}
+                                            paddingBlock={1}
+                                        >
+                                            {history.hits.map(hit => (
+                                                <Item
+                                                    key={`${hit.runId}:${String(hit.timestamp)}:${hit.message}`}
+                                                    as='div'
+                                                    density='compact'
+                                                    marker={
+                                                        <StatusDot
+                                                            variant={
+                                                                hit.level === 'error' ?
+                                                                    'error'
+                                                                :   'warning'
+                                                            }
+                                                            label={hit.level}
+                                                        />
+                                                    }
+                                                    label={hit.message}
+                                                    labelLines={2}
+                                                    description={`${new Date(hit.timestamp).toLocaleString()} · session ${hit.sessionId ?? 'before managed sessions'}`}
+                                                    descriptionLines={1}
+                                                />
+                                            ))}
+                                        </VStack>
+                                    </PanelState>
+                                }
                             </VStack>
                         )}
                         {tab === 'import' && (

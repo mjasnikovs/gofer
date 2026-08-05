@@ -650,7 +650,15 @@ mod tests {
         let response = format_source(&spawner, &binary(), source).expect("format");
         assert!(response.changed);
         assert_eq!(response.formatted, formatted);
-        // The formatter saw exactly the buffer through stdin and nothing else.
+        // The formatter saw exactly the buffer through stdin and nothing else. The write rides its
+        // own thread — a formatter that exits early must not block the caller — so the assertion
+        // waits for it rather than racing a scheduler under load.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && written.lock().expect("written lock").len() < source.len()
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
         assert_eq!(
             written.lock().expect("written lock").as_slice(),
             source.as_bytes()

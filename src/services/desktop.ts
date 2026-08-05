@@ -24,7 +24,6 @@ import type {
 import type {
     AiStreamPayload,
     ChatAttachment,
-    GodotProcessEvent,
     Message,
     StoredChat,
     ToolApprovalPrompt,
@@ -47,6 +46,8 @@ import type {
     DocsResponse,
     GodotLogPage,
     GodotLogQuery,
+    GodotLogSearchHit,
+    GodotLogSearchRequest,
     GodotSessionEvent,
     GodotSessionSummary,
     StartGodotSessionRequest
@@ -71,20 +72,7 @@ type AttachmentUpload = Readonly<{
     data: string
 }>
 
-type LaunchGodotRequest = Readonly<{
-    taskId?: string | undefined
-    editor: boolean
-    scene?: string
-}>
-
 type BackupResult = Readonly<{path: string}>
-
-type ProtocolRequest = Readonly<{
-    protocolVersion: number
-    id: string
-    command: string
-    params: Readonly<Record<string, unknown>>
-}>
 
 type ToolApprovalRequest = Readonly<{
     approvalId: string
@@ -127,7 +115,6 @@ type DesktopCommandMap = Readonly<{
     call_godot_debug: CommandSpec<{request: DebugRequest}, DebugResponse>
     call_script_language: CommandSpec<{request: ScriptRequest}, ScriptResponse>
     cancel_ai_request: CommandSpec<{requestId: number}, boolean>
-    cancel_godot: CommandSpec<undefined, void>
     close_script_document: CommandSpec<{request: OpenScriptRequest}, void>
     create_chat_task: CommandSpec<undefined, StoredChat>
     create_project_backup: CommandSpec<undefined, BackupResult>
@@ -139,7 +126,6 @@ type DesktopCommandMap = Readonly<{
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>
     initialize_rag: CommandSpec<undefined, void>
-    launch_godot: CommandSpec<{request: LaunchGodotRequest}, void>
     list_ai_models: CommandSpec<{request: SettingsRequest}, readonly AiModelOption[]>
     list_project_tasks: CommandSpec<undefined, readonly TaskSummary[]>
     list_workspace_files: CommandSpec<undefined, readonly WorkspaceEntry[]>
@@ -158,8 +144,10 @@ type DesktopCommandMap = Readonly<{
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
     save_script_document: CommandSpec<{request: SaveScriptRequest}, ScriptStamp>
     save_settings: CommandSpec<{request: SettingsRequest}, SettingsResponse>
-    // Only registered in WebDriver builds; the backend owns the bridge address.
-    send_godot_command: CommandSpec<{request: ProtocolRequest}, unknown>
+    search_godot_log_history: CommandSpec<
+        {request: GodotLogSearchRequest},
+        readonly GodotLogSearchHit[]
+    >
     send_ai_message: CommandSpec<{request: SendAiMessageRequest}, void>
     start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionSummary>
     stop_godot_session: CommandSpec<undefined, void>
@@ -180,7 +168,6 @@ type DesktopEventMap = Readonly<{
     'ai-stream-event': AiStreamPayload
     'ai-approval-request': ToolApprovalPrompt
     'ai-approval-settled': ToolApprovalSettled
-    'godot-process-event': GodotProcessEvent
     'godot-session-event': GodotSessionEvent
     'rag-download-progress': DownloadProgress
 }>

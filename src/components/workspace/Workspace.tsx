@@ -11,7 +11,6 @@ import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
 import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useChatPersistence} from '../../hooks/useChatPersistence'
-import {useGodotProcess} from '../../hooks/useGodotProcess'
 import {useToolApprovals} from '../../hooks/useToolApprovals'
 import {ChatConversation} from './ChatConversation'
 import {InspectorWorkspace} from './InspectorWorkspace'
@@ -68,11 +67,6 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     const {settings, models, connectionState, connect, applyModel, applyThinkingLevel} =
         useAiConnection({onError: reportError, onConnected: clearError})
     const {approvals, respond: respondToApproval} = useToolApprovals({onError: reportError})
-    const {isGodotRunning, runGodot, stopGodot} = useGodotProcess({
-        taskId,
-        onError: reportError,
-        onStart: clearError
-    })
 
     const chatScroll = useChatStreamScroll({
         scrollRef: messageScrollRef,
@@ -430,13 +424,10 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         >
             <WorkspaceHeader
                 connectionState={connectionState}
-                isGodotRunning={isGodotRunning}
                 onConnect={connect}
                 onMergeTask={() => {
                     void mergeTask()
                 }}
-                onRunGodot={runGodot}
-                onStopGodot={stopGodot}
                 {...(activeTask && {activeTask})}
             />
             <Divider />

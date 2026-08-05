@@ -1,8 +1,6 @@
 import type {Options} from '@wdio/types'
 import {cpSync, existsSync, mkdtempSync, mkdirSync, writeFileSync} from 'node:fs'
-import {spawn} from 'node:child_process'
-import type {ChildProcessWithoutNullStreams} from 'node:child_process'
-import {createServer} from 'node:http'
+import {spawnSync} from 'node:child_process'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
@@ -13,62 +11,45 @@ const executable =
 const fixtureRoot =
     process.env.GOFER_PACKAGED_FIXTURE_ROOT ?? mkdtempSync(join(tmpdir(), 'gofer-wdio-'))
 const appDataDir = join(fixtureRoot, 'data')
+const workspace = join(fixtureRoot, 'workspace')
 process.env.GOFER_APP_DATA_DIR = appDataDir
 process.env.GOFER_RAG_CACHE_DIR = join(fixtureRoot, 'cache')
 process.env.GOFER_WEBDRIVER_RAG_READY = '1'
 process.env.GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE = '1'
 process.env.GOFER_AI_WORKER = resolve('fixtures/packaged/fake-ai-worker.mjs')
+// The journey drives a real Godot editor session over protocol v2, so the application needs a
+// workspace it can create a task worktree in, and an editor it can launch without a display.
+process.env.GOFER_WORKSPACE_DIR = workspace
+process.env.GOFER_GODOT_HEADLESS = '1'
 
-let godotBridge: ChildProcessWithoutNullStreams | undefined
+function git(...arguments_: string[]) {
+    const result = spawnSync('git', ['-C', workspace, ...arguments_], {encoding: 'utf8'})
+    if (result.status !== 0) {
+        throw new Error(`git ${arguments_.join(' ')} failed: ${result.stderr || result.stdout}`)
+    }
+}
 
-async function startGodotBridge() {
-    const binary = process.env.GOFER_GODOT_BINARY
-    if (!binary) throw new Error('GOFER_GODOT_BINARY is required for the packaged journey')
-    const project = join(fixtureRoot, 'godot-project')
-    cpSync(resolve('fixtures/godot-project'), project, {recursive: true})
-    const probe = createServer()
-    await new Promise<void>((resolveListen, reject) => {
-        probe.once('error', reject)
-        probe.listen(0, '127.0.0.1', resolveListen)
-    })
-    const address = probe.address()
-    if (!address || typeof address === 'string') throw new Error('Godot bridge probe has no port')
-    await new Promise<void>(resolveClose =>
-        probe.close(() => {
-            resolveClose()
-        })
-    )
-    const port = address.port
-    const bridge = spawn(
-        binary,
-        [
-            '--headless',
-            '--path',
-            project,
-            '--script',
-            'res://tests/bridge.gd',
-            '--',
-            `--port=${String(port)}`
-        ],
-        {stdio: 'pipe'}
-    )
-    godotBridge = bridge
-    await new Promise<void>((resolveReady, reject) => {
-        const timeout = setTimeout(() => {
-            reject(new Error('Godot bridge did not become ready'))
-        }, 15_000)
-        bridge.once('error', reject)
-        bridge.once('exit', code => {
-            reject(new Error(`Godot bridge exited with ${String(code)}`))
-        })
-        bridge.stdout.on('data', chunk => {
-            if (!String(chunk).includes('GOFER_BRIDGE_READY:')) return
-            clearTimeout(timeout)
-            resolveReady()
-        })
-    })
-    process.env.GOFER_TEST_GODOT_ADDRESS = `127.0.0.1:${String(port)}`
-    process.env.GOFER_TEST_GODOT_PROJECT = project
+/**
+ * Prepares the repository the packaged application manages.
+ *
+ * Gofer binds every editor session to the active task's isolated worktree, and a task only gets a
+ * worktree inside a Git repository with a commit, so the fixture project is committed here rather
+ * than merely copied.
+ */
+function prepareWorkspace() {
+    if (!process.env.GOFER_GODOT_BINARY) {
+        throw new Error('GOFER_GODOT_BINARY is required for the packaged journey')
+    }
+    // The restart journey runs a second application process against the same fixture root, and it
+    // must find the repository the first one worked in rather than a fresh one.
+    if (existsSync(join(workspace, '.git'))) return
+    mkdirSync(workspace, {recursive: true})
+    cpSync(resolve('fixtures/godot-project'), workspace, {recursive: true})
+    git('init', '--quiet', '--initial-branch', 'main')
+    git('config', 'user.email', 'packaged@gofer.test')
+    git('config', 'user.name', 'Gofer packaged journey')
+    git('add', '--all')
+    git('commit', '--quiet', '--message', 'Godot fixture project')
 }
 
 export const config: Options.Testrunner = {
@@ -95,9 +76,11 @@ export const config: Options.Testrunner = {
     connectionRetryCount: 0,
     framework: 'mocha',
     reporters: ['spec'],
-    mochaOpts: {ui: 'bdd', timeout: 60_000},
-    onPrepare: async () => {
-        await startGodotBridge()
+    // A real editor session imports the project before the addon can answer, which is slower than
+    // anything else in this suite.
+    mochaOpts: {ui: 'bdd', timeout: 240_000},
+    onPrepare: () => {
+        prepareWorkspace()
         const modelBaseUrl = process.env.GOFER_PACKAGED_MODEL_BASE_URL
         if (!modelBaseUrl) throw new Error('GOFER_PACKAGED_MODEL_BASE_URL is required')
         mkdirSync(appDataDir, {recursive: true})
@@ -130,8 +113,5 @@ export const config: Options.Testrunner = {
                     4
                 )}\n`
             )
-    },
-    onComplete: async () => {
-        godotBridge?.kill()
     }
 }

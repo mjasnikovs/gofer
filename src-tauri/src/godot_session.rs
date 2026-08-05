@@ -26,8 +26,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const REQUIRED_ENGINE_VERSION: &str = "4.7.1";
 pub const REQUIRED_CHANNEL: &str = "stable";
 const PORT_RETRIES: usize = 3;
-const EDITOR_SETTINGS_FILE_NAME: &str = "editor_settings-4.tres";
+/// Godot 4.7 writes a per-minor-version settings file; older 4.x builds wrote the unversioned one.
+const EDITOR_SETTINGS_FILE_NAMES: [&str; 2] =
+    ["editor_settings-4.7.tres", "editor_settings-4.tres"];
+/// The configuration directory Godot uses, whose case differs by platform.
+const EDITOR_SETTINGS_DIRECTORIES: [&str; 2] = ["godot", "Godot"];
 const LSP_REMOTE_HOST_KEY: &str = "language_server/remote_host";
+/// Godot's own default for that setting.
+const DEFAULT_LSP_REMOTE_HOST: &str = "127.0.0.1";
 /// How many log lines the session keeps. A long import prints thousands, so the buffer is bounded
 /// and reports how many lines it dropped rather than growing without limit.
 const MAX_LOG_ENTRIES: usize = 4_000;
@@ -99,6 +105,9 @@ pub struct LaunchRequest {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInfo {
+    /// Identifies this editor session for as long as it lives. Stored run logging is keyed by it,
+    /// so output that reached the buffer can still be found once the editor is gone.
+    pub session_id: String,
     pub state: SessionState,
     pub rpc_address: String,
     pub lsp_port: u16,
@@ -248,6 +257,7 @@ impl LogBuffer {
 }
 
 pub struct GodotSession {
+    session_id: String,
     state: SessionState,
     rpc_address: String,
     lsp_port: u16,
@@ -353,6 +363,13 @@ fn start_with(
     if cfg!(target_os = "macos") {
         arguments.insert(0, OsString::from("--single-window"));
     }
+    // The packaged journey drives a real editor on machines that have no display. The flag exists
+    // only in the WebDriver build, so a shipped Gofer can never start an editor the user cannot
+    // see, and the journey never needs a second, differently-launched code path.
+    #[cfg(feature = "webdriver")]
+    if std::env::var_os("GOFER_GODOT_HEADLESS").is_some() {
+        arguments.insert(0, OsString::from("--headless"));
+    }
 
     let mut child = spawner
         .spawn_with_env(
@@ -396,6 +413,7 @@ fn start_with(
     let project_path = worktree.display().to_string();
     let rpc = godot_rpc::RpcSession::start(rpc_listener, token.clone(), project_path);
     let session = GodotSession {
+        session_id: uuid::Uuid::now_v7().to_string(),
         state: SessionState::Starting,
         rpc_address,
         lsp_port,
@@ -542,6 +560,11 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
+/// Serializes every test that touches the process-wide session state or log buffer, including the
+/// ones in [`crate::godot_session_api`] that drain that buffer into storage.
+#[cfg(test)]
+pub(crate) static SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Stops the active session by killing the Godot child process.
 pub fn stop() -> Result<(), SessionError> {
     let active = ACTIVE_SESSION
@@ -583,11 +606,16 @@ fn verify_version(spawner: &impl ProcessSpawner, binary: &str) -> Result<String,
     Ok(output)
 }
 
+/// Accepts exactly one engine: 4.7.1-stable.
+///
+/// `--version` answers `4.7.1.stable` for a build made from source and
+/// `4.7.1.stable.official.<hash>` for a release, so the required version and channel are matched as
+/// a prefix and the build metadata behind them is ignored. Requiring the whole string to equal
+/// `4.7.1.stable` would reject every published release — which is every editor a user actually has.
 fn is_supported_version(version: &str) -> bool {
-    let Some((numbers, channel)) = version.rsplit_once('.') else {
-        return false;
-    };
-    numbers == REQUIRED_ENGINE_VERSION && channel == REQUIRED_CHANNEL
+    let version = version.trim();
+    let required = format!("{REQUIRED_ENGINE_VERSION}.{REQUIRED_CHANNEL}");
+    version == required || version.starts_with(&format!("{required}."))
 }
 // coverage-critical-end: version
 
@@ -708,6 +736,7 @@ fn generate_token() -> String {
 
 fn session_info(session: &GodotSession) -> SessionInfo {
     SessionInfo {
+        session_id: session.session_id.clone(),
         state: session.state,
         rpc_address: session.rpc_address.clone(),
         lsp_port: session.lsp_port,
@@ -717,12 +746,21 @@ fn session_info(session: &GodotSession) -> SessionInfo {
     }
 }
 
-fn editor_settings_path() -> Result<PathBuf, SessionError> {
+/// Finds the machine-wide editor settings file, if the user has one.
+///
+/// Godot writes one file per minor version (`editor_settings-4.7.tres`) and used an unversioned
+/// name before that, under a configuration directory whose case differs by platform — `godot` on
+/// Linux, `Godot` on Windows and macOS. Every candidate is tried rather than one assumed, and an
+/// editor that has never been opened simply has no file: that is `Ok(None)`, not a failure, because
+/// the setting Gofer reads then holds its engine default.
+fn editor_settings_path() -> Result<Option<PathBuf>, SessionError> {
     if let Ok(path) = std::env::var("GOFER_GODOT_EDITOR_SETTINGS") {
         let path = PathBuf::from(path);
         if path.is_file() {
-            return Ok(path);
+            return Ok(Some(path));
         }
+        // An explicit override that names nothing is a mistake worth reporting, unlike a machine
+        // that simply has no settings file yet.
         return Err(SessionError::new(
             "editor_settings_missing",
             format!(
@@ -732,41 +770,38 @@ fn editor_settings_path() -> Result<PathBuf, SessionError> {
         ));
     }
 
-    let config_root = dirs::config_dir().ok_or_else(|| {
-        SessionError::new(
-            "config_dir_unavailable",
-            "Could not resolve the user configuration directory",
-        )
-    })?;
-    let path = config_root.join("Godot").join(EDITOR_SETTINGS_FILE_NAME);
-    if path.is_file() {
-        return Ok(path);
+    let mut roots = Vec::new();
+    if let Some(config_root) = dirs::config_dir() {
+        for directory in EDITOR_SETTINGS_DIRECTORIES {
+            roots.push(config_root.join(directory));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join("Library/Application Support/Godot"));
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        let path = dirs::home_dir()
-            .ok_or_else(|| {
-                SessionError::new(
-                    "home_dir_unavailable",
-                    "Could not resolve the home directory",
-                )
-            })?
-            .join("Library/Application Support/Godot")
-            .join(EDITOR_SETTINGS_FILE_NAME);
-        if path.is_file() {
-            return Ok(path);
+    for root in roots {
+        for name in EDITOR_SETTINGS_FILE_NAMES {
+            let path = root.join(name);
+            if path.is_file() {
+                return Ok(Some(path));
+            }
         }
     }
 
-    Err(SessionError::new(
-        "editor_settings_missing",
-        "Godot editor settings could not be found. Set GOFER_GODOT_EDITOR_SETTINGS.",
-    ))
+    Ok(None)
 }
 
+/// Reads the machine-wide LSP remote host the editor will bind.
+///
+/// `--lsp-port` overrides the port alone, so this is the setting that decides whether the language
+/// server listens on loopback. Godot's own default is `127.0.0.1`, which is what an editor with no
+/// settings file yet — and one whose settings never mention the key — will use.
 fn read_lsp_remote_host() -> Result<String, SessionError> {
-    let path = editor_settings_path()?;
+    let Some(path) = editor_settings_path()? else {
+        return Ok(DEFAULT_LSP_REMOTE_HOST.to_owned());
+    };
     let text = fs::read_to_string(&path).map_err(|error| {
         SessionError::new(
             "editor_settings_unreadable",
@@ -774,7 +809,7 @@ fn read_lsp_remote_host() -> Result<String, SessionError> {
         )
         .retryable()
     })?;
-    Ok(parse_lsp_remote_host(&text).unwrap_or_else(|| "127.0.0.1".to_owned()))
+    Ok(parse_lsp_remote_host(&text).unwrap_or_else(|| DEFAULT_LSP_REMOTE_HOST.to_owned()))
 }
 
 fn parse_lsp_remote_host(text: &str) -> Option<String> {
@@ -783,7 +818,10 @@ fn parse_lsp_remote_host(text: &str) -> Option<String> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if key.trim() != LSP_REMOTE_HOST_KEY {
+        // A real settings file writes the fully qualified `network/language_server/remote_host`
+        // with spaces around the separator; the suffix match accepts both that and the bare key,
+        // and `network/debug/remote_host` cannot collide with it.
+        if !key.trim().ends_with(LSP_REMOTE_HOST_KEY) {
             continue;
         }
         let value = value.trim();
@@ -804,8 +842,6 @@ mod tests {
     use std::io::{self, Cursor};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
-
-    static SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct FakeSpawner {
         version_output: String,
@@ -921,10 +957,11 @@ mod tests {
 
     fn settings_file_with(host: &str) -> (TempDir, PathBuf) {
         let directory = TempDir::new().expect("temporary settings dir");
-        let path = directory.path().join(EDITOR_SETTINGS_FILE_NAME);
+        let path = directory.path().join(EDITOR_SETTINGS_FILE_NAMES[0]);
+        // Written the way a real editor writes it: fully qualified key, spaces around the equals.
         fs::write(
             &path,
-            format!("[network]\n\n{LSP_REMOTE_HOST_KEY}=\"{host}\"\n"),
+            format!("[network]\n\nnetwork/{LSP_REMOTE_HOST_KEY} = \"{host}\"\n"),
         )
         .expect("write editor settings");
         (directory, path)
@@ -933,9 +970,13 @@ mod tests {
     #[test]
     fn supported_version_matches_exact_release() {
         assert!(is_supported_version("4.7.1.stable"));
+        // What a published release actually reports; rejecting it would reject every real editor.
+        assert!(is_supported_version("4.7.1.stable.official"));
+        assert!(is_supported_version("4.7.1.stable.official.a13da4feb"));
         assert!(!is_supported_version("4.7.1.dev"));
         assert!(!is_supported_version("4.7.0.stable"));
-        assert!(!is_supported_version("4.7.1.stable.official"));
+        assert!(!is_supported_version("4.7.1.stablish.official"));
+        assert!(!is_supported_version("4.7.10.stable"));
         assert!(!is_supported_version("4.7.1"));
         assert!(!is_supported_version(""));
     }
@@ -959,10 +1000,46 @@ mod tests {
             parse_lsp_remote_host("language_server/remote_host=\"::1\""),
             Some("::1".to_owned())
         );
+        // What Godot 4.7 actually writes: fully qualified, spaced, and next to a sibling key that
+        // must not be mistaken for it.
+        assert_eq!(
+            parse_lsp_remote_host(
+                "[network]\n\nnetwork/debug/remote_host = \"10.0.0.5\"\nnetwork/language_server/remote_host = \"127.0.0.1\"\n"
+            ),
+            Some("127.0.0.1".to_owned())
+        );
         assert_eq!(
             parse_lsp_remote_host("[network]\n\nother_setting=\"x\"\n"),
             None
         );
+    }
+
+    /// An editor that has never been opened has no settings file, and Gofer must start against it:
+    /// the setting it reads then holds the engine's own loopback default. An override that names
+    /// nothing is the one case worth refusing, because someone asked for a specific file.
+    #[test]
+    fn missing_editor_settings_fall_back_to_the_engine_default_host() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        let (directory, path) = settings_file_with("::1");
+        // SAFETY: the session test lock serializes the process-wide override.
+        unsafe { std::env::set_var("GOFER_GODOT_EDITOR_SETTINGS", &path) };
+        assert_eq!(read_lsp_remote_host().expect("configured host"), "::1");
+
+        let missing = directory.path().join("absent.tres");
+        // SAFETY: still holding the test lock.
+        unsafe { std::env::set_var("GOFER_GODOT_EDITOR_SETTINGS", &missing) };
+        assert_eq!(
+            read_lsp_remote_host()
+                .expect_err("a named file must exist")
+                .code,
+            "editor_settings_missing"
+        );
+
+        // SAFETY: restore the process environment while still holding the test lock.
+        unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
+        // Whatever this machine has — a real settings file or none at all — the answer is a host,
+        // never a failure.
+        assert!(!read_lsp_remote_host().expect("discovered host").is_empty());
     }
 
     #[test]

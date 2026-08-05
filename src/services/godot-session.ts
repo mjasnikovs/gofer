@@ -9,6 +9,8 @@ import type {
     GodotError,
     GodotLogPage,
     GodotLogQuery,
+    GodotLogSearchHit,
+    GodotLogSearchRequest,
     GodotSessionEvent,
     GodotSessionSummary
 } from '../models/godot'
@@ -57,6 +59,18 @@ export function callGodotDebug(request: DebugRequest): Promise<DebugResponse> {
 
 export function readGodotLogs(query: GodotLogQuery): Promise<GodotLogPage> {
     return invoke('read_godot_logs', {query})
+}
+
+/**
+ * Searches the stored history instead of the live buffer.
+ *
+ * `readGodotLogs` answers from the session that is running now; this reaches the archive behind it,
+ * so a warning from a session that has already stopped is still findable.
+ */
+export function searchGodotLogHistory(
+    request: GodotLogSearchRequest
+): Promise<readonly GodotLogSearchHit[]> {
+    return invoke('search_godot_log_history', {request})
 }
 
 export function queryGodotDocs(query: DocsQuery): Promise<DocsResponse> {

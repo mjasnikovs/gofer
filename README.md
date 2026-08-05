@@ -1,8 +1,9 @@
 # Gofer
 
 Gofer is a Tauri desktop workspace for an AI agent that operates Godot 4.7 on a user's behalf. It
-launches projects in the active task's isolated Git worktree, streams process output into the UI,
-and persists compressed run logs.
+runs one managed Godot editor session bound to the active task's isolated Git worktree, launches the
+game through that editor's own debug adapter, streams editor output into the UI, and persists
+compressed run logs.
 
 ## Stack
 
@@ -81,10 +82,13 @@ worktree with its branch, base, head, and merge commits recorded. Creating a tas
 other tasks; selecting one changes only the project's current task pointer. The task merge action
 commits pending task changes and creates a merge commit on a clean main worktree.
 
-Godot runs are tied to tasks. Raw log batches are written as project-scoped `.jsonl.zst` segments,
-while warning and error records are indexed with SQLite FTS5. The index is maintained but not yet
-queried: the Logs panel that reads it arrives with the Godot editor integration. Normal
-informational output therefore does not cause unbounded growth in the relational tables.
+Godot runs are tied to tasks and to the editor session that produced them. The managed session opens
+a run when the editor starts and closes it when the editor stops, draining its output buffer into
+project-scoped `.jsonl.zst` segments while warning and error records are indexed with SQLite FTS5.
+The Output panel's History search reads that index, so a warning from a session that has already
+stopped is still findable; runs recorded before Gofer managed the editor keep their segments and
+their index rows and simply name no session. Normal informational output therefore does not cause
+unbounded growth in the relational tables.
 
 Project memory is canonical SQLite data with explicit project/task scope, kind, lifecycle state,
 provenance, and supersession. FTS5 provides exact retrieval. Normalized 1,024-dimensional Qwen3
@@ -115,6 +119,14 @@ beforehand, and it is written before the worktree is touched, so a crashed sessi
 Cleanup removes only Gofer's own entries: a plugin enabled or an autoload added while the session
 ran survives, and an `addons/gofer` that Gofer did not install is refused rather than overwritten.
 The editor session that stages and stops the addon arrives with the session supervisor.
+
+## Third-party notices
+
+`THIRD-PARTY-NOTICES.md` records what reaches a user's machine through Gofer's own files rather than
+through a package manager: the MIT-licensed godot-ai patterns the editor addon adapts, the Godot
+documentation and source the transports were written against, Monaco, and the pinned `gdformat`
+sidecar. Dependencies installed by npm and Cargo carry their licences in `package-lock.json` and
+`src-tauri/Cargo.lock`.
 
 ## Quality gates
 

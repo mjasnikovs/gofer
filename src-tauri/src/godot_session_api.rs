@@ -8,11 +8,16 @@ use crate::addon::AddonStager;
 use crate::approvals::ApprovalError;
 use crate::files::Workspace;
 use crate::godot_rpc::{CallRequest as RpcCallRequest, EventEnvelope, ResponseEnvelope, RpcError};
-use crate::godot_session::{self, LaunchRequest, SessionError, SessionInfo, SessionState};
-use crate::storage::ProjectStorage;
+use crate::godot_session::{
+    self, LaunchRequest, LogQuery, LogSeverity, SessionError, SessionInfo, SessionState,
+};
+use crate::storage::{
+    AppendGodotLogsRequest, FinishGodotRunRequest, GodotLogEntry, ProjectStorage,
+    StartGodotRunRequest,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::path::PathBuf;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -21,6 +26,12 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const LEDGER_FILE_NAME: &str = "godot-addon-ledger.json";
 const EVENT_FORWARD_INTERVAL_MS: u64 = 50;
+/// How often buffered session output is written to durable storage. The session buffer is bounded,
+/// so a long import can push lines out of it; flushing on a timer is what keeps them.
+const LOG_FLUSH_INTERVAL_MS: u64 = 1_000;
+/// How many buffered lines one storage segment carries.
+const LOG_FLUSH_BATCH: usize = 500;
+const LOG_TICK: Duration = Duration::from_millis(50);
 
 /// An empty request body for commands that need no parameters.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -31,6 +42,9 @@ pub struct StartGodotSessionRequest {}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GodotSessionResponse {
+    /// Names this editor session. Stored run logging is keyed by it, so the renderer can tell
+    /// output from the running editor apart from output the archive kept.
+    pub session_id: String,
     pub state: SessionState,
     pub rpc_address: String,
     pub lsp_port: u16,
@@ -100,6 +114,22 @@ impl EventSubscription {
 
 static EVENT_SUBSCRIPTION: Mutex<Option<EventSubscription>> = Mutex::new(None);
 
+/// The stored run one editor session is writing its output into.
+///
+/// Run logging used to belong to the standalone Godot process Gofer launched from the Run button.
+/// That process is gone, so the managed session owns it: a run row is opened when the editor
+/// starts, carries the session identifier, and is closed when the session stops. Everything already
+/// recorded keeps its segments and its full-text rows — a run without a session is simply one that
+/// predates the managed editor.
+struct RunLogger {
+    run_id: String,
+    storage: ProjectStorage,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
+}
+
+static RUN_LOGGER: Mutex<Option<RunLogger>> = Mutex::new(None);
+
 /// Starts a Godot editor session bound to the active task's worktree.
 pub fn start_session<R: Runtime>(
     app: &AppHandle<R>,
@@ -133,12 +163,145 @@ pub fn start_session<R: Runtime>(
     match godot_session::start(LaunchRequest {
         worktree: worktree.clone(),
     }) {
-        Ok(info) => Ok(to_response(&info)),
+        Ok(info) => {
+            start_run_logging(&storage, &info, &worktree);
+            Ok(to_response(&info))
+        }
         Err(error) => {
             let _ = stager.unstage(&worktree);
             Err(error)
         }
     }
+}
+
+/// Opens the stored run for a session and starts draining the session buffer into it.
+///
+/// A failure here never fails the session: the editor is running and usable without a log archive.
+/// It is reported into the session buffer instead, which is where the user is already looking for
+/// what the editor is doing.
+fn start_run_logging(storage: &ProjectStorage, info: &SessionInfo, worktree: &Path) {
+    stop_run_logging("aborted");
+    let run = match storage.start_godot_run_in(
+        &StartGodotRunRequest {
+            task_id: None,
+            session_id: Some(info.session_id.clone()),
+            godot_version: Some(info.godot_version.clone()),
+            metadata: json!({
+                "rpcAddress": info.rpc_address,
+                "lspPort": info.lsp_port,
+                "dapPort": info.dap_port,
+            }),
+        },
+        worktree,
+    ) {
+        Ok(run) => run,
+        Err(error) => {
+            godot_session::append_log(
+                godot_session::LogSource::EditorError,
+                &format!("ERROR: Gofer could not record this session's run: {error}"),
+            );
+            return;
+        }
+    };
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let sink = storage.clone();
+    let run_id = run.id.clone();
+    let worker = thread::spawn(move || {
+        let mut cursor = 0_u64;
+        let mut waited = Duration::ZERO;
+        // The wait is ticked rather than slept through, so stopping a session does not sit out a
+        // whole flush interval before its final drain.
+        while !flag.load(Ordering::Acquire) {
+            thread::sleep(LOG_TICK);
+            waited += LOG_TICK;
+            if waited < Duration::from_millis(LOG_FLUSH_INTERVAL_MS) {
+                continue;
+            }
+            waited = Duration::ZERO;
+            flush_logs(&sink, &run_id, &mut cursor);
+        }
+        // The lines that explain a crash arrive last, so the final drain happens after the stop.
+        flush_logs(&sink, &run_id, &mut cursor);
+    });
+
+    if let Ok(mut slot) = RUN_LOGGER.lock() {
+        *slot = Some(RunLogger {
+            run_id: run.id,
+            storage: storage.clone(),
+            stop,
+            worker: Some(worker),
+        });
+    }
+}
+
+/// Writes every buffered line after `cursor` into the run, in storage-sized batches.
+///
+/// Blank lines are dropped rather than sent: storage refuses an empty message, and one blank line
+/// from the engine would otherwise lose the whole batch around it.
+fn flush_logs(storage: &ProjectStorage, run_id: &str, cursor: &mut u64) {
+    loop {
+        let Ok(page) = godot_session::read_logs(&LogQuery {
+            after: Some(*cursor),
+            limit: Some(LOG_FLUSH_BATCH),
+            ..LogQuery::default()
+        }) else {
+            return;
+        };
+        if page.entries.is_empty() {
+            return;
+        }
+        *cursor = page.cursor;
+        let entries = page
+            .entries
+            .iter()
+            .filter(|entry| !entry.message.trim().is_empty())
+            .map(|entry| GodotLogEntry {
+                timestamp: entry.timestamp,
+                level: match entry.severity {
+                    LogSeverity::Error => "error".to_owned(),
+                    LogSeverity::Warning => "warning".to_owned(),
+                    LogSeverity::Info => "info".to_owned(),
+                },
+                message: entry.message.clone(),
+                source: Some(
+                    serde_json::to_value(entry.source)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "editor".to_owned()),
+                ),
+                stack_trace: None,
+            })
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            continue;
+        }
+        if storage
+            .append_godot_logs(&AppendGodotLogsRequest {
+                run_id: run_id.to_owned(),
+                entries,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Stops the drain, waits for its final flush, and closes the run row.
+fn stop_run_logging(status: &str) {
+    let logger = RUN_LOGGER.lock().ok().and_then(|mut slot| slot.take());
+    let Some(mut logger) = logger else { return };
+    logger.stop.store(true, Ordering::Release);
+    if let Some(worker) = logger.worker.take() {
+        let _ = worker.join();
+    }
+    let _ = logger.storage.finish_godot_run(&FinishGodotRunRequest {
+        run_id: logger.run_id.clone(),
+        status: status.to_owned(),
+        exit_code: None,
+    });
 }
 
 /// Stops the active session and removes the staged addon.
@@ -150,6 +313,13 @@ pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> 
     crate::script::disconnect();
     crate::debug::disconnect();
     let result = godot_session::stop();
+    // The run is closed after the editor is stopped so the drain's last pass sees the output the
+    // shutdown itself produced.
+    stop_run_logging(if result.is_ok() {
+        "completed"
+    } else {
+        "failed"
+    });
     if let Some(worktree) = worktree {
         // Unstaging must read the same ledger staging wrote, or the addon is left in the worktree.
         let _ = AddonStager::new(ledger_path(app)).unstage(&worktree);
@@ -263,6 +433,7 @@ fn current_worktree() -> Option<PathBuf> {
 
 fn to_response(info: &SessionInfo) -> GodotSessionResponse {
     GodotSessionResponse {
+        session_id: info.session_id.clone(),
         state: info.state,
         rpc_address: info.rpc_address.clone(),
         lsp_port: info.lsp_port,
@@ -308,5 +479,97 @@ fn stop_event_subscription() {
         && let Some(subscription) = slot.take()
     {
         subscription.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::godot_session::{LogSource, SessionState};
+    use crate::storage::SearchGodotLogsRequest;
+    use tempfile::TempDir;
+
+    fn session_info(session_id: &str, worktree: &Path) -> SessionInfo {
+        SessionInfo {
+            session_id: session_id.to_owned(),
+            state: SessionState::Starting,
+            rpc_address: "127.0.0.1:7000".to_owned(),
+            lsp_port: 6005,
+            dap_port: 6006,
+            godot_version: "4.7.1.stable".to_owned(),
+            worktree: worktree.display().to_string(),
+        }
+    }
+
+    /// The Run button used to launch a standalone Godot process that recorded its own run; the
+    /// managed session records it now. What has to survive that move is the archive: output the
+    /// editor produced is still stored, still full-text searchable, and now names the session that
+    /// produced it.
+    #[test]
+    fn session_output_is_recorded_against_the_session_and_stays_searchable() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = TempDir::new().expect("temporary directory");
+        let worktree = directory.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("create worktree");
+        let storage = ProjectStorage::open(&directory.path().join("data"), &worktree)
+            .expect("open project storage");
+
+        godot_session::clear_logs();
+        godot_session::append_log(LogSource::Editor, "Godot Engine v4.7.1.stable\n");
+        // A blank line is what the engine prints between phases. Storage refuses an empty message,
+        // so one of them must not be able to lose the batch it arrived in.
+        godot_session::append_log(LogSource::Editor, "   \n");
+        godot_session::append_log(
+            LogSource::EditorError,
+            "ERROR: Gofer packaged fixture reported an invalid call\n",
+        );
+
+        start_run_logging(&storage, &session_info("session-1", &worktree), &worktree);
+        stop_run_logging("completed");
+
+        let hits = storage
+            .search_godot_logs(&SearchGodotLogsRequest {
+                query: "Gofer packaged fixture reported an invalid call".to_owned(),
+                limit: None,
+            })
+            .expect("search recorded output");
+        assert_eq!(hits.len(), 1, "the error line must reach the index");
+        assert_eq!(hits[0].session_id.as_deref(), Some("session-1"));
+        assert_eq!(hits[0].level, "error");
+        assert_eq!(hits[0].source.as_deref(), Some("editorError"));
+
+        // Stopping twice is what a crashed editor followed by a normal stop looks like: the
+        // second stop finds no logger and answers rather than closing someone else's run.
+        stop_run_logging("completed");
+    }
+
+    /// Storage that cannot record the run must not stop the editor from being usable: the failure
+    /// is reported where the user is already looking for what the editor is doing.
+    #[test]
+    fn a_run_that_cannot_be_recorded_is_reported_into_the_session_buffer() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = TempDir::new().expect("temporary directory");
+        let worktree = directory.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("create worktree");
+        let storage = ProjectStorage::open(&directory.path().join("data"), &worktree)
+            .expect("open project storage");
+        std::fs::remove_dir_all(directory.path()).expect("remove the storage directory");
+
+        godot_session::clear_logs();
+        start_run_logging(&storage, &session_info("session-2", &worktree), &worktree);
+        stop_run_logging("failed");
+
+        let page = godot_session::read_logs(&LogQuery::default()).expect("read session logs");
+        assert!(
+            page.entries.iter().any(|entry| entry
+                .message
+                .contains("could not record this session's run")),
+            "the failure must be visible in the session output: {:?}",
+            page.entries
+        );
     }
 }

@@ -3,6 +3,7 @@ import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {spawn} from 'node:child_process'
 import {createServer} from 'node:http'
+import {resolveGodotBinary} from './godot-binary.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'gofer-packaged-journey-'))
 const wdio = resolve('node_modules/@wdio/cli/bin/wdio.js')
@@ -22,8 +23,11 @@ await new Promise((resolveListen, reject) => {
 })
 const address = modelServer.address()
 if (!address || typeof address === 'string') throw new Error('Fake model server has no port')
+// The journey drives a real editor session, so the pinned engine is resolved and verified here
+// rather than assumed: the application discovers it through this same variable.
 const environment = {
     ...process.env,
+    GOFER_GODOT_BINARY: resolveGodotBinary(),
     GOFER_PACKAGED_FIXTURE_ROOT: fixtureRoot,
     GOFER_PACKAGED_MODEL_BASE_URL: `http://127.0.0.1:${String(address.port)}/v1`
 }

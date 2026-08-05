@@ -16,6 +16,12 @@ type DebugSessionOptions = Readonly<{
     breakpoints: readonly DebugSourceBreakpoints[]
 }>
 
+/**
+ * The debugger, as the frame shares it. One instance is owned by `InspectorWorkspace` so the Run
+ * control and the debugger panel drive the same session rather than two adapters' worth of state.
+ */
+export type DebugSession = ReturnType<typeof useDebugSession>
+
 export type ScopeVariables = Readonly<{
     scope: DebugScope
     variables: readonly DebugVariable[]

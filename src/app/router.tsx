@@ -154,8 +154,15 @@ function Application() {
                 }
             >
                 <Suspense fallback={null}>
+                    {/*
+                     * The key resets the workspace when the user switches tasks, so it follows the
+                     * task the route names and nothing else. Keying on the task list instead would
+                     * remount the moment the first list arrives — while the workspace is already
+                     * showing that very task — and a remount discards whatever has not reached the
+                     * debounced chat save yet, which is exactly a message just sent.
+                     */}
                     <Workspace
-                        key={displayedTask?.id ?? selectedTaskId ?? 'workspace'}
+                        key={selectedTaskId ?? 'workspace'}
                         onTasksChanged={tasksChanged}
                         onMergeTask={mergeDisplayedTask}
                         {...(displayedTask && {activeTask: displayedTask})}

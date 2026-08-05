@@ -16,7 +16,6 @@ shipped sidecar is a frozen per-platform executable built in CI):
 
     ```
     gdformat --check probe.gd
-    gdformat --check ../godot-project/tests/bridge.gd
     gdformat --check ../godot-project/tests/protocol_test.gd
     ```
 
@@ -35,7 +34,9 @@ shipped sidecar is a frozen per-platform executable built in CI):
 
 ## Results (2026-08, gdtoolkit 4.5.0, CPython 3.14)
 
-- All three fixtures parse; `probe.gd` in this directory is the formatter's canonical output.
+- Both fixtures parse; `probe.gd` in this directory is the formatter's canonical output. (The proof
+  originally covered a third script, the protocol v1 bridge fixture, which retired with the one-shot
+  bridge.)
 - `gdformat -` output is idempotent for every fixture.
 - Invalid syntax exits 1 with a parser diagnostic on stderr and no stdout, so a failed run can never
   reach a buffer.

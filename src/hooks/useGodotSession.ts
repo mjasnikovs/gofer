@@ -15,6 +15,16 @@ type GodotSessionOptions = Readonly<{
     onError: (message: string) => void
 }>
 
+/** How long a Run waits for a starting editor before giving up on it. */
+const READY_TIMEOUT_MS = 120_000
+const READY_POLL_MS = 250
+/** The states in which the editor can answer an addon or debug-adapter request. */
+const READY_STATES: ReadonlySet<GodotSessionState> = new Set<GodotSessionState>([
+    'ready',
+    'playing',
+    'debugPaused'
+])
+
 /** What the edited scene is, as the addon's own events report it. */
 export type EditedScene = Readonly<{
     path: string
@@ -97,6 +107,33 @@ export function useGodotSession({onError}: GodotSessionOptions) {
         }
     }, [report, subscribe])
 
+    /**
+     * Guarantees an editor that can answer, starting one if none is running.
+     *
+     * The Run control needs this: `start` returns as soon as the process is spawned, but the debug
+     * adapter only exists once the editor has finished loading and the addon has reported itself
+     * ready. The backend's own view of the session is polled rather than the local state, because
+     * readiness arrives on an event this call cannot wait for from inside a render.
+     */
+    const ensureReady = useCallback(async () => {
+        if (!isTauri()) return false
+        const running = await getGodotSession().catch(() => undefined)
+        if (!running) await start()
+        const deadline = Date.now() + READY_TIMEOUT_MS
+        while (Date.now() < deadline) {
+            const current = await getGodotSession().catch(() => undefined)
+            if (current && READY_STATES.has(current.state)) {
+                setSession(current)
+                setState(current.state)
+                return true
+            }
+            if (!current) break
+            await new Promise(resolve => setTimeout(resolve, READY_POLL_MS))
+        }
+        onError('The Godot editor did not become ready, so the game was not launched.')
+        return false
+    }, [onError, start])
+
     const stop = useCallback(async () => {
         if (!isTauri()) return
         setIsBusy(true)
@@ -158,6 +195,7 @@ export function useGodotSession({onError}: GodotSessionOptions) {
 
     return {
         call,
+        ensureReady,
         isBusy,
         runtimeEpoch,
         scene,
