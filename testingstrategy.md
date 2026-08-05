@@ -19,7 +19,8 @@ Verified on August 3, 2026, the enforced suites contain:
   tests
 - 1 Godot shared-fixture suite and 1 real-process acceptance test covering every mandatory bridge
   scenario, plus 3 editor acceptance tests that drive the staged addon through the real editor RPC
-- 5 Playwright visual/accessibility states and 1 WebdriverIO browser-mode desktop journey
+- 7 Playwright visual/accessibility states, enforced in CI only, and 1 WebdriverIO browser-mode
+  desktop journey
 
 The Node suite measures 97.78% line coverage and 89.28% branch coverage; `workspace-confinement.mjs`
 holds its separate 100% gate. The Rust coverage percentages are produced by the `rust-coverage` CI
@@ -233,6 +234,16 @@ Screenshots must be produced in one pinned CI environment with a fixed viewport,
 clock, and disabled animations. Developers must not casually regenerate baselines on different
 machines.
 
+That environment is the `check` job, and the visual suite runs there and nowhere else — it is not
+part of `npm run check`. The committed baselines were made on a developer's machine and had never
+been asserted on a runner, because every earlier run failed before reaching them; when one finally
+did, the three states carrying the most text differed by 215, 680, and 297 pixels against an
+allowance of 200. Two font stacks do not rasterize the same text identically, so a suite required to
+pass in both places can only be tuned until it proves nothing.
+`.github/workflows/visual-snapshots.yml` is the supported way to regenerate them: dispatch it when a
+UI change is intended, download the artifact, and commit the PNGs. A pixel failure in `check`
+uploads the diff and actual images.
+
 Reference: [Playwright visual comparison guidance](https://playwright.dev/docs/test-snapshots).
 
 ## Full application tests
@@ -291,11 +302,12 @@ The command currently includes:
 - A React automated-accessibility assertion
 - Ignored-test metadata and expiry enforcement
 
-It additionally includes enforced Node coverage, five Playwright visual/accessibility states, and a
-WebdriverIO browser-mode journey. The packaged application is intentionally built and exercised in
-its separate CI job because it is a release build, not part of the fast local gate. Rust coverage is
-enforced in the named `rust-coverage` CI job with `npm run test:coverage:rust`; a summary-only local
-report remains available through `npm run test:coverage:rust:report`.
+It additionally includes enforced Node coverage and a WebdriverIO browser-mode journey. The seven
+Playwright visual/accessibility states run in the `check` job only, for the reason given above. The
+packaged application is intentionally built and exercised in its separate CI job because it is a
+release build, not part of the fast local gate. Rust coverage is enforced in the named
+`rust-coverage` CI job with `npm run test:coverage:rust`; a summary-only local report remains
+available through `npm run test:coverage:rust:report`.
 
 ### Local enforcement
 

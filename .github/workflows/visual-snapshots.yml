@@ -1,0 +1,36 @@
+name: Visual snapshots
+
+# Regenerates the committed visual snapshots on the runner that asserts them.
+#
+# The snapshots are exact pixels, and text rasterization differs between font stacks, so a snapshot
+# generated on a developer's machine can never pass on `ubuntu-24.04` — the difference measured 215
+# to 680 pixels per state, against an allowance of 200. The check job is therefore the only place
+# the visual suite runs, and this is the supported way to update what it compares against: run it
+# when a UI change is intended, download the artifact, and commit the PNGs it contains.
+
+on:
+    workflow_dispatch:
+
+jobs:
+    snapshots:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.19.0
+                  cache: npm
+            - name: Install JavaScript dependencies
+              run: npm ci
+            - name: Install pinned visual-test browser
+              run: npx playwright install --with-deps chromium
+            - name: Regenerate the snapshots
+              run: npm run --silent test:visual:update
+            - name: Publish the regenerated snapshots
+              uses: actions/upload-artifact@v4
+              with:
+                  name: visual-snapshots
+                  path: e2e/visual/**/*-snapshots/*.png
+                  if-no-files-found: error
+                  retention-days: 14
