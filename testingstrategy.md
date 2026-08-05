@@ -16,7 +16,7 @@ Counted on August 5, 2026 by running each suite, the enforced suites contain:
   script buffer, 11 Monaco language-server, 10 script workspace, and 2 router tests
 - 49 Node tests covering the AI worker/provider and its duplex tool channel, protocol fixtures, RAG
   progress, warmup and retrieval, memory embedding, and workspace confinement
-- 223 Rust tests, including shared-protocol, injected-process, and actual Tauri mock-runtime IPC
+- 240 Rust tests, including shared-protocol, injected-process, and actual Tauri mock-runtime IPC
   tests
 - 1 Godot shared-fixture suite and 11 real-editor acceptance tests: the addon's session, scenes,
   revisions, heartbeat and configuration; the language server; the script commands; the debugger;
@@ -25,14 +25,21 @@ Counted on August 5, 2026 by running each suite, the enforced suites contain:
   desktop journey
 
 The Node suite measures 99.85% line coverage and 88.03% branch coverage; `workspace-confinement.mjs`
-holds its separate 100% gate. The Rust coverage percentages are produced by the `rust-coverage` CI
-job, which enforces at least 80% line and 75% branch coverage plus 100% branch coverage for the
-marked critical regions. Critical attachment, cache, cancellation, credential, path, and protocol
-regions each measure 100% branch coverage. The repository includes the versioned shared protocol, a
-loopback-only Rust transport, a real Godot scene-control bridge, a checked-in Godot fixture, and
-real-process acceptance coverage. It also has a typed renderer adapter, Tauri mock-runtime IPC
-coverage, selected visual regressions, automated accessibility scans, enforced Node coverage, and
-browser-mode WebdriverIO coverage.
+holds its separate 100% gate. The Rust suite measures 86.44% line coverage and 77.31% branch
+coverage, produced by the `rust-coverage` CI job, which enforces at least 80% line and 75% branch
+coverage plus 100% branch coverage for the marked critical regions. Critical attachment, cache,
+cancellation, credential, path, and protocol regions each measure 100% branch coverage.
+
+That job measures with `--features godot-acceptance` and excludes the acceptance modules from the
+report. Both halves matter. Without the suites, the Godot subsystems they drive counted as untested
+— `script.rs` reported 2 of 30 branches and `debug.rs` 1 of 12 — while still counting in full
+against the total, which is what held the branch percentage below its own minimum. Without the
+exclusion, the fixtures' own branches count as production coverage, and the same test run reports
+74.39% instead of 75.62%. The job therefore installs the pinned Godot and xvfb like the gate does.
+The repository includes the versioned shared protocol, a loopback-only Rust transport, a real Godot
+scene-control bridge, a checked-in Godot fixture, and real-process acceptance coverage. It also has
+a typed renderer adapter, Tauri mock-runtime IPC coverage, selected visual regressions, automated
+accessibility scans, enforced Node coverage, and browser-mode WebdriverIO coverage.
 
 The repository has a clean-checkout Linux check workflow and an active checked-in commit hook. A
 second Linux job builds and launches a release-mode application through WebdriverIO's embedded
