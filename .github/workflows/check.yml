@@ -26,10 +26,12 @@ jobs:
             - uses: actions/setup-python@v5
               with:
                   python-version: '3.13'
+            # xvfb is not optional here: three acceptance tests run the fixture as a real windowed
+            # game, because a screenshot needs a rendered frame and a headless viewport has none.
             - name: Install system dependencies
               run: >-
                   sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
-                  libappindicator3-dev librsvg2-dev patchelf unzip
+                  libappindicator3-dev librsvg2-dev patchelf unzip xvfb
             - name: Install JavaScript dependencies
               run: npm ci
             - name: Install pinned visual-test browser
@@ -49,11 +51,14 @@ jobs:
             # `formatter_unavailable` and proves nothing about the formatter.
             - name: Build the pinned gdformat sidecar
               run: npm run build:gdformat
+            # The whole gate runs under one virtual display rather than the Godot suite alone: the
+            # runner has none, and every other suite in `check` is already headless by its own
+            # configuration, so a display it does not use costs nothing.
             - name: Run required checks with zero retries
               env:
                   GOFER_CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}
                   GOFER_CHROMEDRIVER_BINARY: ${{ steps.chrome.outputs.chromedriver-path }}
-              run: npm run check
+              run: xvfb-run -a npm run check
 
     # The same journey the nightly matrix runs on Windows and macOS, so the platforms cannot drift.
     packaged:
