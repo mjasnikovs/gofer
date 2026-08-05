@@ -1,24 +1,35 @@
-import {useCallback, useMemo, useState} from 'react'
+import {useCallback, useState} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
-import {Divider} from '@astryxdesign/core/Divider'
 import {EmptyState} from '@astryxdesign/core/EmptyState'
-import {Item} from '@astryxdesign/core/Item'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
 import {invoke} from '../../services/desktop'
-import {useScriptBuffers} from '../../hooks/useScriptBuffers'
-import type {FormatPreview, RenamePreview, ScriptBuffer} from '../../hooks/useScriptBuffers'
+import type {
+    FormatPreview,
+    RenamePreview,
+    ScriptBuffer,
+    ScriptBuffers
+} from '../../hooks/useScriptBuffers'
 import type {ScriptPosition} from '../../models/script'
 import {MonacoDiff} from './MonacoDiff'
 import {ScriptEditor} from './ScriptEditor'
 
+export type ScriptReveal = Readonly<{
+    path: string
+    line: number
+    at: number
+}>
+
 type ScriptWorkspaceProps = Readonly<{
+    /** Owned by the frame, so the Problems list and the AI agent see the same buffers. */
+    scripts: ScriptBuffers
+    reveal?: ScriptReveal | undefined
     onError: (message: string) => void
 }>
 
@@ -28,22 +39,12 @@ type RenameTarget = Readonly<{
     name: string
 }>
 
-const EXPLORER_WIDTH = 260
 const DIFF_HEIGHT = 420
-const MAX_LISTED_FILES = 400
-/** Generated sidecars and imported artefacts are noise in a script picker. */
-const HIDDEN_SUFFIXES = ['.import', '.uid', '.tmp']
-const HIDDEN_PREFIXES = ['.godot/', '.git/', 'addons/gofer/']
 
 const CONFLICT_MESSAGE = {
     externalChange: 'This file changed on disk while the buffer was edited.',
     staleSave: 'The file changed since this buffer read it, so nothing was written.'
 } as const
-
-function isListable(path: string) {
-    if (HIDDEN_SUFFIXES.some(suffix => path.endsWith(suffix))) return false
-    return !HIDDEN_PREFIXES.some(prefix => path.startsWith(prefix))
-}
 
 function tabLabel(buffer: ScriptBuffer) {
     const name = buffer.path.split('/').pop() ?? buffer.path
@@ -51,20 +52,19 @@ function tabLabel(buffer: ScriptBuffer) {
 }
 
 /**
- * The script editing surface: a worktree file list, one tab per open buffer, and Monaco wired to
- * Godot's language server through Rust.
+ * The script editing surface: one tab per open buffer, with Monaco wired to Godot's language server
+ * through Rust. Files are chosen in the workspace explorer, which owns the worktree listing.
  *
  * Everything destructive is explicit. A save is a command, never a side effect of typing; the
- * formatter and rename both show what they would write before anything is written; and a file
- * that changed underneath a dirty buffer raises a conflict rather than being overwritten.
+ * formatter and rename both show what they would write before anything is written; and a file that
+ * changed underneath a dirty buffer raises a conflict rather than being overwritten.
  */
-export function ScriptWorkspace({onError}: ScriptWorkspaceProps) {
+export function ScriptWorkspace({scripts, reveal, onError}: ScriptWorkspaceProps) {
     const {
         activeBuffer,
         activePath,
         buffers,
         diagnostics,
-        files,
         applyFormat,
         changeBuffer,
         closeBuffer,
@@ -77,22 +77,12 @@ export function ScriptWorkspace({onError}: ScriptWorkspaceProps) {
         saveBuffer,
         setActivePath,
         toggleBreakpoint
-    } = useScriptBuffers({onError})
-    const [filter, setFilter] = useState('')
+    } = scripts
     const [formatPreview, setFormatPreview] = useState<FormatPreview>()
     const [renameTarget, setRenameTarget] = useState<RenameTarget>()
     const [renamePreview, setRenamePreview] = useState<RenamePreview>()
 
-    const listed = useMemo(
-        () =>
-            files
-                .filter(file => isListable(file.path))
-                .filter(file => file.path.toLowerCase().includes(filter.toLowerCase()))
-                .slice(0, MAX_LISTED_FILES),
-        [files, filter]
-    )
-
-    const openPaths = useMemo(() => buffers.map(buffer => buffer.path), [buffers])
+    const openPaths = buffers.map(buffer => buffer.path)
     const activeDiagnostics = activePath ? (diagnostics[activePath] ?? []) : []
 
     const open = useCallback(
@@ -149,184 +139,129 @@ export function ScriptWorkspace({onError}: ScriptWorkspaceProps) {
     const conflict = activeBuffer?.conflict
 
     return (
-        <HStack
+        <VStack
             gap={0}
             height='100%'
         >
-            <VStack
-                gap={0}
-                width={EXPLORER_WIDTH}
-                height='100%'
+            <TabList
+                size='sm'
+                hasDivider
+                aria-label='Open scripts'
+                value={activePath ?? ''}
+                onChange={setActivePath}
             >
-                <VStack
-                    paddingInline={3}
-                    paddingBlock={2}
-                >
-                    <TextInput
-                        label='Filter files'
-                        isLabelHidden
-                        size='sm'
-                        placeholder='Filter files'
-                        value={filter}
-                        hasClear
-                        onChange={setFilter}
+                {buffers.map(buffer => (
+                    <Tab
+                        key={buffer.path}
+                        value={buffer.path}
+                        label={tabLabel(buffer)}
+                        endContent={
+                            diagnostics[buffer.path]?.length ?
+                                <Badge
+                                    variant='error'
+                                    label={String(diagnostics[buffer.path]?.length)}
+                                />
+                            :   undefined
+                        }
                     />
-                </VStack>
-                <Divider />
-                <StackItem
-                    size='fill'
-                    isScrollable
-                >
-                    {listed.length === 0 ?
-                        <VStack padding={3}>
-                            <Text
-                                type='supporting'
-                                color='secondary'
-                            >
-                                No files match. A worktree is only listed while a Godot session is
-                                bound to it.
-                            </Text>
-                        </VStack>
-                    :   listed.map(file => (
-                            <Item
-                                key={file.path}
-                                as='div'
-                                density='compact'
-                                label={file.path}
-                                labelLines={1}
-                                onClick={() => {
-                                    open(file.path)
+                ))}
+            </TabList>
+            <Toolbar
+                label='Script actions'
+                size='sm'
+                startContent={
+                    <Text
+                        type='supporting'
+                        color='secondary'
+                    >
+                        {activeBuffer?.path ?? 'No script open'}
+                    </Text>
+                }
+                endContent={
+                    <HStack gap={1}>
+                        <Button
+                            label='Save'
+                            size='sm'
+                            isDisabled={!activeBuffer?.dirty}
+                            clickAction={() => {
+                                if (activePath) save(activePath)
+                            }}
+                        />
+                        <Button
+                            label='Reload'
+                            size='sm'
+                            variant='ghost'
+                            isDisabled={!activeBuffer}
+                            clickAction={() => {
+                                if (activePath) void reloadBuffer(activePath)
+                            }}
+                        />
+                        <Button
+                            label='Format'
+                            size='sm'
+                            variant='ghost'
+                            isDisabled={!activeBuffer}
+                            clickAction={requestFormat}
+                        />
+                        <Button
+                            label='Close'
+                            size='sm'
+                            variant='ghost'
+                            isDisabled={!activeBuffer}
+                            clickAction={() => {
+                                if (activePath) closeBuffer(activePath)
+                            }}
+                        />
+                    </HStack>
+                }
+            />
+            {conflict ?
+                <Banner
+                    container='section'
+                    status='warning'
+                    title='This buffer is out of date'
+                    description={CONFLICT_MESSAGE[conflict]}
+                    endContent={
+                        <HStack gap={1}>
+                            <Button
+                                label='Reload from disk'
+                                size='sm'
+                                variant='ghost'
+                                clickAction={() => {
+                                    if (activePath) void reloadBuffer(activePath)
                                 }}
                             />
-                        ))
-                    }
-                </StackItem>
-            </VStack>
-            <Divider orientation='vertical' />
-            <StackItem size='fill'>
-                <VStack
-                    gap={0}
-                    height='100%'
-                >
-                    <TabList
-                        size='sm'
-                        hasDivider
-                        value={activePath ?? ''}
-                        onChange={setActivePath}
-                    >
-                        {buffers.map(buffer => (
-                            <Tab
-                                key={buffer.path}
-                                value={buffer.path}
-                                label={tabLabel(buffer)}
-                                endContent={
-                                    diagnostics[buffer.path]?.length ?
-                                        <Badge
-                                            variant='error'
-                                            label={String(diagnostics[buffer.path]?.length)}
-                                        />
-                                    :   undefined
-                                }
+                            <Button
+                                label='Overwrite'
+                                size='sm'
+                                clickAction={() => {
+                                    if (activePath) void overwriteBuffer(activePath)
+                                }}
                             />
-                        ))}
-                    </TabList>
-                    <Toolbar
-                        label='Script actions'
-                        size='sm'
-                        startContent={
-                            <Text
-                                type='supporting'
-                                color='secondary'
-                            >
-                                {activeBuffer?.path ?? 'No script open'}
-                            </Text>
-                        }
-                        endContent={
-                            <HStack gap={1}>
-                                <Button
-                                    label='Save'
-                                    size='sm'
-                                    isDisabled={!activeBuffer?.dirty}
-                                    clickAction={() => {
-                                        if (activePath) save(activePath)
-                                    }}
-                                />
-                                <Button
-                                    label='Reload'
-                                    size='sm'
-                                    variant='ghost'
-                                    isDisabled={!activeBuffer}
-                                    clickAction={() => {
-                                        if (activePath) void reloadBuffer(activePath)
-                                    }}
-                                />
-                                <Button
-                                    label='Format'
-                                    size='sm'
-                                    variant='ghost'
-                                    isDisabled={!activeBuffer}
-                                    clickAction={requestFormat}
-                                />
-                                <Button
-                                    label='Close'
-                                    size='sm'
-                                    variant='ghost'
-                                    isDisabled={!activeBuffer}
-                                    clickAction={() => {
-                                        if (activePath) closeBuffer(activePath)
-                                    }}
-                                />
-                            </HStack>
-                        }
+                        </HStack>
+                    }
+                />
+            :   null}
+            {activeBuffer ?
+                <ScriptEditor
+                    buffer={activeBuffer}
+                    diagnostics={activeDiagnostics}
+                    openPaths={openPaths}
+                    onChange={changeBuffer}
+                    onError={onError}
+                    onOpenPath={open}
+                    onRename={startRename}
+                    onSave={save}
+                    onToggleBreakpoint={toggleBreakpoint}
+                    {...(reveal && {reveal})}
+                />
+            :   <StackItem size='fill'>
+                    <EmptyState
+                        title='No script open'
+                        description='Choose a file in the explorer to edit it with Godot’s language server attached.'
                     />
-                    {conflict ?
-                        <Banner
-                            container='section'
-                            status='warning'
-                            title='This buffer is out of date'
-                            description={CONFLICT_MESSAGE[conflict]}
-                            endContent={
-                                <HStack gap={1}>
-                                    <Button
-                                        label='Reload from disk'
-                                        size='sm'
-                                        variant='ghost'
-                                        clickAction={() => {
-                                            if (activePath) void reloadBuffer(activePath)
-                                        }}
-                                    />
-                                    <Button
-                                        label='Overwrite'
-                                        size='sm'
-                                        clickAction={() => {
-                                            if (activePath) void overwriteBuffer(activePath)
-                                        }}
-                                    />
-                                </HStack>
-                            }
-                        />
-                    :   null}
-                    {activeBuffer ?
-                        <ScriptEditor
-                            buffer={activeBuffer}
-                            diagnostics={activeDiagnostics}
-                            openPaths={openPaths}
-                            onChange={changeBuffer}
-                            onError={onError}
-                            onOpenPath={open}
-                            onRename={startRename}
-                            onSave={save}
-                            onToggleBreakpoint={toggleBreakpoint}
-                        />
-                    :   <StackItem size='fill'>
-                            <EmptyState
-                                title='No script open'
-                                description='Choose a file to edit it with Godot’s language server attached.'
-                            />
-                        </StackItem>
-                    }
-                </VStack>
-            </StackItem>
+                </StackItem>
+            }
             <Dialog
                 isOpen={formatPreview !== undefined}
                 purpose='form'
@@ -476,6 +411,6 @@ export function ScriptWorkspace({onError}: ScriptWorkspaceProps) {
                     </HStack>
                 </VStack>
             </Dialog>
-        </HStack>
+        </VStack>
     )
 }

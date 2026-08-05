@@ -61,6 +61,9 @@ type ScriptBufferOptions = Readonly<{
     onError: (message: string) => void
 }>
 
+/** Everything the workspace's script surfaces share: one set of buffers, owned by the frame. */
+export type ScriptBuffers = ReturnType<typeof useScriptBuffers>
+
 /** Keystrokes are batched before `didChange`: the server answers from the editor's main loop. */
 const CHANGE_DEBOUNCE_MS = 250
 

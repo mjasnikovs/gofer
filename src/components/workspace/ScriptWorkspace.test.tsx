@@ -3,6 +3,8 @@ import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {ScriptWorkspace} from './ScriptWorkspace'
+import type {ScriptReveal} from './ScriptWorkspace'
+import {useScriptBuffers} from '../../hooks/useScriptBuffers'
 import type {MonacoStubState} from '../../test/monaco-stub'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
@@ -83,6 +85,36 @@ function backend() {
 }
 
 /**
+ * The buffers belong to the workspace frame, so the test owns them the way the frame does and
+ * opens a file the way the explorer would.
+ */
+type HarnessProps = Readonly<{
+    onError: (message: string) => void
+    reveal?: ScriptReveal | undefined
+}>
+
+function Harness({onError, reveal}: HarnessProps) {
+    const scripts = useScriptBuffers({onError})
+    return (
+        <>
+            <button
+                type='button'
+                onClick={() => {
+                    void scripts.openBuffer('player.gd')
+                }}
+            >
+                Open player.gd
+            </button>
+            <ScriptWorkspace
+                scripts={scripts}
+                onError={onError}
+                {...(reveal && {reveal})}
+            />
+        </>
+    )
+}
+
+/**
  * The open tab strip. Astryx renders tabs as buttons inside a labelled nav rather than with the
  * ARIA tab role, and the file list holds a button with the same name, so the tab is addressed by
  * its own attribute.
@@ -95,8 +127,8 @@ function openTab() {
 
 async function openPlayer() {
     const user = userEvent.setup()
-    render(<ScriptWorkspace onError={vi.fn()} />)
-    await user.click(await screen.findByText('player.gd'))
+    render(<Harness onError={vi.fn()} />)
+    await user.click(screen.getByRole('button', {name: 'Open player.gd'}))
     await waitFor(() => {
         expect(editor.state?.editors).toBe(1)
     })
@@ -114,15 +146,6 @@ afterEach(() => {
 })
 
 describe('ScriptWorkspace', () => {
-    it('lists editable worktree files and hides generated sidecars', async () => {
-        backend()
-        render(<ScriptWorkspace onError={vi.fn()} />)
-
-        expect(await screen.findByText('player.gd')).toBeInTheDocument()
-        expect(screen.queryByText('player.gd.uid')).not.toBeInTheDocument()
-        expect(screen.queryByText('addons/gofer/plugin.gd')).not.toBeInTheDocument()
-    })
-
     it('opens a file into a tab and hands its text to the editor', async () => {
         backend()
         await openPlayer()
@@ -236,10 +259,33 @@ describe('ScriptWorkspace', () => {
         expect(screen.getByRole('button', {name: 'Reload from disk'})).toBeInTheDocument()
     })
 
+    it('reveals the line another panel pointed at', async () => {
+        backend()
+        const report = vi.fn()
+        const user = userEvent.setup()
+        const {rerender} = render(<Harness onError={report} />)
+        await user.click(screen.getByRole('button', {name: 'Open player.gd'}))
+        await waitFor(() => {
+            expect(editor.state?.editors).toBe(1)
+        })
+        expect(editor.state?.revealed).toEqual([])
+
+        rerender(
+            <Harness
+                onError={report}
+                reveal={{path: 'player.gd', line: 3, at: 1}}
+            />
+        )
+
+        await waitFor(() => {
+            expect(editor.state?.revealed).toEqual([3])
+        })
+    })
+
     it('has no automatically detectable accessibility violations', async () => {
         backend()
-        const {container} = render(<ScriptWorkspace onError={vi.fn()} />)
-        await screen.findByText('player.gd')
+        const {container} = render(<Harness onError={vi.fn()} />)
+        await screen.findByRole('button', {name: 'Open player.gd'})
 
         const result = await axe.run(container)
 

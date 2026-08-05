@@ -18,6 +18,11 @@ import {GDSCRIPT_LANGUAGE_ID} from '../../services/monaco-gdscript'
 type ScriptEditorProps = Readonly<{
     buffer: ScriptBuffer
     diagnostics: readonly ScriptDiagnostic[]
+    /**
+     * Where another panel asked the editor to go. `at` is the click that asked, so choosing the
+     * same problem twice reveals it twice.
+     */
+    reveal?: Readonly<{path: string; line: number; at: number}> | undefined
     /** Every open tab, so models for closed files are disposed instead of leaking. */
     openPaths: readonly string[]
     onChange: (path: string, text: string) => void
@@ -53,6 +58,7 @@ const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
 export function ScriptEditor({
     buffer,
     diagnostics,
+    reveal,
     openPaths,
     onChange,
     onSave,
@@ -235,6 +241,17 @@ export function ScriptEditor({
         if (!model || model.isDisposed()) return
         monaco.editor.setModelMarkers(model, MARKER_OWNER, [...toMarkers(diagnostics)])
     }, [buffer.path, diagnostics, monaco])
+
+    // Reveals what the Problems list or a debugger frame pointed at, once the buffer it names is
+    // the one on screen.
+    useEffect(() => {
+        const editor = editorRef.current
+        if (!monaco || !editor || !reveal) return
+        if (reveal.path !== buffer.path) return
+        editor.revealLineInCenter(reveal.line)
+        editor.setPosition({lineNumber: reveal.line, column: 1})
+        editor.focus()
+    }, [buffer.path, monaco, reveal])
 
     useEffect(() => {
         const collection = decorationsRef.current

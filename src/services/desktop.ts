@@ -38,6 +38,19 @@ import type {
     SettingsResponse,
     StorageMaintenanceResult
 } from '../models/settings'
+import type {
+    CallGodotRequest,
+    CallGodotResponse,
+    DebugRequest,
+    DebugResponse,
+    DocsQuery,
+    DocsResponse,
+    GodotLogPage,
+    GodotLogQuery,
+    GodotSessionEvent,
+    GodotSessionSummary,
+    StartGodotSessionRequest
+} from '../models/godot'
 
 type CommandSpec<Arguments, Response> = Readonly<{
     arguments: Arguments
@@ -64,21 +77,6 @@ type LaunchGodotRequest = Readonly<{
     scene?: string
 }>
 
-type GodotDocsQuery = Readonly<{
-    question: string
-    maxPassages?: number | undefined
-    maxTextChars?: number | undefined
-}>
-
-type RankedPassage = Readonly<{
-    text: string
-    chapter: string
-    order: number
-    score: number
-}>
-
-type GodotDocsResponse = Readonly<{passages: readonly RankedPassage[]}>
-
 type BackupResult = Readonly<{path: string}>
 
 type ProtocolRequest = Readonly<{
@@ -87,52 +85,6 @@ type ProtocolRequest = Readonly<{
     command: string
     params: Readonly<Record<string, unknown>>
 }>
-
-type GodotSessionState =
-    | 'offline'
-    | 'staging'
-    | 'starting'
-    | 'importing'
-    | 'ready'
-    | 'playing'
-    | 'debugPaused'
-    | 'stopping'
-    | 'error'
-
-// The backend reserves a request body for future start options; today it carries no fields.
-type StartGodotSessionRequest = Readonly<Record<string, never>>
-
-type GodotSessionResponse = Readonly<{
-    state: GodotSessionState
-    rpcAddress: string
-    lspPort: number
-    dapPort: number
-    godotVersion: string | undefined
-    worktree: string
-}>
-
-type CallGodotRequest = Readonly<{
-    id: string
-    command: string
-    params: Readonly<Record<string, unknown>>
-    expectedRevision?: number | undefined
-    timeoutMs?: number | undefined
-}>
-
-type CallGodotResponse = Readonly<{
-    id: string
-    result: Readonly<Record<string, unknown>>
-    revision?: number | undefined
-}>
-
-type SessionEvent =
-    | Readonly<{type: 'stateChanged'; state: GodotSessionState}>
-    | Readonly<{
-          type: 'rpcEvent'
-          sequence: number
-          event: string
-          data: Readonly<Record<string, unknown>>
-      }>
 
 type ToolApprovalRequest = Readonly<{
     approvalId: string
@@ -172,6 +124,7 @@ type DesktopCommandMap = Readonly<{
     activate_chat_task: CommandSpec<{taskId: string}, StoredChat>
     apply_script_rename: CommandSpec<{request: ApplyScriptRenameRequest}, readonly ScriptStamp[]>
     call_godot: CommandSpec<{request: CallGodotRequest}, CallGodotResponse>
+    call_godot_debug: CommandSpec<{request: DebugRequest}, DebugResponse>
     call_script_language: CommandSpec<{request: ScriptRequest}, ScriptResponse>
     cancel_ai_request: CommandSpec<{requestId: number}, boolean>
     cancel_godot: CommandSpec<undefined, void>
@@ -182,7 +135,7 @@ type DesktopCommandMap = Readonly<{
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
     format_gdscript: CommandSpec<{request: FormatGdscriptRequest}, FormatGdscriptResponse>
-    get_godot_session: CommandSpec<undefined, GodotSessionResponse | undefined>
+    get_godot_session: CommandSpec<undefined, GodotSessionSummary | undefined>
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>
     initialize_rag: CommandSpec<undefined, void>
@@ -195,8 +148,9 @@ type DesktopCommandMap = Readonly<{
     merge_task_worktree: CommandSpec<{taskId: string}, unknown>
     move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
     open_script_document: CommandSpec<{request: OpenScriptRequest}, ScriptDocument>
-    query_godot_docs: CommandSpec<{request: GodotDocsQuery}, GodotDocsResponse>
+    query_godot_docs: CommandSpec<{request: DocsQuery}, DocsResponse>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
+    read_godot_logs: CommandSpec<{query: GodotLogQuery}, GodotLogPage>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
     respond_tool_approval: CommandSpec<{request: ToolApprovalRequest}, void>
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>
@@ -207,9 +161,9 @@ type DesktopCommandMap = Readonly<{
     // Only registered in WebDriver builds; the backend owns the bridge address.
     send_godot_command: CommandSpec<{request: ProtocolRequest}, unknown>
     send_ai_message: CommandSpec<{request: SendAiMessageRequest}, void>
-    start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionResponse>
+    start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionSummary>
     stop_godot_session: CommandSpec<undefined, void>
-    subscribe_godot_events: CommandSpec<{events: Channel<SessionEvent>}, void>
+    subscribe_godot_events: CommandSpec<{events: Channel<GodotSessionEvent>}, void>
     // Published diagnostics arrive on this channel until the renderer unsubscribes.
     subscribe_script_diagnostics: CommandSpec<{diagnostics: Channel<ScriptDiagnosticsEvent>}, void>
     test_ai_connection: CommandSpec<{request: SettingsRequest}, ConnectionTestResult>
@@ -227,7 +181,7 @@ type DesktopEventMap = Readonly<{
     'ai-approval-request': ToolApprovalPrompt
     'ai-approval-settled': ToolApprovalSettled
     'godot-process-event': GodotProcessEvent
-    'godot-session-event': SessionEvent
+    'godot-session-event': GodotSessionEvent
     'rag-download-progress': DownloadProgress
 }>
 

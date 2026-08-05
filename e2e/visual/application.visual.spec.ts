@@ -2,7 +2,8 @@ import {expect, test} from '@playwright/test'
 import type {Page} from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 
-type VisualState = 'first-run' | 'empty' | 'streaming' | 'settings' | 'error' | 'scripts'
+type VisualState =
+    'first-run' | 'empty' | 'streaming' | 'settings' | 'error' | 'scripts' | 'inspector'
 
 async function installDesktop(page: Page, state: VisualState) {
     await page.addInitScript(currentState => {
@@ -54,6 +55,81 @@ async function installDesktop(page: Page, state: VisualState) {
                     return undefined
                 }
                 if (command === 'list_project_tasks') return []
+                if (command === 'get_godot_session') return undefined
+                if (command === 'start_godot_session')
+                    return {
+                        state: 'ready',
+                        rpcAddress: '127.0.0.1:7000',
+                        lspPort: 6005,
+                        dapPort: 6006,
+                        godotVersion: '4.7.1.stable',
+                        worktree: '/fixture/worktree'
+                    }
+                if (command === 'call_godot') {
+                    const call = (arguments_ as {request?: {command?: string}} | undefined)?.request
+                    if (call?.command === 'session.get_state')
+                        return {
+                            id: 'fixture',
+                            result: {
+                                state: 'ready',
+                                scene: 'res://main.tscn',
+                                revision: 3,
+                                dirty: false,
+                                canUndo: true,
+                                canRedo: false
+                            }
+                        }
+                    if (call?.command === 'scene.get_tree')
+                        return {
+                            id: 'fixture',
+                            result: {
+                                root: {
+                                    name: 'Main',
+                                    type: 'Node2D',
+                                    path: 'Main',
+                                    children: [
+                                        {
+                                            name: 'Player',
+                                            type: 'CharacterBody2D',
+                                            path: 'Main/Player',
+                                            children: []
+                                        },
+                                        {
+                                            name: 'Camera',
+                                            type: 'Camera2D',
+                                            path: 'Main/Camera',
+                                            children: []
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    if (call?.command === 'node.inspect')
+                        return {
+                            id: 'fixture',
+                            result: {
+                                name: 'Player',
+                                type: 'CharacterBody2D',
+                                path: 'Main/Player',
+                                groups: ['players']
+                            }
+                        }
+                    return {id: 'fixture', result: {}}
+                }
+                if (command === 'read_godot_logs')
+                    return {
+                        entries: [
+                            {
+                                sequence: 1,
+                                source: 'editor',
+                                severity: 'info',
+                                message: 'Godot Engine v4.7.1.stable',
+                                timestamp: 1_800_000_000
+                            }
+                        ],
+                        cursor: 1,
+                        dropped: 0
+                    }
                 if (command === 'list_workspace_files')
                     return [
                         {path: 'scripts/player.gd', bytes: script.length},
@@ -185,12 +261,24 @@ test('script editor', async ({page}) => {
     await installDesktop(page, 'scripts')
     await page.goto('/')
     await expect(page.getByText('Local AI connected')).toBeVisible()
-    await page.getByRole('button', {name: 'Scripts'}).click()
-    await page.getByText('scripts/player.gd').click()
+    await page.getByRole('button', {name: 'Files'}).click()
+    await page.getByText('player.gd').click()
     // Monaco renders its own DOM, so waiting for a line it tokenized proves the editor is live.
     await expect(page.locator('.monaco-editor').first()).toBeVisible()
     await expect(page.getByText('func _ready() -> void:')).toBeVisible()
     await stableScreenshot(page, 'script-editor.png')
+})
+
+test('inspector workspace', async ({page}) => {
+    await installDesktop(page, 'inspector')
+    await page.goto('/')
+    await expect(page.getByText('Local AI connected')).toBeVisible()
+    await page.getByRole('button', {name: 'Start editor session'}).click()
+    await page.getByText('Player').click()
+    await expect(
+        page.getByRole('complementary', {name: 'Inspector'}).getByText('Main/Player')
+    ).toBeVisible()
+    await stableScreenshot(page, 'inspector-workspace.png')
 })
 
 test('settings dialog', async ({page}) => {

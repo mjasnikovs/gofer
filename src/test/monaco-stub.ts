@@ -28,6 +28,8 @@ export interface MonacoStubState {
     decorations: readonly Monaco.editor.IModelDeltaDecoration[]
     actions: string[]
     diffEditors: number
+    /** Lines another panel asked the editor to reveal, in the order it asked. */
+    revealed: number[]
     /** Text the editor holds for the active model, as the user would see it. */
     activeText: () => string
     /** Simulates typing: the editor reports its model's new content. */
@@ -53,6 +55,7 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
         decorations: [],
         actions: [],
         diffEditors: 0,
+        revealed: [],
         activeText: () => activeModel?.getValue() ?? '',
         type: (text: string) => {
             activeModel?.setText(text)
@@ -70,6 +73,7 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
             state.decorations = []
             state.actions = []
             state.diffEditors = 0
+            state.revealed = []
             contentListener = undefined
             mouseListener = undefined
             activeModel = undefined
@@ -108,6 +112,11 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
             activeModel = model
         },
         getPosition: () => ({lineNumber: 1, column: 1}),
+        setPosition: () => undefined,
+        focus: () => undefined,
+        revealLineInCenter: (line: number) => {
+            state.revealed.push(line)
+        },
         saveViewState: () => null,
         restoreViewState: () => undefined,
         createDecorationsCollection: () => ({

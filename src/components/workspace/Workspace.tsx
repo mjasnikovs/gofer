@@ -1,9 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
 import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
-import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
-import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {invoke, isTauri, listen} from '../../services/desktop'
 import type {TaskSummary} from '../../models/app'
 import type {ChatAttachment, DraftAttachment, Message} from '../../models/chat'
@@ -16,8 +14,8 @@ import {useChatPersistence} from '../../hooks/useChatPersistence'
 import {useGodotProcess} from '../../hooks/useGodotProcess'
 import {useToolApprovals} from '../../hooks/useToolApprovals'
 import {ChatConversation} from './ChatConversation'
+import {InspectorWorkspace} from './InspectorWorkspace'
 import {ToolApprovalDialog} from './ToolApprovalDialog'
-import {ScriptWorkspace} from './ScriptWorkspace'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
 import {WorkspaceHeader} from './WorkspaceHeader'
 
@@ -31,13 +29,15 @@ const CHAT_ATTACHMENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 
 const MAX_CHAT_ATTACHMENTS = 5
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const DEFAULT_CONTEXT_WINDOW = 120_064
-/** The chat column stays readable at 960 px; the editor wants the whole window. */
+/** The chat column stays readable inside the frame's flexible center region. */
 const CHAT_CONTENT_WIDTH = 960
-
-type WorkspaceView = 'chat' | 'scripts'
+/**
+ * Centring the welcome overflows both ways in a short centre region, and a scroll container cannot
+ * reach what overflows above it. `safe` falls back to start alignment exactly then.
+ */
+const SAFE_CENTRE = {justifyContent: 'safe center'} as const
 
 export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspaceProps) {
-    const [view, setView] = useState<WorkspaceView>('chat')
     const [draft, setDraft] = useState('')
     const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
     const [isSavingAttachments, setIsSavingAttachments] = useState(false)
@@ -381,20 +381,30 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         />
     )
 
-    const chat = (
-        <StackItem size='fill'>
-            {messages.length === 0 ?
+    const chat =
+        messages.length === 0 ?
+            // The welcome scrolls: the centre region shares its height with the bottom panel, and a
+            // short window would otherwise clip the greeting rather than let the user reach it.
+            <StackItem
+                size='fill'
+                isScrollable
+            >
                 <VStack
                     height='100%'
-                    padding={8}
+                    padding={6}
                     hAlign='center'
                     vAlign='center'
+                    style={SAFE_CENTRE}
                 >
                     <WorkspaceWelcome composer={composer} />
                 </VStack>
-            :   <VStack
+            </StackItem>
+        :   <StackItem size='fill'>
+                <VStack
                     gap={0}
                     height='100%'
+                    maxWidth={CHAT_CONTENT_WIDTH}
+                    hAlign='center'
                 >
                     <ChatConversation
                         attachmentPreviews={attachmentPreviews}
@@ -411,61 +421,35 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                         {composer}
                     </VStack>
                 </VStack>
-            }
-        </StackItem>
-    )
+            </StackItem>
 
     return (
-        <Layout
-            height='fill'
-            contentWidth={view === 'chat' ? CHAT_CONTENT_WIDTH : '100%'}
-            content={
-                <LayoutContent padding={0}>
-                    <VStack
-                        gap={0}
-                        height='100%'
-                    >
-                        <WorkspaceHeader
-                            connectionState={connectionState}
-                            isGodotRunning={isGodotRunning}
-                            onConnect={connect}
-                            onMergeTask={() => {
-                                void mergeTask()
-                            }}
-                            onRunGodot={runGodot}
-                            onStopGodot={stopGodot}
-                            {...(activeTask && {activeTask})}
-                        />
-                        <Divider />
-                        <TabList
-                            size='sm'
-                            hasDivider
-                            value={view}
-                            onChange={value => {
-                                setView(value === 'scripts' ? 'scripts' : 'chat')
-                            }}
-                        >
-                            <Tab
-                                value='chat'
-                                label='Chat'
-                            />
-                            <Tab
-                                value='scripts'
-                                label='Scripts'
-                            />
-                        </TabList>
-                        {view === 'scripts' ?
-                            <StackItem size='fill'>
-                                <ScriptWorkspace onError={reportError} />
-                            </StackItem>
-                        :   chat}
-                        <ToolApprovalDialog
-                            onRespond={respondToApproval}
-                            {...(approvals[0] && {prompt: approvals[0]})}
-                        />
-                    </VStack>
-                </LayoutContent>
-            }
-        />
+        <VStack
+            gap={0}
+            height='100%'
+        >
+            <WorkspaceHeader
+                connectionState={connectionState}
+                isGodotRunning={isGodotRunning}
+                onConnect={connect}
+                onMergeTask={() => {
+                    void mergeTask()
+                }}
+                onRunGodot={runGodot}
+                onStopGodot={stopGodot}
+                {...(activeTask && {activeTask})}
+            />
+            <Divider />
+            <StackItem size='fill'>
+                <InspectorWorkspace
+                    chat={chat}
+                    onError={reportError}
+                />
+            </StackItem>
+            <ToolApprovalDialog
+                onRespond={respondToApproval}
+                {...(approvals[0] && {prompt: approvals[0]})}
+            />
+        </VStack>
     )
 }

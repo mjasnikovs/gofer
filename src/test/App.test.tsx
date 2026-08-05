@@ -118,6 +118,7 @@ describe('InitializationSplash', () => {
 describe('SettingsPage', () => {
     function loadSettings() {
         tauri.invoke.mockImplementation(async (command: string) => {
+            if (command === 'list_workspace_files') return []
             if (command === 'load_settings') return settingsResponse
             if (command === 'get_rag_cache_status') return incompleteCache
             if (command === 'test_ai_connection') {
@@ -223,6 +224,7 @@ describe('Workspace', () => {
 
     it('attaches and sends an image without requiring text', async () => {
         tauri.invoke.mockImplementation(async command => {
+            if (command === 'list_workspace_files') return []
             if (command === 'load_settings') {
                 return {
                     ...settingsResponse,
@@ -293,6 +295,7 @@ describe('Workspace', () => {
 
     it('loads project chat from Rust storage', async () => {
         tauri.invoke.mockImplementation(async command => {
+            if (command === 'list_workspace_files') return []
             if (command === 'load_chat') {
                 return {
                     taskId: '0198f4c0-02ef-7000-8000-000000000001',
@@ -319,6 +322,7 @@ describe('Workspace', () => {
     it('coalesces chat snapshots while a save is already running', async () => {
         let resolveFirstSave: (() => void) | undefined
         tauri.invoke.mockImplementation((command, args) => {
+            if (command === 'list_workspace_files') return Promise.resolve([])
             if (command === 'load_chat') {
                 return Promise.resolve({taskId: 'task-1', messages: [], agentMessages: []})
             }
@@ -363,6 +367,7 @@ describe('Workspace', () => {
 
     it('loads each persisted attachment preview only once across message updates', async () => {
         tauri.invoke.mockImplementation(async command => {
+            if (command === 'list_workspace_files') return []
             if (command === 'load_chat') {
                 return {
                     messages: [
@@ -409,6 +414,7 @@ describe('Workspace', () => {
         }
         window.localStorage.setItem('gofer.agent-chat.v1', JSON.stringify(legacy))
         tauri.invoke.mockImplementation(async (command, args) => {
+            if (command === 'list_workspace_files') return []
             if (command === 'load_chat') return {messages: [], agentMessages: []}
             if (command === 'import_legacy_chat') {
                 return (args as {chat: typeof legacy}).chat
@@ -430,6 +436,7 @@ describe('Workspace', () => {
             return () => undefined
         })
         tauri.invoke.mockImplementation(async command => {
+            if (command === 'list_workspace_files') return []
             if (command === 'send_ai_message') {
                 handler?.({
                     payload: {
@@ -461,6 +468,7 @@ describe('Workspace', () => {
             return () => undefined
         })
         tauri.invoke.mockImplementation(async command => {
+            if (command === 'list_workspace_files') return []
             if (command === 'load_settings') return settingsResponse
             if (command === 'list_ai_models') {
                 return [
@@ -535,7 +543,9 @@ describe('Workspace', () => {
             if (event && handler) handlers.set(event, handler)
             return vi.fn<() => void>()
         })
-        tauri.invoke.mockResolvedValue(undefined)
+        tauri.invoke.mockImplementation(async command =>
+            command === 'list_workspace_files' ? [] : undefined
+        )
         render(<Workspace />)
         await waitFor(() => {
             expect(handlers.has('ai-approval-request')).toBe(true)

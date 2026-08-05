@@ -555,7 +555,7 @@ UI.
       Docs panel rather than implying a resolvable reference.
     - Done when the same query produces the same ranked chapters in both UI and agent tool output.
 
-17. Build the full inspector workspace
+17. Build the full inspector workspace — DONE
     - Use Astryx’s IDE frame: 260 px resizable explorer, flexible center, 380 px resizable
       inspector, and 240 px collapsible bottom panel.
     - Explorer tabs: edited Scene, Runtime, Files.
@@ -564,8 +564,43 @@ UI.
     - Bottom tabs: Problems, Debugger, Output, Import.
     - At 1024 px and below, overlay the inspector; preserve the current 960 px minimum window.
     - Use dense TreeList, List/Item, and tables rather than card-wrapped rows.
+    - `src/components/workspace/InspectorWorkspace.tsx` is the frame, and it owns what its regions
+      share: the open script buffers, the selected node, and the session. The Problems list, the
+      debugger, the Monaco tabs, and the AI agent are therefore four views of one set of buffers
+      rather than four copies, which is the same rule step 14 enforced between the UI and the tool
+      router. The responsive contract is a comment at the frame root: above 1024 px the three
+      columns sit side by side, at 1024 px and below the inspector opens as an overlay from the
+      toolbar and returns focus to the button that opened it. The bottom panel collapses to its own
+      tab strip at every width — hiding its tabs as well would remove the only way back.
+    - `useGodotSession` is the renderer's view of the one managed editor: lifecycle state from the
+      `godot-session-event` global, the edited scene from the addon's own `scene.changed` events,
+      and two epochs — one for the edited scene, one for the running game — that panels depend on
+      instead of polling, so an editor-side change refreshes the same way a Gofer-side change does.
+      `useGodotQuery` gives every panel the same four states; loading is derived from the request a
+      panel is waiting for against the request that answered, so no effect writes state
+      synchronously and a stale answer is never painted beside a new selection.
+    - The edited scene and the running scene stay separate everywhere: two explorer tabs, two
+      commands (`scene.get_tree` and `runtime.get_tree`), and an inspector reading labelled `Edited`
+      or `Runtime`. A game that is not running answers `runtime_not_running`, which the panels
+      render as a fact about a stopped game rather than as a fault.
+    - The inspector reads; it does not write. A setting is changed through the typed command that
+      owns its family, so no generic value editor can put a malformed autoload or input action into
+      project.godot, and a machine-wide editor setting keeps the approval gate step 15 gave it. The
+      Editor tab says so on screen.
+    - `ScriptWorkspace` lost its own file list and its own copy of `useScriptBuffers`: files are
+      chosen in the explorer, and the frame passes the buffers in. `ScriptEditor` gained one prop,
+      `reveal`, so the Problems list and a debugger frame can send the editor to a line.
     - Done when keyboard navigation, focus management, loading/error/empty states, and accessibility
-      tests pass.
+      tests pass — proven by `InspectorWorkspace.test.tsx`, which drives the frame against a
+      scripted backend: the four regions and their tabs, starting the session from the explorer's
+      empty state, a node selection filling the inspector, `runtime_not_running` reported as a
+      state, opening a worktree file into Monaco with sidecars hidden, a problem jumping to the line
+      that produced it, project and editor settings searched separately, a captured frame from a
+      run, followed output, documentation cited by chapter, the bottom panel collapsing without
+      losing the way back, a centre tab reached and activated from the keyboard, the inspector
+      overlaying below the breakpoint and returning focus on close, and axe reporting no violations.
+      The Playwright `inspector workspace` journey screenshots the assembled frame and runs axe over
+      it.
 
 18. Migrate and release
     - Replace the current Run button with “ensure editor session, then DAP launch.”
