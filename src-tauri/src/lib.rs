@@ -39,6 +39,10 @@ mod godot_runtime_acceptance;
 // Drives one AI turn through the router into that same editor: the step 14 done-criteria.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_ai_acceptance;
+// Drives the final journey: one task worktree from connect to task switch, through the supervisor
+// the renderer starts and the router the agent calls, with no transport bound by the test itself.
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_journey_acceptance;
 mod memory;
 mod process;
 pub mod protocol_v2;

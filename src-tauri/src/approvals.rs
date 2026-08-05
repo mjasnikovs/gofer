@@ -317,6 +317,22 @@ pub fn cancel_all() {
     pending.take();
 }
 
+/// The prompts currently waiting for an answer, for the acceptance journey's stand-in renderer.
+/// The real one learns each identifier from the `ai-approval-request` event it is shown; a test
+/// backend has no window to receive one. Absent from every non-test build.
+#[cfg(all(test, feature = "godot-acceptance"))]
+pub fn pending_approvals() -> Vec<String> {
+    PENDING
+        .lock()
+        .ok()
+        .and_then(|pending| {
+            pending
+                .as_ref()
+                .map(|pending| pending.keys().cloned().collect())
+        })
+        .unwrap_or_default()
+}
+
 fn take_pending(approval_id: &str) -> Option<Sender<bool>> {
     PENDING
         .lock()

@@ -219,6 +219,16 @@ pub fn bind_test_session(dap_port: u16, worktree: &str) {
     }
 }
 
+/// Drops the binding, mirroring [`crate::script::clear_test_session`]: the journey acceptance
+/// drives the supervised adapter and must not inherit an earlier module's editor.
+#[cfg(all(test, feature = "godot-acceptance"))]
+pub fn clear_test_session() {
+    disconnect();
+    if let Ok(mut slot) = TEST_SESSION.lock() {
+        *slot = None;
+    }
+}
+
 /// Answers one debugger request, connecting to the active session's adapter on first use.
 pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
     let (client, workspace, events) = connection()?;

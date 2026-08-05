@@ -265,6 +265,17 @@ pub fn bind_test_session(lsp_port: u16, worktree: &str) {
     }
 }
 
+/// Drops the binding, so the next request resolves the supervised session again. The journey
+/// acceptance drives a real supervised editor and must not inherit a binding an earlier module
+/// left behind — including one left by a module that panicked before its own teardown.
+#[cfg(all(test, feature = "godot-acceptance"))]
+pub fn clear_test_session() {
+    disconnect();
+    if let Ok(mut slot) = TEST_SESSION.lock() {
+        *slot = None;
+    }
+}
+
 /// Opens a workspace file as an LSP document and returns its current contents. Re-opening a file
 /// the renderer already holds re-synchronizes the server with what is on disk rather than
 /// stacking a second document.

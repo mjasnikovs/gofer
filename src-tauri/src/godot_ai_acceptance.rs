@@ -209,8 +209,8 @@ struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        crate::script::disconnect();
-        crate::debug::disconnect();
+        crate::script::clear_test_session();
+        crate::debug::clear_test_session();
         godot_session::bind_test_rpc(None);
         self.rpc.stop();
         let _ = self.stager.unstage(&self.worktree);

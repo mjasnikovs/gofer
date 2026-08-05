@@ -671,7 +671,7 @@ LSP client, DAP client, and filesystem layer therefore need injectable seams lik
   autonomous shell behavior.
 - Packaged Linux, Windows, and macOS journeys using the pinned Godot artifacts already listed in the
   repository.
-- Final acceptance journey:
+- Final acceptance journey — DONE:
     1. Connect to a task worktree.
     2. Inspect and mutate a scene, undo it, redo it, and explicitly save.
     3. Create/edit a script, fix diagnostics, format it, rename a symbol, and navigate references.
@@ -680,6 +680,39 @@ LSP client, DAP client, and filesystem layer therefore need injectable seams lik
     6. Edit project settings and approve one machine-wide editor setting.
     7. Retrieve relevant Godot documentation.
     8. Switch tasks and verify complete cleanup/rebinding.
+    - `src-tauri/src/godot_journey_acceptance.rs` is those eight steps as eight sections of one
+      test. What makes it the final journey rather than an eleventh boundary suite is what it stops
+      standing in for: it builds a real Git checkout, opens real project storage, creates a real
+      task, and starts the session through the supervisor itself, so the addon staging, the RPC
+      listener, the language server, the debug adapter, and the run archive are the ones a user
+      gets. Every operation then goes through `ai_tools::dispatch` — the router the agent calls into
+      the handlers the renderer's commands call — so the safety model is on the path rather than
+      beside it.
+    - Two things stay scripted, both at the outer edge: the user who answers the approval prompt
+      (`approvals::pending_approvals` is the stand-in renderer's only seam, because a test backend
+      has no window to receive `ai-approval-request`), and the embedding index behind documentation
+      retrieval, which is hundreds of megabytes of models and a built LanceDB table.
+      `fixtures/rag/retrieve-worker.mjs` scripts `retrieve()` and keeps everything downstream real,
+      including the vector stripping the journey asserts. The machine-wide editor setting is written
+      back to itself: the gate is what is being proven, and a test must not change the developer's
+      own settings file.
+    - The supervisor's headless escape now covers the acceptance gate as well as the WebDriver
+      build, so the journey drives the launch a user's Run button drives instead of a second,
+      differently-launched code path. It stays absent from every shipped build.
+    - Driving the supervised session found the leak the boundary suites hide from each other:
+      `script::bind_test_session` and `debug::bind_test_session` were never cleared, so a module
+      that bound its own editor left the next one pointed at a deleted worktree. Both gained
+      `clear_test_session`, the modules that bind now unbind, and the journey clears whatever a
+      panicking predecessor left behind before it starts.
+    - Done when one task is taken from connect to a second task with nothing left behind — proven by
+      `the_final_journey_takes_one_task_from_connect_to_a_second_task`: the addon staged in the task
+      worktree and never in the user's checkout, a marker created, undone, redone, and only then on
+      disk, a stale revision refused, a parse error reported and cleared, a cross-file rename that
+      writes nothing until it is applied, a breakpoint two frames deep with `amount` out of Locals
+      and an emulated step-out into `_process`, an injected key press proven by the label and the
+      captured PNG, a project setting that outlives the session that made it beside a machine-wide
+      one that waited for approval, documentation cited by chapter, and a second task that gets its
+      own worktree while the first is left clean down to Git's shared exclude file.
 
 ## Explicit Assumptions and Exclusions
 

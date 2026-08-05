@@ -363,10 +363,11 @@ fn start_with(
     if cfg!(target_os = "macos") {
         arguments.insert(0, OsString::from("--single-window"));
     }
-    // The packaged journey drives a real editor on machines that have no display. The flag exists
-    // only in the WebDriver build, so a shipped Gofer can never start an editor the user cannot
-    // see, and the journey never needs a second, differently-launched code path.
-    #[cfg(feature = "webdriver")]
+    // The packaged journey and the final acceptance journey both drive a real editor on machines
+    // that have no display. The flag exists only in the WebDriver build and under the acceptance
+    // gate, so a shipped Gofer can never start an editor the user cannot see, and neither journey
+    // needs a second, differently-launched code path.
+    #[cfg(any(feature = "webdriver", all(test, feature = "godot-acceptance")))]
     if std::env::var_os("GOFER_GODOT_HEADLESS").is_some() {
         arguments.insert(0, OsString::from("--headless"));
     }

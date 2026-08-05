@@ -175,5 +175,5 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     })
     .expect("closing twice is harmless");
 
-    script::disconnect();
+    script::clear_test_session();
 }
