@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict'
-import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises'
+import {mkdir, mkdtemp, readdir, rm, writeFile} from 'node:fs/promises'
 import {createServer} from 'node:http'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {spawn, spawnSync} from 'node:child_process'
 import {createInterface} from 'node:readline'
 import test from 'node:test'
-import {TOOL_PREFIX, createGodotTools, createToolHost, toolResult} from './ai-host.mjs'
+import {
+    EVENT_PREFIX,
+    TOOL_PREFIX,
+    createGodotTools,
+    createToolHost,
+    toolResult
+} from './ai-host.mjs'
 import {createAgentTools, runAgent} from './ai-provider.mjs'
 
 const settings = {
@@ -442,6 +448,11 @@ const catalog = [
         name: 'godot_runtime',
         description: 'The running game.',
         operations: [{op: 'capture', summary: 'Captures a PNG frame.'}]
+    },
+    {
+        name: 'godot_resource',
+        description: 'Project resources.',
+        operations: [{op: 'delete', summary: 'Deletes a resource. Asks the user first.'}]
     }
 ]
 
@@ -504,7 +515,7 @@ test('domain tools carry the router catalog and forward every call', async () =>
 
     assert.deepEqual(
         tools.map(tool => tool.name),
-        ['godot_scene', 'godot_runtime']
+        ['godot_scene', 'godot_runtime', 'godot_resource']
     )
     assert.deepEqual(tools[0].parameters.properties.op.enum, ['get_tree', 'save'])
     assert.match(tools[0].description, /get_tree: Returns the edited scene hierarchy\./u)
@@ -698,4 +709,304 @@ test('the Godot guidance is added to the prompt only when the domain tools are o
     const guided = await systemPrompt({tools: catalog, host: {call: () => Promise.resolve({})}})
     assert.match(guided, /godot_session status/u)
     assert.match(guided, /expectedRevision/u)
+    assert.match(guided, /approval_denied means they said no: do not retry it/u)
+})
+
+/**
+ * A model scripted turn by turn: `calls` answers with tool calls, `text` ends the turn on a
+ * message. The request bodies are kept because half of what these tests prove is what reaches the
+ * model — an error code it must read, an image it must see, a tool it was never asked to confirm.
+ */
+function startScriptedServer(turns) {
+    const bodies = []
+    let turn = 0
+    const server = createServer((request, response) => {
+        let body = ''
+        request.on('data', chunk => {
+            body += chunk
+        })
+        request.on('end', () => {
+            bodies.push(JSON.parse(body))
+            const script = turns[Math.min(turn, turns.length - 1)]
+            turn += 1
+            const calls = script.calls ?? []
+            const delta =
+                calls.length > 0 ?
+                    {
+                        role: 'assistant',
+                        tool_calls: calls.map((call, index) => ({
+                            index,
+                            id: `call-${String(turn)}-${String(index)}`,
+                            type: 'function',
+                            function: {name: call.name, arguments: JSON.stringify(call.args)}
+                        }))
+                    }
+                :   {role: 'assistant', content: script.text ?? 'Done'}
+            const frame = choices => ({
+                id: `chatcmpl-${String(turn)}`,
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: settings.model,
+                choices
+            })
+            response.writeHead(200, {'content-type': 'text/event-stream'})
+            response.write(
+                `data: ${JSON.stringify(frame([{index: 0, delta, finish_reason: null}]))}\n\n`
+            )
+            response.write(
+                `data: ${JSON.stringify({
+                    ...frame([
+                        {
+                            index: 0,
+                            delta: {},
+                            finish_reason: calls.length > 0 ? 'tool_calls' : 'stop'
+                        }
+                    ]),
+                    usage: {prompt_tokens: 8, completion_tokens: 2, total_tokens: 10}
+                })}\n\n`
+            )
+            response.end('data: [DONE]\n\n')
+        })
+    })
+    return {bodies, server}
+}
+
+async function baseUrl(context, server) {
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    context.after(() => server.close())
+    return `http://127.0.0.1:${String(server.address().port)}/v1`
+}
+
+test('parallel domain calls are answered out of order without crossing results', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {
+            calls: [
+                {name: 'godot_scene', args: {op: 'get_tree', params: {}}},
+                {name: 'godot_runtime', args: {op: 'capture', params: {}}}
+            ]
+        },
+        {text: 'Both answered'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    // The backend's half: hold both requests, then answer them in reverse arrival order. Two calls
+    // are in flight at once precisely because the channel is duplex, and only the correlation id
+    // says which result belongs to which.
+    const held = []
+    const host = createToolHost(call => {
+        held.push(call)
+        if (held.length < 2) return
+        for (const request of [...held].reverse())
+            host.deliver({
+                type: 'tool-result',
+                id: request.id,
+                ok: true,
+                result: {answered: request.params.op}
+            })
+    })
+    const events = []
+
+    const completion = await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'Inspect and capture', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: event => events.push(event)
+    })
+
+    assert.equal(completion.text, 'Both answered')
+    assert.deepEqual(
+        held.map(request => request.params.op),
+        ['get_tree', 'capture']
+    )
+    const requested = new Map(
+        events.filter(event => event.type === 'tool-start').map(event => [event.id, event.target])
+    )
+    const ended = events.filter(event => event.type === 'tool-end')
+    assert.equal(ended.length, 2)
+    for (const end of ended)
+        assert.equal(JSON.parse(end.output).answered, requested.get(end.id), end.id)
+    assert.equal(host.pendingCount, 0)
+})
+
+test('aborting a turn cancels the domain tool call it is waiting on', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {calls: [{name: 'godot_scene', args: {op: 'get_tree', params: {}}}]}
+    ])
+    const url = await baseUrl(context, mock.server)
+    let notifyCalled
+    const called = new Promise(resolve => {
+        notifyCalled = resolve
+    })
+    // A backend that never answers: the only thing that can settle this call is the abort.
+    const host = createToolHost(() => notifyCalled())
+    const controller = new AbortController()
+    const events = []
+
+    const completion = runAgent({
+        settings: {...settings, baseUrl: url, maxRetries: 0},
+        messages: [{sender: 'user', text: 'Inspect the scene', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: event => events.push(event),
+        signal: controller.signal
+    })
+    await called
+    controller.abort()
+
+    const result = await completion
+    assert.equal(result.stopReason, 'aborted')
+    assert.equal(host.pendingCount, 0)
+})
+
+test('a tool call left unanswered is settled when the backend closes the channel', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {calls: [{name: 'godot_scene', args: {op: 'get_tree', params: {}}}]},
+        {text: 'The scene could not be read'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const worker = spawn(process.execPath, ['scripts/ai-worker.mjs'], {cwd: process.cwd()})
+    context.after(() => worker.kill())
+    const events = []
+    const finished = new Promise(resolve => worker.on('exit', resolve))
+    createInterface({input: worker.stdout}).on('line', line => {
+        // The backend goes away mid-call: the channel closes instead of the request being answered.
+        if (line.startsWith(TOOL_PREFIX)) return worker.stdin.end()
+        if (line.startsWith(EVENT_PREFIX)) events.push(JSON.parse(line.slice(EVENT_PREFIX.length)))
+    })
+
+    worker.stdin.write(
+        `${JSON.stringify({
+            settings: {...settings, baseUrl: url},
+            messages: [{sender: 'user', text: 'Inspect the scene', timestamp: 1}],
+            workspacePath: workspace.path,
+            tools: catalog
+        })}\n`
+    )
+
+    // The worker exits rather than hanging on a promise the backend can no longer resolve, and the
+    // model is told why instead of being left waiting for a result.
+    assert.equal(await finished, 0)
+    const end = events.find(event => event.type === 'tool-end')
+    assert.equal(end.isError, true)
+    assert.match(end.output, /closed the tool channel/u)
+    assert.equal(events.find(event => event.type === 'done').text, 'The scene could not be read')
+})
+
+test('a denied approval reaches the model as approval_denied without failing the turn', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {calls: [{name: 'godot_resource', args: {op: 'delete', params: {path: 'main.tscn'}}}]},
+        {text: 'I did not delete it'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const host = createToolHost(call =>
+        host.deliver({
+            type: 'tool-result',
+            id: call.id,
+            ok: false,
+            error: {code: 'approval_denied', message: 'The user declined the tool call'}
+        })
+    )
+    const events = []
+
+    const completion = await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'Delete main.tscn', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: event => events.push(event)
+    })
+
+    // A refusal is an answer, not a failure: the turn continues and the model reads the code, which
+    // the system prompt has already told it not to retry.
+    assert.equal(completion.text, 'I did not delete it')
+    const end = events.find(event => event.type === 'tool-end')
+    assert.equal(end.isError, true)
+    assert.match(end.output, /approval_denied/u)
+    assert.equal(mock.bodies.length, 2)
+    const answer = mock.bodies[1].messages.at(-1)
+    assert.equal(answer.role, 'tool')
+    assert.match(JSON.stringify(answer.content), /approval_denied/u)
+})
+
+test('a captured frame reaches the model as an image and not as base64 in the tool text', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const data = 'iVBORw0KGgoAAAANSUhEUg=='
+    const mock = startScriptedServer([
+        {calls: [{name: 'godot_runtime', args: {op: 'capture', params: {}}}]},
+        {text: 'The label changed'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const host = createToolHost(call =>
+        host.deliver({
+            type: 'tool-result',
+            id: call.id,
+            ok: true,
+            result: {
+                running: true,
+                frame: {encoding: 'png-base64', width: 320, height: 240, data}
+            }
+        })
+    )
+    const events = []
+
+    await runAgent({
+        settings: {...settings, baseUrl: url, input: ['text', 'image']},
+        messages: [{sender: 'user', text: 'Capture the game', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: event => events.push(event)
+    })
+
+    // The frame rides the second request as an image part; the text the model reads keeps the
+    // frame's dimensions and drops its payload, which is worth nothing as characters.
+    assert.match(JSON.stringify(mock.bodies[1]), new RegExp(`data:image/png;base64,${data}`, 'u'))
+    const tool = mock.bodies[1].messages.find(message => message.role === 'tool')
+    assert.doesNotMatch(JSON.stringify(tool.content), new RegExp(data, 'u'))
+    const end = events.find(event => event.type === 'tool-end')
+    assert.equal(end.isError, false)
+    assert.equal(JSON.parse(end.output).frame.width, 320)
+    assert.equal(JSON.parse(end.output).frame.data, undefined)
+})
+
+test('the confined shell does destructive work in the worktree without asking anyone', async context => {
+    const workspace = await temporaryWorkspace({'stale.tmp': 'remove me'})
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {calls: [{name: 'bash', args: {command: 'rm stale.tmp'}}]},
+        {text: 'Removed'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    // The Godot tools are offered, so a gated typed delete was available; nothing reaches the
+    // backend because the shell is the deliberate autonomous exception to the approval model.
+    const asked = []
+    const host = {call: (tool, params) => Promise.resolve(asked.push({tool, params}) && {})}
+    const events = []
+
+    await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'Remove the stale file', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: event => events.push(event)
+    })
+
+    assert.deepEqual(await readdir(workspace.path), [])
+    assert.deepEqual(asked, [])
+    const end = events.find(event => event.type === 'tool-end')
+    assert.equal(end.isError, false)
+    assert.equal(events.find(event => event.type === 'tool-start').target, 'rm stale.tmp')
 })

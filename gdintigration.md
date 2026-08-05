@@ -684,7 +684,28 @@ LSP client, DAP client, and filesystem layer therefore need injectable seams lik
       until the user chooses; a save that lost the hash check raises `staleSave` from the write
       itself and offers the same two ways out. Neither writes anything on its own.
 - AI-worker tests for duplex tool calls, cancellation, approval rejection, image tool results, and
-  autonomous shell behavior.
+  autonomous shell behavior — DONE:
+    - `scripts/ai-worker.test.mjs` drives the five surfaces against a model scripted turn by turn
+      (`startScriptedServer`), keeping every request body: what the model is told is half of what
+      these tests prove, and the other half — the tool request the backend receives, or never
+      receives — is the worker's own channel.
+    - Duplex is proven by two calls in flight at once, answered in reverse arrival order: only the
+      correlation id says which result belongs to which, so a crossed pair fails the assertion
+      rather than passing quietly. If tool execution were sequential the held first call would never
+      be answered and the test would hang instead of asserting.
+    - Cancellation arrives two ways, because it does in production. A turn aborted while a domain
+      tool is waiting settles that call through the tool's own AbortSignal and ends `aborted`; a
+      backend that closes the channel mid-call is driven through the real worker process, which
+      exits 0 with the model told why, rather than hanging on a promise nobody can resolve.
+    - `approval_denied` is an answer, not a failure: the tool result reaches the model as an error
+      carrying the code, the turn continues to its next model request, and the system prompt's "do
+      not retry it" is asserted where the guidance is built.
+    - A captured frame rides the following request as a real image part while the tool text keeps
+      the frame's dimensions and drops its payload — the Node-level counterpart to the assertion
+      `godot_ai_acceptance` makes with a real editor.
+    - The shell test is the autonomous exception from the other side: the Godot domain tools are
+      offered, so a gated typed delete was available, and `rm` still removes a worktree file with
+      nothing reaching the backend to approve.
 - Packaged Linux, Windows, and macOS journeys using the pinned Godot artifacts already listed in the
   repository.
 - Final acceptance journey — DONE:
