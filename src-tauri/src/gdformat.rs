@@ -6,9 +6,11 @@
 //! non-zero without producing output. The proof fixture and procedure live in
 //! `fixtures/gdformat/`.
 //!
-//! Upstream publishes only wheels and sdists, so the sidecar is a frozen per-platform executable
-//! built in CI and shipped as a bundled resource. During development `GOFER_GDFORMAT` points at
-//! any local gdformat 4.5.0 binary. A missing or wrong-version binary yields
+//! Upstream publishes only wheels and sdists, so the sidecar is a frozen per-platform executable:
+//! `scripts/build-gdformat.mjs` freezes it into `src-tauri/sidecar`, `tauri.conf.json` bundles
+//! that directory, and it resolves here from the application's resource directory. During
+//! development `GOFER_GDFORMAT` points at any local gdformat 4.5.0 binary instead. A missing or
+//! wrong-version binary yields
 //! `formatter_unavailable`: formatting is the one feature allowed to ship disabled.
 //!
 //! The formatter only ever sees the buffer through stdin (`gdformat -`) and its stdout is
@@ -31,6 +33,9 @@ use std::time::{Duration, Instant};
 pub const PINNED_VERSION: &str = "4.5.0";
 /// Development/CI seam for pointing at a locally built gdformat executable.
 pub const ENV_OVERRIDE: &str = "GOFER_GDFORMAT";
+/// Where the frozen sidecar sits inside the application's resource directory. `tauri.conf.json`
+/// bundles `src-tauri/sidecar`, and `scripts/build-gdformat.mjs` is what fills it.
+pub const SIDECAR_DIRECTORY: &str = "sidecar";
 /// Matches the protocol v2 JSON payload cap: a script buffer larger than this is rejected
 /// before the sidecar is even spawned.
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -101,9 +106,9 @@ pub struct FormatResponse {
     pub changed: bool,
 }
 
-/// Resolves the sidecar binary: the `GOFER_GDFORMAT` override wins, then the bundled resource
-/// directory. There is deliberately no PATH search — a user-installed gdformat would bypass the
-/// pin. When nothing resolves the feature reports itself disabled.
+/// Resolves the sidecar binary: the `GOFER_GDFORMAT` override wins, then `sidecar/` inside the
+/// application's resource directory. There is deliberately no PATH search — a user-installed
+/// gdformat would bypass the pin. When nothing resolves the feature reports itself disabled.
 pub fn resolve(
     override_path: Option<OsString>,
     resource_dir: Option<PathBuf>,
@@ -124,7 +129,7 @@ pub fn resolve(
         .with_details(json!({"override": ENV_OVERRIDE, "path": path.display().to_string()})));
     }
     if let Some(directory) = resource_dir {
-        let bundled = directory.join(binary_name());
+        let bundled = directory.join(SIDECAR_DIRECTORY).join(binary_name());
         if bundled.is_file() {
             return Ok(bundled);
         }
@@ -570,15 +575,20 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_the_bundled_resource() {
         let directory = tempfile::TempDir::new().expect("temp directory");
-        std::fs::write(directory.path().join(binary_name()), b"binary").expect("write fake binary");
+        // The layout is the contract with `tauri.conf.json`, which bundles `src-tauri/sidecar`:
+        // a binary loose in the resource root is not the one Gofer ships.
+        let sidecar = directory.path().join(SIDECAR_DIRECTORY);
+        std::fs::create_dir(&sidecar).expect("create sidecar directory");
+        std::fs::write(sidecar.join(binary_name()), b"binary").expect("write fake binary");
         let resolved =
             resolve(None, Some(directory.path().to_path_buf())).expect("resolve bundled resource");
-        assert_eq!(resolved, directory.path().join(binary_name()));
+        assert_eq!(resolved, sidecar.join(binary_name()));
     }
 
     #[test]
     fn resolve_reports_disabled_when_nothing_exists() {
         let directory = tempfile::TempDir::new().expect("temp directory");
+        std::fs::write(directory.path().join(binary_name()), b"loose").expect("write fake binary");
         let error = resolve(None, Some(directory.path().to_path_buf()))
             .expect_err("empty resource directory must fail");
         assert_eq!(error.code, "formatter_unavailable");

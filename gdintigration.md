@@ -740,6 +740,49 @@ LSP client, DAP client, and filesystem layer therefore need injectable seams lik
     - Done when each platform runs the journey it was configured for. The Linux leg is proven here
       and on every push; the Windows and macOS legs are proven by the nightly matrix's first real
       GitHub-hosted run, which is the only machine that can run them.
+- Frozen per-platform `gdformat` sidecar packaging — DONE:
+    - This is the piece step 9 specified, step 18 deferred, and nothing else closed: the runtime
+      contract, the pin proof, and the `formatter_unavailable` disabled state all existed, but no
+      build ever produced the executable they described, `tauri.conf.json` declared no resources,
+      and `resolve` therefore searched a directory that could never contain anything. A shipped
+      Gofer could not format at all.
+    - `scripts/build-gdformat.mjs` is the build. It resolves the pins in
+      `protocol/gdformat-sidecar.json` — gdtoolkit 4.5.0 and its eight runtime dependencies, plus
+      PyInstaller as the freezer — into a throwaway virtual environment, freezes the `gdformat`
+      console entry point into one file, and drops it into `src-tauri/sidecar/` with its SHA-256 and
+      a `LICENSES.md` collecting the licence of everything inside it. Only the pinned requirements
+      are collected there: pip, setuptools, and PyInstaller make the executable and are not in it,
+      and pip alone would otherwise contribute two dozen vendored licences a user never receives.
+      The generated entry point reproduces gdtoolkit's console script exactly, including the `.exe`
+      suffix it strips from `argv[0]` before docopt parses the usage text against the program name.
+    - The build is also the proof. `fixtures/gdformat/README.md` already specified what the pin must
+      satisfy, so the script asserts every step of it against the frozen executable rather than
+      against the environment that produced it: a binary that lost a package data file — lark's
+      grammars being the obvious candidate — packs cleanly and fails at import time, so a build that
+      never runs its own artifact proves nothing. Wrong version, an unparseable fixture, a
+      non-idempotent format, or any stdout for invalid syntax fails the build instead of shipping.
+    - `tauri.conf.json` bundles `src-tauri/sidecar` as a resource and `gdformat::resolve` now looks
+      inside `sidecar/` rather than at the resource root, which is the layout a unit test pins.
+      Tauri's build script copies resources beside the executable for unbundled builds too, so the
+      release-mode WebDriver application carries the sidecar exactly as a bundled one does.
+    - That is what makes the packaged journey the proof rather than a second unit test:
+      `wdio.packaged.conf.ts` deletes any `GOFER_GDFORMAT` the developer exported, leaving the
+      bundled resource as the only binary that can answer, and the spec asserts `format_gdscript`
+      returns the formatted buffer through the renderer's own command. The journey's preflight
+      requires the sidecar and names `npm run build:gdformat`, because a missing one would otherwise
+      surface as `formatter_unavailable` from a window three processes away.
+    - `check.yml` and `packaged-journey.yml` both build it, so the Linux gate and all three packaged
+      legs freeze their own platform's executable. Building it in `check.yml` closes the hole the
+      acceptance journey had carried since step 9: its formatting assertion accepted
+      `formatter_unavailable`, so every green run was silent about whether the formatter worked. The
+      journey now refuses that branch whenever `GOFER_GDFORMAT` names a sidecar.
+    - macOS is the one honest gap. PyInstaller freezes for the interpreter's own architecture, so an
+      arm64 runner produces an arm64 executable rather than the universal binary the Godot pin is; a
+      release that must run on both macOS architectures needs either a universal2 CPython or two
+      builds joined with `lipo`. The journey proves the leg each runner was configured for.
+    - Done when a packaged application formats a buffer with no override in its environment — proven
+      by the `format_gdscript` assertion in `e2e/desktop/packaged.spec.ts`, which can only be
+      answered by `src-tauri/sidecar/gdformat` as the Tauri build placed it.
 - Final acceptance journey — DONE:
     1. Connect to a task worktree.
     2. Inspect and mutate a scene, undo it, redo it, and explicitly save.

@@ -25,3 +25,9 @@ test-results
 *.njsproj
 *.sln
 *.sw?
+
+# Built per platform by `npm run build:gdformat`; only the directory's README is tracked.
+src-tauri/sidecar/gdformat
+src-tauri/sidecar/gdformat.exe
+src-tauri/sidecar/gdformat*.sha256
+src-tauri/sidecar/LICENSES.md

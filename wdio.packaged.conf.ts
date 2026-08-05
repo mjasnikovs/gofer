@@ -21,6 +21,11 @@ process.env.GOFER_AI_WORKER = resolve('fixtures/packaged/fake-ai-worker.mjs')
 // workspace it can create a task worktree in, and an editor it can launch without a display.
 process.env.GOFER_WORKSPACE_DIR = workspace
 process.env.GOFER_GODOT_HEADLESS = '1'
+// The formatter is the one thing a shipped Gofer resolves from its own resource directory rather
+// than from a process it launches, so the journey must not be handed a developer's local override:
+// with it set, a bundle that ships no sidecar at all would still format and the assertion would
+// prove nothing about what a user receives.
+delete process.env.GOFER_GDFORMAT
 
 /**
  * Git inherits the environment of whatever ran the journey — a Git hook exports `GIT_DIR` and

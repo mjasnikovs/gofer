@@ -82,8 +82,15 @@ unmodified.
 
 The formatter is invoked as a separate process reading GDScript on standard input; Gofer requires
 exactly gdtoolkit 4.5.0 and reports `formatter_unavailable` rather than formatting with any other
-version. No gdtoolkit source is compiled into Gofer. The packaging build records the frozen
-executable's checksum and copies gdtoolkit's licence beside it.
+version. No gdtoolkit source is compiled into Gofer.
+
+`scripts/build-gdformat.mjs` is that build. It freezes the pins in `protocol/gdformat-sidecar.json`
+into `src-tauri/sidecar/`, which `tauri.conf.json` bundles as an application resource, and writes
+two files beside the executable: its SHA-256, and `LICENSES.md` carrying the licence of every
+package inside it. The frozen binary contains gdtoolkit, its runtime dependencies — colorama,
+docopt-ng, lark, mando, PyYAML, radon, regex, six — and a CPython interpreter under the Python
+Software Foundation License Version 2 (https://docs.python.org/3/license.html). PyInstaller, pip,
+and setuptools produce the executable and are not inside it.
 
 ## Astryx, Pi, and other package-manager dependencies
 

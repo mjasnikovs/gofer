@@ -23,6 +23,9 @@ jobs:
               with:
                   toolchain: 1.97.1
                   components: clippy,rustfmt
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.13'
             - name: Install system dependencies
               run: >-
                   sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
@@ -41,6 +44,11 @@ jobs:
               env:
                   GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
               run: node scripts/install-godot.mjs
+            # Exports GOFER_GDFORMAT, which is what makes the acceptance journey take the branch
+            # where formatting actually ran. Without it that assertion accepts
+            # `formatter_unavailable` and proves nothing about the formatter.
+            - name: Build the pinned gdformat sidecar
+              run: npm run build:gdformat
             - name: Run required checks with zero retries
               env:
                   GOFER_CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}

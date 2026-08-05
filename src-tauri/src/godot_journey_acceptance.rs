@@ -543,9 +543,12 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     );
     assert_eq!(read(&worktree, BROKEN_PATH), FIXED_SCRIPT);
 
-    // Formatting is allowed to ship disabled — the pinned sidecar is built per platform in CI — so
-    // the journey accepts either the pin doing its work or the documented unavailable state, and
-    // nothing in between.
+    // Formatting is allowed to ship disabled, so the journey accepts either the pin doing its work
+    // or the documented unavailable state, and nothing in between. Which one is legitimate is not
+    // left open: a machine that has the sidecar — CI builds it with `npm run build:gdformat` and
+    // exports this variable — must take the branch where formatting ran, because a `match` that
+    // accepts both is a green run that proves nothing about the formatter.
+    let sidecar_available = std::env::var_os(crate::gdformat::ENV_OVERRIDE).is_some();
     match journey.try_call(
         "godot_script",
         json!({"op": "format", "params": {"source": UNFORMATTED}}),
@@ -564,7 +567,16 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
                 "the formatter must never touch a source file"
             );
         }
-        Err(failure) => assert_eq!(failure.code, "formatter_unavailable"),
+        Err(failure) => {
+            assert!(
+                !sidecar_available,
+                "{} names a sidecar, so formatting must not report {}: {}",
+                crate::gdformat::ENV_OVERRIDE,
+                failure.code,
+                failure.message
+            );
+            assert_eq!(failure.code, "formatter_unavailable");
+        }
     }
 
     journey.open_script(MATH_PATH);

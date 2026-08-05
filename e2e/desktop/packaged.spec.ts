@@ -136,6 +136,20 @@ describe('packaged desktop application', () => {
         expect(savedScene).toContain('PackagedNode')
         expect(savedScene).toContain('Vector2(12, 34)')
 
+        // The formatter is the one sidecar Gofer ships rather than launches from the user's
+        // machine, so the packaged application is the only place its bundled resolution can be
+        // proven: `wdio.packaged.conf.ts` removes any GOFER_GDFORMAT override, which leaves
+        // `src-tauri/sidecar/gdformat` — copied beside the executable by the Tauri build — as the
+        // only binary that can answer.
+        const unformatted = 'extends Node\n\n\nfunc _ready( ) -> void:\n    print( "packaged" )\n'
+        const formatted = await command<{formatted: string; changed: boolean}>('format_gdscript', {
+            request: {source: unformatted}
+        })
+        expect(formatted.changed).toBe(true)
+        expect(formatted.formatted).toBe(
+            'extends Node\n\n\nfunc _ready() -> void:\n\tprint("packaged")\n'
+        )
+
         await command('stop_godot_session', {})
         // Stopping removes what the session staged: the addon is Gofer's, the worktree is the
         // user's, and a stopped session leaves nothing of the former in the latter.

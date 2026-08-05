@@ -1,9 +1,20 @@
-import {mkdtempSync, rmSync} from 'node:fs'
+import {existsSync, mkdtempSync, rmSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {spawn} from 'node:child_process'
 import {createServer} from 'node:http'
 import {resolveGodotBinary} from './godot-binary.mjs'
+
+// The journey asserts the formatter answers from the bundled sidecar rather than from an override,
+// so the sidecar has to have been built. Failing here names the command; failing inside the
+// packaged run would only report `formatter_unavailable` from a window three processes away.
+const sidecar = resolve(
+    'src-tauri/sidecar',
+    process.platform === 'win32' ? 'gdformat.exe' : 'gdformat'
+)
+if (!existsSync(sidecar)) {
+    throw new Error(`The packaged journey needs the bundled sidecar. Run: npm run build:gdformat`)
+}
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'gofer-packaged-journey-'))
 const wdio = resolve('node_modules/@wdio/cli/bin/wdio.js')

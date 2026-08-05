@@ -42,12 +42,21 @@ jobs:
               run: >-
                   sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
                   libappindicator3-dev librsvg2-dev patchelf unzip xvfb
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.13'
             - name: Install JavaScript dependencies
               run: npm ci
             - name: Install pinned Godot
               env:
                   GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
               run: node scripts/install-godot.mjs
+            # Freezing the sidecar is the only per-platform packaging step Gofer performs itself,
+            # and it has to happen before the application is built: the Tauri build is what copies
+            # `src-tauri/sidecar` beside the executable, which is where the journey's formatting
+            # assertion reads it from. The build proves the artifact before handing it over.
+            - name: Build the pinned gdformat sidecar
+              run: npm run build:gdformat
             - name: Run real Godot protocol and acceptance tests
               if: inputs.godot-suite
               run: npm run test:godot
