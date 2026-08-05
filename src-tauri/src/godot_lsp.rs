@@ -1091,7 +1091,9 @@ fn write_message(writer: &mut TcpStream, message: &Value) -> Result<(), LspError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::HoverContents;
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::Receiver as MpscReceiver;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -1962,5 +1964,251 @@ mod tests {
         assert!(error.retryable);
         assert!(started.elapsed() < INITIALIZE_TIMEOUT);
         server.join().expect("server");
+    }
+
+    /// A server that answers initialize without capabilities is not a server this client can use:
+    /// every later request would be sent on a guess about what it supports.
+    #[test]
+    fn refuses_a_handshake_without_capabilities() {
+        let (_directory, root) = workspace();
+        let server = start_fake_server(|message, _writer| {
+            match message.get("method").and_then(Value::as_str) {
+                Some("initialize") => FakeAction::Result(json!({"serverInfo": {"name": "fake"}})),
+                _ => FakeAction::Ignore,
+            }
+        });
+
+        let error = match LspClient::connect(server.address, root.root()) {
+            Ok(_) => panic!("initialize without capabilities must not produce a client"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "invalid_response");
+    }
+
+    /// The document lifecycle is a state machine, and the three operations that require an open
+    /// document say so rather than notifying the server about a document it has never seen.
+    #[test]
+    fn refuses_lifecycle_operations_on_a_document_that_is_not_open() {
+        let (_directory, root) = workspace();
+        let server = start_fake_server(handshake_handler);
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let uri = Url::parse("file:///worktree/scripts/absent.gd").expect("uri");
+
+        for error in [
+            client.change_document(&uri, "extends Node\n").unwrap_err(),
+            client.save_document(&uri, "extends Node\n").unwrap_err(),
+            client.close_document(&uri).unwrap_err(),
+        ] {
+            assert_eq!(error.code, "document_not_open");
+        }
+
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    /// A diagnostics pull answers three different questions, and the caller has to be able to tell
+    /// them apart: nothing published yet, a published verdict, and a session that is gone. Only the
+    /// middle one carries diagnostics, and `None` is not the same as a clean file.
+    #[test]
+    fn diagnostics_separate_silence_from_a_verdict_and_from_a_dead_session() {
+        let (_directory, root) = workspace();
+        let published = Arc::new(AtomicBool::new(false));
+        let publishing = Arc::clone(&published);
+        let server = start_fake_server(move |message, writer| {
+            if message.get("method").and_then(Value::as_str) == Some("textDocument/didOpen")
+                && publishing.load(Ordering::SeqCst)
+            {
+                let notification = json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {
+                        "uri": message["params"]["textDocument"]["uri"],
+                        "diagnostics": [{
+                            "range": {
+                                "start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 4}
+                            },
+                            "message": "Expected ')'",
+                            "severity": 1
+                        }]
+                    }
+                });
+                write_message(writer, &notification).expect("publish diagnostics");
+            }
+            handshake_handler(message, writer)
+        });
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let uri = Url::parse("file:///worktree/scripts/quiet.gd").expect("uri");
+
+        client.open_document(&uri, "extends Node\n").expect("open");
+        assert!(
+            client
+                .diagnostics(&uri, Duration::from_millis(150))
+                .expect("a silent server is not an error")
+                .is_none(),
+            "nothing published yet must not be reported as a clean file"
+        );
+
+        published.store(true, Ordering::SeqCst);
+        client
+            .open_document(&uri, "extends Node\n")
+            .expect("reopen");
+        let answer = client
+            .diagnostics(&uri, Duration::from_secs(2))
+            .expect("published diagnostics")
+            .expect("the publication must be readable");
+        assert_eq!(answer.diagnostics.len(), 1);
+        assert_eq!(answer.diagnostics[0].message, "Expected ')'");
+
+        client.shutdown();
+        assert!(
+            client
+                .diagnostics(&uri, Duration::from_secs(2))
+                .expect("the cache is read before the session state")
+                .is_some(),
+            "a verdict already published outlives the session that published it"
+        );
+        let unanswered = Url::parse("file:///worktree/scripts/other.gd").expect("uri");
+        let error = client
+            .diagnostics(&unanswered, Duration::from_secs(2))
+            .expect_err("a closed session can no longer produce a first verdict");
+        assert_eq!(error.code, "session_closed");
+        server.join.join().expect("server thread");
+    }
+
+    /// Godot answers `textDocument/rename` with null when the symbol under the cursor cannot be
+    /// renamed. That is an empty edit, not a malformed answer.
+    #[test]
+    fn a_null_rename_answer_is_an_empty_edit() {
+        let (_directory, root) = workspace();
+        let server = start_fake_server(|message, writer| {
+            match message.get("method").and_then(Value::as_str) {
+                Some("textDocument/rename") => FakeAction::Result(Value::Null),
+                _ => handshake_handler(message, writer),
+            }
+        });
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let uri = Url::parse("file:///worktree/scripts/player.gd").expect("uri");
+
+        let edit = client
+            .rename(&uri, Position::new(0, 0), "renamed")
+            .expect("a null answer is not a failure");
+
+        assert_eq!(edit, WorkspaceEdit::default());
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    /// The synthesized workspace symbols index every `.gd` file, and a document the caller already
+    /// opened has to survive the indexing: closing it would silently drop the caller's buffer
+    /// version and leave the server answering from disk.
+    #[test]
+    fn workspace_symbols_filter_by_query_and_leave_open_documents_open() {
+        let (directory, root) = workspace();
+        std::fs::create_dir_all(directory.path().join("scripts")).expect("scripts directory");
+        std::fs::write(
+            directory.path().join("scripts/player.gd"),
+            "extends Node\n\nfunc jump() -> void:\n\tpass\n",
+        )
+        .expect("write script");
+        let server = start_fake_server(|message, writer| {
+            match message.get("method").and_then(Value::as_str) {
+                Some("textDocument/documentSymbol") => FakeAction::Result(json!([
+                    {
+                        "name": "jump",
+                        "kind": 12,
+                        "range": {
+                            "start": {"line": 2, "character": 0},
+                            "end": {"line": 3, "character": 5}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 2, "character": 5},
+                            "end": {"line": 2, "character": 9}
+                        }
+                    },
+                    {
+                        "name": "walk",
+                        "kind": 12,
+                        "range": {
+                            "start": {"line": 4, "character": 0},
+                            "end": {"line": 5, "character": 5}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 4, "character": 5},
+                            "end": {"line": 4, "character": 9}
+                        }
+                    }
+                ])),
+                _ => handshake_handler(message, writer),
+            }
+        });
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let uri = file_uri(&root, "scripts/player.gd").expect("uri");
+        client.open_document(&uri, "extends Node\n").expect("open");
+
+        let matched = client
+            .workspace_symbols(&root, "JUM")
+            .expect("workspace symbols");
+
+        assert_eq!(matched.len(), 1, "the query filters case-insensitively");
+        assert_eq!(matched[0].name, "jump");
+        assert!(
+            client.is_open(&uri),
+            "indexing must not close a document the caller opened"
+        );
+        assert_eq!(
+            client
+                .workspace_symbols(&root, "")
+                .expect("workspace symbols")
+                .len(),
+            2,
+            "an empty query returns every symbol"
+        );
+
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    /// Nothing a server sends may take the client down. Each of these is discarded on the reader
+    /// thread, and the request that follows still gets its answer.
+    #[test]
+    fn ignores_unusable_server_messages_and_keeps_serving() {
+        let (_directory, root) = workspace();
+        let server = start_fake_server(|message, writer| {
+            if message.get("method").and_then(Value::as_str) == Some("initialized") {
+                for junk in [
+                    // A notification the client parses but cannot use.
+                    json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics"}),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {"uri": 42}
+                    }),
+                    // Answers to requests nobody is waiting for.
+                    json!({"jsonrpc": "2.0", "id": "not-a-number", "result": null}),
+                    json!({"jsonrpc": "2.0", "id": 4242, "result": {"ok": true}}),
+                ] {
+                    write_message(writer, &junk).expect("write junk");
+                }
+            }
+            match message.get("method").and_then(Value::as_str) {
+                Some("textDocument/hover") => FakeAction::Result(json!({
+                    "contents": {"kind": "plaintext", "value": "still here"}
+                })),
+                _ => handshake_handler(message, writer),
+            }
+        });
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let uri = Url::parse("file:///worktree/scripts/player.gd").expect("uri");
+
+        let hover = client
+            .hover(&uri, Position::new(0, 0))
+            .expect("the client survived every unusable message")
+            .expect("hover contents");
+
+        assert!(matches!(hover.contents, HoverContents::Markup(_)));
+        client.shutdown();
+        server.join.join().expect("server thread");
     }
 }

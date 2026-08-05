@@ -2747,4 +2747,127 @@ mod tests {
             .expect("task count");
         assert_eq!(tasks, 1);
     }
+
+    /// A run's lifecycle is a state machine, and every transition out of it is refused by name.
+    /// These are the answers the log viewer and the session supervisor read when something is
+    /// already over: appending to a finished run and finishing it twice are both ordinary races,
+    /// not programming errors, so they have to fail as data rather than corrupt the history.
+    #[test]
+    fn a_finished_godot_run_refuses_further_writes() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let run = storage
+            .start_godot_run(&StartGodotRunRequest {
+                task_id: None,
+                session_id: Some("session-1".to_owned()),
+                godot_version: Some("4.7".to_owned()),
+                metadata: serde_json::json!({}),
+            })
+            .expect("start Godot run");
+        let entry = || GodotLogEntry {
+            timestamp: 10,
+            level: "info".to_owned(),
+            message: "Game started".to_owned(),
+            source: None,
+            stack_trace: None,
+        };
+
+        assert!(
+            storage
+                .finish_godot_run(&FinishGodotRunRequest {
+                    run_id: run.id.clone(),
+                    status: "exploded".to_owned(),
+                    exit_code: None,
+                })
+                .unwrap_err()
+                .contains("status is invalid"),
+            "only the three terminal statuses may end a run"
+        );
+        storage
+            .finish_godot_run(&FinishGodotRunRequest {
+                run_id: run.id.clone(),
+                status: "completed".to_owned(),
+                exit_code: Some(0),
+            })
+            .expect("finish the run");
+
+        assert!(
+            storage
+                .finish_godot_run(&FinishGodotRunRequest {
+                    run_id: run.id.clone(),
+                    status: "aborted".to_owned(),
+                    exit_code: None,
+                })
+                .unwrap_err()
+                .contains("was not found"),
+            "a run only ends once: the second finish matches no running session"
+        );
+        assert!(
+            storage
+                .append_godot_logs(&AppendGodotLogsRequest {
+                    run_id: run.id.clone(),
+                    entries: vec![entry()],
+                })
+                .unwrap_err()
+                .contains("running Godot session"),
+            "output cannot arrive after the run that produced it ended"
+        );
+        assert!(
+            storage
+                .append_godot_logs(&AppendGodotLogsRequest {
+                    run_id: "018f47aa-09d2-7b34-a2d3-8c4e6f123456".to_owned(),
+                    entries: vec![entry()],
+                })
+                .unwrap_err()
+                .contains("was not found")
+        );
+        assert!(
+            storage
+                .search_godot_logs(&SearchGodotLogsRequest {
+                    query: "   ".to_owned(),
+                    limit: None,
+                })
+                .unwrap_err()
+                .contains("needs a query"),
+            "a blank needle is a mistake, not a request for every log line ever recorded"
+        );
+    }
+
+    /// `agent_workspace` answers where the agent may write, and it falls back to the project
+    /// workspace whenever the active task has no usable worktree — including when the recorded
+    /// worktree has since been deleted, which is what a developer removing a worktree by hand
+    /// leaves behind. `active_task_workspace` refuses the same state instead, so the Godot session
+    /// supervisor can never stage the addon into the user's main checkout.
+    #[test]
+    fn a_deleted_worktree_falls_back_for_the_agent_and_fails_for_the_session() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let workspace = storage.workspace_path.clone();
+        let missing = directory.path().join("worktrees").join("gone");
+        let connection = storage.connection().expect("connection");
+        let task_id = active_task_id(&connection)
+            .expect("active task lookup")
+            .expect("an open project always has an active task");
+        connection
+            .execute(
+                "INSERT INTO task_worktrees
+                 (task_id, branch_name, worktree_path, base_commit, updated_at)
+                 VALUES (?1, 'gofer/task', ?2, 'abc123', 0)",
+                params![task_id, missing.display().to_string()],
+            )
+            .expect("record a worktree that no longer exists on disk");
+
+        assert_eq!(
+            storage.agent_workspace().expect("agent workspace"),
+            workspace,
+            "a recorded worktree that is not a directory is not a place to write"
+        );
+        assert!(
+            storage
+                .active_task_workspace()
+                .unwrap_err()
+                .contains("does not exist"),
+            "the session supervisor must name the missing worktree rather than fall back"
+        );
+    }
 }

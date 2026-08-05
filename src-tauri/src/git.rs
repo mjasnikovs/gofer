@@ -73,6 +73,16 @@ pub fn merge_task_worktree(
         let _ = git_output(&repository_root, &["merge", "--abort"]);
         return Err(git_failure("merge the task branch", &output));
     }
+    // A task whose branch carries no commits of its own is not a failure to merge; it is nothing
+    // to merge. Git answers "Already up to date" and stages nothing, and `git commit` then refuses
+    // the empty commit — which reached the user as a bare "Git exited with exit status: 1",
+    // because that refusal goes to stdout and leaves stderr empty.
+    if git_text(&repository_root, &["status", "--porcelain"])?.is_empty() {
+        return Ok(MergeResult {
+            merged_commit: git_text(&repository_root, &["rev-parse", "HEAD"])?,
+            head_commit,
+        });
+    }
     let message = format!("Merge task branch {branch_name}");
     let commit = git_output(&repository_root, &["commit", "-m", &message])?;
     if !commit.status.success() {
@@ -275,5 +285,125 @@ mod tests {
                 .unwrap_err()
                 .contains("already exists")
         );
+    }
+
+    /// A conflicting merge must leave the main checkout exactly as it was. Git stops mid-merge and
+    /// keeps the conflict markers in the working tree unless someone aborts it, and the next task
+    /// would then merge into that mess — so the abort is the assertion, not the error message.
+    #[test]
+    fn a_conflicting_merge_is_aborted_and_leaves_the_checkout_clean() {
+        let repository = repository();
+        let worktree_root = TempDir::new().expect("temporary worktree root");
+        let worktree = worktree_root.path().join("task-worktree");
+        let created = create_task_worktree(repository.path(), &worktree, "gofer/task-conflict")
+            .expect("create worktree")
+            .expect("Git worktree");
+        fs::write(
+            worktree.join("project.godot"),
+            "[application]\nname=\"task\"\n",
+        )
+        .expect("task edit");
+        fs::write(
+            repository.path().join("project.godot"),
+            "[application]\nname=\"main\"\n",
+        )
+        .expect("main edit");
+        git(repository.path(), &["add", "project.godot"]);
+        git(repository.path(), &["commit", "-m", "Main edit"]);
+
+        let error = merge_task_worktree(repository.path(), &worktree, &created.branch_name)
+            .expect_err("two edits to one file must conflict");
+
+        assert!(error.contains("merge the task branch"), "{error}");
+        assert_eq!(
+            git_text(repository.path(), &["status", "--porcelain"]).expect("status"),
+            "",
+            "the failed merge must be aborted, not left half-applied"
+        );
+    }
+
+    /// A task that changed nothing still merges. Two separate places have to notice the emptiness:
+    /// `commit_pending_task_changes` must not ask Git to record an empty commit, and the merge
+    /// itself must not try to commit a merge Git already called "Already up to date". Before this
+    /// was handled, completing a task that edited nothing failed with a bare "Git exited with
+    /// exit status: 1".
+    #[test]
+    fn a_task_that_changed_nothing_merges_without_a_commit() {
+        let repository = repository();
+        let worktree_root = TempDir::new().expect("temporary worktree root");
+        let worktree = worktree_root.path().join("task-worktree");
+        let created = create_task_worktree(repository.path(), &worktree, "gofer/task-empty")
+            .expect("create worktree")
+            .expect("Git worktree");
+        let before = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("HEAD");
+
+        let merged = merge_task_worktree(repository.path(), &worktree, &created.branch_name)
+            .expect("an unchanged task still merges");
+
+        assert_eq!(
+            merged.head_commit, created.head_commit,
+            "nothing was committed on the task branch"
+        );
+        assert_eq!(
+            merged.merged_commit, before,
+            "and nothing was committed on the main branch either"
+        );
+        assert_eq!(
+            git_text(repository.path(), &["status", "--porcelain"]).expect("status"),
+            "",
+            "the checkout is left exactly as it was found"
+        );
+    }
+
+    /// The branch name is the one part of a worktree request that Git can reject on its own, and
+    /// the failure has to arrive as the named error rather than as a silent `None`.
+    #[test]
+    fn a_branch_name_already_in_use_is_refused_by_name() {
+        let repository = repository();
+        let worktree_root = TempDir::new().expect("temporary worktree root");
+        create_task_worktree(
+            repository.path(),
+            &worktree_root.path().join("first"),
+            "gofer/task-twice",
+        )
+        .expect("create worktree")
+        .expect("Git worktree");
+
+        let error = create_task_worktree(
+            repository.path(),
+            &worktree_root.path().join("second"),
+            "gofer/task-twice",
+        )
+        .expect_err("one branch cannot back two worktrees");
+
+        assert!(error.contains("create the task worktree"), "{error}");
+    }
+
+    /// Per-repository excludes are written into the common Git directory so one task's entry is
+    /// visible from every linked worktree. Outside a repository there is no such directory, and
+    /// answering with a path anyway would write the exclude somewhere nobody reads.
+    #[test]
+    fn the_common_directory_is_absolute_inside_a_repository_and_absent_outside_one() {
+        let repository = repository();
+        let worktree_root = TempDir::new().expect("temporary worktree root");
+        let worktree = worktree_root.path().join("task-worktree");
+        create_task_worktree(repository.path(), &worktree, "gofer/task-common")
+            .expect("create worktree")
+            .expect("Git worktree");
+
+        let from_main = common_directory(repository.path()).expect("common directory");
+        let from_worktree = common_directory(&worktree).expect("common directory");
+
+        assert!(from_main.is_absolute(), "{}", from_main.display());
+        assert!(from_worktree.is_absolute(), "{}", from_worktree.display());
+        assert!(from_main.ends_with(".git"), "{}", from_main.display());
+        assert_eq!(
+            fs::canonicalize(&from_main).expect("canonical main"),
+            fs::canonicalize(&from_worktree).expect("canonical worktree"),
+            "a linked worktree shares the main checkout's Git directory"
+        );
+
+        let outside = TempDir::new().expect("temporary non-repository");
+        assert!(common_directory(outside.path()).is_none());
     }
 }

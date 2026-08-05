@@ -1158,4 +1158,67 @@ mod tests {
         });
         handle.stop();
     }
+
+    /// The scan walks a directory a user controls, so it has to end on its own terms rather than
+    /// on the filesystem's. A tree deeper than the walk limit is truncated instead of recursing
+    /// until the stack runs out, and a directory the process cannot read is skipped rather than
+    /// failing the scan that a Godot import or a `.git` operation happened to race.
+    #[test]
+    fn scanning_stops_at_the_depth_limit_and_survives_unreadable_directories() {
+        let (directory, workspace) = workspace();
+        let mut deep = String::new();
+        for _ in 0..MAX_WALK_DEPTH + 2 {
+            deep.push_str("d/");
+        }
+        workspace
+            .write(&format!("{deep}buried.gd"), "extends Node\n", None)
+            .expect("create a file below the walk limit");
+        workspace
+            .write("shallow.gd", "extends Node\n", None)
+            .expect("create");
+
+        let snapshot = scan(workspace.root());
+
+        assert!(
+            snapshot.contains_key("shallow.gd"),
+            "the walk limit must not cost the files above it"
+        );
+        assert!(
+            !snapshot.keys().any(|path| path.ends_with("buried.gd")),
+            "a tree past the walk limit is truncated, not followed"
+        );
+
+        // A path that is not a directory at all is the same non-event: the scan answers empty.
+        assert!(scan(&directory.path().join("shallow.gd")).is_empty());
+        assert!(scan(&directory.path().join("absent")).is_empty());
+    }
+
+    /// Every relative path arrives from a model or a renderer, so the rejections are the contract:
+    /// a name that is empty once `res://` is stripped, one longer than the cap, one carrying
+    /// control characters, and one that cleans away to nothing.
+    #[test]
+    fn relative_paths_are_refused_by_shape_before_they_reach_the_filesystem() {
+        let (_directory, workspace) = workspace();
+
+        for path in [
+            "",
+            "res://",
+            "./",
+            &"a".repeat(MAX_RELATIVE_PATH_BYTES + 1),
+            "scripts/pla\u{7}yer.gd",
+            "scripts/player\n.gd",
+        ] {
+            let error = workspace
+                .resolve(path)
+                .expect_err("a path of this shape never names a file");
+            assert_eq!(error.code, "invalid_path", "{path:?}");
+        }
+
+        assert!(
+            workspace
+                .resolve(&"a".repeat(MAX_RELATIVE_PATH_BYTES))
+                .is_ok(),
+            "the cap itself is allowed"
+        );
+    }
 }

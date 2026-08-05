@@ -10,19 +10,21 @@ must also receive a shared-contract or integration test that exercises that boun
 
 ## Current baseline
 
-Verified on August 3, 2026, the enforced suites contain:
+Counted on August 5, 2026 by running each suite, the enforced suites contain:
 
-- 18 frontend tests: 16 React component/accessibility tests and 2 router tests
-- 28 Node tests covering the AI worker/provider, protocol, RAG progress and warmup, memory
-  embedding, and workspace confinement
-- 66 Rust tests, including shared-protocol, injected-process, and actual Tauri mock-runtime IPC
+- 117 frontend tests: 48 shared-protocol, 17 application and settings, 16 inspector workspace, 13
+  script buffer, 11 Monaco language-server, 10 script workspace, and 2 router tests
+- 49 Node tests covering the AI worker/provider and its duplex tool channel, protocol fixtures, RAG
+  progress, warmup and retrieval, memory embedding, and workspace confinement
+- 223 Rust tests, including shared-protocol, injected-process, and actual Tauri mock-runtime IPC
   tests
-- 1 Godot shared-fixture suite and 1 real-process acceptance test covering every mandatory bridge
-  scenario, plus 3 editor acceptance tests that drive the staged addon through the real editor RPC
+- 1 Godot shared-fixture suite and 11 real-editor acceptance tests: the addon's session, scenes,
+  revisions, heartbeat and configuration; the language server; the script commands; the debugger;
+  the runtime loop; an AI turn; and the whole journey
 - 7 Playwright visual/accessibility states, enforced in CI only, and 1 WebdriverIO browser-mode
   desktop journey
 
-The Node suite measures 97.78% line coverage and 89.28% branch coverage; `workspace-confinement.mjs`
+The Node suite measures 99.85% line coverage and 88.03% branch coverage; `workspace-confinement.mjs`
 holds its separate 100% gate. The Rust coverage percentages are produced by the `rust-coverage` CI
 job, which enforces at least 80% line and 75% branch coverage plus 100% branch coverage for the
 marked critical regions. Critical attachment, cache, cancellation, credential, path, and protocol

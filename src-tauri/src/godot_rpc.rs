@@ -1182,4 +1182,117 @@ mod tests {
         assert_eq!(event.event, "session.ready");
         session.stop();
     }
+
+    /// A caller never reaches the wire with a request the session already knows it cannot deliver.
+    /// Both answers name their own reason instead of making the caller wait out a timeout: an id
+    /// past the protocol's cap, and a session the caller has already stopped.
+    #[test]
+    fn a_call_is_refused_before_the_wire_when_the_session_cannot_carry_it() {
+        let request = |id: String| CallRequest {
+            id,
+            command: "scene.list".to_owned(),
+            params: json!({}),
+            expected_revision: None,
+            timeout_ms: Some(100),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let session = RpcSession::start(listener, "a1".repeat(32), "/tmp/gofer/project".to_owned());
+
+        let oversized = session
+            .call(request("x".repeat(MAX_ID_LENGTH + 1)))
+            .expect_err("an id past the protocol cap never leaves the process");
+        assert_eq!(oversized.code, "invalid_request_id");
+
+        session.stop();
+        let stopped = session
+            .call(request("after-stop".to_owned()))
+            .expect_err("a stopped session refuses immediately");
+        assert_eq!(stopped.code, "session_closed");
+    }
+
+    /// The framing has to survive what a real socket delivers, and the two cases are not the same
+    /// kind of event: a bare newline is keepalive and costs nothing, while a reply to a request
+    /// nobody is waiting for means the two sides disagree about what is outstanding.
+    #[test]
+    fn a_blank_line_is_keepalive_and_a_stale_reply_ends_the_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let token = "a1".repeat(32);
+        let project_path = "/tmp/gofer/project".to_owned();
+        let session = RpcSession::start(listener, token.clone(), project_path.clone());
+
+        let mut addon = addon_client(address);
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&handshake(&token, &project_path)).unwrap()
+        )
+        .unwrap();
+        let mut reader = BufReader::new(addon.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let accepted: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(accepted["kind"], "response");
+
+        // Only the session loop tolerates a bare newline. The handshake reader does not: the
+        // handshake must be the connection's first line, and a blank one there is a protocol
+        // error rather than keepalive.
+        writeln!(addon).unwrap();
+
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&json!({
+                "protocolVersion": 2,
+                "kind": "response",
+                "id": "nobody-is-waiting",
+                "result": {}
+            }))
+            .unwrap()
+        )
+        .unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let stale: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(stale["error"]["code"], "stale_reply");
+
+        // A reply nobody is waiting for is not a stray message to drop: the addon and the session
+        // disagree about what is outstanding, and the only safe answer is to stop. The connection
+        // is closed behind that error.
+        // The session is done with this addon: the disagreement is recorded as the connection's
+        // error, so the next caller is told what happened instead of waiting out a timeout.
+        let refused = session
+            .call(CallRequest {
+                id: "after-stale-reply".to_owned(),
+                command: "scene.list".to_owned(),
+                params: json!({}),
+                expected_revision: None,
+                timeout_ms: Some(100),
+            })
+            .expect_err("a session that lost track of its requests cannot carry another");
+        assert_eq!(refused.code, "stale_reply");
+        session.stop();
+    }
+
+    /// A line past the envelope cap cannot be answered and cannot be skipped: the reader would
+    /// have to guess where the next envelope begins, and every message after it would be framed
+    /// against that guess. The addon is told which cap it passed, and the connection ends.
+    #[test]
+    fn an_oversized_envelope_is_refused_rather_than_truncated() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let session = RpcSession::start(listener, "a1".repeat(32), "/tmp/gofer/project".to_owned());
+
+        let mut addon = addon_client(address);
+        writeln!(addon, "{}", "x".repeat(MAX_ENVELOPE_BYTES + 1)).unwrap();
+
+        let mut reader = BufReader::new(addon.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let refused: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(refused["error"]["code"], "payload_too_large");
+        assert_eq!(refused["kind"], "error");
+        session.stop();
+    }
 }
