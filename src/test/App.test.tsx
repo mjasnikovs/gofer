@@ -528,6 +528,60 @@ describe('Workspace', () => {
         expect(screen.getByText('0.01K / 120K')).toBeInTheDocument()
         expect(screen.queryByText('local-model')).not.toBeInTheDocument()
     })
+
+    it('asks the user before the agent runs a gated tool call, and answers the backend', async () => {
+        const handlers = new Map<string, EventHandler>()
+        tauri.listen.mockImplementation(async (event, handler) => {
+            if (event && handler) handlers.set(event, handler)
+            return vi.fn<() => void>()
+        })
+        tauri.invoke.mockResolvedValue(undefined)
+        render(<Workspace />)
+        await waitFor(() => {
+            expect(handlers.has('ai-approval-request')).toBe(true)
+        })
+        const raise = (approvalId: string, op: string, params: Record<string, unknown>) => {
+            handlers.get('ai-approval-request')?.({
+                payload: {
+                    approvalId,
+                    tool: 'godot_resource',
+                    op,
+                    reason: 'Deleting a file removes it from the task worktree.',
+                    params
+                } as never
+            })
+        }
+
+        raise('approval-1', 'delete', {path: 'scenes/main.tscn'})
+        // A second prompt queues behind the first rather than stacking a second dialog.
+        raise('approval-2', 'move', {from: 'a.gd', to: 'b.gd'})
+        expect(
+            await screen.findByText(/The agent is waiting to run godot_resource delete/)
+        ).toBeInTheDocument()
+        expect(screen.getByText(/scenes\/main.tscn/)).toBeInTheDocument()
+        expect(screen.queryByText(/godot_resource move/)).not.toBeInTheDocument()
+
+        await userEvent.click(screen.getByRole('button', {name: 'Reject'}))
+        expect(tauri.invoke).toHaveBeenCalledWith('respond_tool_approval', {
+            request: {approvalId: 'approval-1', approved: false}
+        })
+
+        expect(await screen.findByText(/a.gd → b.gd/)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', {name: 'Approve'}))
+        expect(tauri.invoke).toHaveBeenCalledWith('respond_tool_approval', {
+            request: {approvalId: 'approval-2', approved: true}
+        })
+
+        // A prompt the backend settles on its own — a timeout, or a cancelled turn — closes too.
+        raise('approval-3', 'delete', {path: 'scenes/other.tscn'})
+        expect(await screen.findByText(/scenes\/other.tscn/)).toBeInTheDocument()
+        handlers.get('ai-approval-settled')?.({
+            payload: {approvalId: 'approval-3', approved: false} as never
+        })
+        await waitFor(() => {
+            expect(screen.queryByText(/scenes\/other.tscn/)).not.toBeInTheDocument()
+        })
+    })
 })
 
 describe('Navigation', () => {

@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 pub mod addon;
 mod ai_tools;
+mod approvals;
 mod debug;
 mod files;
 mod gdformat;
@@ -821,18 +822,15 @@ async fn unsubscribe_godot_events() -> Result<(), godot_session::SessionError> {
         })?
 }
 
-/// Acknowledges a pending tool approval request.
+/// Answers one AI tool call the safety model stopped and put in front of the user.
 #[tauri::command]
 async fn respond_tool_approval(
     request: godot_session_api::ToolApprovalRequest,
-) -> Result<(), godot_session::SessionError> {
+) -> Result<(), approvals::ApprovalError> {
     tauri::async_runtime::spawn_blocking(move || godot_session_api::respond_tool_approval(request))
         .await
         .map_err(|error| {
-            godot_session::SessionError::new(
-                "approval_task_failed",
-                format!("Tool approval task failed: {error}"),
-            )
+            approvals::ApprovalError::task_failed(format!("Tool approval task failed: {error}"))
         })?
 }
 
@@ -1096,6 +1094,9 @@ fn cancel_ai_request_with<R: Runtime>(app: &AppHandle<R>, request_id: u64) -> Re
         return Ok(false);
     }
     AI_REQUEST_CANCELLED.store(true, Ordering::Release);
+    // A tool call waiting for the user belongs to the turn being cancelled: left waiting, it would
+    // hold a tool worker open long after the agent that asked for it is gone.
+    approvals::cancel_all();
     let active = AI_CHILD
         .lock()
         .map_err(|_| "The AI process lock is poisoned".to_owned())?
@@ -1671,6 +1672,9 @@ fn run_ai_worker_with<R: Runtime>(
     spawner: &impl ProcessSpawner,
 ) -> Result<String, String> {
     let worker = ai_worker_path()?;
+    // Approvals belong to a turn: the gate opens here and closes when this one ends, so a gated
+    // tool call always has an agent waiting for its answer.
+    approvals::open();
     let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
     let mut child = spawner
         .spawn(node.as_ref(), &[worker.into_os_string()], true)
@@ -1710,38 +1714,48 @@ fn run_ai_worker_with<R: Runtime>(
     let mut completion_text = String::new();
     let mut tool_workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
-    for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|error| format!("Could not read Pi AI output: {error}"))?;
-        if let Some(payload) = line.strip_prefix(AI_TOOL_PREFIX) {
-            tool_workers.push(spawn_tool_worker(app, &stdin, payload)?);
-            continue;
+    // The stream is read in a closure so that a malformed line leaves the turn the same way a
+    // clean end does: through the cancel-and-join below, rather than past it.
+    let stream = || -> Result<(), String> {
+        for line in BufReader::new(stdout).lines() {
+            let line = line.map_err(|error| format!("Could not read Pi AI output: {error}"))?;
+            if let Some(payload) = line.strip_prefix(AI_TOOL_PREFIX) {
+                tool_workers.push(spawn_tool_worker(app, &stdin, payload)?);
+                continue;
+            }
+            let Some(payload) = line.strip_prefix(AI_EVENT_PREFIX) else {
+                continue;
+            };
+            let event: serde_json::Value = serde_json::from_str(payload)
+                .map_err(|error| format!("Pi AI returned an invalid event: {error}"))?;
+            if event.get("type").and_then(serde_json::Value::as_str) == Some("done") {
+                completed = true;
+                completion_text = event
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            app.emit_to(
+                "main",
+                "ai-stream-event",
+                AiStreamPayload { request_id, event },
+            )
+            .map_err(|error| format!("Could not stream the AI response: {error}"))?;
         }
-        let Some(payload) = line.strip_prefix(AI_EVENT_PREFIX) else {
-            continue;
-        };
-        let event: serde_json::Value = serde_json::from_str(payload)
-            .map_err(|error| format!("Pi AI returned an invalid event: {error}"))?;
-        if event.get("type").and_then(serde_json::Value::as_str) == Some("done") {
-            completed = true;
-            completion_text = event
-                .get("text")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-        }
-        app.emit_to(
-            "main",
-            "ai-stream-event",
-            AiStreamPayload { request_id, event },
-        )
-        .map_err(|error| format!("Could not stream the AI response: {error}"))?;
-    }
+        Ok(())
+    };
+    let streamed = stream();
 
     // The worker exited, so nothing is left to answer; joining keeps a tool that outlived it from
-    // writing into the next turn's channel.
+    // writing into the next turn's channel. Closing the approval gate first is what makes that join
+    // finite: a tool call still waiting for the user has lost the agent that asked, and a prompt
+    // registered after this point is refused rather than left waiting for the whole timeout.
+    approvals::cancel_all();
     for worker in tool_workers {
         let _ = worker.join();
     }
+    streamed?;
 
     let status = child
         .lock()
@@ -2357,6 +2371,36 @@ mod tests {
     }
 
     #[test]
+    fn a_gated_tool_call_left_unanswered_is_settled_with_its_turn() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let app = mock_app();
+        // A machine-wide editor setting always asks the user. Nobody answers this one, so the turn
+        // ends with the prompt still up: the tool worker must be released rather than hold the join
+        // open for the whole approval timeout.
+        let output = [
+            r#"GOFER_AI_TOOL:{"id":"call-1","tool":"godot_project","params":{"op":"set_editor_setting","params":{"setting":"interface/editor/single_window_mode","value":true}}}"#,
+            r#"GOFER_AI_EVENT:{"type":"done","text":"Asked","agentMessages":[],"usage":{},"model":"fake"}"#,
+            "",
+        ]
+        .join("\n");
+        let spawner = FakeProcessSpawner::new(&output, "", true);
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            run_ai_worker_with(app.handle(), 23, worker_request(), &spawner)
+                .expect("fake AI completion"),
+            "Asked"
+        );
+        assert!(started.elapsed() < Duration::from_secs(30));
+
+        let sent = spawner.sent();
+        let answer = sent.last().expect("the tool call was answered");
+        assert_eq!(answer["ok"], false);
+        assert_eq!(answer["error"]["code"], "approval_cancelled");
+        *AI_CHILD.lock().expect("AI child lock") = None;
+    }
+
+    #[test]
     fn an_unparsable_tool_request_fails_the_turn() {
         let _test = AI_TEST_LOCK.lock().expect("AI test lock");
         let app = mock_app();
@@ -2701,7 +2745,9 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(approval_error.to_string().contains("not_implemented"));
+        // Nothing is waiting: an answer to a prompt that no longer exists must not silently pass
+        // for approval of the next one.
+        assert!(approval_error.to_string().contains("unknown_approval"));
     }
 
     fn chat_attachment() -> ChatAttachment {

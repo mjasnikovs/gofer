@@ -483,7 +483,7 @@ UI.
       from the transcript, not from a fixed list — the revision, the file hash, the frame id, and
       the variables reference are values only the editor can produce.
 
-15. Enforce the agreed safety model
+15. Enforce the agreed safety model — DONE
     - Auto-allow reads, LSP/DAP control, runtime actions, typed file writes/edits, undoable scene
       changes, saves, worktree project settings, and RAG.
     - Require AI approval for typed deletes, addon/plugin changes, machine-wide EditorSettings
@@ -493,6 +493,58 @@ UI.
       dialogs.
     - Preserve confined bash unchanged and document it as an explicit autonomous exception that can
       perform destructive work inside the task worktree.
+    - `src-tauri/src/approvals.rs` is the gate, and its `GATED` list is the whole policy:
+      `godot_resource delete`/`move`, `godot_project set_plugin_enabled`, and
+      `godot_project set_editor_setting`. Everything absent from it is auto-allowed, because the
+      worktree's Git checkout and the editor's undo stack can take those back — the question the
+      model answers is not "may this work?" but "who can undo it?". A machine-wide editor setting is
+      the non-worktree-impacting case: it is the one write that no `git checkout` in the task can
+      reverse. The list is checked against the catalog by a test, so a gate cannot name an operation
+      that does not exist, and a new operation is auto-allowed only by omission a reviewer can see.
+    - Gofer's own addon is not a plugin change: staging is part of the session the agent was asked
+      to start, it is ledgered and removed on stop, and the addon refuses `gofer_managed`
+      modification from the inside. The generic `project.set_setting` already refuses the
+      `editor_plugins/` family with `reserved_setting`, so the gated `set_plugin_enabled` is the
+      only route to a plugin change rather than one of two.
+    - The typed delete the policy needs did not exist, so `godot_resource` gained `move` and
+      `delete`, routed to the same `Workspace` the renderer's `move_workspace_path` and
+      `delete_workspace_path` commands use — canonical-path validation, the hash check, and atomic
+      replacement stay the workspace's rather than becoming a second copy.
+    - `ai_tools::dispatch` runs the gate between validation and the operation: an unknown tool or
+      operation is never worth a prompt, and `reject_outside_paths` resolves every `path`, `from`,
+      and `to` a gated call names through the workspace first, so an outside-worktree file is
+      refused with `invalid_path`/`path_outside_workspace` instead of being offered for approval.
+    - A prompt is a paused agent, not a notification: `ask` registers the call, emits
+      `ai-approval-request` to the main window, and blocks the tool worker until
+      `respond_tool_approval` answers, 300 s pass (`approval_timeout`, retryable), or the turn ends
+      (`approval_cancelled`). A denial is `approval_denied` and is explicitly not retryable — the
+      system prompt tells the model to ask instead of trying again. A backend with no window refuses
+      with `approval_unavailable` rather than deciding on the user's behalf, and an answer to a
+      prompt that no longer exists is `unknown_approval` rather than approval of the next one.
+    - Approvals belong to a turn, so the gate is opened by `run_ai_worker_with` and closed by
+      `approvals::cancel_all` on every exit path — the stdout loop moved into a closure so a
+      malformed line leaves through the same cancel-and-join a clean end does, and cancellation
+      closes it too. Closing is a flag as well as a sender drop: dropping the senders cannot reach a
+      tool worker that has not registered its prompt yet, and that worker would otherwise sit out
+      the full timeout inside a join the turn is already waiting on.
+    - The renderer half is `src/hooks/useToolApprovals.ts` and
+      `src/components/workspace/ToolApprovalDialog.tsx`: prompts queue in arrival order, only the
+      oldest is shown — a stack of dialogs makes approving the wrong one too easy — and dismissing
+      counts as a refusal, because the blocked call has to be told something either way. The queue
+      follows `ai-approval-settled` as well as its own answers, so a prompt the backend timed out or
+      cancelled closes on screen too.
+    - Direct UI actions never reach this gate by construction: the renderer's commands call the same
+      Rust handlers without passing through the router, which is what makes a UI click the user's
+      own authorization. Confined bash is the deliberate exception in the other direction and is
+      unchanged; `scripts/workspace-confinement.mjs` now documents why it may do destructive work
+      inside the worktree with no prompt where the equivalent typed delete stops and waits.
+    - Done when a gated call cannot reach its handler unanswered — proven by `approvals::tests`
+      (approved, denied, timed out, cancelled, refused without a window, and a prompt raised after
+      the turn ended returning at once rather than after 300 s), `ai_tools::tests` (a gated
+      operation stopping where its auto-allowed neighbours reach the handler, and outside-worktree
+      paths refused before any prompt), `a_gated_tool_call_left_unanswered_is_settled_with_its_turn`
+      driving one through the real duplex worker channel, and the Workspace suite answering both
+      ways from the renderer.
 
 16. Expose gofer-rag — DONE
     - Call retrieve(), not query(), so documentation retrieval does not make a second LLM request.

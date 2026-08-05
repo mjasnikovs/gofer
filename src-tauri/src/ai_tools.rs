@@ -10,7 +10,12 @@
 //! The catalog below is also the contract the Node worker receives at startup: the tool names,
 //! their operations, and the parameter hints the model sees are generated from it and validated
 //! against it, so a tool the model can call always exists here, and one it cannot call never does.
+//!
+//! Every call also passes [`crate::approvals`] on its way in: most operations are auto-allowed
+//! because the worktree and the editor's undo stack can take them back, and the few that leave both
+//! of those nets wait for the user before they reach a handler.
 
+use crate::approvals;
 use crate::debug::{self, DebugRequest};
 use crate::files;
 use crate::gdformat;
@@ -72,6 +77,7 @@ macro_rules! tool_failure_from {
 }
 
 tool_failure_from!(
+    crate::approvals::ApprovalError,
     crate::godot_rpc::RpcError,
     crate::godot_lsp::LspError,
     crate::godot_dap::DapError,
@@ -234,7 +240,8 @@ pub const CATALOG: &[ToolDomain] = &[
     },
     ToolDomain {
         name: "godot_resource",
-        description: "Project files as the editor sees them.",
+        description: "Project files as the editor sees them. Deleting and moving need the user's \
+                      approval; nothing outside the task worktree can be named at all.",
         operations: &[
             operation(
                 "list",
@@ -243,6 +250,14 @@ pub const CATALOG: &[ToolDomain] = &[
             operation(
                 "rescan",
                 "Tells the editor filesystem about one changed file: {path}.",
+            ),
+            operation(
+                "move",
+                "Moves a file or directory inside the worktree: {from, to}.",
+            ),
+            operation(
+                "delete",
+                "Deletes a file or directory: {path, expectedHash?}.",
             ),
         ],
     },
@@ -438,6 +453,14 @@ pub fn dispatch<R: Runtime>(
         ));
     }
 
+    // The safety model sits between validation and the operation. A call the router would refuse
+    // anyway is never worth a prompt, and a path outside the worktree is rejected here rather than
+    // offered for approval, so no dialog can ever propose writing outside the task's own tree.
+    if approvals::gate_reason(domain.name, &op).is_some() {
+        reject_outside_paths(app, &params)?;
+    }
+    approvals::require(app, domain.name, &op, &params)?;
+
     match domain.name {
         "godot_session" => session_domain(app, &op, params),
         "godot_scene" => Ok(rpc(&format!("scene.{op}"), params)?),
@@ -481,15 +504,50 @@ fn resource_domain<R: Runtime>(
     op: &str,
     params: Value,
 ) -> Result<Value, ToolFailure> {
-    if op == "list" {
-        let workspace = crate::active_workspace(app)?;
-        let files: Vec<Value> = files::scan(workspace.root())
-            .into_iter()
-            .map(|(path, stamp)| json!({"path": path, "bytes": stamp.bytes}))
-            .collect();
-        return Ok(json!({"files": files}));
+    match op {
+        "list" => {
+            let workspace = crate::active_workspace(app)?;
+            let files: Vec<Value> = files::scan(workspace.root())
+                .into_iter()
+                .map(|(path, stamp)| json!({"path": path, "bytes": stamp.bytes}))
+                .collect();
+            Ok(json!({"files": files}))
+        }
+        // The typed destructive pair. Both reach the same `Workspace` the renderer's own
+        // `move_workspace_path` and `delete_workspace_path` commands use, so canonical-path
+        // validation and the hash check are the workspace's, not a second copy of them.
+        "move" => {
+            let request: files::MovePathRequest = from_params(params)?;
+            crate::active_workspace(app)?.move_path(&request.from, &request.to)?;
+            Ok(json!({"from": request.from, "to": request.to, "moved": true}))
+        }
+        "delete" => {
+            let request: files::DeletePathRequest = from_params(params)?;
+            crate::active_workspace(app)?
+                .delete(&request.path, request.expected_hash.as_deref())?;
+            Ok(json!({"path": request.path, "deleted": true}))
+        }
+        _ => Ok(rpc("resource.rescan", params)?),
     }
-    Ok(rpc("resource.rescan", params)?)
+}
+
+/// Resolves every path a gated call names before the user is asked about it. Outside-worktree
+/// files are refused outright — "outside the worktree" is not a decision to put in front of the
+/// user one file at a time — and the resolution is the workspace's own, so this check cannot drift
+/// from the one the operation itself will run.
+fn reject_outside_paths<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<(), ToolFailure> {
+    let named: Vec<&str> = ["path", "from", "to"]
+        .iter()
+        .filter_map(|key| params.get(*key).and_then(Value::as_str))
+        .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    let workspace = crate::active_workspace(app)?;
+    for path in named {
+        workspace.resolve(path)?;
+    }
+    Ok(())
 }
 
 fn script_domain<R: Runtime>(
@@ -637,6 +695,100 @@ fn to_value<T: Serialize>(value: T) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tauri::Manager;
+    use tempfile::TempDir;
+
+    /// A backend with no window: nothing here can approve anything, so a gated operation that
+    /// reports `approval_unavailable` proves the gate stopped it before its handler ran.
+    fn unattended_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::generate_context!())
+            .expect("build mock Tauri app")
+    }
+
+    fn call(tool: &str, op: &str, params: Value) -> ToolRequest {
+        ToolRequest {
+            tool: tool.to_owned(),
+            params: json!({"op": op, "params": params}),
+        }
+    }
+
+    #[test]
+    fn a_gated_operation_stops_before_its_handler_runs() {
+        let app = unattended_app();
+
+        let failure = dispatch(
+            app.handle(),
+            call(
+                "godot_project",
+                "set_editor_setting",
+                json!({"setting": "interface/editor/single_window_mode", "value": true}),
+            ),
+        )
+        .expect_err("a machine-wide editor setting needs the user");
+        assert_eq!(failure.code, "approval_unavailable");
+        assert!(failure.retryable);
+
+        // The same domain's auto-allowed operations reach the handler, which reports the missing
+        // session rather than a missing approval.
+        let failure = dispatch(
+            app.handle(),
+            call("godot_project", "get_settings", json!({})),
+        )
+        .expect_err("no session is active");
+        assert_eq!(failure.code, "session_not_active");
+        let failure = dispatch(
+            app.handle(),
+            call(
+                "godot_project",
+                "set_setting",
+                json!({"setting": "a", "value": 1}),
+            ),
+        )
+        .expect_err("no session is active");
+        assert_eq!(failure.code, "session_not_active");
+    }
+
+    #[test]
+    fn a_path_outside_the_worktree_is_rejected_rather_than_offered_for_approval() {
+        let directory = TempDir::new().expect("temporary application data");
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("create workspace");
+        let storage =
+            crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace)
+                .expect("open project storage");
+        let app = unattended_app();
+        app.manage(storage);
+
+        for params in [
+            json!({"path": "../escape.gd"}),
+            json!({"path": "/etc/passwd"}),
+        ] {
+            let failure = dispatch(app.handle(), call("godot_resource", "delete", params))
+                .expect_err("a path outside the worktree is refused");
+            assert_eq!(failure.code, "invalid_path");
+        }
+
+        let failure = dispatch(
+            app.handle(),
+            call(
+                "godot_resource",
+                "move",
+                json!({"from": "main.gd", "to": "../stolen.gd"}),
+            ),
+        )
+        .expect_err("a destination outside the worktree is refused");
+        assert_eq!(failure.code, "invalid_path");
+
+        // Inside the worktree the same call is a decision the user gets to make, so it reaches the
+        // prompt — which this unattended backend cannot show.
+        let failure = dispatch(
+            app.handle(),
+            call("godot_resource", "delete", json!({"path": "main.gd"})),
+        )
+        .expect_err("an unattended backend cannot approve a delete");
+        assert_eq!(failure.code, "approval_unavailable");
+    }
 
     #[test]
     fn every_catalog_domain_has_a_route_and_unique_operations() {

@@ -80,6 +80,24 @@ export type StoredChat = Readonly<{
     agentMessages: readonly unknown[]
 }>
 
+/**
+ * One AI tool call the backend's safety model would not run unattended. The call is blocked until
+ * the user answers, so a prompt on screen is a paused agent, not a notification.
+ */
+export type ToolApprovalPrompt = Readonly<{
+    approvalId: string
+    tool: string
+    op: string
+    reason: string
+    params: Readonly<Record<string, unknown>>
+}>
+
+/** Emitted when a prompt stops waiting — answered, timed out, or cancelled with its turn. */
+export type ToolApprovalSettled = Readonly<{
+    approvalId: string
+    approved: boolean
+}>
+
 export type GodotProcessEvent = Readonly<{
     runId: string
     eventType: 'started' | 'line' | 'finished'

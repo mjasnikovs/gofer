@@ -14,7 +14,9 @@ import {useAiConnection} from '../../hooks/useAiConnection'
 import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useChatPersistence} from '../../hooks/useChatPersistence'
 import {useGodotProcess} from '../../hooks/useGodotProcess'
+import {useToolApprovals} from '../../hooks/useToolApprovals'
 import {ChatConversation} from './ChatConversation'
+import {ToolApprovalDialog} from './ToolApprovalDialog'
 import {ScriptWorkspace} from './ScriptWorkspace'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
 import {WorkspaceHeader} from './WorkspaceHeader'
@@ -65,6 +67,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     const {attachmentPreviews, addPreviews} = useAttachmentPreviews({messages, isMounted})
     const {settings, models, connectionState, connect, applyModel, applyThinkingLevel} =
         useAiConnection({onError: reportError, onConnected: clearError})
+    const {approvals, respond: respondToApproval} = useToolApprovals({onError: reportError})
     const {isGodotRunning, runGodot, stopGodot} = useGodotProcess({
         taskId,
         onError: reportError,
@@ -456,6 +459,10 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                                 <ScriptWorkspace onError={reportError} />
                             </StackItem>
                         :   chat}
+                        <ToolApprovalDialog
+                            onRespond={respondToApproval}
+                            {...(approvals[0] && {prompt: approvals[0]})}
+                        />
                     </VStack>
                 </LayoutContent>
             }

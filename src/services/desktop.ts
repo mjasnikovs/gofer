@@ -26,7 +26,9 @@ import type {
     ChatAttachment,
     GodotProcessEvent,
     Message,
-    StoredChat
+    StoredChat,
+    ToolApprovalPrompt,
+    ToolApprovalSettled
 } from '../models/chat'
 import type {
     AiModelOption,
@@ -222,6 +224,8 @@ type DesktopCommandMap = Readonly<{
 
 type DesktopEventMap = Readonly<{
     'ai-stream-event': AiStreamPayload
+    'ai-approval-request': ToolApprovalPrompt
+    'ai-approval-settled': ToolApprovalSettled
     'godot-process-event': GodotProcessEvent
     'godot-session-event': SessionEvent
     'rag-download-progress': DownloadProgress

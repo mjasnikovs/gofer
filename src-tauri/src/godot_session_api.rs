@@ -5,6 +5,7 @@
 //! forwards addon events through a Tauri channel.
 
 use crate::addon::AddonStager;
+use crate::approvals::ApprovalError;
 use crate::files::Workspace;
 use crate::godot_rpc::{CallRequest as RpcCallRequest, EventEnvelope, ResponseEnvelope, RpcError};
 use crate::godot_session::{self, LaunchRequest, SessionError, SessionInfo, SessionState};
@@ -78,7 +79,6 @@ pub enum SessionEvent {
 /// An approval response from the renderer for an AI-initiated operation.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct ToolApprovalRequest {
     pub approval_id: String,
     pub approved: bool,
@@ -233,12 +233,10 @@ pub fn unsubscribe_godot_events() -> Result<(), SessionError> {
     Ok(())
 }
 
-/// Acknowledges a pending tool approval request. Approvals are wired in a later step.
-pub fn respond_tool_approval(_request: ToolApprovalRequest) -> Result<(), SessionError> {
-    Err(SessionError::new(
-        "not_implemented",
-        "Tool approvals are not implemented yet",
-    ))
+/// Answers one AI tool call that is waiting for the user. The gated call resumes — or fails with
+/// `approval_denied` — the moment this returns.
+pub fn respond_tool_approval(request: ToolApprovalRequest) -> Result<(), ApprovalError> {
+    crate::approvals::respond(&request.approval_id, request.approved)
 }
 
 fn project_storage<R: Runtime>(app: &AppHandle<R>) -> Result<ProjectStorage, SessionError> {

@@ -1,3 +1,16 @@
+/**
+ * Keeps the agent's file and shell tools inside the active task worktree.
+ *
+ * Confinement is the whole safety story for these four tools, and deliberately so: bash is the one
+ * explicit autonomous exception to the approval model in `src-tauri/src/approvals.rs`. Inside the
+ * worktree it may do destructive work — `rm`, `git checkout`, a build that rewrites generated
+ * files — with no prompt at all, even where the equivalent typed `godot_resource delete` would stop
+ * and wait for the user. The worktree is the boundary that makes that acceptable: it is a Git
+ * checkout of its own, so everything the shell can reach is recoverable, and nothing outside it can
+ * be reached. A shell that asked for permission per command would be a shell the agent cannot use,
+ * which is why the gate lives on typed operations rather than here.
+ */
+
 import {realpath} from 'node:fs/promises'
 import {dirname, isAbsolute, relative, resolve, sep} from 'node:path'
 
