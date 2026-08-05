@@ -22,8 +22,30 @@ process.env.GOFER_AI_WORKER = resolve('fixtures/packaged/fake-ai-worker.mjs')
 process.env.GOFER_WORKSPACE_DIR = workspace
 process.env.GOFER_GODOT_HEADLESS = '1'
 
+/**
+ * Git inherits the environment of whatever ran the journey — a Git hook exports `GIT_DIR` and
+ * `GIT_INDEX_FILE` — so the fixture repository is addressed the same scrubbed way `git.rs`
+ * addresses the real ones. Without it, `add` writes these fixture files into Gofer's own index
+ * while their objects stay here, leaving that repository referencing objects it cannot find.
+ */
+const GIT_ENVIRONMENT = new Set([
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_INDEX_FILE',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_COMMON_DIR',
+    'GIT_PREFIX'
+])
+
 function git(...arguments_: string[]) {
-    const result = spawnSync('git', ['-C', workspace, ...arguments_], {encoding: 'utf8'})
+    const environment = Object.fromEntries(
+        Object.entries(process.env).filter(([name]) => !GIT_ENVIRONMENT.has(name))
+    )
+    const result = spawnSync('git', ['-C', workspace, ...arguments_], {
+        encoding: 'utf8',
+        env: environment
+    })
     if (result.status !== 0) {
         throw new Error(`git ${arguments_.join(' ')} failed: ${result.stderr || result.stdout}`)
     }

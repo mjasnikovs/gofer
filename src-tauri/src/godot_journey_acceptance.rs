@@ -105,11 +105,23 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Git inherits the environment of whatever ran the suite — a Git hook exports `GIT_DIR` and
+/// `GIT_INDEX_FILE` — so the journey's checkout is addressed the same scrubbed way `git.rs`
+/// addresses the real ones. Without it, `add` under a pre-commit hook writes these fixture files
+/// into Gofer's own index while their objects stay in the temporary repository, and the commit
+/// that started the hook then fails on an object it cannot find.
 fn git(workspace: &Path, arguments: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace)
         .args(arguments)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_PREFIX")
         .output()
         .unwrap_or_else(|error| panic!("git {arguments:?} could not run: {error}"));
     assert!(

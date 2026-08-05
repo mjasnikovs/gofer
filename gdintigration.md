@@ -666,7 +666,23 @@ LSP client, DAP client, and filesystem layer therefore need injectable seams lik
 `ProcessSpawner` from the first commit, not retrofitted at the end.
 
 - Monaco tests for diagnostics, rename, breakpoint gutter, dirty-buffer conflicts, formatting
-  preview, and save.
+  preview, and save — DONE:
+    - `ScriptWorkspace.test.tsx` drives the assembled editor against a scripted backend through
+      `src/test/monaco-stub.ts`, which stands in for Monaco because jsdom can neither measure fonts
+      nor lay out the real editor: it records the models, markers, decorations, and actions Gofer
+      asked for and lets a test fire the listeners the editor would have fired.
+    - The six surfaces are one test each. A published diagnostic becomes an editor marker and a tab
+      badge; a gutter click adds the breakpoint decoration and a second one removes it; formatting
+      previews the diff and dirties the buffer only when applied, never writing; the save keybinding
+      writes and clears the dirty mark.
+    - Rename is the flow the UI owns rather than Monaco: the `gofer.renameSymbol` action opens on
+      the identifier `prepareRename` named, previewing shows one diff per file — including the file
+      that has no tab open — and `apply_script_rename` is reached only by the apply button, with the
+      open buffer taking the transaction's text back clean.
+    - The two conflicts are tested apart because they arrive differently. A file changed underneath
+      a dirty buffer raises `externalChange` from the watcher's own channel and keeps both texts
+      until the user chooses; a save that lost the hash check raises `staleSave` from the write
+      itself and offers the same two ways out. Neither writes anything on its own.
 - AI-worker tests for duplex tool calls, cancellation, approval rejection, image tool results, and
   autonomous shell behavior.
 - Packaged Linux, Windows, and macOS journeys using the pinned Godot artifacts already listed in the

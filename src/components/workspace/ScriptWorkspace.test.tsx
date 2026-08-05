@@ -5,6 +5,7 @@ import axe from 'axe-core'
 import {ScriptWorkspace} from './ScriptWorkspace'
 import type {ScriptReveal} from './ScriptWorkspace'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
+import type {WorkspaceFileChange} from '../../models/files'
 import type {MonacoStubState} from '../../test/monaco-stub'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
@@ -43,13 +44,29 @@ class BackendError extends Error {
 
 const SOURCE = 'extends Node\n\nfunc _ready():\n\tpass\n'
 const FORMATTED = 'extends Node\n\n\nfunc _ready():\n\tpass\n'
+const EXTERNAL = 'extends Node\n\nfunc _ready():\n\tprint("someone else")\n'
+const RENAMED = 'extends Node\n\nfunc _start():\n\tpass\n'
 
 function backend() {
     const file = {text: SOURCE, hash: 'hash-1', version: 1}
     const saved: string[] = []
+    /** Each rename transaction that reached the backend, as the paths it rewrote. */
+    const applied: string[][] = []
+    let changes: {onmessage: (changes: readonly WorkspaceFileChange[]) => void} | undefined
     tauri.invoke.mockImplementation(async (command, args) => {
         const request =
-            (args as {request?: {text?: string; expectedHash?: string}} | undefined)?.request ?? {}
+            (
+                args as
+                    | {
+                          request?: {
+                              op?: string
+                              text?: string
+                              expectedHash?: string
+                              files?: unknown[]
+                          }
+                      }
+                    | undefined
+            )?.request ?? {}
         switch (command) {
             case 'list_workspace_files':
                 return [
@@ -77,11 +94,57 @@ function backend() {
                 return {path: 'player.gd', hash: file.hash, bytes: 1, version: file.version}
             case 'format_gdscript':
                 return {formatted: FORMATTED, changed: true}
+            case 'watch_workspace_files':
+                changes = (
+                    args as {changes: {onmessage: (batch: readonly WorkspaceFileChange[]) => void}}
+                ).changes
+                return undefined
+            case 'call_script_language':
+                if (request.op === 'prepareRename')
+                    return {op: 'prepareRename', placeholder: 'ready'}
+                // A rename crossing two files, only one of which has a tab open.
+                return {
+                    op: 'rename',
+                    files: [
+                        {
+                            path: 'player.gd',
+                            originalText: file.text,
+                            originalHash: file.hash,
+                            updatedText: RENAMED
+                        },
+                        {
+                            path: 'enemy.gd',
+                            originalText: 'extends Node\n\nfunc call_ready():\n\tpass\n',
+                            originalHash: 'hash-enemy',
+                            updatedText: 'extends Node\n\nfunc call_start():\n\tpass\n'
+                        }
+                    ]
+                }
+            case 'apply_script_rename': {
+                const files = (request.files ?? []) as {path: string; updatedText: string}[]
+                applied.push(files.map(entry => entry.path))
+                file.text = RENAMED
+                file.hash = 'hash-renamed'
+                file.version += 1
+                return files.map(entry => ({
+                    path: entry.path,
+                    hash: entry.path === 'player.gd' ? file.hash : 'hash-enemy-2',
+                    bytes: entry.updatedText.length,
+                    version: file.version
+                }))
+            }
             default:
                 return undefined
         }
     })
-    return {file, saved}
+    return {
+        file,
+        saved,
+        applied,
+        publishChanges: (batch: readonly WorkspaceFileChange[]) => {
+            changes?.onmessage(batch)
+        }
+    }
 }
 
 /**
@@ -240,6 +303,70 @@ describe('ScriptWorkspace', () => {
         // Applying formats the buffer only; writing it is still an explicit save.
         expect(server.saved).toEqual([])
         expect(openTab()).toHaveTextContent('•')
+    })
+
+    it('previews every file a rename would rewrite and writes only when applied', async () => {
+        const server = backend()
+        const user = await openPlayer()
+
+        editor.state?.runAction('gofer.renameSymbol')
+
+        // The dialog opens on the identifier the server named, not on whatever the cursor touched.
+        const name = await screen.findByLabelText('New name')
+        expect(name).toHaveValue('ready')
+        await user.clear(name)
+        await user.type(name, 'start')
+        await user.click(screen.getByRole('button', {name: 'Preview rename'}))
+
+        expect(await screen.findByText('Rename to start')).toBeInTheDocument()
+        expect(
+            screen.getByText('2 file(s) would be rewritten as one transaction.')
+        ).toBeInTheDocument()
+        expect(screen.getByText('enemy.gd')).toBeInTheDocument()
+        // One diff per file, and nothing written by looking at them.
+        expect(editor.state?.diffEditors).toBe(2)
+        expect(server.applied).toEqual([])
+        expect(server.file.text).toBe(SOURCE)
+
+        await user.click(screen.getByRole('button', {name: 'Apply rename'}))
+
+        await waitFor(() => {
+            expect(server.applied).toEqual([['player.gd', 'enemy.gd']])
+        })
+        // The open buffer takes the text the transaction wrote, clean rather than dirty.
+        await waitFor(() => {
+            expect(editor.state?.activeText()).toBe(RENAMED)
+        })
+        expect(openTab()).not.toHaveTextContent('•')
+    })
+
+    it('conflicts a dirty buffer that changed on disk and reloads it on request', async () => {
+        const server = backend()
+        const user = await openPlayer()
+
+        editor.state?.type('extends Node2D\n')
+        await waitFor(() => {
+            expect(openTab()).toHaveTextContent('•')
+        })
+
+        server.file.text = EXTERNAL
+        server.file.hash = 'hash-external'
+        server.publishChanges([{path: 'player.gd', kind: 'modified'}])
+
+        expect(
+            await screen.findByText('This file changed on disk while the buffer was edited.')
+        ).toBeInTheDocument()
+        // The user's edit is still there: a conflict warns, it does not overwrite either side.
+        expect(editor.state?.activeText()).toBe('extends Node2D\n')
+        expect(server.saved).toEqual([])
+
+        await user.click(screen.getByRole('button', {name: 'Reload from disk'}))
+
+        await waitFor(() => {
+            expect(editor.state?.activeText()).toBe(EXTERNAL)
+        })
+        expect(screen.queryByText('This buffer is out of date')).not.toBeInTheDocument()
+        expect(openTab()).not.toHaveTextContent('•')
     })
 
     it('refuses a stale save and offers to reload or overwrite', async () => {
