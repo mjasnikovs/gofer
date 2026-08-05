@@ -47,32 +47,11 @@ jobs:
                   GOFER_CHROMEDRIVER_BINARY: ${{ steps.chrome.outputs.chromedriver-path }}
               run: npm run check
 
+    # The same journey the nightly matrix runs on Windows and macOS, so the platforms cannot drift.
     packaged:
-        runs-on: ubuntu-24.04
-        timeout-minutes: 45
-        steps:
-            - uses: actions/checkout@v4
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 22.19.0
-                  cache: npm
-            - uses: dtolnay/rust-toolchain@stable
-              with:
-                  toolchain: 1.97.1
-            - name: Install system dependencies
-              run: >-
-                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
-                  libappindicator3-dev librsvg2-dev patchelf xvfb
-            - name: Install JavaScript dependencies
-              run: npm ci
-            - name: Install pinned Godot
-              env:
-                  GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
-              run: node scripts/install-godot.mjs
-            - name: Build the release-mode WebDriver application
-              run: npm run build:desktop:test
-            - name: Run the packaged application with zero retries
-              run: xvfb-run -a npm run test:desktop:packaged
+        uses: ./.github/workflows/packaged-journey.yml
+        with:
+            os: ubuntu-24.04
 
     rust-coverage:
         runs-on: ubuntu-24.04

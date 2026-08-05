@@ -146,7 +146,7 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
     std::fs::write(scripts.join("main_probe.gd"), PROBE_SCRIPT).expect("write the probe script");
     std::fs::write(scripts.join("broken.gd"), BROKEN_SCRIPT).expect("write the broken script");
     std::fs::write(worktree.join("main.tscn"), PROBE_SCENE).expect("write the probe scene");
-    worktree.canonicalize().expect("canonical worktree")
+    crate::paths::canonical(&worktree).expect("canonical worktree")
 }
 
 /// Launches the pinned editor with every transport the router needs, draining both pipes into the

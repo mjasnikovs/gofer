@@ -121,7 +121,7 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
         .join("fixtures")
         .join("godot-project");
     copy_tree(&fixture, &worktree);
-    worktree.canonicalize().expect("canonical worktree")
+    crate::paths::canonical(&worktree).expect("canonical worktree")
 }
 
 /// The fixture project padded with enough resources that the editor's first import scan is still

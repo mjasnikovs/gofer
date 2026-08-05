@@ -1,0 +1,73 @@
+name: Packaged journey
+
+# One definition of the packaged desktop journey for every platform it runs on.
+#
+# The Linux leg runs on each push and the Windows and macOS legs run nightly, but they are the same
+# job: a second copy is how the Linux leg drifted ahead of the other two while the matrix that was
+# meant to prove them stayed configured and unrun. Each leg installs the pinned Godot artifact for
+# its own platform from `protocol/godot-artifacts.json`, builds the release-mode WebDriver
+# application, and drives the real binary through the embedded driver provider, which needs no
+# external WebDriver on any of the three.
+
+on:
+    workflow_call:
+        inputs:
+            os:
+                description: The GitHub-hosted runner image to drive the journey on.
+                type: string
+                required: true
+            godot-suite:
+                description: Also run the real-editor Godot acceptance suites on this platform.
+                type: boolean
+                default: false
+
+jobs:
+    journey:
+        runs-on: ${{ inputs.os }}
+        # A cold Rust release build of the Tauri application, the real-editor suites, and a journey
+        # that imports a Godot project twice do not fit in the 60 minutes the Linux leg used to
+        # need on its own.
+        timeout-minutes: 90
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.19.0
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: 1.97.1
+            - name: Install Linux system dependencies
+              if: runner.os == 'Linux'
+              run: >-
+                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
+                  libappindicator3-dev librsvg2-dev patchelf unzip xvfb
+            - name: Install JavaScript dependencies
+              run: npm ci
+            - name: Install pinned Godot
+              env:
+                  GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
+              run: node scripts/install-godot.mjs
+            - name: Run real Godot protocol and acceptance tests
+              if: inputs.godot-suite
+              run: npm run test:godot
+            - name: Build the release-mode WebDriver application
+              run: npm run build:desktop:test
+            # Linux runners have no display; Windows and macOS runners do, and the managed editor
+            # the journey starts is headless on all three.
+            - name: Run the packaged application with zero retries
+              if: runner.os == 'Linux'
+              run: xvfb-run -a npm run test:desktop:packaged
+            - name: Run the packaged application with zero retries
+              if: runner.os != 'Linux'
+              run: npm run test:desktop:packaged
+            # The first run of a platform is the one that most needs evidence, and the WebDriver
+            # log holds the application's own backend and frontend output.
+            - name: Collect the journey logs
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: packaged-journey-logs-${{ inputs.os }}
+                  path: logs/
+                  if-no-files-found: ignore
+                  retention-days: 14

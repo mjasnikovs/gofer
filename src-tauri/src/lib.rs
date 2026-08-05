@@ -44,6 +44,7 @@ mod godot_ai_acceptance;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_journey_acceptance;
 mod memory;
+mod paths;
 mod process;
 pub mod protocol_v2;
 mod rag;

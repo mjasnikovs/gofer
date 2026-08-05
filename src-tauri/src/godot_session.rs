@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use crate::godot_rpc;
+use crate::paths;
 use crate::process::{ChildProcess, ProcessSpawner};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -662,8 +663,7 @@ fn command_text(
 }
 
 fn canonical_worktree(worktree: &Path) -> Result<PathBuf, SessionError> {
-    worktree
-        .canonicalize()
+    paths::canonical(worktree)
         .map_err(|error| {
             SessionError::new(
                 "worktree_unavailable",
@@ -952,7 +952,7 @@ mod tests {
 
     fn workspace() -> (TempDir, PathBuf) {
         let directory = TempDir::new().expect("temporary worktree");
-        let path = directory.path().canonicalize().expect("canonicalize");
+        let path = paths::canonical(directory.path()).expect("canonicalize");
         (directory, path)
     }
 

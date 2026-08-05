@@ -179,7 +179,7 @@ fn committed_workspace(root: &Path) -> PathBuf {
     git(&workspace, &["config", "user.name", "Gofer journey"]);
     git(&workspace, &["add", "--all"]);
     git(&workspace, &["commit", "--quiet", "--message", "Fixture"]);
-    workspace.canonicalize().expect("canonical workspace")
+    crate::paths::canonical(&workspace).expect("canonical workspace")
 }
 
 /// One journey: a Git workspace, project storage, a mock desktop application, and whichever task

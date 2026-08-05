@@ -707,7 +707,39 @@ LSP client, DAP client, and filesystem layer therefore need injectable seams lik
       offered, so a gated typed delete was available, and `rm` still removes a worktree file with
       nothing reaching the backend to approve.
 - Packaged Linux, Windows, and macOS journeys using the pinned Godot artifacts already listed in the
-  repository.
+  repository — DONE:
+    - The three legs are one definition. `.github/workflows/packaged-journey.yml` installs the
+      platform's own pinned artifact, builds the release-mode WebDriver application, and drives the
+      real binary through the embedded driver provider — which needs no external WebDriver on any of
+      the three. `check.yml` calls it for Linux on every push and `nightly.yml` calls it from the
+      three-platform matrix, so the leg that runs constantly and the legs that run nightly cannot
+      diverge: a second copy is exactly how the Linux journey drifted ahead of Windows and macOS
+      while the matrix meant to prove them stayed configured and unrun. A failed leg uploads the
+      WebDriver log, which carries the application's own backend and frontend output, because the
+      first run of a platform is the run that most needs evidence.
+    - The two pins that had never been exercised were verified against the published archives: both
+      SHA-256 digests in `protocol/godot-artifacts.json` match, and each `binary` exists inside its
+      archive — `Godot.app/Contents/MacOS/Godot`, executable and with no symlinks for `unzip` to
+      drop, and `Godot_v4.7.1-stable_win64.exe`, the GUI-subsystem executable rather than the
+      `_console.exe` wrapper beside it. It carries the console-attach path itself and redirects only
+      streams that are not already redirected, so the session's piped stdout and stderr — the only
+      place editor, importer, plugin, and game output exists — still reach the log buffer.
+    - Windows could not have passed as it stood, for a reason no Linux run can show:
+      `std::fs::canonicalize` returns an extended-length path, `\\?\C:\…`, and every program a
+      session hands one to rejects it. `SetCurrentDirectory` does not accept the verbatim prefix, so
+      `Command::current_dir` could not even start Git; Git for Windows reads it as a relative name,
+      so `git worktree add` could not create the task worktree the journey binds to; and Godot
+      simplifies `--path` before opening a project. `src-tauri/src/paths.rs` is the one
+      canonicalization rule instead: `canonical` keeps the plain spelling whenever it addresses the
+      same file and falls back to the prefix only where Windows genuinely requires it, and because
+      that fallback exists — a short root, a long path inside it — every comparison of two canonical
+      paths levels them through `simplified` first. Both are identities on Linux and macOS, so the
+      change is Windows-only in effect: `Workspace`, the session supervisor's worktree, project
+      storage's workspace path, the RPC handshake's project check, and the RAG cache guard now
+      resolve paths one way rather than five.
+    - Done when each platform runs the journey it was configured for. The Linux leg is proven here
+      and on every push; the Windows and macOS legs are proven by the nightly matrix's first real
+      GitHub-hosted run, which is the only machine that can run them.
 - Final acceptance journey — DONE:
     1. Connect to a task worktree.
     2. Inspect and mutate a scene, undo it, redo it, and explicitly save.

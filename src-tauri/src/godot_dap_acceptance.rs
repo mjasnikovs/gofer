@@ -133,7 +133,7 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
     std::fs::create_dir_all(&scripts).expect("create scripts directory");
     std::fs::write(scripts.join("debugger_probe.gd"), PROBE_SCRIPT).expect("write probe script");
     std::fs::write(worktree.join("main.tscn"), PROBE_SCENE).expect("write probe scene");
-    worktree.canonicalize().expect("canonical worktree")
+    crate::paths::canonical(&worktree).expect("canonical worktree")
 }
 
 fn launch(worktree: &Path, dap_port: u16) -> Editor {

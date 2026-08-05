@@ -36,9 +36,11 @@ second Linux job builds and launches a release-mode application through Webdrive
 driver using isolated application data and a test-feature-only prepared RAG cache. The packaged
 journey covers deterministic AI streaming and tool events, an image attachment, real Godot project
 mutation and saving, cancellation, and chat/settings restoration in a second application process. A
-nightly matrix repeats the packaged journey and real Godot acceptance suites on Linux, Windows, and
-macOS. These workflows are on `origin/master`. Every job installs Godot through
-`scripts/install-godot.mjs`, which reads the single pinned manifest in
+nightly matrix repeats that journey and the real Godot acceptance suites on Linux, Windows, and
+macOS. The push job and every matrix entry call one reusable workflow,
+`.github/workflows/packaged-journey.yml`, so the platform that runs constantly cannot drift away
+from the platforms that run nightly. These workflows are on `origin/master`. Every job installs
+Godot through `scripts/install-godot.mjs`, which reads the single pinned manifest in
 `protocol/godot-artifacts.json` and verifies its SHA-256 and reported version, so no workflow
 carries its own copy of the pins.
 
@@ -300,9 +302,11 @@ branch, and critical-region coverage.
 ### Target: nightly
 
 Nightly CI builds the release-mode application and runs the packaged journey plus real Godot
-acceptance suite on Linux, Windows, and macOS. Each matrix entry uses WebdriverIO's embedded driver
-provider and the pinned platform-specific Godot 4.7.1-stable artifact. The matrix is configured but
-still requires evidence from its first real GitHub-hosted run.
+acceptance suite on Linux, Windows, and macOS. Each matrix entry calls the same reusable workflow
+the push gate calls, using WebdriverIO's embedded driver provider and the pinned platform-specific
+Godot 4.7.1-stable artifact, and a failed entry uploads its WebDriver log. The Windows and macOS
+entries still require evidence from their first real GitHub-hosted run; no developer machine can
+produce it.
 
 ## Enforcement rules
 

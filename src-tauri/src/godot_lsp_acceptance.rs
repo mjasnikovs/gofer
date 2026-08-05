@@ -130,7 +130,7 @@ pub fn fixture_worktree(directory: &TempDir) -> PathBuf {
     std::fs::write(scripts.join("math_utils.gd"), MATH_UTILS).expect("write math_utils.gd");
     std::fs::write(scripts.join("score_keeper.gd"), SCORE_KEEPER).expect("write score_keeper.gd");
     std::fs::write(scripts.join("broken.gd"), BROKEN).expect("write broken.gd");
-    worktree.canonicalize().expect("canonical worktree")
+    crate::paths::canonical(&worktree).expect("canonical worktree")
 }
 
 pub fn launch(worktree: &Path, lsp_port: u16) -> Editor {

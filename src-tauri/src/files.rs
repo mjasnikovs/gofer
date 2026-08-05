@@ -6,6 +6,7 @@
 //! stale buffer reports a conflict instead of overwriting newer content. [`spawn_watcher`] reports
 //! changes made behind Gofer's back — by Godot, the user, or a confined shell command.
 
+use crate::paths;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -184,8 +185,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn open(root: &Path) -> Result<Self, FileError> {
-        let canonical = root
-            .canonicalize()
+        let canonical = paths::canonical(root)
             .map_err(|error| FileError::io(&root.display().to_string(), &error))?;
         if !canonical.is_dir() {
             return Err(FileError::new(
@@ -208,9 +208,11 @@ impl Workspace {
         let target = self.root.join(&cleaned);
         let mut existing = target.as_path();
         loop {
-            match existing.canonicalize() {
+            match paths::canonical(existing) {
                 Ok(real) => {
-                    if !real.starts_with(&self.root) {
+                    // A short root can stay plain while a long path under it needs the verbatim
+                    // prefix, so the two spellings are levelled before they are compared.
+                    if !paths::simplified(&real).starts_with(paths::simplified(&self.root)) {
                         return Err(FileError::outside(relative));
                     }
                     return Ok(target);

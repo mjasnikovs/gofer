@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::git;
+use crate::paths;
 
 const CATALOG_FILE_NAME: &str = "catalog.sqlite";
 const PROJECTS_DIRECTORY: &str = "projects";
@@ -442,8 +443,7 @@ impl ProjectStorage {
     pub fn open(data_root: &Path, workspace_path: &Path) -> Result<Self, String> {
         fs::create_dir_all(data_root)
             .map_err(|error| format!("Could not create {}: {error}", data_root.display()))?;
-        let canonical_path = workspace_path
-            .canonicalize()
+        let canonical_path = paths::canonical(workspace_path)
             .map_err(|error| format!("Could not resolve {}: {error}", workspace_path.display()))?;
         let catalog_path = data_root.join(CATALOG_FILE_NAME);
         let catalog = open_connection(&catalog_path)?;

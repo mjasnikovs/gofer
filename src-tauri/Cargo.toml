@@ -27,6 +27,7 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 tauri = { version = "2", features = [] }
 dirs = "6"
+dunce = "1"
 keyring = "4"
 reqwest = { version = "0.13", features = ["json"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

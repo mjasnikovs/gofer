@@ -516,7 +516,8 @@ fn same_project(expected: &str, reported: &str) -> bool {
     let normalize = |value: &str| {
         let trimmed = value.trim_end_matches(['/', '\\']);
         let path = Path::new(if trimmed.is_empty() { value } else { trimmed });
-        path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        let canonical = crate::paths::canonical(path).unwrap_or_else(|_| path.to_path_buf());
+        crate::paths::simplified(&canonical).to_path_buf()
     };
     normalize(expected) == normalize(reported)
 }
@@ -937,7 +938,7 @@ mod tests {
     #[test]
     fn accepts_the_trailing_separator_godot_reports() {
         let directory = tempfile::TempDir::new().expect("temporary directory");
-        let worktree = directory.path().canonicalize().expect("canonical worktree");
+        let worktree = crate::paths::canonical(directory.path()).expect("canonical worktree");
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("listener address");
         let token = "a1".repeat(32);

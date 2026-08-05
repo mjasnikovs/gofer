@@ -10,40 +10,15 @@ concurrency:
     cancel-in-progress: false
 
 jobs:
+    # Every platform runs the journey the push gate runs on Linux, plus the real-editor Godot
+    # acceptance suites, against its own pinned Godot artifact. `fail-fast: false` because the
+    # point of the matrix is which platforms fail, not that one did.
     desktop:
         strategy:
             fail-fast: false
             matrix:
                 os: [ubuntu-24.04, windows-2025, macos-15]
-        runs-on: ${{ matrix.os }}
-        timeout-minutes: 60
-        steps:
-            - uses: actions/checkout@v4
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 22.19.0
-                  cache: npm
-            - uses: dtolnay/rust-toolchain@stable
-              with:
-                  toolchain: 1.97.1
-            - name: Install Linux system dependencies
-              if: runner.os == 'Linux'
-              run: >-
-                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
-                  libappindicator3-dev librsvg2-dev patchelf xvfb
-            - name: Install JavaScript dependencies
-              run: npm ci
-            - name: Install pinned Godot
-              env:
-                  GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
-              run: node scripts/install-godot.mjs
-            - name: Run real Godot protocol and acceptance tests
-              run: npm run test:godot
-            - name: Build the release-mode WebDriver application
-              run: npm run build:desktop:test
-            - name: Run packaged desktop journey on Linux
-              if: runner.os == 'Linux'
-              run: xvfb-run -a npm run test:desktop:packaged
-            - name: Run packaged desktop journey
-              if: runner.os != 'Linux'
-              run: npm run test:desktop:packaged
+        uses: ./.github/workflows/packaged-journey.yml
+        with:
+            os: ${{ matrix.os }}
+            godot-suite: true

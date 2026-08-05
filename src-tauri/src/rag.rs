@@ -202,8 +202,8 @@ fn validate_cache_path(path: PathBuf) -> Result<PathBuf, String> {
             path.display()
         ));
     }
-    let safety_path = path.canonicalize().unwrap_or_else(|_| path.clone());
-    let home = dirs::home_dir().and_then(|home| home.canonicalize().ok());
+    let safety_path = crate::paths::canonical(&path).unwrap_or_else(|_| path.clone());
+    let home = dirs::home_dir().and_then(|home| crate::paths::canonical(&home).ok());
     if home.as_deref() == Some(safety_path.as_path()) {
         return Err("Refusing to use the home directory as the Gofer RAG cache".to_owned());
     }
