@@ -8,12 +8,21 @@ import {
 } from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider} from '@earendil-works/pi-ai'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
+import {createGodotTools} from './ai-host.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 
 const PROVIDER_ID = 'local'
 const DEFAULT_CONTEXT_WINDOW = 120_064
 const DEFAULT_SYSTEM_PROMPT = `You are Gofer, a capable local coding agent. Work autonomously toward the user's goal.
 You can inspect and modify files and run shell commands with the provided tools. Use tools when they help; never claim an action succeeded unless its result confirms it. Keep the user informed with a concise final response.`
+/**
+ * Appended when the backend offers the Godot domain tools. It carries only what the tool
+ * descriptions cannot: that the two scene trees are different things, that a mutation needs the
+ * revision the last read reported, and that stopping is an event a caller has to wait for.
+ */
+const GODOT_TOOL_PROMPT = `A Gofer-managed Godot editor is available through the godot_* tools. Start with godot_session status, and start the session if it is offline.
+The edited scene (godot_scene, godot_node) and the running game (godot_runtime) are separate: editing one never changes the other. Scene mutations take expectedRevision from the last read that reported one, and are undoable in the editor until godot_scene save writes them.
+After godot_debug launch, wait with await_stop before reading the stack, scopes, or variables. Read godot_logs when something fails without explanation.`
 
 function zeroUsage() {
     return {
@@ -79,6 +88,7 @@ function textContent(content) {
 
 function toolTarget(name, args) {
     if (name === 'bash') return args.command
+    if (name.startsWith('godot_')) return args.op
     return args.path
 }
 
@@ -90,14 +100,20 @@ function bindTool(tool, context) {
     }
 }
 
-export function createAgentTools(workspacePath) {
+/**
+ * The tools one turn may use: the confined file and shell tools, plus the Godot domain tools the
+ * backend offered. The domain tools are forwarded to Rust rather than implemented here, so the
+ * agent and the desktop UI drive one implementation of every operation.
+ */
+export function createAgentTools(workspacePath, domains, host) {
     const env = new NodeExecutionEnv({cwd: workspacePath})
     const context = {env}
+    const confined = [createReadTool(), createWriteTool(), createEditTool(), createBashTool()]
+        .map(tool => confineTool(tool, workspacePath))
+        .map(tool => bindTool(tool, context))
     return {
         env,
-        tools: [createReadTool(), createWriteTool(), createEditTool(), createBashTool()]
-            .map(tool => confineTool(tool, workspacePath))
-            .map(tool => bindTool(tool, context))
+        tools: host ? [...confined, ...createGodotTools(domains, host)] : confined
     }
 }
 
@@ -108,6 +124,8 @@ export async function runAgent({
     agentMessages,
     workspacePath,
     memoryContext,
+    tools: domains,
+    host,
     emit,
     signal
 }) {
@@ -127,7 +145,7 @@ export async function runAgent({
     })
     const models = createModels()
     models.setProvider(provider)
-    const {env, tools} = createAgentTools(workspacePath)
+    const {env, tools} = createAgentTools(workspacePath, domains, host)
     const previousMessages =
         Array.isArray(agentMessages) ? agentMessages : (
             messages.slice(0, -1).map(message => contextMessage(message, model))
@@ -139,7 +157,7 @@ export async function runAgent({
 
     const agent = new Agent({
         initialState: {
-            systemPrompt: `${settings.systemPrompt || DEFAULT_SYSTEM_PROMPT}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}`,
+            systemPrompt: `${settings.systemPrompt || DEFAULT_SYSTEM_PROMPT}${tools.some(tool => tool.name.startsWith('godot_')) ? `\n\n${GODOT_TOOL_PROMPT}` : ''}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}`,
             model,
             thinkingLevel: settings.thinkingLevel || 'off',
             tools,

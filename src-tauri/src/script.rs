@@ -31,6 +31,11 @@ use std::time::Duration;
 
 /// How long the diagnostics forwarder waits for a notification before re-checking its stop flag.
 const DIAGNOSTICS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How long a diagnostics pull waits for the server's first publication for a document, and the
+/// ceiling a caller may ask for. Godot answers from the editor's main loop in 100 ms slices, so a
+/// freshly opened document is routinely a few slices ahead of its diagnostics.
+const DEFAULT_DIAGNOSTICS_WAIT_MS: u64 = 5_000;
+const MAX_DIAGNOSTICS_WAIT_MS: u64 = 30_000;
 const SCRIPT_EXTENSION: &str = ".gd";
 
 /// One open script buffer as the renderer first receives it.
@@ -153,6 +158,14 @@ pub enum ScriptRequest {
     WorkspaceSymbols {
         query: String,
     },
+    /// Reads the diagnostics the server last published for one document. Monaco subscribes to
+    /// them instead; this exists because a pull is the only way a caller without a channel — the
+    /// AI agent — can read them at all.
+    Diagnostics {
+        path: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
 }
 
 /// The answer to one [`ScriptRequest`], tagged with the operation that produced it.
@@ -194,6 +207,16 @@ pub enum ScriptResponse {
     },
     WorkspaceSymbols {
         symbols: Vec<WorkspaceSymbol>,
+    },
+    Diagnostics {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<i32>,
+        diagnostics: Vec<Diagnostic>,
+        /// False when the server published nothing for the document's current text within the
+        /// timeout. An empty list with `published: true` is a clean file; with `published: false`
+        /// it is an unanswered question, and the caller must ask again rather than report success.
+        published: bool,
     },
 }
 
@@ -409,6 +432,23 @@ pub fn call(request: ScriptRequest) -> Result<ScriptResponse, LspError> {
         ScriptRequest::WorkspaceSymbols { query } => Ok(ScriptResponse::WorkspaceSymbols {
             symbols: client.workspace_symbols(&workspace, &query)?,
         }),
+        ScriptRequest::Diagnostics { path, timeout_ms } => {
+            let uri = godot_lsp::file_uri(&workspace, &path)?;
+            let wait = Duration::from_millis(
+                timeout_ms
+                    .unwrap_or(DEFAULT_DIAGNOSTICS_WAIT_MS)
+                    .min(MAX_DIAGNOSTICS_WAIT_MS),
+            );
+            let published = client.diagnostics(&uri, wait)?;
+            Ok(ScriptResponse::Diagnostics {
+                path,
+                version: published.as_ref().and_then(|published| published.version),
+                published: published.is_some(),
+                diagnostics: published
+                    .map(|published| published.diagnostics)
+                    .unwrap_or_default(),
+            })
+        }
     }
 }
 

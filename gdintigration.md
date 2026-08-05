@@ -435,7 +435,7 @@ UI.
       real editor, verifies project.godot is clean after unstage, and reads the value back from a
       fresh editor on the same worktree.
 
-14. Add the AI tool router
+14. Add the AI tool router — DONE
     - Change the per-request Node worker protocol to duplex NDJSON: Rust sends startup context; Node
       emits typed tool requests; Rust returns results while streaming existing agent events.
 
@@ -443,8 +443,45 @@ UI.
       godot_resource, godot_script, godot_debug, godot_runtime, godot_logs, and godot_docs_search.
 
     - UI and AI invoke the same Rust handlers; no second implementation exists.
+    - The channel is duplex for the whole turn: `run_ai_worker_with` writes the startup context as
+      the first stdin line and keeps stdin open, the worker answers on stdout with `GOFER_AI_EVENT:`
+      for agent events and `GOFER_AI_TOOL:` for tool requests, and each request is dispatched on its
+      own thread so a debugger wait or a documentation retrieval cannot stall the event stream
+      behind it. Prefixes stay because stdout also carries Node's own diagnostics.
+      `scripts/ai-host.mjs` is the worker half — correlation, cancellation through the tool's
+      AbortSignal, and channel closure, each settling a pending call exactly once — and it
+      implements no operation: every call is forwarded.
+    - `src-tauri/src/ai_tools.rs` is the router and the catalog. The ten domains are one `const`
+      whose operations both generate the tool descriptions the model sees and validate what it may
+      call, so the two cannot drift; the worker registers tools from the catalog Rust sends it. A
+      call is `{tool, params: {op, ...}}`, `expectedRevision` and `timeoutMs` are lifted beside the
+      command the way the wire format keeps them, and the model-facing snake_case operation names
+      become the renderer's camelCase serde tags by derivation rather than by a second table.
+      Failures keep their code: `revision_conflict`, `file_conflict`, and `session_not_active` reach
+      the model as themselves.
+    - Two domains had no handler to route to. `src-tauri/src/debug.rs` is the session-bound debug
+      adapter — cached by port and worktree like `script.rs`, with `launch` performing Godot's exact
+      sequence (launch on its own thread, `setBreakpoints`, `configurationDone`, join) so the caller
+      cannot get the order wrong, and `await_stop` as a request of its own because stopping is an
+      event. `godot_session` now drains the editor's two pipes into a bounded ring buffer with
+      sequence cursors and engine-marked severities; the game the editor launches inherits those
+      pipes, so `godot_logs` covers editor, importer, plugin, and game output without parsing engine
+      prose to guess a producer. Both reach the renderer through `call_godot_debug` and
+      `read_godot_logs`.
+    - Diagnostics became pullable for the same reason: Monaco subscribes to them, but an agent has
+      no channel to listen on. `LspClient` now caches the last publication per document and forgets
+      it whenever the text changes, so `godot_script diagnostics` answers for the current text and
+      reports `published: false` rather than passing off an unanswered question as a clean file.
     - Done when an AI turn edits a scene, fixes an LSP diagnostic, runs to a breakpoint, inspects
-      variables, and captures the result.
+      variables, and captures the result — proven by
+      `godot_ai_acceptance::an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game`,
+      which drives a scripted OpenAI-compatible model through the real Node worker, the real router,
+      and one pinned editor: the marker it creates reaches `main.tscn` only after the explicit save,
+      the parse error the language server reported is gone once the fix is written, the game stops
+      on the breakpoint two frames deep and reports `amount` out of Locals, and the captured PNG
+      reaches the model as an image rather than as base64 in a tool result. The model is scripted
+      from the transcript, not from a fixed list — the revision, the file hash, the frame id, and
+      the variables reference are values only the editor can produce.
 
 15. Enforce the agreed safety model
     - Auto-allow reads, LSP/DAP control, runtime actions, typed file writes/edits, undoable scene

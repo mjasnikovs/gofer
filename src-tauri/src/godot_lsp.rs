@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The server answers from the editor main loop in 100 ms poll slices, so a request's latency
 /// tracks how busy the editor is. Thirty seconds is deliberate: a faster default would turn a
@@ -49,6 +49,8 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HEADER_LINES: usize = 32;
 const LANGUAGE_ID: &str = "gdscript";
 const LSP_REQUEST_CANCELLED: i64 = -32800;
+/// How often a diagnostics pull re-checks the cache while it waits for a first publication.
+const DIAGNOSTICS_POLL: Duration = Duration::from_millis(25);
 
 /// A structured, actionable language-server failure.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -116,6 +118,10 @@ struct Shared {
     writer: TcpStream,
     pending: HashMap<u64, Sender<Result<Value, LspError>>>,
     diagnostics: Vec<Sender<PublishDiagnosticsParams>>,
+    /// The last diagnostics published per document. Monaco subscribes and never needs this, but a
+    /// pull is the only way an agent can read diagnostics: it has no channel to listen on, and a
+    /// publication that arrived before it asked would otherwise be lost.
+    published: HashMap<Url, PublishDiagnosticsParams>,
     closed: bool,
 }
 
@@ -158,6 +164,7 @@ impl LspClient {
             writer: stream,
             pending: HashMap::new(),
             diagnostics: Vec::new(),
+            published: HashMap::new(),
             closed: false,
         }));
         let reader = thread::spawn({
@@ -259,6 +266,7 @@ impl LspClient {
             *version += 1;
             *version
         };
+        self.invalidate_diagnostics(uri);
         self.notify(
             "textDocument/didOpen",
             json!({"textDocument": {"uri": uri, "languageId": LANGUAGE_ID, "version": version, "text": text}}),
@@ -279,6 +287,7 @@ impl LspClient {
             *version += 1;
             *version
         };
+        self.invalidate_diagnostics(uri);
         self.notify(
             "textDocument/didChange",
             json!({
@@ -298,10 +307,19 @@ impl LspClient {
                 "The document is not open in this LSP session",
             ));
         }
+        self.invalidate_diagnostics(uri);
         self.notify(
             "textDocument/didSave",
             json!({"textDocument": {"uri": uri}, "text": text}),
         )
+    }
+
+    /// Forgets the cached diagnostics of a document whose text just changed, so the next pull
+    /// waits for the server's verdict on the new text instead of repeating the old one.
+    fn invalidate_diagnostics(&self, uri: &Url) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.published.remove(uri);
+        }
     }
 
     pub fn close_document(&self, uri: &Url) -> Result<(), LspError> {
@@ -327,6 +345,32 @@ impl LspClient {
             shared.diagnostics.push(sender);
         }
         receiver
+    }
+
+    /// Reads the diagnostics the server published for the document's current text, waiting up to
+    /// `timeout` for them. `None` means the server said nothing in time — which is not the same as
+    /// a clean file, because Godot publishes an empty list for that.
+    pub fn diagnostics(
+        &self,
+        uri: &Url,
+        timeout: Duration,
+    ) -> Result<Option<PublishDiagnosticsParams>, LspError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let shared = self.shared.lock().map_err(|_| LspError::poisoned())?;
+                if let Some(published) = shared.published.get(uri) {
+                    return Ok(Some(published.clone()));
+                }
+                if shared.closed {
+                    return Err(LspError::closed());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            thread::sleep(DIAGNOSTICS_POLL);
+        }
     }
 
     pub fn hover(&self, uri: &Url, position: Position) -> Result<Option<Hover>, LspError> {
@@ -916,6 +960,7 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, message: Value) {
                 return;
             };
             if let Ok(mut shared) = shared.lock() {
+                shared.published.insert(params.uri.clone(), params.clone());
                 shared
                     .diagnostics
                     .retain(|sender| sender.send(params.clone()).is_ok());

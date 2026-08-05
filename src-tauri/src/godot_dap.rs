@@ -72,7 +72,7 @@ pub struct DapError {
 }
 
 impl DapError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -81,7 +81,7 @@ impl DapError {
         }
     }
 
-    fn retryable(mut self) -> Self {
+    pub(crate) fn retryable(mut self) -> Self {
         self.retryable = true;
         self
     }

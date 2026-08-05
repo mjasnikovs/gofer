@@ -3,8 +3,10 @@ import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises'
 import {createServer} from 'node:http'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
-import {spawnSync} from 'node:child_process'
+import {spawn, spawnSync} from 'node:child_process'
+import {createInterface} from 'node:readline'
 import test from 'node:test'
+import {TOOL_PREFIX, createGodotTools, createToolHost, toolResult} from './ai-host.mjs'
 import {createAgentTools, runAgent} from './ai-provider.mjs'
 
 const settings = {
@@ -425,4 +427,275 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
     } finally {
         server.close()
     }
+})
+
+const catalog = [
+    {
+        name: 'godot_scene',
+        description: 'The edited scene.',
+        operations: [
+            {op: 'get_tree', summary: 'Returns the edited scene hierarchy.'},
+            {op: 'save', summary: 'Saves the edited scene.'}
+        ]
+    },
+    {
+        name: 'godot_runtime',
+        description: 'The running game.',
+        operations: [{op: 'capture', summary: 'Captures a PNG frame.'}]
+    }
+]
+
+test('the tool host correlates results, failures, cancellation, and closure', async () => {
+    const sent = []
+    const host = createToolHost(call => sent.push(call))
+
+    const answered = host.call('godot_scene', {op: 'get_tree'})
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].tool, 'godot_scene')
+    host.deliver({type: 'tool-result', id: sent[0].id, ok: true, result: {revision: 3}})
+    assert.deepEqual(await answered, {revision: 3})
+
+    const refused = host.call('godot_scene', {op: 'save'})
+    host.deliver({
+        type: 'tool-result',
+        id: sent[1].id,
+        ok: false,
+        error: {code: 'revision_conflict', message: 'The scene moved on'}
+    })
+    await assert.rejects(refused, /revision_conflict: The scene moved on/u)
+
+    // A late duplicate result must not settle anything a second time, and an unknown id is
+    // ignored rather than thrown: the channel outlives individual calls.
+    host.deliver({type: 'tool-result', id: sent[1].id, ok: true, result: {}})
+    host.deliver({type: 'tool-result', id: 'call-unknown', ok: true, result: {}})
+    host.deliver({type: 'ignored'})
+
+    const controller = new AbortController()
+    const cancelled = host.call('godot_scene', {op: 'get_tree'}, controller.signal)
+    controller.abort()
+    await assert.rejects(cancelled, /cancelled/u)
+    assert.equal(host.pendingCount, 0)
+
+    const failing = createToolHost(() => {
+        throw new Error('the channel is closed')
+    })
+    await assert.rejects(failing.call('godot_scene', {op: 'get_tree'}), /channel is closed/u)
+    assert.equal(failing.pendingCount, 0)
+
+    const pending = host.call('godot_scene', {op: 'get_tree'})
+    host.close('the backend closed the tool channel')
+    await assert.rejects(pending, /backend closed/u)
+    await assert.rejects(host.call('godot_scene', {op: 'get_tree'}), /backend closed/u)
+    await assert.rejects(
+        host.call('godot_scene', {op: 'get_tree'}, AbortSignal.abort()),
+        /backend closed/u
+    )
+})
+
+test('domain tools carry the router catalog and forward every call', async () => {
+    const calls = []
+    const host = {
+        call: (tool, params) => {
+            calls.push({tool, params})
+            return Promise.resolve({nodes: []})
+        }
+    }
+    const tools = createGodotTools(catalog, host)
+
+    assert.deepEqual(
+        tools.map(tool => tool.name),
+        ['godot_scene', 'godot_runtime']
+    )
+    assert.deepEqual(tools[0].parameters.properties.op.enum, ['get_tree', 'save'])
+    assert.match(tools[0].description, /get_tree: Returns the edited scene hierarchy\./u)
+    const result = await tools[0].execute('call-1', {op: 'get_tree'})
+    assert.deepEqual(calls, [{tool: 'godot_scene', params: {op: 'get_tree', params: {}}}])
+    assert.deepEqual(result.details, {nodes: []})
+    assert.equal(createGodotTools(undefined, host).length, 0)
+})
+
+test('captured frames become image content and large results are bounded', () => {
+    const captured = toolResult({
+        running: true,
+        frame: {encoding: 'png-base64', width: 320, height: 240, data: 'iVBORw0KGgo='}
+    })
+
+    assert.deepEqual(captured.content[1], {
+        type: 'image',
+        data: 'iVBORw0KGgo=',
+        mimeType: 'image/png'
+    })
+    assert.equal(JSON.parse(captured.content[0].text).frame.data, undefined)
+    assert.equal(JSON.parse(captured.content[0].text).frame.width, 320)
+    assert.equal(captured.details.frame.data, 'iVBORw0KGgo=')
+
+    const huge = toolResult({nodes: 'x'.repeat(40_000)})
+    assert.equal(huge.content.length, 1)
+    assert.match(huge.content[0].text, /… \[truncated, \d+ characters\]$/u)
+    assert.equal(huge.details.nodes.length, 40_000)
+})
+
+/** A model that answers with one tool call, then with text once the tool result comes back. */
+function startToolCallingServer(tool, args) {
+    let turn = 0
+    const server = createServer((request, response) => {
+        request.on('data', () => undefined)
+        request.on('end', () => {
+            turn += 1
+            const delta =
+                turn === 1 ?
+                    {
+                        role: 'assistant',
+                        tool_calls: [
+                            {
+                                index: 0,
+                                id: 'call-tool',
+                                type: 'function',
+                                function: {name: tool, arguments: JSON.stringify(args)}
+                            }
+                        ]
+                    }
+                :   {role: 'assistant', content: 'Scene inspected'}
+            response.writeHead(200, {'content-type': 'text/event-stream'})
+            response.write(
+                `data: ${JSON.stringify({
+                    id: 'chatcmpl-tool',
+                    object: 'chat.completion.chunk',
+                    created: 1,
+                    model: settings.model,
+                    choices: [{index: 0, delta, finish_reason: null}]
+                })}\n\n`
+            )
+            response.write(
+                `data: ${JSON.stringify({
+                    id: 'chatcmpl-tool',
+                    object: 'chat.completion.chunk',
+                    created: 1,
+                    model: settings.model,
+                    choices: [
+                        {index: 0, delta: {}, finish_reason: turn === 1 ? 'tool_calls' : 'stop'}
+                    ],
+                    usage: {prompt_tokens: 8, completion_tokens: 2, total_tokens: 10}
+                })}\n\n`
+            )
+            response.end('data: [DONE]\n\n')
+        })
+    })
+    return server
+}
+
+test('the worker asks the backend for domain tools over the duplex channel', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const server = startToolCallingServer('godot_scene', {op: 'get_tree', params: {}})
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    context.after(() => server.close())
+    const port = server.address().port
+
+    const worker = spawn(process.execPath, ['scripts/ai-worker.mjs'], {cwd: process.cwd()})
+    context.after(() => worker.kill())
+    const requests = []
+    const events = []
+    const finished = new Promise(resolve => worker.on('exit', resolve))
+    createInterface({input: worker.stdout}).on('line', line => {
+        if (line.startsWith(TOOL_PREFIX)) {
+            const call = JSON.parse(line.slice(TOOL_PREFIX.length))
+            requests.push(call)
+            // The backend's half of the channel: dispatch, then answer on the same stream.
+            worker.stdin.write(
+                `${JSON.stringify({
+                    type: 'tool-result',
+                    id: call.id,
+                    ok: true,
+                    result: {root: 'Main', revision: 4}
+                })}\n`
+            )
+            return
+        }
+        if (line.startsWith('GOFER_AI_EVENT:'))
+            events.push(JSON.parse(line.slice('GOFER_AI_EVENT:'.length)))
+    })
+
+    worker.stdin.write(
+        `${JSON.stringify({
+            settings: {...settings, baseUrl: `http://127.0.0.1:${String(port)}/v1`},
+            messages: [{sender: 'user', text: 'Inspect the scene', timestamp: 1}],
+            workspacePath: workspace.path,
+            tools: catalog
+        })}\n`
+    )
+
+    const code = await finished
+    assert.equal(code, 0)
+    assert.deepEqual(
+        requests.map(request => ({tool: request.tool, params: request.params})),
+        [{tool: 'godot_scene', params: {op: 'get_tree', params: {}}}]
+    )
+    const end = events.find(event => event.type === 'tool-end')
+    assert.equal(events.find(event => event.type === 'tool-start').name, 'godot_scene')
+    assert.equal(events.find(event => event.type === 'tool-start').target, 'get_tree')
+    assert.equal(end.isError, false)
+    assert.equal(JSON.parse(end.output).root, 'Main')
+    assert.equal(events.find(event => event.type === 'done').text, 'Scene inspected')
+})
+
+test('a refused tool call reaches the model as an error result', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const server = startToolCallingServer('godot_scene', {op: 'save', params: {}})
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    context.after(() => server.close())
+    const port = server.address().port
+    const events = []
+    const host = createToolHost(call =>
+        host.deliver({
+            type: 'tool-result',
+            id: call.id,
+            ok: false,
+            error: {code: 'revision_conflict', message: 'The scene moved on'}
+        })
+    )
+
+    await runAgent({
+        settings: {...settings, baseUrl: `http://127.0.0.1:${String(port)}/v1`},
+        messages: [{sender: 'user', text: 'Save the scene', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: event => events.push(event)
+    })
+
+    const end = events.find(event => event.type === 'tool-end')
+    assert.equal(end.isError, true)
+    assert.match(end.output, /revision_conflict/u)
+})
+
+test('the Godot guidance is added to the prompt only when the domain tools are offered', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    // One server per turn: the shared mock accumulates request bodies, and this test compares two.
+    const systemPrompt = async extra => {
+        const mock = startServer()
+        await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+        try {
+            await runAgent({
+                settings: {
+                    ...settings,
+                    baseUrl: `http://127.0.0.1:${String(mock.server.address().port)}/v1`
+                },
+                messages: [{sender: 'user', text: 'Hello', timestamp: 1}],
+                workspacePath: workspace.path,
+                emit: () => undefined,
+                ...extra
+            })
+            return mock.request().body.messages[0].content
+        } finally {
+            mock.server.close()
+        }
+    }
+
+    assert.doesNotMatch(await systemPrompt({}), /godot_session status/u)
+    const guided = await systemPrompt({tools: catalog, host: {call: () => Promise.resolve({})}})
+    assert.match(guided, /godot_session status/u)
+    assert.match(guided, /expectedRevision/u)
 })

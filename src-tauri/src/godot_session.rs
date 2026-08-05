@@ -13,8 +13,10 @@ use crate::godot_rpc;
 use crate::process::{ChildProcess, ProcessSpawner};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,9 +28,18 @@ pub const REQUIRED_CHANNEL: &str = "stable";
 const PORT_RETRIES: usize = 3;
 const EDITOR_SETTINGS_FILE_NAME: &str = "editor_settings-4.tres";
 const LSP_REMOTE_HOST_KEY: &str = "language_server/remote_host";
+/// How many log lines the session keeps. A long import prints thousands, so the buffer is bounded
+/// and reports how many lines it dropped rather than growing without limit.
+const MAX_LOG_ENTRIES: usize = 4_000;
+/// One log line is truncated past this many characters: a single engine error can carry a whole
+/// stack trace, and the 1 MiB envelope is shared with every other line in the page.
+const MAX_LOG_LINE_CHARS: usize = 4_000;
+const DEFAULT_LOG_PAGE: usize = 200;
+const MAX_LOG_PAGE: usize = 1_000;
 
 static ACTIVE_SESSION: Mutex<Option<GodotSession>> = Mutex::new(None);
 static SESSION_STARTING: AtomicBool = AtomicBool::new(false);
+static LOGS: Mutex<LogBuffer> = Mutex::new(LogBuffer::new());
 
 /// The lifecycle states of a Godot editor session.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -94,6 +105,146 @@ pub struct SessionInfo {
     pub dap_port: u16,
     pub godot_version: String,
     pub worktree: String,
+}
+
+/// How serious one captured log line is. Godot marks its own lines, so the classification is the
+/// engine's, not a guess: anything it did not mark stays informational.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogSeverity {
+    #[default]
+    Info,
+    Warning,
+    Error,
+}
+
+/// One captured line of session output.
+///
+/// `source` names the stream, not the producer: the editor spawns the game, the importer, and the
+/// language/debug servers as part of its own process tree, so their output arrives on the editor's
+/// two pipes. Splitting them further would mean parsing engine prose, which changes between builds.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogEntry {
+    pub sequence: u64,
+    pub source: LogSource,
+    pub severity: LogSeverity,
+    pub message: String,
+    pub timestamp: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LogSource {
+    /// The editor's standard output, which also carries whatever the game it launched printed.
+    Editor,
+    /// The editor's standard error, where the engine reports its own failures.
+    EditorError,
+}
+
+/// What a caller asks for when it reads session logs.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogQuery {
+    /// The cursor from the previous page. Absent starts at the oldest line still buffered.
+    #[serde(default)]
+    pub after: Option<u64>,
+    /// Drops anything below this severity.
+    #[serde(default)]
+    pub min_severity: Option<LogSeverity>,
+    #[serde(default)]
+    pub source: Option<LogSource>,
+    /// Case-insensitive substring filter.
+    #[serde(default)]
+    pub contains: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// One page of session logs plus the cursor that continues it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogPage {
+    pub entries: Vec<LogEntry>,
+    /// Pass back as `after` to continue. Unchanged when the page is empty, so a poller cannot skip
+    /// a line that arrives between two reads.
+    pub cursor: u64,
+    /// How many lines the ring buffer discarded since the session started. A cursor older than the
+    /// oldest buffered line silently resumes at that line, and this is how the caller notices.
+    pub dropped: u64,
+}
+
+struct LogBuffer {
+    entries: VecDeque<LogEntry>,
+    next_sequence: u64,
+    dropped: u64,
+}
+
+impl LogBuffer {
+    const fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            next_sequence: 1,
+            dropped: 0,
+        }
+    }
+
+    fn push(&mut self, source: LogSource, line: &str) {
+        let message = truncate_chars(line.trim_end_matches(['\r', '\n']), MAX_LOG_LINE_CHARS);
+        let entry = LogEntry {
+            sequence: self.next_sequence,
+            source,
+            severity: classify_log_line(&message),
+            message,
+            timestamp: now_millis(),
+        };
+        self.next_sequence += 1;
+        self.entries.push_back(entry);
+        while self.entries.len() > MAX_LOG_ENTRIES {
+            self.entries.pop_front();
+            self.dropped += 1;
+        }
+    }
+
+    fn read(&self, query: &LogQuery) -> LogPage {
+        let limit = query.limit.unwrap_or(DEFAULT_LOG_PAGE).min(MAX_LOG_PAGE);
+        let needle = query
+            .contains
+            .as_ref()
+            .map(|contains| contains.to_lowercase());
+        let mut cursor = query.after.unwrap_or(0);
+        let mut entries = Vec::new();
+        for entry in &self.entries {
+            if entry.sequence <= query.after.unwrap_or(0) {
+                continue;
+            }
+            cursor = cursor.max(entry.sequence);
+            if query
+                .min_severity
+                .is_some_and(|minimum| entry.severity < minimum)
+            {
+                continue;
+            }
+            if query.source.is_some_and(|source| entry.source != source) {
+                continue;
+            }
+            if needle
+                .as_ref()
+                .is_some_and(|needle| !entry.message.to_lowercase().contains(needle))
+            {
+                continue;
+            }
+            entries.push(entry.clone());
+            if entries.len() >= limit {
+                break;
+            }
+        }
+        LogPage {
+            entries,
+            cursor,
+            dropped: self.dropped,
+        }
+    }
 }
 
 pub struct GodotSession {
@@ -227,12 +378,19 @@ fn start_with(
             .retryable()
         })?;
 
-    let _stdout = child
+    // Both streams are pipes: an unread pipe fills and stalls the editor, so each one is drained
+    // by a reader thread into the session log buffer. That buffer is the only place editor,
+    // importer, plugin, and game output exists — the game the editor launches inherits these very
+    // pipes — so the logs domain reads it instead of re-deriving output from somewhere else.
+    let stdout = child
         .take_stdout()
         .ok_or_else(|| SessionError::new("godot_stdout_missing", "Could not read Godot output"))?;
-    let _stderr = child
+    let stderr = child
         .take_stderr()
         .ok_or_else(|| SessionError::new("godot_stderr_missing", "Could not read Godot errors"))?;
+    clear_logs();
+    spawn_log_reader(stdout, LogSource::Editor);
+    spawn_log_reader(stderr, LogSource::EditorError);
 
     let child = Arc::new(Mutex::new(child));
     let project_path = worktree.display().to_string();
@@ -283,12 +441,105 @@ pub fn set_state(state: SessionState) {
     }
 }
 
+/// The RPC session an acceptance test started itself, mirroring `script::bind_test_session` and
+/// `debug::bind_test_session`: the supervisor launches a windowed editor, which a headless gate
+/// cannot run, so the acceptance suite launches the pinned editor and binds its transport here.
+/// Absent from every non-test build.
+#[cfg(all(test, feature = "godot-acceptance"))]
+static TEST_RPC: Mutex<Option<godot_rpc::RpcSession>> = Mutex::new(None);
+
+#[cfg(all(test, feature = "godot-acceptance"))]
+pub fn bind_test_rpc(rpc: Option<godot_rpc::RpcSession>) {
+    if let Ok(mut slot) = TEST_RPC.lock() {
+        *slot = rpc;
+    }
+}
+
 /// Returns a clone of the active RPC session, if any.
 pub fn rpc_session() -> Option<godot_rpc::RpcSession> {
+    #[cfg(all(test, feature = "godot-acceptance"))]
+    if let Some(rpc) = TEST_RPC.lock().ok().and_then(|slot| slot.clone()) {
+        return Some(rpc);
+    }
     ACTIVE_SESSION
         .lock()
         .ok()
         .and_then(|session| session.as_ref().map(|session| session.rpc.clone()))
+}
+
+/// Reads one page of captured session output.
+///
+/// The buffer outlives the process that filled it: a crashed editor leaves the lines that explain
+/// the crash, which is exactly when they are worth reading.
+pub fn read_logs(query: &LogQuery) -> Result<LogPage, SessionError> {
+    LOGS.lock()
+        .map(|logs| logs.read(query))
+        .map_err(|_| SessionError::new("lock_poisoned", "The session log lock is poisoned"))
+}
+
+/// Appends one line to the session log buffer. The reader threads own this; the acceptance suite
+/// launches its own editor and feeds the same buffer, and unit tests seed it without a process.
+pub(crate) fn append_log(source: LogSource, line: &str) {
+    if let Ok(mut logs) = LOGS.lock() {
+        logs.push(source, line);
+    }
+}
+
+/// Empties the buffer for a new session, so a page never mixes two editors' output.
+pub(crate) fn clear_logs() {
+    if let Ok(mut logs) = LOGS.lock() {
+        *logs = LogBuffer::new();
+    }
+}
+
+fn spawn_log_reader(stream: crate::process::ProcessReader, source: LogSource) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        // A non-UTF-8 byte in engine output must not stop the drain: the pipe would fill and stall
+        // the editor. `read_line` fails the whole read, so the buffer is cleared and reading
+        // continues with the next line.
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => append_log(source, &line),
+                Err(_) => continue,
+            }
+        }
+    });
+}
+
+/// Classifies a captured line the way the engine marked it. Godot prefixes its own diagnostics
+/// with `ERROR:`, `SCRIPT ERROR:`, `USER ERROR:`, `WARNING:`, or `USER WARNING:`; a `print()` from
+/// the game carries no marker and stays informational.
+fn classify_log_line(line: &str) -> LogSeverity {
+    let text = line.trim_start();
+    if text.starts_with("ERROR:")
+        || text.starts_with("SCRIPT ERROR:")
+        || text.starts_with("USER ERROR:")
+        || text.starts_with("USER SCRIPT ERROR:")
+    {
+        return LogSeverity::Error;
+    }
+    if text.starts_with("WARNING:") || text.starts_with("USER WARNING:") {
+        return LogSeverity::Warning;
+    }
+    LogSeverity::Info
+}
+
+fn truncate_chars(text: &str, maximum: usize) -> String {
+    if text.chars().count() <= maximum {
+        return text.to_owned();
+    }
+    text.chars().take(maximum).collect()
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 /// Stops the active session by killing the Godot child process.
@@ -817,5 +1068,95 @@ mod tests {
         assert_eq!(stop().expect_err("no session").code, "session_not_active");
 
         unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
+    }
+
+    #[test]
+    fn captured_output_is_classified_paged_and_bounded() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        clear_logs();
+        append_log(LogSource::Editor, "Godot Engine v4.7.1.stable\n");
+        append_log(LogSource::Editor, "presses: 1 (key)\n");
+        append_log(
+            LogSource::EditorError,
+            "ERROR: Condition \"p_index\" is true.\n",
+        );
+        append_log(LogSource::EditorError, "WARNING: The scene has no root.\n");
+        append_log(
+            LogSource::Editor,
+            "SCRIPT ERROR: Invalid call on null instance\n",
+        );
+
+        let all = read_logs(&LogQuery::default()).expect("read logs");
+        assert_eq!(all.entries.len(), 5);
+        assert_eq!(all.dropped, 0);
+        // The newline is not part of the message, and the engine's own markers set the severity.
+        assert_eq!(all.entries[0].message, "Godot Engine v4.7.1.stable");
+        assert_eq!(all.entries[0].severity, LogSeverity::Info);
+        assert_eq!(all.entries[2].severity, LogSeverity::Error);
+        assert_eq!(all.entries[3].severity, LogSeverity::Warning);
+        assert_eq!(all.entries[4].severity, LogSeverity::Error);
+        assert_eq!(all.cursor, 5);
+
+        let errors = read_logs(&LogQuery {
+            min_severity: Some(LogSeverity::Warning),
+            ..LogQuery::default()
+        })
+        .expect("filtered logs");
+        assert_eq!(errors.entries.len(), 3);
+
+        let game = read_logs(&LogQuery {
+            source: Some(LogSource::Editor),
+            contains: Some("PRESSES".to_owned()),
+            ..LogQuery::default()
+        })
+        .expect("game logs");
+        assert_eq!(game.entries.len(), 1);
+        assert_eq!(game.entries[0].message, "presses: 1 (key)");
+
+        // A cursor resumes exactly after the line it names, and an empty page keeps it put.
+        let page = read_logs(&LogQuery {
+            after: Some(2),
+            limit: Some(1),
+            ..LogQuery::default()
+        })
+        .expect("second page");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].sequence, 3);
+        assert_eq!(page.cursor, 3);
+        let tail = read_logs(&LogQuery {
+            after: Some(5),
+            ..LogQuery::default()
+        })
+        .expect("tail page");
+        assert!(tail.entries.is_empty());
+        assert_eq!(tail.cursor, 5);
+        clear_logs();
+    }
+
+    #[test]
+    fn the_log_buffer_drops_the_oldest_lines_and_says_so() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        clear_logs();
+        for index in 0..(MAX_LOG_ENTRIES + 10) {
+            append_log(LogSource::Editor, &format!("line {index}"));
+        }
+
+        let page = read_logs(&LogQuery {
+            limit: Some(1),
+            ..LogQuery::default()
+        })
+        .expect("read logs");
+        assert_eq!(page.dropped, 10);
+        assert_eq!(page.entries[0].message, "line 10");
+
+        // One oversized line cannot blow the page budget on its own.
+        append_log(LogSource::Editor, &"x".repeat(MAX_LOG_LINE_CHARS * 2));
+        let last = read_logs(&LogQuery {
+            after: Some(u64::try_from(MAX_LOG_ENTRIES).expect("buffer size fits") + 10),
+            ..LogQuery::default()
+        })
+        .expect("read tail");
+        assert_eq!(last.entries[0].message.chars().count(), MAX_LOG_LINE_CHARS);
+        clear_logs();
     }
 }

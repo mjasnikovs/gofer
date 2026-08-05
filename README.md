@@ -44,12 +44,25 @@ metadata is stored in Gofer's settings file, while its optional API key is store
 operating system credential store. Gofer does not read or depend on Pi's agent configuration.
 
 Chat completions run through a Gofer-owned Node worker backed by
-[`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai). Rust sends
-the connection settings, conversation, and credential to the worker over standard input, then
-forwards Pi's streaming response events to the interface. The local provider uses the configured
-base URL and model with the `openai-completions` dialect, disables developer-role and
-reasoning-effort fields for llama.cpp compatibility, and uses `local` as the harmless placeholder
-API key when no credential is stored.
+[`@earendil-works/pi-ai`](https://github.com/earendil-works/pi/tree/main/packages/ai). The channel
+between them is duplex NDJSON: Rust sends the connection settings, conversation, credential, and
+tool catalog as the first line, the worker asks for tools on standard output, and Rust answers on
+the same standard input it opened with — all while Pi's streaming response events are forwarded to
+the interface. The local provider uses the configured base URL and model with the
+`openai-completions` dialect, disables developer-role and reasoning-effort fields for llama.cpp
+compatibility, and uses `local` as the harmless placeholder API key when no credential is stored.
+
+## AI tool router
+
+The agent reaches Godot through ten compact domain tools — `godot_session`, `godot_scene`,
+`godot_node`, `godot_project`, `godot_resource`, `godot_script`, `godot_debug`, `godot_runtime`,
+`godot_logs`, and `godot_docs_search` — each taking an `op` plus that operation's parameters. The
+worker implements none of them: it forwards every call to `src-tauri/src/ai_tools.rs`, which routes
+it to the same handler the renderer's own command calls, so a scene the agent edits goes through the
+same undo stack, revision check, and worktree binding as one the user edits. The catalog in that
+module generates the tool descriptions the model sees and validates the operations it may call, so
+the two cannot drift apart. Captured frames come back as real images rather than base64 text, and
+every failure keeps its structured code — `revision_conflict` stays `revision_conflict`.
 
 ## Local project data
 

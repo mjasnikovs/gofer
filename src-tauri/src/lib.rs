@@ -11,6 +11,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 pub mod addon;
+mod ai_tools;
+mod debug;
 mod files;
 mod gdformat;
 mod git;
@@ -34,6 +36,9 @@ mod godot_script_acceptance;
 mod godot_dap_acceptance;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_runtime_acceptance;
+// Drives one AI turn through the router into that same editor: the step 14 done-criteria.
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_ai_acceptance;
 // The one-shot bridge now serves only the packaged WebDriver journey, so release builds omit it
 // entirely. `test` keeps its loopback and protocol-version coverage in the default suite.
 #[cfg(any(feature = "webdriver", test))]
@@ -56,6 +61,9 @@ use storage::{
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 const API_KEY_USERNAME: &str = "ai-default";
 const AI_EVENT_PREFIX: &str = "GOFER_AI_EVENT:";
+/// The worker's half of the duplex channel: agent events keep their prefix, tool requests get
+/// their own, and anything unprefixed on stdout stays diagnostic output rather than protocol.
+const AI_TOOL_PREFIX: &str = "GOFER_AI_TOOL:";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
 const SETTINGS_VERSION: u32 = 1;
@@ -234,6 +242,9 @@ struct AiWorkerRequest {
     agent_messages: Option<serde_json::Value>,
     workspace_path: String,
     memory_context: Option<String>,
+    /// The domain tools the worker registers. Generated from the router's own catalog, so the
+    /// tools the model is offered and the operations Rust will accept cannot drift apart.
+    tools: &'static [ai_tools::ToolDomain],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -577,6 +588,7 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
                 agent_messages: request.agent_messages,
                 workspace_path,
                 memory_context,
+                tools: ai_tools::CATALOG,
             },
         )?;
         let _ = remember_completed_turn(&storage, task_id.as_deref(), &prompt, &completion);
@@ -824,6 +836,39 @@ async fn respond_tool_approval(
         })?
 }
 
+/// One debugger operation against the active session's adapter. The debugger panel and the
+/// agent's `godot_debug` tool both land here, so a breakpoint the user set and one the agent set
+/// are the same breakpoint.
+#[tauri::command]
+async fn call_godot_debug(
+    request: debug::DebugRequest,
+) -> Result<debug::DebugResponse, godot_dap::DapError> {
+    tauri::async_runtime::spawn_blocking(move || debug::call(request))
+        .await
+        .map_err(|error| {
+            godot_dap::DapError::new(
+                "debug_task_failed",
+                format!("The debug request task failed: {error}"),
+            )
+        })?
+}
+
+/// Reads one page of captured session output: editor, importer, plugin, and the game the editor
+/// launched, since they share the editor's two pipes.
+#[tauri::command]
+async fn read_godot_logs(
+    query: godot_session::LogQuery,
+) -> Result<godot_session::LogPage, godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(move || godot_session::read_logs(&query))
+        .await
+        .map_err(|error| {
+            godot_session::SessionError::new(
+                "logs_task_failed",
+                format!("The session log task failed: {error}"),
+            )
+        })?
+}
+
 /// Typed workspace file access. Every caller — the renderer, the AI agent, and the Godot addon —
 /// reaches the worktree through these commands so that path validation, atomic replacement, and
 /// optimistic concurrency exist exactly once.
@@ -1032,7 +1077,7 @@ fn workspace_watch()
 }
 
 /// Binds file access to the active task's worktree, which `agent_workspace` resolves.
-fn active_workspace(app: &AppHandle) -> Result<files::Workspace, files::FileError> {
+fn active_workspace<R: Runtime>(app: &AppHandle<R>) -> Result<files::Workspace, files::FileError> {
     let storage = project_storage(app).map_err(files::FileError::unavailable)?;
     let root = storage
         .agent_workspace()
@@ -1193,7 +1238,7 @@ fn read_chat_attachment_bytes(
     project_storage(app)?.read_attachment(&attachment.as_stored())
 }
 
-fn project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
+fn project_storage<R: Runtime>(app: &AppHandle<R>) -> Result<ProjectStorage, String> {
     app.try_state::<ProjectStorage>()
         .map(|storage| storage.inner().clone())
         .ok_or_else(|| "Project storage has not been initialized".to_owned())
@@ -1634,15 +1679,17 @@ fn run_ai_worker_with<R: Runtime>(
                 "Could not start the Pi AI worker with '{node}': {error}. Install Node.js 22.19 or newer, or set GOFER_NODE_BINARY."
             )
         })?;
-    let mut stdin = child
+    let stdin = child
         .take_stdin()
         .ok_or_else(|| "Could not write to the Pi AI worker".to_owned())?;
+    // The channel is duplex for the whole turn: the startup context is the first line, and every
+    // later line answers a tool request. Closing stdin here — as the one-shot protocol did — would
+    // leave the worker with tools it can call but no way to receive their results.
+    let stdin = Arc::new(Mutex::new(stdin));
     let payload = serde_json::to_vec(&request)
         .map_err(|error| format!("Could not serialize the AI request: {error}"))?;
-    stdin
-        .write_all(&payload)
+    write_worker_line(&stdin, &payload)
         .map_err(|error| format!("Could not send the request to the Pi AI worker: {error}"))?;
-    drop(stdin);
 
     let stdout = child
         .take_stdout()
@@ -1661,9 +1708,14 @@ fn run_ai_worker_with<R: Runtime>(
     });
     let mut completed = false;
     let mut completion_text = String::new();
+    let mut tool_workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|error| format!("Could not read Pi AI output: {error}"))?;
+        if let Some(payload) = line.strip_prefix(AI_TOOL_PREFIX) {
+            tool_workers.push(spawn_tool_worker(app, &stdin, payload)?);
+            continue;
+        }
         let Some(payload) = line.strip_prefix(AI_EVENT_PREFIX) else {
             continue;
         };
@@ -1683,6 +1735,12 @@ fn run_ai_worker_with<R: Runtime>(
             AiStreamPayload { request_id, event },
         )
         .map_err(|error| format!("Could not stream the AI response: {error}"))?;
+    }
+
+    // The worker exited, so nothing is left to answer; joining keeps a tool that outlived it from
+    // writing into the next turn's channel.
+    for worker in tool_workers {
+        let _ = worker.join();
     }
 
     let status = child
@@ -1707,6 +1765,65 @@ fn run_ai_worker_with<R: Runtime>(
         return Err("Pi AI worker exited without completing the response".to_owned());
     }
     Ok(completion_text)
+}
+
+/// Runs one tool request off the stdout loop and answers it on the duplex channel.
+///
+/// Off the loop because the agent executes tool calls in parallel and the loop must stay free to
+/// read the next line: a dispatch that blocked it — a debugger wait, a documentation retrieval —
+/// would stall every event behind it, including the ones that prove the tool is working.
+fn spawn_tool_worker<R: Runtime>(
+    app: &AppHandle<R>,
+    stdin: &Arc<Mutex<process::ProcessWriter>>,
+    payload: &str,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WorkerToolCall {
+        id: String,
+        #[serde(flatten)]
+        request: ai_tools::ToolRequest,
+    }
+
+    let call: WorkerToolCall = serde_json::from_str(payload)
+        .map_err(|error| format!("Pi AI returned an invalid tool request: {error}"))?;
+    let app = app.clone();
+    let stdin = Arc::clone(stdin);
+    Ok(std::thread::spawn(move || {
+        let answer = match ai_tools::dispatch(&app, call.request) {
+            Ok(result) => serde_json::json!({
+                "type": "tool-result",
+                "id": call.id,
+                "ok": true,
+                "result": result,
+            }),
+            Err(failure) => serde_json::json!({
+                "type": "tool-result",
+                "id": call.id,
+                "ok": false,
+                "error": failure,
+            }),
+        };
+        if let Ok(line) = serde_json::to_vec(&answer) {
+            // A closed channel means the turn ended — cancelled, or the worker exited. There is
+            // nobody left to tell, and the tool result is not worth failing the turn over.
+            let _ = write_worker_line(&stdin, &line);
+        }
+    }))
+}
+
+/// Writes one NDJSON line to the worker. The lock spans the newline so two tool answers written
+/// from different threads cannot interleave into one unparsable line.
+fn write_worker_line(
+    stdin: &Arc<Mutex<process::ProcessWriter>>,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let mut writer = stdin
+        .lock()
+        .map_err(|_| std::io::Error::other("The AI worker input lock is poisoned"))?;
+    writer.write_all(payload)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
 fn retrieve_memory_context(
@@ -1860,6 +1977,7 @@ pub fn run() {
                 activate_chat_task,
                 apply_script_rename,
                 call_godot,
+                call_godot_debug,
                 call_script_language,
                 cancel_ai_request,
                 cancel_godot,
@@ -1885,6 +2003,7 @@ pub fn run() {
                 open_script_document,
                 query_godot_docs,
                 read_chat_attachment,
+                read_godot_logs,
                 read_workspace_file,
                 respond_tool_approval,
                 run_storage_maintenance,
@@ -1937,13 +2056,34 @@ mod tests {
     struct FakeProcessSpawner {
         child: Mutex<Option<FakeChildProcess>>,
         fail_spawn: bool,
+        /// Everything the backend wrote to the worker: the startup context, then one line per
+        /// answered tool call.
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    /// A stdin pipe the test can read back. `Cursor` would swallow the writes it exists to prove.
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| io::Error::other("fake stdin lock poisoned"))?
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     impl FakeProcessSpawner {
         fn new(stdout: &str, stderr: &str, success: bool) -> Self {
+            let written = Arc::new(Mutex::new(Vec::new()));
             Self {
                 child: Mutex::new(Some(FakeChildProcess {
-                    stdin: Some(Box::new(Cursor::new(Vec::new()))),
+                    stdin: Some(Box::new(SharedWriter(Arc::clone(&written)))),
                     stdout: Some(Box::new(Cursor::new(stdout.as_bytes().to_vec()))),
                     stderr: Some(Box::new(Cursor::new(stderr.as_bytes().to_vec()))),
                     status: ProcessStatus {
@@ -1959,7 +2099,18 @@ mod tests {
                     killed: Arc::new(AtomicBool::new(false)),
                 })),
                 fail_spawn: false,
+                written,
             }
+        }
+
+        /// The lines the backend sent the worker, decoded.
+        fn sent(&self) -> Vec<serde_json::Value> {
+            let written = self.written.lock().expect("fake stdin lock");
+            String::from_utf8_lossy(&written)
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_str(line).expect("worker input line is NDJSON"))
+                .collect()
         }
     }
 
@@ -2039,6 +2190,7 @@ mod tests {
             agent_messages: None,
             workspace_path: "/tmp/workspace".to_owned(),
             memory_context: None,
+            tools: ai_tools::CATALOG,
         }
     }
 
@@ -2147,6 +2299,7 @@ mod tests {
         let missing = FakeProcessSpawner {
             child: Mutex::new(None),
             fail_spawn: true,
+            written: Arc::new(Mutex::new(Vec::new())),
         };
         assert!(
             run_ai_worker_with(app.handle(), 10, worker_request(), &missing)
@@ -2162,6 +2315,58 @@ mod tests {
             ""
         );
         AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+        *AI_CHILD.lock().expect("AI child lock") = None;
+    }
+
+    #[test]
+    fn the_worker_channel_carries_the_tool_catalog_and_answers_tool_requests() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let app = mock_app();
+        // Two calls: one the router rejects outright, one that reaches a handler with no session.
+        // Both must come back as structured failures on the same channel the events ride.
+        let output = [
+            r#"GOFER_AI_TOOL:{"id":"call-1","tool":"godot_scene","params":{"op":"get_tree"}}"#,
+            r#"GOFER_AI_TOOL:{"id":"call-2","tool":"godot_scene","params":{"op":"detonate"}}"#,
+            r#"GOFER_AI_EVENT:{"type":"done","text":"Done","agentMessages":[],"usage":{},"model":"fake"}"#,
+            "",
+        ]
+        .join("\n");
+        let spawner = FakeProcessSpawner::new(&output, "", true);
+
+        assert_eq!(
+            run_ai_worker_with(app.handle(), 21, worker_request(), &spawner)
+                .expect("fake AI completion"),
+            "Done"
+        );
+
+        let sent = spawner.sent();
+        let catalog = sent[0]["tools"]
+            .as_array()
+            .expect("the startup context carries the tool catalog");
+        assert_eq!(catalog.len(), ai_tools::CATALOG.len());
+        assert_eq!(catalog[0]["name"], "godot_session");
+        // Answers may be written in either order: the two dispatches run on their own threads.
+        let mut answers: Vec<&serde_json::Value> = sent[1..].iter().collect();
+        answers.sort_by_key(|answer| answer["id"].as_str().unwrap_or_default().to_owned());
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0]["ok"], false);
+        assert_eq!(answers[0]["error"]["code"], "session_not_active");
+        assert_eq!(answers[1]["ok"], false);
+        assert_eq!(answers[1]["error"]["code"], "unknown_operation");
+        *AI_CHILD.lock().expect("AI child lock") = None;
+    }
+
+    #[test]
+    fn an_unparsable_tool_request_fails_the_turn() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let app = mock_app();
+        let spawner = FakeProcessSpawner::new("GOFER_AI_TOOL:not-json\n", "", true);
+
+        assert!(
+            run_ai_worker_with(app.handle(), 22, worker_request(), &spawner)
+                .unwrap_err()
+                .contains("invalid tool request")
+        );
         *AI_CHILD.lock().expect("AI child lock") = None;
     }
 
