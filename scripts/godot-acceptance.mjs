@@ -22,6 +22,33 @@ const FILTER = 'acceptance'
 const jobs =
     Number(process.env.GOFER_GODOT_JOBS) || Math.max(1, Math.min(6, Math.floor(cpus().length / 2)))
 
+// Three of these tests run the fixture as a real windowed game, because a screenshot needs a
+// rendered frame and a headless viewport has none. A Linux CI runner has no display at all, so
+// they can only report "Unable to create DisplayServer, all display drivers failed" there.
+//
+// The suite claims a virtual display for itself rather than the workflow wrapping the whole gate in
+// one: the display is not free to the suites that do not need it. Wrapping `npm run check` made
+// Playwright render into X instead of its own headless pipeline and moved 297 pixels of three
+// committed snapshots. One `xvfb-run` around this runner covers every worker it starts.
+if (
+    process.platform === 'linux'
+    && !process.env.DISPLAY
+    && !process.env.WAYLAND_DISPLAY
+    && !process.env.GOFER_GODOT_DISPLAY_WRAPPED
+) {
+    const wrapped = spawnSync('xvfb-run', ['-a', process.execPath, ...process.argv.slice(1)], {
+        stdio: 'inherit',
+        env: {...process.env, GOFER_GODOT_DISPLAY_WRAPPED: '1'}
+    })
+    if (wrapped.error) {
+        throw new Error(
+            'The Godot acceptance suite needs a display for the tests that run a windowed game. '
+                + 'Install xvfb, or run the suite where a display server is already available.'
+        )
+    }
+    process.exit(wrapped.status ?? 1)
+}
+
 function cargo(args, options = {}) {
     return spawnSync('cargo', args, {encoding: 'utf8', ...options})
 }

@@ -58,12 +58,10 @@ jobs:
             - name: Build the pinned gdformat sidecar
               run: npm run build:gdformat
             # Three acceptance tests run the fixture as a real windowed game, because a screenshot
-            # needs a rendered frame. Linux runners have no display; Windows and macOS do.
+            # needs a rendered frame. Linux runners have no display, so the suite claims one through
+            # `xvfb-run` itself; Windows and macOS runners have one already.
             - name: Run real Godot protocol and acceptance tests
-              if: inputs.godot-suite && runner.os == 'Linux'
-              run: xvfb-run -a npm run test:godot
-            - name: Run real Godot protocol and acceptance tests
-              if: inputs.godot-suite && runner.os != 'Linux'
+              if: inputs.godot-suite
               run: npm run test:godot
             - name: Build the release-mode WebDriver application
               run: npm run build:desktop:test
