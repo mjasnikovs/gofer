@@ -2,11 +2,19 @@ import {expect, test} from '@playwright/test'
 import type {Page} from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 
-type VisualState = 'first-run' | 'empty' | 'streaming' | 'settings' | 'error'
+type VisualState = 'first-run' | 'empty' | 'streaming' | 'settings' | 'error' | 'scripts'
 
 async function installDesktop(page: Page, state: VisualState) {
     await page.addInitScript(currentState => {
         const listeners = new Map<string, Set<(event: unknown) => void>>()
+        // Channels register their receiver through Tauri's IPC internals, which the browser
+        // fixture has to stand in for.
+        let nextCallbackId = 1
+        window.__TAURI_INTERNALS__ = {
+            transformCallback: () => nextCallbackId++,
+            unregisterCallback: () => undefined
+        }
+        const script = 'extends Node\n\n\nfunc _ready() -> void:\n\tprint("ready")\n'
         const settings = {
             version: 1,
             ai: {
@@ -46,6 +54,19 @@ async function installDesktop(page: Page, state: VisualState) {
                     return undefined
                 }
                 if (command === 'list_project_tasks') return []
+                if (command === 'list_workspace_files')
+                    return [
+                        {path: 'scripts/player.gd', bytes: script.length},
+                        {path: 'main.tscn', bytes: 220}
+                    ]
+                if (command === 'open_script_document')
+                    return {
+                        path: 'scripts/player.gd',
+                        text: script,
+                        hash: 'fixture-hash',
+                        bytes: script.length,
+                        version: 1
+                    }
                 if (command === 'load_chat') return {messages: [], agentMessages: []}
                 if (command === 'load_settings') return {settings, hasApiKey: true}
                 if (command === 'get_rag_cache_status')
@@ -158,6 +179,18 @@ test('streaming conversation with tool activity', async ({page}) => {
     await expect(page.getByText('Finished the requested change.')).toBeVisible()
     await expect(page.getByText('bash')).toBeVisible()
     await stableScreenshot(page, 'streaming-tool-activity.png')
+})
+
+test('script editor', async ({page}) => {
+    await installDesktop(page, 'scripts')
+    await page.goto('/')
+    await expect(page.getByText('Local AI connected')).toBeVisible()
+    await page.getByRole('button', {name: 'Scripts'}).click()
+    await page.getByText('scripts/player.gd').click()
+    // Monaco renders its own DOM, so waiting for a line it tokenized proves the editor is live.
+    await expect(page.locator('.monaco-editor').first()).toBeVisible()
+    await expect(page.getByText('func _ready() -> void:')).toBeVisible()
+    await stableScreenshot(page, 'script-editor.png')
 })
 
 test('settings dialog', async ({page}) => {

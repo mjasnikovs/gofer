@@ -25,8 +25,8 @@ use lsp_types::{
     PublishDiagnosticsParams, Range, ServerCapabilities, SignatureHelp, SymbolKind, TextEdit, Url,
     WorkspaceEdit,
 };
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -61,7 +61,7 @@ pub struct LspError {
 }
 
 impl LspError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -70,12 +70,12 @@ impl LspError {
         }
     }
 
-    fn retryable(mut self) -> Self {
+    pub fn retryable(mut self) -> Self {
         self.retryable = true;
         self
     }
 
-    fn with_details(mut self, details: Value) -> Self {
+    pub fn with_details(mut self, details: Value) -> Self {
         self.details = details;
         self
     }
@@ -91,7 +91,7 @@ impl LspError {
 
 /// One file a [`WorkspaceEdit`] would change, with everything needed to apply it optimistically
 /// and to roll it back. Produced by [`plan_workspace_edit`], applied by [`commit_planned_edit`].
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlannedFile {
     pub path: String,
@@ -232,6 +232,15 @@ impl LspClient {
     /// The capabilities the server reported during initialize.
     pub fn server_capabilities(&self) -> &ServerCapabilities {
         &self.capabilities
+    }
+
+    /// Whether the transport has been closed — by `shutdown`, by a dead editor, or by a framing
+    /// failure. The renderer's script bridge reconnects instead of reusing a dead client.
+    pub fn is_closed(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|shared| shared.closed)
+            .unwrap_or(true)
     }
 
     /// Whether this client currently holds the document open.
@@ -783,7 +792,7 @@ fn position_out_of_range(text: &str, position: Position) -> LspError {
     .with_details(json!({"position": position, "bytes": text.len()}))
 }
 
-fn relative_path(workspace: &Workspace, uri: &Url) -> Result<String, LspError> {
+pub fn relative_path(workspace: &Workspace, uri: &Url) -> Result<String, LspError> {
     let path = uri.to_file_path().map_err(|_| {
         LspError::new("invalid_uri", format!("{uri} is not a file URI"))
             .with_details(json!({"uri": uri.as_str()}))

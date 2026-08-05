@@ -381,6 +381,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _node_set_property(params)
         "node.inspect":
             return _node_inspect(params)
+        "resource.rescan":
+            return _resource_rescan(params)
         "session.heartbeat":
             return {}
     return _unknown_command_error(command)
@@ -1152,6 +1154,21 @@ func _editor_set_setting(params: Dictionary) -> Dictionary:
         return _config_error("unsupported_value", decoded["message"], {"name": name})
     settings.set_setting(name, decoded["value"])
     return {"name": name, "machineWide": true}
+
+## Tells the editor filesystem that a file changed underneath it. Gofer writes project files
+## through Rust, so the editor learns about a saved resource here. Scripts are excluded by the
+## caller: Godot's own `didSave` handler already reloads a script and refreshes its exports.
+func _resource_rescan(params: Dictionary) -> Dictionary:
+    var path: String = params.get("path", "")
+    var filesystem := EditorInterface.get_resource_filesystem()
+    if path.is_empty():
+        filesystem.scan()
+        return {"scanned": true, "path": ""}
+    if not path.begins_with("res://"):
+        path = "res://" + path.trim_prefix("./")
+    # One file, not a project walk: a save must not cost a full rescan of every asset.
+    filesystem.update_file(path)
+    return {"scanned": true, "path": path}
 
 func _scene_list() -> Dictionary:
     return {"scenes": Array(EditorInterface.get_open_scenes())}

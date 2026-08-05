@@ -263,7 +263,7 @@ UI.
       source. The diff/apply UI arrives with Monaco in step 10.
     - Done when valid 4.7 fixture syntax is idempotent and invalid syntax produces no mutation.
 
-10. Integrate Monaco
+10. Integrate Monaco — DONE
     - Add Monaco tabs, dirty buffers, file hashes, save/reload/diff flows, GDScript language
       registration, LSP providers, diagnostics markers, references, rename preview, and breakpoint
       gutter.
@@ -273,7 +273,44 @@ UI.
       exports, so the addon is asked to rescan only for non-script resources.
     - Widen the production CSP for Monaco’s workers before the editor loads; the current policy sets
       no `worker-src` and inherits `default-src 'self'`.
-    - Done when UI and AI edits converge without duplicate or stale LSP document versions.
+    - `src-tauri/src/script.rs` is the renderer-facing half of step 8's client: it connects lazily
+      to the active session's `--lsp-port`, keys the cached connection by port and worktree so a
+      restarted editor reconnects, and exposes `open_script_document`, `update_script_document`,
+      `save_script_document`, `close_script_document`, `call_script_language` (a serde-tagged union
+      per operation), `apply_script_rename`, and `subscribe_script_diagnostics` /
+      `unsubscribe_script_diagnostics`. Rust owns the document version — assigned on open, on every
+      debounced change, and on save — which is what keeps a UI edit and an AI edit of one file from
+      leaving two versions behind. Definitions, declarations, and references all collapse to
+      workspace-relative locations, and anything outside the worktree is dropped rather than handed
+      to the renderer as a `file://` URI. `list_workspace_files` feeds the picker from the same scan
+      the watcher uses.
+    - Rename is planned, never applied by Monaco: `call_script_language` returns the planned files
+      from `plan_workspace_edit`, the renderer previews them, and `apply_script_rename` commits the
+      one validated transaction and re-synchronizes every document the server still holds open.
+      Monaco's own rename provider is deliberately not registered, because its widget would apply
+      model edits behind that transaction.
+    - `resource.rescan` is the addon's new command: a save of anything that is not a `.gd` file
+      tells `EditorFileSystem` about that one file. Scripts are excluded because Godot's own
+      `didSave` handler already reloads them.
+    - The renderer side is `src/services/monaco-runtime.ts` (Monaco loaded on demand so it stays out
+      of the entry chunk, with only the base editor worker registered),
+      `src/services/monaco-gdscript.ts` (language id, configuration, Monarch grammar; everything
+      that is not GDScript is plain text, so no other language worker is ever needed),
+      `src/services/monaco-lsp.ts` (every LSP↔Monaco conversion in one place — the two protocols
+      disagree on line bases, severities, completion kinds, and symbol kinds — plus the providers),
+      `src/hooks/useScriptBuffers.ts` (tabs, dirty state, hashes, conflicts, breakpoints, format and
+      rename previews), and `src/components/workspace/ScriptWorkspace.tsx` with `ScriptEditor` and
+      `MonacoDiff`. A file that changed underneath a dirty buffer raises `externalChange`, a write
+      that lost the hash check raises `staleSave`, and both offer reload or overwrite; a clean
+      buffer is simply re-read.
+    - Done when UI and AI edits converge without duplicate or stale LSP document versions — proven
+      by `godot_script_acceptance::the_editor_serves_monaco_through_the_script_commands`, which
+      launches the pinned editor headless with `--lsp-port` and drives the commands themselves:
+      open, one version per change, a save that writes through the workspace transaction, a stale
+      save refused with `file_conflict`, a re-open that re-synchronizes one document instead of
+      stacking a second, and a cross-file rename that writes nothing until the plan is applied. The
+      supervisor's own launch is windowed, so the test binds the editor it launched through
+      `script::bind_test_session`, which exists only under the acceptance feature.
 
 11. Connect Godot’s native DAP — DONE
     - Use DAP framing and the exact Godot 4.7 sequence: initialize, launch/attach, setBreakpoints,

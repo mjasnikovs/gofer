@@ -27,20 +27,20 @@ use tempfile::TempDir;
 /// The engine the repository pins. Kept in step with `scripts/godot-binary.mjs`, which reads the
 /// same manifest and reports the version with dots where the release tag has a dash.
 const ARTIFACTS: &str = include_str!("../../protocol/godot-artifacts.json");
-const READY_TIMEOUT: Duration = Duration::from_secs(90);
+pub const READY_TIMEOUT: Duration = Duration::from_secs(90);
 const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(30);
 
-const MATH_UTILS: &str = "class_name MathUtils\nextends RefCounted\n\n\nstatic func add_score(base: int, bonus: int) -> int:\n\treturn base + bonus\n";
-const SCORE_KEEPER: &str = "extends Node\n\nvar total := 0\n\n\nfunc award(bonus: int) -> void:\n\ttotal = MathUtils.add_score(total, bonus)\n";
+pub const MATH_UTILS: &str = "class_name MathUtils\nextends RefCounted\n\n\nstatic func add_score(base: int, bonus: int) -> int:\n\treturn base + bonus\n";
+pub const SCORE_KEEPER: &str = "extends Node\n\nvar total := 0\n\n\nfunc award(bonus: int) -> void:\n\ttotal = MathUtils.add_score(total, bonus)\n";
 const BROKEN: &str = "extends Node\n\nfunc explode( -> void:\n\tpass\n";
 
-struct Editor {
+pub struct Editor {
     child: Box<dyn ChildProcess>,
     output: Arc<Mutex<String>>,
 }
 
 impl Editor {
-    fn output(&self) -> String {
+    pub fn output(&self) -> String {
         self.output
             .lock()
             .map(|output| output.clone())
@@ -65,7 +65,7 @@ fn pinned_version_prefix() -> String {
 
 /// Resolves the pinned editor the same way the Node gate does: an absolute `GOFER_GODOT_BINARY`
 /// wins, otherwise the pinned version is accepted from `PATH`. The version is always verified.
-fn pinned_editor() -> String {
+pub fn pinned_editor() -> String {
     let expected = pinned_version_prefix();
     let reported = |binary: &str| {
         let arguments = [OsString::from("--version")];
@@ -118,7 +118,7 @@ fn copy_tree(source: &Path, target: &Path) {
 /// Copies the fixture project and adds the scripts this suite navigates. The checked-in fixture
 /// deliberately stays free of them: the parse error in `broken.gd` must never reach the Node
 /// journeys, which scan editor output for script errors.
-fn fixture_worktree(directory: &TempDir) -> PathBuf {
+pub fn fixture_worktree(directory: &TempDir) -> PathBuf {
     let worktree = directory.path().join("worktree");
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -133,7 +133,7 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
     worktree.canonicalize().expect("canonical worktree")
 }
 
-fn launch(worktree: &Path, lsp_port: u16) -> Editor {
+pub fn launch(worktree: &Path, lsp_port: u16) -> Editor {
     let arguments = [
         OsString::from("--editor"),
         OsString::from("--headless"),
@@ -190,7 +190,7 @@ fn connect(worktree: &Path, lsp_port: u16, editor: &Editor) -> LspClient {
 
 /// The position one character inside `needle`, which is where language servers like the cursor
 /// for navigation requests.
-fn position_of(text: &str, needle: &str) -> Position {
+pub fn position_of(text: &str, needle: &str) -> Position {
     let offset = text
         .find(needle)
         .unwrap_or_else(|| panic!("{needle} must exist in the fixture script"));

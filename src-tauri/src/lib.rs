@@ -26,6 +26,9 @@ mod godot_addon_acceptance;
 // Drives the native language server inside a real editor, under the same gate.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_lsp_acceptance;
+// Drives the script commands Monaco calls against that same editor.
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_script_acceptance;
 // Drives the native debug adapter inside a real editor running the fixture game, same gate.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_dap_acceptance;
@@ -40,6 +43,7 @@ mod process;
 pub mod protocol;
 pub mod protocol_v2;
 mod rag;
+mod script;
 mod storage;
 
 use process::{ProcessSpawner, SystemProcessSpawner};
@@ -899,6 +903,83 @@ fn unwatch_workspace_files() -> Result<(), files::FileError> {
         watch.stop();
     }
     Ok(())
+}
+
+/// Lists every watchable file in the active task worktree so the renderer can offer them for
+/// editing. Sizes come from the same scan the watcher uses; content hashes stay absent because a
+/// worktree holds game assets and the editor re-reads a file when it opens it.
+#[tauri::command(async)]
+fn list_workspace_files(app: AppHandle) -> Result<Vec<WorkspaceEntry>, files::FileError> {
+    let workspace = active_workspace(&app)?;
+    Ok(files::scan(workspace.root())
+        .into_iter()
+        .map(|(path, stamp)| WorkspaceEntry {
+            path,
+            bytes: stamp.bytes,
+        })
+        .collect())
+}
+
+/// One workspace file offered to the renderer's script picker.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceEntry {
+    path: String,
+    bytes: u64,
+}
+
+/// Script intelligence for the renderer's Monaco editor. Every command binds to the active
+/// session's language server, so the editor and the AI agent share one document version per file.
+#[tauri::command(async)]
+fn open_script_document(
+    request: script::OpenScriptRequest,
+) -> Result<script::ScriptDocument, godot_lsp::LspError> {
+    script::open_document(request)
+}
+
+#[tauri::command(async)]
+fn update_script_document(
+    request: script::UpdateScriptRequest,
+) -> Result<script::ScriptStamp, godot_lsp::LspError> {
+    script::update_document(request)
+}
+
+#[tauri::command(async)]
+fn save_script_document(
+    request: script::SaveScriptRequest,
+) -> Result<script::ScriptStamp, godot_lsp::LspError> {
+    script::save_document(request)
+}
+
+#[tauri::command(async)]
+fn close_script_document(request: script::OpenScriptRequest) -> Result<(), godot_lsp::LspError> {
+    script::close_document(request)
+}
+
+#[tauri::command(async)]
+fn call_script_language(
+    request: script::ScriptRequest,
+) -> Result<script::ScriptResponse, godot_lsp::LspError> {
+    script::call(request)
+}
+
+#[tauri::command(async)]
+fn apply_script_rename(
+    request: script::ApplyRenameRequest,
+) -> Result<Vec<script::ScriptStamp>, godot_lsp::LspError> {
+    script::apply_rename(request)
+}
+
+#[tauri::command(async)]
+fn subscribe_script_diagnostics(
+    diagnostics: tauri::ipc::Channel<script::ScriptDiagnostics>,
+) -> Result<(), godot_lsp::LspError> {
+    script::subscribe_diagnostics(diagnostics)
+}
+
+#[tauri::command(async)]
+fn unsubscribe_script_diagnostics() -> Result<(), godot_lsp::LspError> {
+    script::unsubscribe_diagnostics()
 }
 
 /// Formats a GDScript buffer through the pinned gdformat sidecar. The formatted text is returned
@@ -1777,9 +1858,12 @@ pub fn run() {
         ($($test_only:path),*) => {
             tauri::generate_handler![
                 activate_chat_task,
+                apply_script_rename,
                 call_godot,
+                call_script_language,
                 cancel_ai_request,
                 cancel_godot,
+                close_script_document,
                 create_chat_task,
                 create_project_backup,
                 delete_rag_cache,
@@ -1792,26 +1876,32 @@ pub fn run() {
                 initialize_rag,
                 list_ai_models,
                 list_project_tasks,
+                list_workspace_files,
                 launch_godot,
                 load_chat,
                 load_settings,
                 merge_task_worktree,
                 move_workspace_path,
+                open_script_document,
                 query_godot_docs,
                 read_chat_attachment,
                 read_workspace_file,
                 respond_tool_approval,
                 run_storage_maintenance,
                 save_chat,
+                save_script_document,
                 save_settings,
                 save_chat_attachment,
                 send_ai_message,
                 start_godot_session,
                 stop_godot_session,
                 subscribe_godot_events,
+                subscribe_script_diagnostics,
                 test_ai_connection,
                 unsubscribe_godot_events,
+                unsubscribe_script_diagnostics,
                 unwatch_workspace_files,
+                update_script_document,
                 watch_workspace_files,
                 write_workspace_file,
                 $($test_only),*

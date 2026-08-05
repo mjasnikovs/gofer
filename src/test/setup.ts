@@ -78,3 +78,19 @@ Object.defineProperty(window, 'matchMedia', {
 Object.defineProperty(window, 'scrollTo', {
     value: () => undefined
 })
+
+// `Channel` registers its receiver through Tauri's IPC internals, which only exist inside the
+// desktop shell. The stub keeps channel-carrying commands constructible under jsdom.
+let nextCallbackId = 1
+const callbacks = new Map<number, (payload: unknown) => void>()
+Object.defineProperty(window, '__TAURI_INTERNALS__', {
+    configurable: true,
+    value: {
+        transformCallback: (callback: (payload: unknown) => void) => {
+            const id = nextCallbackId++
+            callbacks.set(id, callback)
+            return id
+        },
+        unregisterCallback: (id: number) => callbacks.delete(id)
+    }
+})

@@ -13,6 +13,15 @@ import type {
     WriteWorkspaceFileRequest
 } from '../models/files'
 import type {
+    PlannedScriptFile,
+    ScriptDiagnosticsEvent,
+    ScriptDocument,
+    ScriptRequest,
+    ScriptResponse,
+    ScriptStamp,
+    WorkspaceEntry
+} from '../models/script'
+import type {
     AiStreamPayload,
     ChatAttachment,
     GodotProcessEvent,
@@ -137,6 +146,21 @@ type FormatGdscriptResponse = Readonly<{
     changed: boolean
 }>
 
+type OpenScriptRequest = Readonly<{path: string}>
+
+type UpdateScriptRequest = Readonly<{
+    path: string
+    text: string
+}>
+
+type SaveScriptRequest = Readonly<{
+    path: string
+    text: string
+    expectedHash?: string | undefined
+}>
+
+type ApplyScriptRenameRequest = Readonly<{files: readonly PlannedScriptFile[]}>
+
 type StoredChatPayload = Omit<StoredChat, 'taskId'>
     & Readonly<{
         taskId?: string | undefined
@@ -144,9 +168,12 @@ type StoredChatPayload = Omit<StoredChat, 'taskId'>
 
 type DesktopCommandMap = Readonly<{
     activate_chat_task: CommandSpec<{taskId: string}, StoredChat>
+    apply_script_rename: CommandSpec<{request: ApplyScriptRenameRequest}, readonly ScriptStamp[]>
     call_godot: CommandSpec<{request: CallGodotRequest}, CallGodotResponse>
+    call_script_language: CommandSpec<{request: ScriptRequest}, ScriptResponse>
     cancel_ai_request: CommandSpec<{requestId: number}, boolean>
     cancel_godot: CommandSpec<undefined, void>
+    close_script_document: CommandSpec<{request: OpenScriptRequest}, void>
     create_chat_task: CommandSpec<undefined, StoredChat>
     create_project_backup: CommandSpec<undefined, BackupResult>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
@@ -160,10 +187,12 @@ type DesktopCommandMap = Readonly<{
     launch_godot: CommandSpec<{request: LaunchGodotRequest}, void>
     list_ai_models: CommandSpec<{request: SettingsRequest}, readonly AiModelOption[]>
     list_project_tasks: CommandSpec<undefined, readonly TaskSummary[]>
+    list_workspace_files: CommandSpec<undefined, readonly WorkspaceEntry[]>
     load_chat: CommandSpec<undefined, StoredChat>
     load_settings: CommandSpec<undefined, SettingsResponse>
     merge_task_worktree: CommandSpec<{taskId: string}, unknown>
     move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
+    open_script_document: CommandSpec<{request: OpenScriptRequest}, ScriptDocument>
     query_godot_docs: CommandSpec<{request: GodotDocsQuery}, GodotDocsResponse>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
@@ -171,6 +200,7 @@ type DesktopCommandMap = Readonly<{
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
+    save_script_document: CommandSpec<{request: SaveScriptRequest}, ScriptStamp>
     save_settings: CommandSpec<{request: SettingsRequest}, SettingsResponse>
     // Only registered in WebDriver builds; the backend owns the bridge address.
     send_godot_command: CommandSpec<{request: ProtocolRequest}, unknown>
@@ -178,9 +208,13 @@ type DesktopCommandMap = Readonly<{
     start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionResponse>
     stop_godot_session: CommandSpec<undefined, void>
     subscribe_godot_events: CommandSpec<{events: Channel<SessionEvent>}, void>
+    // Published diagnostics arrive on this channel until the renderer unsubscribes.
+    subscribe_script_diagnostics: CommandSpec<{diagnostics: Channel<ScriptDiagnosticsEvent>}, void>
     test_ai_connection: CommandSpec<{request: SettingsRequest}, ConnectionTestResult>
     unsubscribe_godot_events: CommandSpec<undefined, void>
+    unsubscribe_script_diagnostics: CommandSpec<undefined, void>
     unwatch_workspace_files: CommandSpec<undefined, void>
+    update_script_document: CommandSpec<{request: UpdateScriptRequest}, ScriptStamp>
     // The backend streams settled batches of external changes down this channel.
     watch_workspace_files: CommandSpec<{changes: Channel<readonly WorkspaceFileChange[]>}, void>
     write_workspace_file: CommandSpec<{request: WriteWorkspaceFileRequest}, WorkspaceFileStamp>

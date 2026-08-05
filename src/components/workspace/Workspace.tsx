@@ -3,6 +3,7 @@ import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
 import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
+import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {invoke, isTauri, listen} from '../../services/desktop'
 import type {TaskSummary} from '../../models/app'
 import type {ChatAttachment, DraftAttachment, Message} from '../../models/chat'
@@ -14,6 +15,7 @@ import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useChatPersistence} from '../../hooks/useChatPersistence'
 import {useGodotProcess} from '../../hooks/useGodotProcess'
 import {ChatConversation} from './ChatConversation'
+import {ScriptWorkspace} from './ScriptWorkspace'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
 import {WorkspaceHeader} from './WorkspaceHeader'
 
@@ -27,8 +29,13 @@ const CHAT_ATTACHMENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 
 const MAX_CHAT_ATTACHMENTS = 5
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const DEFAULT_CONTEXT_WINDOW = 120_064
+/** The chat column stays readable at 960 px; the editor wants the whole window. */
+const CHAT_CONTENT_WIDTH = 960
+
+type WorkspaceView = 'chat' | 'scripts'
 
 export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspaceProps) {
+    const [view, setView] = useState<WorkspaceView>('chat')
     const [draft, setDraft] = useState('')
     const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
     const [isSavingAttachments, setIsSavingAttachments] = useState(false)
@@ -371,10 +378,44 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         />
     )
 
+    const chat = (
+        <StackItem size='fill'>
+            {messages.length === 0 ?
+                <VStack
+                    height='100%'
+                    padding={8}
+                    hAlign='center'
+                    vAlign='center'
+                >
+                    <WorkspaceWelcome composer={composer} />
+                </VStack>
+            :   <VStack
+                    gap={0}
+                    height='100%'
+                >
+                    <ChatConversation
+                        attachmentPreviews={attachmentPreviews}
+                        isStreaming={isStreaming}
+                        messages={messages}
+                        scrollRef={messageScrollRef}
+                        onRetry={retry}
+                    />
+                    <VStack
+                        width='100%'
+                        paddingInline={3}
+                        paddingBlock={3}
+                    >
+                        {composer}
+                    </VStack>
+                </VStack>
+            }
+        </StackItem>
+    )
+
     return (
         <Layout
             height='fill'
-            contentWidth={960}
+            contentWidth={view === 'chat' ? CHAT_CONTENT_WIDTH : '100%'}
             content={
                 <LayoutContent padding={0}>
                     <VStack
@@ -393,37 +434,28 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                             {...(activeTask && {activeTask})}
                         />
                         <Divider />
-                        <StackItem size='fill'>
-                            {messages.length === 0 ?
-                                <VStack
-                                    height='100%'
-                                    padding={8}
-                                    hAlign='center'
-                                    vAlign='center'
-                                >
-                                    <WorkspaceWelcome composer={composer} />
-                                </VStack>
-                            :   <VStack
-                                    gap={0}
-                                    height='100%'
-                                >
-                                    <ChatConversation
-                                        attachmentPreviews={attachmentPreviews}
-                                        isStreaming={isStreaming}
-                                        messages={messages}
-                                        scrollRef={messageScrollRef}
-                                        onRetry={retry}
-                                    />
-                                    <VStack
-                                        width='100%'
-                                        paddingInline={3}
-                                        paddingBlock={3}
-                                    >
-                                        {composer}
-                                    </VStack>
-                                </VStack>
-                            }
-                        </StackItem>
+                        <TabList
+                            size='sm'
+                            hasDivider
+                            value={view}
+                            onChange={value => {
+                                setView(value === 'scripts' ? 'scripts' : 'chat')
+                            }}
+                        >
+                            <Tab
+                                value='chat'
+                                label='Chat'
+                            />
+                            <Tab
+                                value='scripts'
+                                label='Scripts'
+                            />
+                        </TabList>
+                        {view === 'scripts' ?
+                            <StackItem size='fill'>
+                                <ScriptWorkspace onError={reportError} />
+                            </StackItem>
+                        :   chat}
                     </VStack>
                 </LayoutContent>
             }

@@ -7,6 +7,7 @@ import '@astryxdesign/theme-neutral/theme.css'
 import App from './App'
 import {goferTheme} from './theme/gofer'
 import './theme/gofer-theme.css'
+import './theme/editor.css'
 
 if (import.meta.env.MODE === 'webdriver') void import('@wdio/tauri-plugin')
 

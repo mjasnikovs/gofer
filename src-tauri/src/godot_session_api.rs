@@ -144,6 +144,9 @@ pub fn start_session<R: Runtime>(
 /// Stops the active session and removes the staged addon.
 pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> {
     let worktree = current_worktree();
+    // The language server dies with the editor, so the cached client is dropped before the
+    // process is stopped rather than left to fail the renderer's next script request.
+    crate::script::disconnect();
     let result = godot_session::stop();
     if let Some(worktree) = worktree {
         // Unstaging must read the same ledger staging wrote, or the addon is left in the worktree.

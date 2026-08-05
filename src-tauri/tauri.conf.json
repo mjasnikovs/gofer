@@ -24,6 +24,7 @@
             "devCsp": {
                 "default-src": "'self'",
                 "connect-src": "ipc: http://ipc.localhost ws:",
+                "worker-src": "'self' blob:",
                 "font-src": "'self' data:",
                 "img-src": "'self' blob: data:",
                 "object-src": "'none'",
@@ -32,6 +33,7 @@
             "csp": {
                 "default-src": "'self'",
                 "connect-src": "ipc: http://ipc.localhost",
+                "worker-src": "'self' blob:",
                 "font-src": "'self' data:",
                 "img-src": "'self' blob: data:",
                 "object-src": "'none'",
