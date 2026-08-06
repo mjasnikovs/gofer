@@ -33,6 +33,8 @@ const ARTIFACTS: &str = include_str!("../../protocol/godot-artifacts.json");
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
 const CALL_TIMEOUT_MS: u64 = 30_000;
 const PROBE_TIMEOUT_MS: u64 = 2_000;
+/// What base64 PNG bytes begin with, so an icon can be checked without decoding it.
+const PNG_BASE64_PREFIX: &str = "iVBORw0KGgo";
 
 struct Editor {
     child: Box<dyn ChildProcess>,
@@ -372,6 +374,53 @@ fn a_ready_session_owns_the_edited_scene() {
         child_names(&session.call("scene.get_tree", json!({}))),
         vec!["Marker".to_owned()],
         "the created node must appear in the scene the session opened"
+    );
+}
+
+/// The tree names the icon each node is drawn with, and the editor hands over the artwork.
+///
+/// Gofer's explorer draws Godot's own icons rather than bundled copies, so the only proof that the
+/// lookup works is a real editor's theme answering with real PNGs — and a class the theme has never
+/// heard of has to be left out rather than fail the batch the rest of the tree needs.
+#[test]
+fn the_addon_serves_the_editors_own_class_icons() {
+    let mut session = Session::start();
+    let scene = "res://icons.tscn";
+
+    session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
+    session.mutate(
+        "node.create",
+        json!({"parent": "/icons", "name": "Sprite", "type": "Sprite2D"}),
+    );
+
+    let tree = session.call("scene.get_tree", json!({}));
+    assert_eq!(
+        tree["root"]["icon"], "Node2D",
+        "a node with no script is drawn as its engine class: {tree}"
+    );
+
+    let answer = session.call(
+        "editor.get_class_icons",
+        json!({"classes": ["Node2D", "Sprite2D", "NoSuchClassAnywhere"]}),
+    );
+    assert_eq!(answer["encoding"], "png-base64");
+    let icons = answer["icons"].as_object().expect("icons object");
+    for class in ["Node2D", "Sprite2D"] {
+        let data = icons[class]
+            .as_str()
+            .unwrap_or_else(|| panic!("{class} icon"));
+        assert!(
+            data.starts_with(PNG_BASE64_PREFIX),
+            "the {class} icon must be a PNG: {data:.16}"
+        );
+    }
+    assert_ne!(
+        icons["Node2D"], icons["Sprite2D"],
+        "each class must answer with its own artwork"
+    );
+    assert!(
+        !icons.contains_key("NoSuchClassAnywhere") || icons["NoSuchClassAnywhere"].is_string(),
+        "an unknown class is answered with a fallback icon or left out, never as an error"
     );
 }
 

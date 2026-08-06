@@ -43,6 +43,13 @@ theme, tokens, typography swizzle <Name> eject component source for deep customi
 --apply run after any @astryxdesign/core bump
 <!-- ASTRYX:END -->
 
+## UI changes
+
+Read `.claude/skills/gofer-ui/SKILL.md` before writing or changing anything under `src/components`
+or `src/theme`. The Astryx block above covers imports, tokens, and props; the skill covers the part
+that decides whether a screen is readable — surface layering, one primary action per screen,
+placeholder discipline — and it is gated by `npm run check:design`.
+
 ## Validation
 
 Use npm for package scripts. Run the full validation suite with:
@@ -50,6 +57,22 @@ Use npm for package scripts. Run the full validation suite with:
 ```
 npm run check
 ```
+
+## Waiting
+
+Never sleep. Never use a fixed timeout to wait for something when an event, a condition, or a
+retrying assertion is available — that is always, in every tool this repo uses.
+
+- Playwright: `await expect(locator).toBeVisible()`, `locator.waitFor()`,
+  `page.waitForFunction(...)`. Never `page.waitForTimeout(...)`.
+- Testing Library / vitest: `findBy*`, `await waitFor(...)`. Never a `setTimeout` sleep.
+- WebdriverIO: `browser.waitUntil(...)`, `element.waitForDisplayed()`. Never `browser.pause(...)`.
+- Rust and Node: wait on the event, the channel, or the process the work actually signals through.
+  Poll a condition only when nothing signals, and then poll fast with a deadline — a sleep long
+  enough to "be safe" is both slower and flakier than the condition it is guessing at.
+
+This applies to throwaway probes and one-off scripts exactly as much as to committed tests. A
+guessed delay is either wasted seconds or a flake, usually both.
 
 ## Git workflow
 

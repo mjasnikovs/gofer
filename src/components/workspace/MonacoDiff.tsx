@@ -4,6 +4,7 @@ import {StackItem} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {languageForPath} from '../../services/monaco-gdscript'
 import {loadMonaco} from '../../services/monaco-runtime'
+import {GOFER_EDITOR_THEME} from '../../services/monaco-theme'
 
 type MonacoDiffProps = Readonly<{
     path: string
@@ -13,6 +14,7 @@ type MonacoDiffProps = Readonly<{
 }>
 
 const DIFF_OPTIONS: Monaco.editor.IStandaloneDiffEditorConstructionOptions = {
+    theme: GOFER_EDITOR_THEME,
     automaticLayout: true,
     readOnly: true,
     renderSideBySide: false,

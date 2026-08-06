@@ -3,6 +3,8 @@ import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {InspectorWorkspace} from './InspectorWorkspace'
+import {ChatReferenceContext} from '../../hooks/useChatReferences'
+import type {ChatReference} from '../../utils/chat-references'
 import type {MonacoStubState} from '../../test/monaco-stub'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
@@ -48,6 +50,8 @@ type CallRequest = Readonly<{
 }>
 
 const SCRIPT = 'extends Node\n\nfunc _ready():\n\tpass\n'
+/** Stands in for the artwork the editor's theme hands back for a class. */
+const ICON_PNG = 'iVBORw0KGgoAAAANSUhEUg=='
 const FRAME = {encoding: 'png-base64', width: 320, height: 180, data: 'iVBORw0KGgo='}
 
 const SCENE_TREE = {
@@ -55,13 +59,24 @@ const SCENE_TREE = {
         name: 'Main',
         type: 'Node2D',
         path: 'Main',
-        children: [{name: 'Player', type: 'CharacterBody2D', path: 'Main/Player', children: []}]
+        children: [
+            {
+                name: 'Player',
+                type: 'CharacterBody2D',
+                // The class the editor draws it with: this one is a script class of its own.
+                icon: 'PlayerBody',
+                path: 'Main/Player',
+                children: []
+            }
+        ]
     }
 }
 
 type Backend = Readonly<{
     session: {started: boolean}
     calls: string[]
+    /** Each batch of classes the tree asked the editor to draw. */
+    iconRequests: string[][]
     debugCalls: string[]
     /** Every path handed to `scene.open`, in order. */
     sceneOpens: string[]
@@ -91,6 +106,7 @@ const SESSION = {
 function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptions = {}): Backend {
     const session = {started: false}
     const calls: string[] = []
+    const iconRequests: string[][] = []
     const debugCalls: string[] = []
     const sceneOpens: string[] = []
     const edited = {scene: openScene}
@@ -294,6 +310,13 @@ function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptio
                         }
                     case 'runtime.run':
                         return {id: 'x', result: {running: true, frame: FRAME}}
+                    case 'editor.get_class_icons': {
+                        const classes = (request.params?.['classes'] ?? []) as string[]
+                        iconRequests.push(classes)
+                        const icons: Record<string, string> = {}
+                        for (const className of classes) icons[className] = ICON_PNG
+                        return {id: 'x', result: {encoding: 'png-base64', icons}}
+                    }
                     default:
                         return {id: 'x', result: {}}
                 }
@@ -302,7 +325,7 @@ function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptio
                 return undefined
         }
     })
-    return {session, calls, debugCalls, sceneOpens, edited}
+    return {session, calls, iconRequests, debugCalls, sceneOpens, edited}
 }
 
 /** Publishes one diagnostic through the channel the frame subscribed with. */
@@ -354,6 +377,24 @@ function renderWorkspace(onError: (message: string) => void = vi.fn()) {
             chat={<p>Chat column</p>}
             onError={onError}
         />
+    )
+}
+
+/** The same frame, with somewhere for a panel to put what the user asked to talk about. */
+function renderWithChatReferences(added: ChatReference[]) {
+    return render(
+        <ChatReferenceContext.Provider
+            value={{
+                add: reference => {
+                    added.push(reference)
+                }
+            }}
+        >
+            <InspectorWorkspace
+                chat={<p>Chat column</p>}
+                onError={vi.fn()}
+            />
+        </ChatReferenceContext.Provider>
     )
 }
 
@@ -431,6 +472,37 @@ describe('InspectorWorkspace', () => {
         expect(within(inspector).getByText('players')).toBeInTheDocument()
         // The reading is labelled as the edited scene, never confused with the running one.
         expect(within(inspector).getByText('Edited')).toBeInTheDocument()
+    })
+
+    it('draws each node with the icon the editor draws it with', async () => {
+        const server = backend()
+        const user = userEvent.setup()
+        renderWorkspace()
+        await startSession(user)
+
+        const player = await screen.findByAltText('CharacterBody2D')
+        expect(player).toHaveAttribute('src', `data:image/png;base64,${ICON_PNG}`)
+        // The script class the node carries is what was asked for, not the engine class beneath it.
+        expect(server.iconRequests[0]).toEqual(['Node2D', 'PlayerBody'])
+
+        // A second read of the same tree is not a second request for artwork that cannot change.
+        await user.click(screen.getByRole('button', {name: 'Refresh'}))
+        await waitFor(() => {
+            expect(server.calls.filter(call => call === 'scene.get_tree').length).toBe(2)
+        })
+        expect(server.iconRequests).toHaveLength(1)
+    })
+
+    it('hands a node to the message being written', async () => {
+        backend()
+        const added: ChatReference[] = []
+        const user = userEvent.setup()
+        renderWithChatReferences(added)
+        await startSession(user)
+
+        await user.click(screen.getByRole('button', {name: 'Mention Player in the message'}))
+
+        expect(added).toEqual([{kind: 'node', id: 'Main/Player', detail: 'CharacterBody2D'}])
     })
 
     it('reports a game that is not running as a fact rather than a fault', async () => {

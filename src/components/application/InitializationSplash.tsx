@@ -6,7 +6,7 @@ import {Icon} from '@astryxdesign/core/Icon'
 import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {ProgressBar} from '@astryxdesign/core/ProgressBar'
 import {Spinner} from '@astryxdesign/core/Spinner'
-import {VStack} from '@astryxdesign/core/Stack'
+import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import CircleStackIcon from '@heroicons/react/24/outline/CircleStackIcon'
 import {invoke, isTauri, listen} from '../../services/desktop'
@@ -106,18 +106,18 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                         size='lg'
                                         label='Initializing documentation search'
                                     />
+                                    {/*
+                                     * The bar carries its own label, so the caption underneath was
+                                     * printing the same sentence a second time, forty pixels lower
+                                     * and one shade dimmer — which reads as two different pieces of
+                                     * news about the same download.
+                                     */}
                                     <ProgressBar
                                         label={progressLabel(progress)}
                                         value={value ?? 0}
                                         isIndeterminate={value === undefined}
                                         hasValueLabel={value !== undefined}
                                     />
-                                    <Text
-                                        type='supporting'
-                                        color='secondary'
-                                    >
-                                        {progressLabel(progress)}
-                                    </Text>
                                 </VStack>
                             :   null}
 
@@ -141,12 +141,19 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                         failing, delete the cache — Settings › Documentation models
                                         › Delete cache — and prepare it again.
                                     </Text>
-                                    <Button
-                                        label='Try again'
-                                        variant='primary'
-                                        width='100%'
-                                        clickAction={initialize}
-                                    />
+                                    {/*
+                                     * Stretched to the column this was a 592 px slab, four times
+                                     * the width of any other button in the application; a button
+                                     * that wide stops reading as a button. It sizes to its label
+                                     * and sits at the end of the block it belongs to.
+                                     */}
+                                    <HStack hAlign='end'>
+                                        <Button
+                                            label='Try again'
+                                            variant='primary'
+                                            clickAction={initialize}
+                                        />
+                                    </HStack>
                                 </VStack>
                             :   null}
                         </VStack>

@@ -1,4 +1,4 @@
-import {useCallback, useMemo} from 'react'
+import {useCallback, useMemo, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {EmptyState} from '@astryxdesign/core/EmptyState'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
@@ -6,10 +6,19 @@ import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
+import {Tooltip} from '@astryxdesign/core/Tooltip'
+import {IconButton} from '@astryxdesign/core/IconButton'
+import {Icon} from '@astryxdesign/core/Icon'
+import AtSymbolIcon from '@heroicons/react/24/outline/AtSymbolIcon'
+import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon'
 import {TreeList} from '@astryxdesign/core/TreeList'
 import type {TreeListItemData} from '@astryxdesign/core/TreeList'
 import {useGodotQuery} from '../../hooks/useGodotQuery'
-import {buildPathTree} from '../../utils/godot-format'
+import {useGodotClassIcons} from '../../hooks/useGodotClassIcons'
+import {useChatReferences} from '../../hooks/useChatReferences'
+import type {ChatReferenceSink} from '../../hooks/useChatReferences'
+import type {ClassIcons} from '../../hooks/useGodotClassIcons'
+import {buildPathTree, filterSceneTree} from '../../utils/godot-format'
 import type {PathTreeNode} from '../../utils/godot-format'
 import type {GodotCall, GodotSelection} from '../../models/workspace'
 import {isSessionReadable} from '../../models/godot'
@@ -55,6 +64,38 @@ const EDITABLE_SUFFIXES = ['.gd', '.cfg', '.godot', '.json', '.md', '.txt', '.tr
  */
 const SCENE_SUFFIX = '.tscn'
 
+const ROW_LABEL_STYLE = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 'var(--spacing-2)',
+    width: '100%',
+    // A deep branch leaves a long name less room, and a name that refuses to shrink drags the row
+    // wider than the column — taking the row's action off the right edge with it.
+    minWidth: 0,
+    overflow: 'hidden'
+} as const
+
+/**
+ * The name itself, which is the part allowed to run out of room.
+ *
+ * `text-overflow` needs a block box with the text inside it: on the row's flex container the
+ * property is inherited but never applied, so a name too long for a deep branch was cut off
+ * mid-letter instead of trailing off.
+ */
+const ROW_NAME_STYLE = {
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap'
+} as const
+
+/** Godot draws its class icons at 16 px; the slot holds that whether or not an icon fills it. */
+const NODE_ICON_STYLE = {
+    width: 'var(--spacing-4)',
+    height: 'var(--spacing-4)',
+    flexShrink: 0
+} as const
+
 function isListable(path: string) {
     if (HIDDEN_SUFFIXES.some(suffix => path.endsWith(suffix))) return false
     return !HIDDEN_PREFIXES.some(prefix => path.startsWith(prefix))
@@ -68,23 +109,105 @@ function isScene(path: string) {
     return path.endsWith(SCENE_SUFFIX)
 }
 
-function nodeItems(
-    node: GodotNode,
-    origin: GodotSelection['origin'],
-    selected: string | undefined,
+/**
+ * A row's class icon, the artwork the editor itself draws.
+ *
+ * The class is the image's alternative text, so a row still announces what it is even though the
+ * tree no longer prints the class under every name. Until the icons arrive — or for a class the
+ * editor has no icon for — the slot keeps its width, so no tree ever reflows around a late answer.
+ */
+function NodeIcon({icon, type}: Readonly<{icon: string | undefined; type: string}>) {
+    if (icon === undefined) {
+        return (
+            <span
+                role='img'
+                aria-label={type}
+                style={NODE_ICON_STYLE}
+            />
+        )
+    }
+    return (
+        <img
+            src={icon}
+            alt={type}
+            style={NODE_ICON_STYLE}
+        />
+    )
+}
+
+type NodeTreeContext = Readonly<{
+    origin: GodotSelection['origin']
+    selected: string | undefined
+    icons: ClassIcons
     onSelect: (selection: GodotSelection) => void
-): TreeListItemData {
+    /** Absent wherever there is no conversation to add a node to. */
+    references: ChatReferenceSink | undefined
+}>
+
+function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData {
+    const {origin, selected, icons, onSelect, references} = context
     return {
         id: `${origin}:${node.path}`,
-        label: node.name,
-        description: node.type,
+        // Godot's own scene tree names a node once and lets its icon say what class it is. Printing
+        // the class under every name said the same thing twice and made the two lines compete; the
+        // class is on the row's tooltip and on the icon's alternative text instead.
+        //
+        // Icon and name are one trigger, filling the row: the tooltip has to survive the pointer
+        // crossing from the name to the icon, which two separate triggers cannot do.
+        label: (
+            <Tooltip
+                content={node.type}
+                // Under the row and anchored to its start: the trigger is the full row, so an
+                // end-placed tooltip hangs off the right of a 260 px column and lands in the next
+                // pane entirely.
+                placement='below'
+                alignment='start'
+                hasHoverIndication={false}
+            >
+                <span style={ROW_LABEL_STYLE}>
+                    <NodeIcon
+                        icon={icons[node.icon ?? node.type]}
+                        type={node.type}
+                    />
+                    <span style={ROW_NAME_STYLE}>{node.name}</span>
+                </span>
+            </Tooltip>
+        ),
+        // At the head of the row, ahead of the class icon, because that is where the row's own
+        // width is guaranteed: the end of a row is the first thing a long name in a deep branch
+        // takes away. The at sign is the gesture people already know — it names a thing inside a
+        // message rather than creating one, which is what a plus promised and this does not do.
+        ...(references && {
+            startContent: (
+                <span className='gofer-row-action'>
+                    <IconButton
+                        label={`Mention ${node.name} in the message`}
+                        size='sm'
+                        variant='ghost'
+                        // Through Astryx's `Icon`, which puts a width and a height on the drawing.
+                        // A bare Heroicon carries only a `viewBox`: Chromium then stretches it to
+                        // its box, WebKit — the engine the desktop actually renders in — draws it
+                        // at nothing at all, so the button was there and empty on every row.
+                        icon={
+                            <Icon
+                                icon={AtSymbolIcon}
+                                size='sm'
+                            />
+                        }
+                        clickAction={() => {
+                            references.add({kind: 'node', id: node.path, detail: node.type})
+                        }}
+                    />
+                </span>
+            )
+        }),
         isExpanded: true,
         isSelected: selected === node.path,
         onClick: () => {
             onSelect({origin, path: node.path, name: node.name, type: node.type})
         },
         ...(node.children.length > 0 && {
-            children: node.children.map(child => nodeItems(child, origin, selected, onSelect))
+            children: node.children.map(child => nodeItems(child, context))
         })
     }
 }
@@ -165,6 +288,24 @@ export function ExplorerPanel({
      */
     const isGameIdle = runtime.error?.code === 'runtime_not_running'
 
+    // Both trees draw from one icon cache: a running game is the same project's classes, and the
+    // editor is the only half that has a theme to read them from.
+    const shownRoot = tab === 'runtime' ? runtime.data?.root : scene.data?.root
+    const icons = useGodotClassIcons(call, shownRoot, !isOffline && !isSettling && tab !== 'files')
+    const references = useChatReferences()
+    const [nodeFilter, setNodeFilter] = useState('')
+
+    // What each tree draws once the filter has had its say. A filter that matches nothing leaves an
+    // empty tree, which the panel already reports as an empty state rather than as a broken read.
+    const sceneRoot = useMemo(() => {
+        const root = scene.data?.root
+        return root ? filterSceneTree(root, nodeFilter) : undefined
+    }, [scene.data, nodeFilter])
+    const runtimeRoot = useMemo(() => {
+        const root = runtime.data?.root
+        return root ? filterSceneTree(root, nodeFilter) : undefined
+    }, [runtime.data, nodeFilter])
+
     const listed = useMemo(
         () =>
             files
@@ -235,33 +376,54 @@ export function ExplorerPanel({
                         isLabelHidden
                         size='sm'
                         placeholder='Filter files'
+                        startIcon={MagnifyingGlassIcon}
                         value={fileFilter}
                         hasClear
                         onChange={onFileFilterChange}
                     />
                 </VStack>
-            :   <Toolbar
-                    label='Explorer actions'
-                    size='sm'
-                    dividers={['bottom']}
-                    startContent={
-                        <Text
-                            type='supporting'
-                            color='secondary'
+            :   <>
+                    <Toolbar
+                        label='Explorer actions'
+                        size='sm'
+                        dividers={['bottom']}
+                        startContent={
+                            <Text
+                                type='supporting'
+                                color='secondary'
+                            >
+                                {tab === 'scene' ? 'Edited scene' : 'Running game'}
+                            </Text>
+                        }
+                        endContent={
+                            <Button
+                                label='Refresh'
+                                size='sm'
+                                variant='ghost'
+                                isDisabled={isOffline}
+                                clickAction={tab === 'scene' ? scene.reload : runtime.reload}
+                            />
+                        }
+                    />
+                    {/* No tree, nothing to filter: an offline panel offers to start the session. */}
+                    {!isOffline && (
+                        <VStack
+                            paddingInline={2}
+                            paddingBlock={2}
                         >
-                            {tab === 'scene' ? 'Edited scene' : 'Running game'}
-                        </Text>
-                    }
-                    endContent={
-                        <Button
-                            label='Refresh'
-                            size='sm'
-                            variant='ghost'
-                            isDisabled={isOffline}
-                            clickAction={tab === 'scene' ? scene.reload : runtime.reload}
-                        />
-                    }
-                />
+                            <TextInput
+                                label='Filter nodes'
+                                isLabelHidden
+                                size='sm'
+                                placeholder='Filter nodes'
+                                startIcon={MagnifyingGlassIcon}
+                                value={nodeFilter}
+                                hasClear
+                                onChange={setNodeFilter}
+                            />
+                        </VStack>
+                    )}
+                </>
             }
             <StackItem
                 size='fill'
@@ -273,9 +435,15 @@ export function ExplorerPanel({
                             label='scene tree'
                             isLoading={scene.isLoading || isSettling}
                             error={scene.error}
-                            isEmpty={!scene.data?.root}
-                            emptyTitle='No scene is open'
-                            emptyDescription='Open a scene from Files, or open the one the project runs.'
+                            isEmpty={!sceneRoot}
+                            emptyTitle={
+                                scene.data?.root ? 'No node matches the filter' : 'No scene is open'
+                            }
+                            emptyDescription={
+                                scene.data?.root ?
+                                    'Nodes are matched by their name and by their class.'
+                                :   'Open a scene from Files, or open the one the project runs.'
+                            }
                             emptyAction={
                                 <Button
                                     label='Open main scene'
@@ -284,17 +452,18 @@ export function ExplorerPanel({
                                 />
                             }
                         >
-                            {scene.data?.root ?
+                            {sceneRoot ?
                                 <TreeList
                                     density='compact'
                                     variant='noGuides'
                                     items={[
-                                        nodeItems(
-                                            scene.data.root,
-                                            'edited',
-                                            selection?.path,
-                                            onSelect
-                                        )
+                                        nodeItems(sceneRoot, {
+                                            origin: 'edited',
+                                            selected: selection?.path,
+                                            icons,
+                                            onSelect,
+                                            references
+                                        })
                                     ]}
                                 />
                             :   null}
@@ -306,21 +475,30 @@ export function ExplorerPanel({
                             label='runtime tree'
                             isLoading={runtime.isLoading || isSettling}
                             {...(!isGameIdle && {error: runtime.error})}
-                            isEmpty={isGameIdle || !runtime.data?.root}
-                            emptyTitle='The game is not running'
-                            emptyDescription='Run the game to inspect the tree it holds in memory.'
+                            isEmpty={isGameIdle || !runtimeRoot}
+                            emptyTitle={
+                                runtime.data?.root ?
+                                    'No node matches the filter'
+                                :   'The game is not running'
+                            }
+                            emptyDescription={
+                                runtime.data?.root ?
+                                    'Nodes are matched by their name and by their class.'
+                                :   'Run the game to inspect the tree it holds in memory.'
+                            }
                         >
-                            {runtime.data?.root ?
+                            {runtimeRoot ?
                                 <TreeList
                                     density='compact'
                                     variant='noGuides'
                                     items={[
-                                        nodeItems(
-                                            runtime.data.root,
-                                            'runtime',
-                                            selection?.path,
-                                            onSelect
-                                        )
+                                        nodeItems(runtimeRoot, {
+                                            origin: 'runtime',
+                                            selected: selection?.path,
+                                            icons,
+                                            onSelect,
+                                            references
+                                        })
                                     ]}
                                 />
                             :   null}

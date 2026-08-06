@@ -85,6 +85,13 @@ const GOFER_AUTOLOAD_NAME := "GoferRuntime"
 ## Search results are capped so a broad query cannot exceed the 1 MiB envelope limit.
 const MAX_SEARCH_RESULTS := 50
 
+## One icon request covers a whole scene tree's worth of classes and no more, and each icon stays
+## the size the editor draws it, so the batch stays far inside the envelope limit.
+const MAX_ICON_CLASSES := 200
+const MAX_ICON_EDGE := 64
+## A script class chain is walked this far towards an engine class before the icon lookup gives up.
+const MAX_ICON_BASE_DEPTH := 32
+
 ## The element type of each packed array, keyed by the type of the packed array itself. The wire
 ## carries every array as a plain `array`, so this is what a setting declared as a packed array is
 ## rebuilt from.
@@ -372,6 +379,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _editor_get_setting(params)
         "editor.set_setting":
             return _editor_set_setting(params)
+        "editor.get_class_icons":
+            return _editor_class_icons(params)
         "scene.list":
             return _scene_list()
         "scene.open":
@@ -1222,6 +1231,88 @@ func _editor_set_setting(params: Dictionary) -> Dictionary:
     settings.set_setting(name, decoded["value"])
     return {"name": name, "machineWide": true}
 
+## The icons the editor draws beside nodes.
+##
+## They are read out of the editor's own theme rather than bundled with Gofer: the artwork then
+## matches whatever editor theme the user runs, and it arrives already tinted the way Godot tints
+## it — blue for 2D, red for 3D, green for Control — so a tree drawn from these reads like the
+## editor's. A class the project declares in a script resolves to its `@icon`, or to the icon of
+## whatever it extends.
+func _editor_class_icons(params: Dictionary) -> Dictionary:
+    var requested: Variant = params.get("classes", [])
+    if typeof(requested) != TYPE_ARRAY:
+        return _config_error("invalid_params", "editor.get_class_icons requires classes")
+    var names: Array = requested
+    if names.size() > MAX_ICON_CLASSES:
+        return _config_error(
+            "invalid_params",
+            "editor.get_class_icons accepts at most %d classes" % MAX_ICON_CLASSES,
+            {"requested": names.size(), "limit": MAX_ICON_CLASSES}
+        )
+    var theme := EditorInterface.get_editor_theme()
+    var scripted := _scripted_classes()
+    var icons: Dictionary = {}
+    for entry in names:
+        var name := str(entry)
+        if name.is_empty() or icons.has(name):
+            continue
+        var png := _class_icon_png(name, theme, scripted)
+        if not png.is_empty():
+            icons[name] = Marshalls.raw_to_base64(png)
+    # A class with no icon is simply absent: the renderer falls back on its own, and a missing
+    # icon is never worth failing a scene tree over.
+    return {"encoding": "png-base64", "icons": icons}
+
+## Every class the project declares in a script, by name, with the icon and base class it names.
+func _scripted_classes() -> Dictionary:
+    var classes: Dictionary = {}
+    for entry in ProjectSettings.get_global_class_list():
+        var name := str(entry.get("class", ""))
+        if name.is_empty():
+            continue
+        classes[name] = {"icon": str(entry.get("icon", "")), "base": str(entry.get("base", ""))}
+    return classes
+
+func _class_icon_png(name: String, theme: Theme, scripted: Dictionary) -> PackedByteArray:
+    var texture := _class_icon(name, theme, scripted)
+    if texture == null:
+        return PackedByteArray()
+    var image := texture.get_image()
+    if image == null or image.is_empty():
+        return PackedByteArray()
+    if image.is_compressed() and image.decompress() != OK:
+        return PackedByteArray()
+    if maxi(image.get_width(), image.get_height()) > MAX_ICON_EDGE:
+        var scale := float(MAX_ICON_EDGE) / float(maxi(image.get_width(), image.get_height()))
+        image.resize(
+            maxi(1, int(image.get_width() * scale)),
+            maxi(1, int(image.get_height() * scale)),
+            Image.INTERPOLATE_LANCZOS
+        )
+    return image.save_png_to_buffer()
+
+func _class_icon(name: String, theme: Theme, scripted: Dictionary) -> Texture2D:
+    var current := name
+    # Walk the script classes first: only they can carry an `@icon`, and one that does not ends up
+    # drawn as the engine class it ultimately extends.
+    for _step in range(MAX_ICON_BASE_DEPTH):
+        if not scripted.has(current):
+            break
+        var entry: Dictionary = scripted[current]
+        var path := str(entry.get("icon", ""))
+        if not path.is_empty() and ResourceLoader.exists(path):
+            var loaded: Variant = load(path)
+            if loaded is Texture2D:
+                return loaded
+        current = str(entry.get("base", ""))
+        if current.is_empty():
+            break
+    if not current.is_empty() and theme.has_icon(current, "EditorIcons"):
+        return theme.get_icon(current, "EditorIcons")
+    if theme.has_icon("Node", "EditorIcons"):
+        return theme.get_icon("Node", "EditorIcons")
+    return null
+
 ## Tells the editor filesystem that a file changed underneath it. Gofer writes project files
 ## through Rust, so the editor learns about a saved resource here. Scripts are excluded by the
 ## caller: Godot's own `didSave` handler already reloads a script and refreshes its exports.
@@ -1860,9 +1951,20 @@ func _node_summary(node: Node) -> Dictionary:
     return {
         "name": node.name,
         "type": node.get_class(),
+        "icon": _node_icon_class(node),
         "path": _node_path(node),
         "children": children
     }
+
+## The class an icon lookup should use for a node: the script's own class where it has one, since
+## that is the icon the editor draws, and the engine class otherwise.
+func _node_icon_class(node: Node) -> String:
+    var script: Variant = node.get_script()
+    if script is Script:
+        var global_name := (script as Script).get_global_name()
+        if not global_name.is_empty():
+            return global_name
+    return node.get_class()
 
 ## Summarizes input events for the wire. Key events name their physical key so they can be rebuilt
 ## with `OS.find_keycode_from_string` on the way back in.

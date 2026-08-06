@@ -1,6 +1,7 @@
 import type * as Monaco from 'monaco-editor'
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker'
 import {registerGdscript} from './monaco-gdscript'
+import {GOFER_EDITOR_THEME, goferEditorTheme} from './monaco-theme'
 
 /**
  * Loads Monaco once, on demand.
@@ -26,6 +27,8 @@ export function loadMonaco(): Promise<typeof Monaco> {
     pending ??= import('monaco-editor').then(monaco => {
         self.MonacoEnvironment = {getWorker: () => new EditorWorker()}
         registerGdscript(monaco)
+        // Defined before the first editor is created, so no editor ever paints the light default.
+        monaco.editor.defineTheme(GOFER_EDITOR_THEME, goferEditorTheme())
         return monaco
     })
     return pending

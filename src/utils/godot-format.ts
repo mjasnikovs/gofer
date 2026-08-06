@@ -1,4 +1,4 @@
-import type {GodotValue} from '../models/godot'
+import type {GodotNode, GodotValue} from '../models/godot'
 
 /**
  * Presentation for the tagged values the addon encodes. Everything here is read-only text: a value
@@ -118,4 +118,26 @@ export function buildPathTree(paths: readonly string[]): readonly PathTreeNode[]
             .map(node => ({...node, children: sort(node.children)}))
 
     return sort(roots)
+}
+
+/**
+ * Narrows a scene tree to what a filter names.
+ *
+ * A node matches on its name or its class, and a match keeps the branch that reaches it: a tree
+ * pruned to bare matches would show `CollisionShape2D` with no clue which of five coins it belongs
+ * to. Ancestors are kept for the path they draw, so what stays reads as the scene it came from.
+ */
+export function filterSceneTree(node: GodotNode, filter: string): GodotNode | undefined {
+    const query = filter.trim().toLowerCase()
+    if (query === '') return node
+    const prune = (current: GodotNode): GodotNode | undefined => {
+        const kept = current.children
+            .map(child => prune(child))
+            .filter((child): child is GodotNode => child !== undefined)
+        const matches =
+            current.name.toLowerCase().includes(query) || current.type.toLowerCase().includes(query)
+        if (!matches && kept.length === 0) return undefined
+        return {...current, children: kept}
+    }
+    return prune(node)
 }

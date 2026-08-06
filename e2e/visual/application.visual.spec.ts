@@ -16,6 +16,15 @@ async function installDesktop(page: Page, state: VisualState) {
             unregisterCallback: () => undefined
         }
         const script = 'extends Node\n\n\nfunc _ready() -> void:\n\tprint("ready")\n'
+        // Stand-ins for the editor's own class icons: one flat rounded square per class, so a
+        // snapshot shows the tree drawing what the editor sent rather than a real theme's artwork.
+        const FIXTURE_ICONS: Record<string, string> = {
+            Node2D: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQAgMAAABinRfyAAAADFBMVEUAAABam9Vam9Vam9VG6tLsAAAAA3RSTlMAKLP1Q4hCAAAAKUlEQVQI12NggAPG/f8cGNj//7/AwP3//wMG/v//P+AmwErAisHa4AAAKswhZ5Fmo6UAAAAASUVORK5CYII=',
+            CharacterBody2D:
+                'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQAgMAAABinRfyAAAADFBMVEUAAADVWlrVWlrVWlr8ciXIAAAAA3RSTlMAKLP1Q4hCAAAAKUlEQVQI12NggAPG/f8cGNj//7/AwP3//wMG/v//P+AmwErAisHa4AAAKswhZ5Fmo6UAAAAASUVORK5CYII=',
+            Camera2D:
+                'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQAgMAAABinRfyAAAADFBMVEUAAABa1X5a1X5a1X5tBuVgAAAAA3RSTlMAKLP1Q4hCAAAAKUlEQVQI12NggAPG/f8cGNj//7/AwP3//wMG/v//P+AmwErAisHa4AAAKswhZ5Fmo6UAAAAASUVORK5CYII='
+        }
         const settings = {
             version: 1,
             ai: {
@@ -101,7 +110,21 @@ async function installDesktop(page: Page, state: VisualState) {
                                             name: 'Player',
                                             type: 'CharacterBody2D',
                                             path: 'Main/Player',
-                                            children: []
+                                            children: [
+                                                {
+                                                    name: 'CollisionShapeForThePlayerBody',
+                                                    type: 'CollisionShape2D',
+                                                    path: 'Main/Player/CollisionShapeForThePlayerBody',
+                                                    children: [
+                                                        {
+                                                            name: 'DeeplyNestedMarkerNodeName',
+                                                            type: 'Marker2D',
+                                                            path: 'Main/Player/CollisionShapeForThePlayerBody/DeeplyNestedMarkerNodeName',
+                                                            children: []
+                                                        }
+                                                    ]
+                                                }
+                                            ]
                                         },
                                         {
                                             name: 'Camera',
@@ -113,6 +136,16 @@ async function installDesktop(page: Page, state: VisualState) {
                                 }
                             }
                         }
+                    if (call?.command === 'editor.get_class_icons') {
+                        const classes =
+                            (call as {params?: {classes?: string[]}}).params?.classes ?? []
+                        const icons: Record<string, string> = {}
+                        for (const name of classes) {
+                            const icon = FIXTURE_ICONS[name]
+                            if (icon) icons[name] = icon
+                        }
+                        return {id: 'fixture', result: {encoding: 'png-base64', icons}}
+                    }
                     if (call?.command === 'node.inspect')
                         return {
                             id: 'fixture',
@@ -278,12 +311,51 @@ test('script editor', async ({page}) => {
     await stableScreenshot(page, 'script-editor.png')
 })
 
+/**
+ * The row's own action, which only a real layout can prove.
+ *
+ * The button is drawn faint until its row is hovered, and it shares a row with a name that may be
+ * longer than the column is wide — both of which a component test, with no layout and no pointer,
+ * reports as passing however far off the panel the button has been pushed.
+ */
+test('raises the mention action on the row under the pointer', async ({page}) => {
+    await installDesktop(page, 'inspector')
+    await page.goto('/')
+    await page.getByRole('button', {name: 'Start editor session'}).click()
+    // The deepest row with the longest name: the one a row-width mistake takes out of reach first.
+    const action = page.getByRole('button', {
+        name: 'Mention DeeplyNestedMarkerNodeName in the message'
+    })
+    // The strength lives on the slot around the button, not on the button, which is always opaque.
+    const slot = action.locator('..')
+    // The pointer is left wherever the last click put it, which is inside this very panel.
+    await page.mouse.move(0, 0)
+    // Absent, not merely invisible: a hidden button that still holds its width leaves a gap in
+    // every row of the tree.
+    await expect(slot).toHaveCSS('opacity', '0')
+    await expect(slot).toHaveCSS('width', '0px')
+    await page.getByText('DeeplyNestedMarkerNodeName').hover()
+    await expect(slot).toHaveCSS('opacity', '1')
+    await expect(slot).not.toHaveCSS('width', '0px')
+    await expect(action).toBeVisible()
+    // The drawing itself, not just the button around it: a Heroicon handed over without a size
+    // renders at nothing in WebKit, which left this button present, hoverable and empty.
+    const glyph = await action.locator('svg').boundingBox()
+    expect(glyph?.width).toBeGreaterThan(8)
+    const box = await action.boundingBox()
+    const panel = await page.locator('.astryx-tree-list').boundingBox()
+    expect(box && panel && box.x + box.width).toBeLessThanOrEqual(
+        (panel?.x ?? 0) + (panel?.width ?? 0)
+    )
+})
+
 test('inspector workspace', async ({page}) => {
     await installDesktop(page, 'inspector')
     await page.goto('/')
     await expect(page.getByText('Local AI connected')).toBeVisible()
     await page.getByRole('button', {name: 'Start editor session'}).click()
-    await page.getByText('Player').click()
+    // The name is its own element now, so `Player` alone also matches the collision shape below it.
+    await page.getByText('Player', {exact: true}).click()
     await expect(
         page.getByRole('complementary', {name: 'Inspector'}).getByText('Main/Player')
     ).toBeVisible()

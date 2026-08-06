@@ -160,9 +160,15 @@ function Application() {
 
     return (
         <ApplicationContext value={context}>
+            {/*
+             * `section` paints the task list and the workspace with one surface and separates them
+             * with a hairline: 89.8% of the window measured as a single grey, so nothing told the
+             * eye where the frame ended and the work began. `elevated` drops the nav to the body
+             * colour and leaves the content on surface, which is the layering the ramp is for.
+             */}
             <AppShell
                 contentPadding={0}
-                variant='section'
+                variant='elevated'
                 sideNav={
                     <Navigation
                         page={page}

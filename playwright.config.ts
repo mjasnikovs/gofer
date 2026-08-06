@@ -10,7 +10,10 @@ export default defineConfig({
     use: {
         baseURL: 'http://127.0.0.1:1420',
         viewport: {width: 1280, height: 800},
-        colorScheme: 'light',
+        // The application follows the system and is developed and shipped dark. A light runner was
+        // measuring a screen nobody looks at: contrast, emphasis and every faint control read
+        // differently there, so a snapshot could pass while the real window was unreadable.
+        colorScheme: 'dark',
         locale: 'en-US',
         timezoneId: 'Europe/Riga',
         reducedMotion: 'reduce'

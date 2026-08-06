@@ -372,10 +372,17 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                                             }}
                                         />
                                     :   null}
+                                    {/*
+                                     * Emphasis follows whatever the screen is for. With no session
+                                     * there is only one thing to do, and starting it is already the
+                                     * primary; once a session is live the project controls are, and
+                                     * they were both rendering grey-on-grey, so a running workspace
+                                     * had no primary action at all.
+                                     */}
                                     <Button
                                         label={debug.isLaunched ? 'Stop project' : 'Run project'}
                                         size='sm'
-                                        variant={debug.isLaunched ? 'ghost' : 'secondary'}
+                                        variant={isOffline ? 'secondary' : 'primary'}
                                         isDisabled={isBusy || debug.isBusy}
                                         clickAction={debug.isLaunched ? stopProject : runProject}
                                     />

@@ -133,9 +133,20 @@ func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
     return {
         "name": node.name,
         "type": node.get_class(),
+        # The class whose icon the editor would draw. The game has no editor theme to read, so the
+        # name is all the running tree can carry: the editor side resolves it to artwork.
+        "icon": _runtime_icon_class(node),
         "path": str(node.get_path()),
         "children": children,
     }
+
+func _runtime_icon_class(node: Node) -> String:
+    var script: Variant = node.get_script()
+    if script is Script:
+        var global_name := (script as Script).get_global_name()
+        if not global_name.is_empty():
+            return global_name
+    return node.get_class()
 
 ## Reads named properties off one live node. Property values cross the wire tagged through the
 ## same encoder the editor plugin uses, so the renderer sees one representation.

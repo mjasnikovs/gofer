@@ -3,6 +3,7 @@ import type * as Monaco from 'monaco-editor'
 import {StackItem} from '@astryxdesign/core/Stack'
 import {languageForPath} from '../../services/monaco-gdscript'
 import {loadMonaco} from '../../services/monaco-runtime'
+import {GOFER_EDITOR_THEME} from '../../services/monaco-theme'
 import {
     modelUri,
     registerScriptProviders,
@@ -37,6 +38,7 @@ const EDITOR_HOST_STYLE = {minHeight: 0, width: '100%'} as const
 const MARKER_OWNER = 'gofer-lsp'
 
 const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
+    theme: GOFER_EDITOR_THEME,
     automaticLayout: true,
     glyphMargin: true,
     minimap: {enabled: false},

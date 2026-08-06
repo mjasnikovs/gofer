@@ -8,7 +8,7 @@ import {DropdownMenu} from '@astryxdesign/core/DropdownMenu'
 import {FormLayout} from '@astryxdesign/core/FormLayout'
 import {Grid} from '@astryxdesign/core/Grid'
 import {Icon} from '@astryxdesign/core/Icon'
-import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
+import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
 import {ProgressBar} from '@astryxdesign/core/ProgressBar'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
@@ -509,25 +509,6 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                     }}
                                                 />
                                             )}
-                                            <HStack
-                                                gap={3}
-                                                hAlign='end'
-                                            >
-                                                <Button
-                                                    label='Test connection'
-                                                    variant='secondary'
-                                                    isLoading={isTesting}
-                                                    isDisabled={isSaving}
-                                                    clickAction={testConnection}
-                                                />
-                                                <Button
-                                                    label='Save connection'
-                                                    variant='primary'
-                                                    isLoading={isSaving}
-                                                    isDisabled={isTesting}
-                                                    clickAction={save}
-                                                />
-                                            </HStack>
                                         </VStack>
                                     :   <Text color='secondary'>
                                             {isLoading ?
@@ -692,6 +673,41 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 </Grid>
                             </VStack>
                         </LayoutContent>
+                    }
+                    /*
+                     * The connection form is taller than the dialog at 1280x800, so an action row
+                     * that scrolled with its own section put Save below the fold with nothing on
+                     * screen to say there was more: the last field simply ran off the bottom edge.
+                     * Pinned here it is always reachable, and the divider gives the scrolling body
+                     * an end to slide under.
+                     */
+                    footer={
+                        draft ?
+                            <LayoutFooter
+                                hasDivider
+                                label='Connection actions'
+                            >
+                                <HStack
+                                    gap={3}
+                                    hAlign='end'
+                                >
+                                    <Button
+                                        label='Test connection'
+                                        variant='secondary'
+                                        isLoading={isTesting}
+                                        isDisabled={isSaving}
+                                        clickAction={testConnection}
+                                    />
+                                    <Button
+                                        label='Save connection'
+                                        variant='primary'
+                                        isLoading={isSaving}
+                                        isDisabled={isTesting}
+                                        clickAction={save}
+                                    />
+                                </HStack>
+                            </LayoutFooter>
+                        :   undefined
                     }
                 />
             </Dialog>

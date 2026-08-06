@@ -8,6 +8,9 @@ import App from './App'
 import {goferTheme} from './theme/gofer'
 import './theme/gofer-theme.css'
 import './theme/editor.css'
+import './theme/inputs.css'
+import './theme/rows.css'
+import './theme/toolbar.css'
 
 if (import.meta.env.MODE === 'webdriver') void import('@wdio/tauri-plugin')
 

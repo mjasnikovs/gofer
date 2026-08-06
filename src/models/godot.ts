@@ -85,8 +85,23 @@ export type GodotValue = Readonly<{
 export type GodotNode = Readonly<{
     name: string
     type: string
+    /**
+     * The class whose editor icon this node is drawn with — its own script class where it has one,
+     * its engine class otherwise. Older addons do not send it; the type stands in then.
+     */
+    icon?: string | undefined
     path: string
     children: readonly GodotNode[]
+}>
+
+/**
+ * Editor icons for the classes a tree asked about, PNG, base64, keyed by class name. A class the
+ * editor theme has no artwork for is absent rather than empty, and an addon too old to know the
+ * command answers without the map at all.
+ */
+export type GodotClassIcons = Readonly<{
+    encoding: 'png-base64'
+    icons?: Readonly<Record<string, string>> | undefined
 }>
 
 export type GodotSceneTree = Readonly<{

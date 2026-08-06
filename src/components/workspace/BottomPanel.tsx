@@ -3,6 +3,7 @@ import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {IconButton} from '@astryxdesign/core/IconButton'
+import {Icon} from '@astryxdesign/core/Icon'
 import {ChevronDownIcon, ChevronUpIcon} from '@heroicons/react/24/outline'
 import {Divider} from '@astryxdesign/core/Divider'
 import {Item} from '@astryxdesign/core/Item'
@@ -269,7 +270,15 @@ export function BottomPanel({
                     <HStack paddingInline={2}>
                         <IconButton
                             label={isCollapsed ? 'Show panel' : 'Hide panel'}
-                            icon={isCollapsed ? <ChevronUpIcon /> : <ChevronDownIcon />}
+                            // Through `Icon`, which sizes the drawing: a bare Heroicon has only a
+                            // `viewBox`, and WebKit — what the desktop renders in — draws that at
+                            // nothing, leaving an empty button where the chevron should be.
+                            icon={
+                                <Icon
+                                    icon={isCollapsed ? ChevronUpIcon : ChevronDownIcon}
+                                    size='sm'
+                                />
+                            }
                             size='sm'
                             variant='ghost'
                             aria-expanded={!isCollapsed}

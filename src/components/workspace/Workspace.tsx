@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
@@ -12,6 +12,9 @@ import {useAiConnection} from '../../hooks/useAiConnection'
 import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useChatPersistence} from '../../hooks/useChatPersistence'
 import {useToolApprovals} from '../../hooks/useToolApprovals'
+import {ChatReferenceContext} from '../../hooks/useChatReferences'
+import {appendReference} from '../../utils/chat-references'
+import type {ChatReference} from '../../utils/chat-references'
 import {ChatConversation} from './ChatConversation'
 import {InspectorWorkspace} from './InspectorWorkspace'
 import {ToolApprovalDialog} from './ToolApprovalDialog'
@@ -373,6 +376,16 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         setDraftAttachments(previous => previous.filter(item => item.id !== attachmentId))
     }, [])
 
+    // Every panel below the header can name what it shows in the message being written.
+    const references = useMemo(
+        () => ({
+            add: (reference: ChatReference) => {
+                setDraft(previous => appendReference(previous, reference))
+            }
+        }),
+        []
+    )
+
     const composer = (
         <WorkspaceComposer
             attachmentInputRef={attachmentInputRef}
@@ -457,10 +470,12 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             />
             <Divider />
             <StackItem size='fill'>
-                <InspectorWorkspace
-                    chat={chat}
-                    onError={reportError}
-                />
+                <ChatReferenceContext.Provider value={references}>
+                    <InspectorWorkspace
+                        chat={chat}
+                        onError={reportError}
+                    />
+                </ChatReferenceContext.Provider>
             </StackItem>
             <ToolApprovalDialog
                 onRespond={respondToApproval}

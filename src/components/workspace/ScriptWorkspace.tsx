@@ -170,9 +170,17 @@ export function ScriptWorkspace({scripts, reveal, onError}: ScriptWorkspaceProps
                 label='Script actions'
                 size='sm'
                 startContent={
+                    /*
+                     * The path is the one thing in this row that can afford to lose characters, and
+                     * it was the one thing refusing to: at 359 px of panel it held its full width
+                     * and pushed `Close` off the panel's own edge, cutting the word in half. It
+                     * gives way first now, and the tooltip that comes with truncation keeps the
+                     * whole path reachable.
+                     */
                     <Text
                         type='supporting'
                         color='secondary'
+                        maxLines={1}
                     >
                         {activeBuffer?.path ?? 'No script open'}
                     </Text>
