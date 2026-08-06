@@ -66,5 +66,13 @@ try {
     }
 } finally {
     await new Promise(resolveClose => modelServer.close(resolveClose))
-    rmSync(fixtureRoot, {recursive: true, force: true})
+    // Windows releases a directory handle after the process holding it exits, not with it, so a
+    // worktree the editor session just closed can still be locked here. The retries wait that out.
+    // Housekeeping a temporary directory is not the journey's verdict, though: if the directory
+    // survives, say so and leave the exit code the specs earned rather than throwing over it.
+    try {
+        rmSync(fixtureRoot, {recursive: true, force: true, maxRetries: 10, retryDelay: 200})
+    } catch (error) {
+        console.warn(`Could not remove ${fixtureRoot}: ${String(error)}`)
+    }
 }

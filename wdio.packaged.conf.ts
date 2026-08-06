@@ -75,6 +75,11 @@ function prepareWorkspace() {
     git('init', '--quiet', '--initial-branch', 'main')
     git('config', 'user.email', 'packaged@gofer.test')
     git('config', 'user.name', 'Gofer packaged journey')
+    // Git for Windows installs `core.autocrlf=true`, which would check every task worktree out
+    // with CRLF and leave the journey's script assertions measuring Git's line-ending policy
+    // instead of the round trip through the editor. The fixture hands back the bytes it committed.
+    git('config', 'core.autocrlf', 'false')
+    git('config', 'core.eol', 'lf')
     git('add', '--all')
     git('commit', '--quiet', '--message', 'Godot fixture project')
 }
