@@ -1,6 +1,13 @@
 import {Channel, invoke as tauriInvoke, isTauri as tauriIsTauri} from '@tauri-apps/api/core'
 import {listen as tauriListen} from '@tauri-apps/api/event'
 import type {EventCallback, UnlistenFn} from '@tauri-apps/api/event'
+/*
+ * The picker's own option type, from the plugin that defines it. The command is invoked directly
+ * rather than through the plugin's `open()` so that the test driver intercepts it like every other
+ * desktop call — but the payload shape is the plugin's to declare, not this file's to guess at.
+ * The package is a devDependency: nothing here imports its runtime.
+ */
+import type {OpenDialogOptions} from '@tauri-apps/plugin-dialog'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import type {TaskSummary} from '../models/app'
 import type {HealthRemedyRequest, HealthReport} from '../models/health'
@@ -61,7 +68,7 @@ type CommandSpec<Arguments, Response> = Readonly<{
 
 type ChatMessageInput = Pick<Message, 'sender' | 'text' | 'timestamp' | 'attachments'>
 
-type SendAiMessageRequest = Readonly<{
+export type SendAiMessageRequest = Readonly<{
     requestId: number
     taskId?: string | undefined
     agentMessages: readonly unknown[]
@@ -109,17 +116,6 @@ type StoredChatPayload = Omit<StoredChat, 'taskId'>
         taskId?: string | undefined
     }>
 
-/**
- * The system file picker, invoked directly rather than through @tauri-apps/plugin-dialog so that
- * the test driver intercepts it like every other desktop call.
- */
-type OpenDialogOptions = Readonly<{
-    directory: boolean
-    multiple: false
-    title: string
-    defaultPath?: string | undefined
-}>
-
 type DesktopCommandMap = Readonly<{
     activate_chat_task: CommandSpec<{taskId: string}, StoredChat>
     apply_health_remedy: CommandSpec<{request: HealthRemedyRequest}, HealthReport>
@@ -131,7 +127,6 @@ type DesktopCommandMap = Readonly<{
     check_workspace_health: CommandSpec<undefined, HealthReport>
     close_script_document: CommandSpec<{request: OpenScriptRequest}, void>
     create_chat_task: CommandSpec<undefined, StoredChat>
-    'plugin:dialog|open': CommandSpec<{options: OpenDialogOptions}, string | null>
     create_project_backup: CommandSpec<undefined, BackupResult>
     delete_chat_task: CommandSpec<{taskId: string}, StoredChat>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
@@ -150,6 +145,7 @@ type DesktopCommandMap = Readonly<{
     merge_task_worktree: CommandSpec<{taskId: string}, unknown>
     move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
     open_script_document: CommandSpec<{request: OpenScriptRequest}, ScriptDocument>
+    'plugin:dialog|open': CommandSpec<{options: OpenDialogOptions}, string | null>
     query_godot_docs: CommandSpec<{request: DocsQuery}, DocsResponse>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
     read_godot_logs: CommandSpec<{query: GodotLogQuery}, GodotLogPage>
@@ -164,7 +160,11 @@ type DesktopCommandMap = Readonly<{
         {request: GodotLogSearchRequest},
         readonly GodotLogSearchHit[]
     >
-    send_ai_message: CommandSpec<{request: SendAiMessageRequest}, void>
+    // The turn's deltas ride this channel: they are high-rate, ordered, and tied to this one call.
+    send_ai_message: CommandSpec<
+        {request: SendAiMessageRequest; stream: Channel<AiStreamPayload>},
+        void
+    >
     start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionSummary>
     stop_godot_session: CommandSpec<undefined, void>
     subscribe_godot_events: CommandSpec<{events: Channel<GodotSessionEvent>}, void>
@@ -181,7 +181,6 @@ type DesktopCommandMap = Readonly<{
 }>
 
 type DesktopEventMap = Readonly<{
-    'ai-stream-event': AiStreamPayload
     'ai-approval-request': ToolApprovalPrompt
     'ai-approval-settled': ToolApprovalSettled
     'godot-session-event': GodotSessionEvent

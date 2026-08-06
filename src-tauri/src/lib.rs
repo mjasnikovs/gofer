@@ -1,4 +1,5 @@
 use base64::Engine;
+use command_error::CommandError;
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,12 +9,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 
 pub mod addon;
 mod ai_tools;
 mod approvals;
 mod cancel;
+mod command_error;
 mod debug;
 mod files;
 mod gdformat;
@@ -90,6 +92,10 @@ static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_AI_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 type SharedChildProcess = Arc<Mutex<Box<dyn process::ChildProcess>>>;
 static AI_CHILD: Mutex<Option<SharedChildProcess>> = Mutex::new(None);
+/// The stream the running turn writes to. Held here so that `cancel_ai_request` — a command of its
+/// own, with no channel of its own — can report the abort down the same ordered stream the deltas
+/// rode, rather than out of band where it could arrive before the text it ends.
+static AI_STREAM: Mutex<Option<tauri::ipc::Channel<AiStreamPayload>>> = Mutex::new(None);
 static KEYRING_INITIALIZATION: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -334,6 +340,9 @@ impl Drop for AiRequestGuard {
         if let Ok(mut active) = AI_CHILD.lock() {
             *active = None;
         }
+        if let Ok(mut stream) = AI_STREAM.lock() {
+            *stream = None;
+        }
         AI_REQUEST_RUNNING.store(false, Ordering::Release);
     }
 }
@@ -390,20 +399,21 @@ impl Default for AiSettings {
 }
 
 #[tauri::command]
-async fn load_settings(app: AppHandle) -> Result<SettingsResponse, String> {
+async fn load_settings(app: AppHandle) -> Result<SettingsResponse, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let settings = read_settings(&app)?;
         Ok(settings_response(settings))
     })
     .await
     .map_err(|error| format!("Could not load Gofer settings: {error}"))?
+    .map_err(CommandError::coded("settings_unreadable"))
 }
 
 #[tauri::command]
 async fn save_settings(
     app: AppHandle,
     request: SettingsRequest,
-) -> Result<SettingsResponse, String> {
+) -> Result<SettingsResponse, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let settings = validate_settings(request.settings)?;
         if matches!(&request.api_key, ApiKeyUpdate::Keep) {
@@ -422,6 +432,7 @@ async fn save_settings(
     })
     .await
     .map_err(|error| format!("Could not save Gofer settings: {error}"))?
+    .map_err(CommandError::coded("settings_unwritable"))
 }
 
 /// A validated settings payload paired with a ready-to-send request to its models endpoint.
@@ -469,8 +480,14 @@ async fn prepare_models_request(
 }
 
 #[tauri::command]
-async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestResult, String> {
-    run_connection_test(request, AI_REQUEST_TIMEOUT).await
+async fn test_ai_connection(
+    request: SettingsRequest,
+) -> Result<ConnectionTestResult, CommandError> {
+    run_connection_test(request, AI_REQUEST_TIMEOUT)
+        .await
+        // Retryable: an AI server that is not up yet is the ordinary case here, and the user has
+        // nothing to change before pressing the button again.
+        .map_err(|message| CommandError::new("ai_unreachable", message).retryable())
 }
 
 async fn run_connection_test(
@@ -531,7 +548,13 @@ async fn run_connection_test(
 }
 
 #[tauri::command]
-async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, String> {
+async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, CommandError> {
+    list_ai_models_with(request)
+        .await
+        .map_err(|message| CommandError::new("ai_unreachable", message).retryable())
+}
+
+async fn list_ai_models_with(request: SettingsRequest) -> Result<Vec<AiModelOption>, String> {
     let ModelsRequest { settings, builder } =
         prepare_models_request(request, AI_REQUEST_TIMEOUT).await?;
     let response = builder
@@ -579,17 +602,34 @@ async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, 
         .collect())
 }
 
+/// Streams one turn of the conversation.
+///
+/// The deltas ride a channel rather than an event: they are high-rate, they are tied to this one
+/// invocation, and text assembled out of order is corrupt text.
 #[tauri::command]
-async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), String> {
+async fn send_ai_message(
+    app: AppHandle,
+    request: ChatRequest,
+    stream: tauri::ipc::Channel<AiStreamPayload>,
+) -> Result<(), CommandError> {
     if AI_REQUEST_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return Err("Another AI response is already in progress".to_owned());
+        // A turn already running is a state, not a fault: the renderer draws it as the composer
+        // being busy rather than as a failed request, which is what the code is for.
+        return Err(CommandError::new(
+            "ai_request_in_progress",
+            "Another AI response is already in progress",
+        )
+        .retryable());
     }
     let guard = AiRequestGuard;
     ACTIVE_AI_REQUEST_ID.store(request.request_id, Ordering::Release);
     AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+    *AI_STREAM
+        .lock()
+        .map_err(|_| "The AI stream lock is poisoned".to_owned())? = Some(stream.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
         validate_agent_messages(&request.agent_messages)?;
@@ -607,6 +647,7 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
         let completion = run_ai_worker(
             &app,
             request.request_id,
+            &stream,
             AiWorkerRequest {
                 settings: settings.ai,
                 api_key,
@@ -622,6 +663,7 @@ async fn send_ai_message(app: AppHandle, request: ChatRequest) -> Result<(), Str
     })
     .await
     .map_err(|error| format!("AI response task failed: {error}"))?
+    .map_err(CommandError::coded("ai_request_failed"))
 }
 
 #[tauri::command(async)]
@@ -728,13 +770,19 @@ fn merge_task_worktree(app: AppHandle, task_id: String) -> Result<MergeTaskResul
 }
 
 #[tauri::command(async)]
-fn create_project_backup(app: AppHandle) -> Result<BackupResult, String> {
-    project_storage(&app)?.create_backup()
+fn create_project_backup(app: AppHandle) -> Result<BackupResult, CommandError> {
+    project_storage(&app)
+        .and_then(|storage| storage.create_backup())
+        .map_err(CommandError::coded("storage_unavailable"))
 }
 
 #[tauri::command(async)]
-fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, String> {
-    let storage = project_storage(&app)?;
+fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, CommandError> {
+    run_storage_maintenance_in(&app).map_err(CommandError::coded("storage_unavailable"))
+}
+
+fn run_storage_maintenance_in(app: &AppHandle) -> Result<MaintenanceResult, String> {
+    let storage = project_storage(app)?;
     let mut result = storage.run_maintenance()?;
     result.memory_embeddings_restored = backfill_memory_embeddings(&storage);
     Ok(result)
@@ -1106,12 +1154,12 @@ fn active_workspace<R: Runtime>(app: &AppHandle<R>) -> Result<files::Workspace, 
 }
 
 #[tauri::command(async)]
-fn cancel_ai_request(app: AppHandle, request_id: u64) -> Result<bool, String> {
-    cancel_ai_request_with(&app, request_id)
+fn cancel_ai_request(request_id: u64) -> Result<bool, String> {
+    cancel_ai_request_with(request_id)
 }
 
 // coverage-critical-start: cancellation
-fn cancel_ai_request_with<R: Runtime>(app: &AppHandle<R>, request_id: u64) -> Result<bool, String> {
+fn cancel_ai_request_with(request_id: u64) -> Result<bool, String> {
     if ACTIVE_AI_REQUEST_ID.load(Ordering::Acquire) != request_id {
         return Ok(false);
     }
@@ -1134,38 +1182,48 @@ fn cancel_ai_request_with<R: Runtime>(app: &AppHandle<R>, request_id: u64) -> Re
             .kill()
             .map_err(|error| format!("Could not stop the AI agent: {error}"))?;
     }
-    app.emit_to(
-        "main",
-        "ai-stream-event",
-        AiStreamPayload {
-            request_id,
-            event: serde_json::json!({"type": "aborted"}),
-        },
-    )
-    .map_err(|error| format!("Could not report the cancelled AI request: {error}"))?;
+    // No stream means no turn is streaming — a cancellation with nobody left to tell is not a
+    // failure, it is the idle case the test suite exercises.
+    let stream = AI_STREAM
+        .lock()
+        .map_err(|_| "The AI stream lock is poisoned".to_owned())?
+        .clone();
+    if let Some(stream) = stream {
+        stream
+            .send(AiStreamPayload {
+                request_id,
+                event: serde_json::json!({"type": "aborted"}),
+            })
+            .map_err(|error| format!("Could not report the cancelled AI request: {error}"))?;
+    }
     Ok(true)
 }
 // coverage-critical-end: cancellation
 
 #[tauri::command]
-async fn get_rag_cache_status() -> Result<rag::CacheStatus, String> {
+async fn get_rag_cache_status() -> Result<rag::CacheStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(rag::cache_status)
         .await
         .map_err(|error| format!("Could not inspect the Gofer RAG cache: {error}"))?
+        .map_err(CommandError::coded("models_unavailable"))
 }
 
 #[tauri::command]
-async fn delete_rag_cache() -> Result<rag::CacheStatus, String> {
+async fn delete_rag_cache() -> Result<rag::CacheStatus, CommandError> {
     tauri::async_runtime::spawn_blocking(rag::delete_cache)
         .await
         .map_err(|error| format!("Could not delete the Gofer RAG cache: {error}"))?
+        .map_err(CommandError::coded("models_unavailable"))
 }
 
 #[tauri::command]
-async fn initialize_rag(app: AppHandle) -> Result<(), String> {
+async fn initialize_rag(app: AppHandle) -> Result<(), CommandError> {
     tauri::async_runtime::spawn_blocking(move || rag::run_initialization(|| rag::run_warmup(&app)))
         .await
         .map_err(|error| format!("Gofer RAG initialization task failed: {error}"))?
+        // A half-written cache and a download that timed out both come back here. Retrying is
+        // worth offering for either: the splash already does, and the code is what lets it.
+        .map_err(|message| CommandError::new("models_unavailable", message).retryable())
 }
 
 #[tauri::command]
@@ -1949,14 +2007,16 @@ fn resolve_api_key(update: &ApiKeyUpdate) -> Result<Option<String>, String> {
 fn run_ai_worker(
     app: &AppHandle,
     request_id: u64,
+    stream: &tauri::ipc::Channel<AiStreamPayload>,
     request: AiWorkerRequest,
 ) -> Result<String, String> {
-    run_ai_worker_with(app, request_id, request, &SystemProcessSpawner)
+    run_ai_worker_with(app, request_id, stream, request, &SystemProcessSpawner)
 }
 
 fn run_ai_worker_with<R: Runtime>(
     app: &AppHandle<R>,
     request_id: u64,
+    stream: &tauri::ipc::Channel<AiStreamPayload>,
     request: AiWorkerRequest,
     spawner: &impl ProcessSpawner,
 ) -> Result<String, String> {
@@ -2025,12 +2085,9 @@ fn run_ai_worker_with<R: Runtime>(
                     .unwrap_or_default()
                     .to_owned();
             }
-            app.emit_to(
-                "main",
-                "ai-stream-event",
-                AiStreamPayload { request_id, event },
-            )
-            .map_err(|error| format!("Could not stream the AI response: {error}"))?;
+            stream
+                .send(AiStreamPayload { request_id, event })
+                .map_err(|error| format!("Could not stream the AI response: {error}"))?;
         }
         Ok(())
     };
@@ -2550,6 +2607,25 @@ mod tests {
         }
     }
 
+    /// Stands in for the renderer's channel, keeping what the turn streamed so a test can read it
+    /// back in the order it was sent.
+    fn recording_stream() -> (
+        tauri::ipc::Channel<AiStreamPayload>,
+        Arc<Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&sent);
+        let channel = tauri::ipc::Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(json) = body
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&json)
+            {
+                recorded.lock().expect("stream record lock").push(value);
+            }
+            Ok(())
+        });
+        (channel, sent)
+    }
+
     #[derive(Default)]
     struct FakeCredentialStore {
         value: Mutex<Option<String>>,
@@ -2606,6 +2682,51 @@ mod tests {
         }
     }
 
+    /// The window is granted exactly the commands it registers.
+    ///
+    /// These are two hand-maintained lists in two languages, and the build cannot reconcile them:
+    /// `generate_handler!` decides what exists, `permissions/main-window-commands.toml` decides
+    /// what the renderer may call, and a name in one and not the other is either a command nobody
+    /// can reach or a grant for a command that is gone. Both are read out of the files themselves
+    /// so that adding a command in one place and forgetting the other fails here.
+    #[test]
+    fn the_window_is_granted_exactly_the_commands_it_registers() {
+        let source = include_str!("lib.rs");
+        let handler = source
+            .split_once("builder.invoke_handler(tauri::generate_handler![")
+            .expect("the application registers its commands")
+            .1
+            .split_once("]);")
+            .expect("the command list is closed")
+            .0;
+        let mut registered: Vec<&str> = handler
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        registered.sort_unstable();
+
+        let permissions = include_str!("../permissions/main-window-commands.toml");
+        let allowed_block = permissions
+            .split_once("commands.allow = [")
+            .expect("the permission set allows commands")
+            .1
+            .split_once(']')
+            .expect("the allow list is closed")
+            .0;
+        let mut allowed: Vec<&str> = allowed_block
+            .split(',')
+            .map(|entry| entry.trim().trim_matches('"'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        allowed.sort_unstable();
+
+        assert_eq!(
+            registered, allowed,
+            "generate_handler! and permissions/main-window-commands.toml disagree"
+        );
+    }
+
     #[test]
     fn injected_node_worker_streams_events_and_reports_lifecycle_failures() {
         let _test = AI_TEST_LOCK.lock().expect("AI test lock");
@@ -2620,21 +2741,32 @@ mod tests {
         ]
         .join("\n");
         let spawner = FakeProcessSpawner::new(&output, "", true);
+        let (stream, streamed) = recording_stream();
         assert_eq!(
-            run_ai_worker_with(app.handle(), 7, worker_request(), &spawner)
+            run_ai_worker_with(app.handle(), 7, &stream, worker_request(), &spawner)
                 .expect("fake AI completion"),
             "Hello"
         );
+        // The deltas ride the channel, in the order the worker wrote them and tagged with the turn
+        // they belong to — the whole reason they are not on the event bus.
+        let sent = streamed.lock().expect("stream record lock").clone();
+        let types: Vec<&str> = sent
+            .iter()
+            .map(|payload| payload["event"]["type"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(types, ["text-delta", "tool-start", "tool-end", "done"]);
+        assert!(sent.iter().all(|payload| payload["requestId"] == 7));
 
         let incomplete = FakeProcessSpawner::new("unrelated output\n", "", true);
         assert_eq!(
-            run_ai_worker_with(app.handle(), 8, worker_request(), &incomplete).unwrap_err(),
+            run_ai_worker_with(app.handle(), 8, &stream, worker_request(), &incomplete)
+                .unwrap_err(),
             "Pi AI worker exited without completing the response"
         );
 
         let invalid = FakeProcessSpawner::new("GOFER_AI_EVENT:not-json\n", "", true);
         assert!(
-            run_ai_worker_with(app.handle(), 9, worker_request(), &invalid)
+            run_ai_worker_with(app.handle(), 9, &stream, worker_request(), &invalid)
                 .unwrap_err()
                 .contains("invalid event")
         );
@@ -2642,12 +2774,12 @@ mod tests {
         AI_REQUEST_CANCELLED.store(false, Ordering::Release);
         let failed = FakeProcessSpawner::new("", "provider failed\n", false);
         assert_eq!(
-            run_ai_worker_with(app.handle(), 10, worker_request(), &failed).unwrap_err(),
+            run_ai_worker_with(app.handle(), 10, &stream, worker_request(), &failed).unwrap_err(),
             "Pi AI request failed: provider failed"
         );
         let silent_failure = FakeProcessSpawner::new("", "", false);
         assert!(
-            run_ai_worker_with(app.handle(), 10, worker_request(), &silent_failure)
+            run_ai_worker_with(app.handle(), 10, &stream, worker_request(), &silent_failure)
                 .unwrap_err()
                 .contains("exit status: 1")
         );
@@ -2658,7 +2790,7 @@ mod tests {
             written: Arc::new(Mutex::new(Vec::new())),
         };
         assert!(
-            run_ai_worker_with(app.handle(), 10, worker_request(), &missing)
+            run_ai_worker_with(app.handle(), 10, &stream, worker_request(), &missing)
                 .unwrap_err()
                 .contains("Could not start the Pi AI worker")
         );
@@ -2666,7 +2798,7 @@ mod tests {
         AI_REQUEST_CANCELLED.store(true, Ordering::Release);
         let cancelled = FakeProcessSpawner::new("", "killed", false);
         assert_eq!(
-            run_ai_worker_with(app.handle(), 11, worker_request(), &cancelled)
+            run_ai_worker_with(app.handle(), 11, &stream, worker_request(), &cancelled)
                 .expect("cancelled worker"),
             ""
         );
@@ -2688,9 +2820,10 @@ mod tests {
         ]
         .join("\n");
         let spawner = FakeProcessSpawner::new(&output, "", true);
+        let (stream, _streamed) = recording_stream();
 
         assert_eq!(
-            run_ai_worker_with(app.handle(), 21, worker_request(), &spawner)
+            run_ai_worker_with(app.handle(), 21, &stream, worker_request(), &spawner)
                 .expect("fake AI completion"),
             "Done"
         );
@@ -2726,10 +2859,11 @@ mod tests {
         ]
         .join("\n");
         let spawner = FakeProcessSpawner::new(&output, "", true);
+        let (stream, _streamed) = recording_stream();
 
         let started = std::time::Instant::now();
         assert_eq!(
-            run_ai_worker_with(app.handle(), 23, worker_request(), &spawner)
+            run_ai_worker_with(app.handle(), 23, &stream, worker_request(), &spawner)
                 .expect("fake AI completion"),
             "Asked"
         );
@@ -2747,9 +2881,10 @@ mod tests {
         let _test = AI_TEST_LOCK.lock().expect("AI test lock");
         let app = mock_app();
         let spawner = FakeProcessSpawner::new("GOFER_AI_TOOL:not-json\n", "", true);
+        let (stream, _streamed) = recording_stream();
 
         assert!(
-            run_ai_worker_with(app.handle(), 22, worker_request(), &spawner)
+            run_ai_worker_with(app.handle(), 22, &stream, worker_request(), &spawner)
                 .unwrap_err()
                 .contains("invalid tool request")
         );
@@ -2759,12 +2894,17 @@ mod tests {
     #[test]
     fn cancellation_handles_mismatched_idle_and_active_ai_requests() {
         let _test = AI_TEST_LOCK.lock().expect("AI test lock");
-        let app = mock_app();
         ACTIVE_AI_REQUEST_ID.store(40, Ordering::Release);
-        assert!(!cancel_ai_request_with(app.handle(), 41).expect("mismatched cancellation"));
+        assert!(!cancel_ai_request_with(41).expect("mismatched cancellation"));
 
+        // No turn is streaming, so there is no channel to report the abort on: cancelling anyway
+        // has to succeed rather than fail on the missing stream.
+        *AI_STREAM.lock().expect("AI stream lock") = None;
         *AI_CHILD.lock().expect("AI child lock") = None;
-        assert!(cancel_ai_request_with(app.handle(), 40).expect("idle cancellation"));
+        assert!(cancel_ai_request_with(40).expect("idle cancellation"));
+
+        let (stream, streamed) = recording_stream();
+        *AI_STREAM.lock().expect("AI stream lock") = Some(stream);
 
         let killed = Arc::new(AtomicBool::new(false));
         *AI_CHILD.lock().expect("AI child lock") =
@@ -2779,9 +2919,15 @@ mod tests {
                 },
                 killed: Arc::clone(&killed),
             }))));
-        assert!(cancel_ai_request_with(app.handle(), 40).expect("active cancellation"));
+        assert!(cancel_ai_request_with(40).expect("active cancellation"));
         assert!(killed.load(AtomicOrdering::Acquire));
         assert!(AI_REQUEST_CANCELLED.load(Ordering::Acquire));
+        // The abort goes down the turn's own stream, behind whatever text it interrupted.
+        let sent = streamed.lock().expect("stream record lock").clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["requestId"], 40);
+        assert_eq!(sent[0]["event"]["type"], "aborted");
+        *AI_STREAM.lock().expect("AI stream lock") = None;
         *AI_CHILD.lock().expect("AI child lock") = None;
         ACTIVE_AI_REQUEST_ID.store(0, Ordering::Release);
         AI_REQUEST_CANCELLED.store(false, Ordering::Release);
@@ -3524,7 +3670,12 @@ mod tests {
             .unwrap_err();
         server.join().expect("invalid response request");
 
-        assert!(error.contains("invalid OpenAI models response"));
+        assert_eq!(error.code, "ai_unreachable");
+        assert!(
+            error.retryable,
+            "the server can be fixed and the button pressed again"
+        );
+        assert!(error.message.contains("invalid OpenAI models response"));
     }
 
     #[tokio::test]
@@ -3561,6 +3712,7 @@ mod tests {
             list_ai_models(request(base_url, "custom"))
                 .await
                 .unwrap_err()
+                .message
                 .contains("HTTP 500")
         );
         server.join().expect("failed model list request");
@@ -3570,6 +3722,7 @@ mod tests {
             list_ai_models(request(base_url, "custom"))
                 .await
                 .unwrap_err()
+                .message
                 .contains("invalid OpenAI models response")
         );
         server.join().expect("invalid model list request");

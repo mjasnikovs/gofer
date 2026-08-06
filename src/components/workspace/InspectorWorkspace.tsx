@@ -287,6 +287,7 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
             scenePath={scenePath}
             selection={selection}
             sceneEpoch={sceneEpoch}
+            onStartSession={startSession}
         />
     )
 

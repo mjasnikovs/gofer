@@ -4,7 +4,15 @@ import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {IconButton} from '@astryxdesign/core/IconButton'
 import {Icon} from '@astryxdesign/core/Icon'
-import {ChevronDownIcon, ChevronUpIcon} from '@heroicons/react/24/outline'
+import ChevronDownIcon from '@heroicons/react/24/outline/ChevronDownIcon'
+import ChevronUpIcon from '@heroicons/react/24/outline/ChevronUpIcon'
+import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon'
+import ArrowDownRightIcon from '@heroicons/react/24/outline/ArrowDownRightIcon'
+import ArrowUpRightIcon from '@heroicons/react/24/outline/ArrowUpRightIcon'
+import ArrowUturnRightIcon from '@heroicons/react/24/outline/ArrowUturnRightIcon'
+import PauseIcon from '@heroicons/react/24/outline/PauseIcon'
+import PlayIcon from '@heroicons/react/24/outline/PlayIcon'
+import StopIcon from '@heroicons/react/24/outline/StopIcon'
 import {Divider} from '@astryxdesign/core/Divider'
 import {Item} from '@astryxdesign/core/Item'
 import {SegmentedControl, SegmentedControlItem} from '@astryxdesign/core/SegmentedControl'
@@ -148,6 +156,13 @@ export function BottomPanel({
                     :   'Not running'}
                 </Text>
             }
+            /*
+             * Seven actions in a row that is a fraction of a 1280 px window: labelled, the row
+             * measured wider than the panel and `Terminate` was cut off by its right edge. Launch
+             * keeps its label because it is the one the toolbar is for; the six that follow it are
+             * the transport controls every debugger draws as icons, and each carries its label as
+             * its tooltip and its accessible name.
+             */
             endContent={
                 <HStack gap={1}>
                     <Button
@@ -162,6 +177,9 @@ export function BottomPanel({
                         label='Continue'
                         size='sm'
                         variant='ghost'
+                        isIconOnly
+                        icon={<Icon icon={PlayIcon} />}
+                        tooltip='Continue'
                         isDisabled={!debug.stopped || debug.isBusy}
                         clickAction={() => {
                             void debug.resume('continue')
@@ -171,6 +189,9 @@ export function BottomPanel({
                         label='Pause'
                         size='sm'
                         variant='ghost'
+                        isIconOnly
+                        icon={<Icon icon={PauseIcon} />}
+                        tooltip='Pause'
                         isDisabled={!debug.isLaunched || Boolean(debug.stopped) || debug.isBusy}
                         clickAction={() => {
                             void debug.pause()
@@ -180,6 +201,9 @@ export function BottomPanel({
                         label='Step over'
                         size='sm'
                         variant='ghost'
+                        isIconOnly
+                        icon={<Icon icon={ArrowUturnRightIcon} />}
+                        tooltip='Step over'
                         isDisabled={!debug.stopped || debug.isBusy}
                         clickAction={() => {
                             void debug.resume('stepOver')
@@ -189,6 +213,9 @@ export function BottomPanel({
                         label='Step in'
                         size='sm'
                         variant='ghost'
+                        isIconOnly
+                        icon={<Icon icon={ArrowDownRightIcon} />}
+                        tooltip='Step in'
                         isDisabled={!debug.stopped || debug.isBusy}
                         clickAction={() => {
                             void debug.resume('stepIn')
@@ -198,6 +225,9 @@ export function BottomPanel({
                         label='Step out'
                         size='sm'
                         variant='ghost'
+                        isIconOnly
+                        icon={<Icon icon={ArrowUpRightIcon} />}
+                        tooltip='Step out'
                         isDisabled={!debug.stopped || debug.isBusy}
                         clickAction={() => {
                             void debug.resume('stepOut')
@@ -207,6 +237,9 @@ export function BottomPanel({
                         label='Terminate'
                         size='sm'
                         variant='ghost'
+                        isIconOnly
+                        icon={<Icon icon={StopIcon} />}
+                        tooltip='Terminate'
                         isDisabled={!debug.isLaunched || debug.isBusy}
                         clickAction={() => {
                             void debug.terminate()
@@ -492,10 +525,7 @@ export function BottomPanel({
                                                 }
                                                 isLabelHidden
                                                 size='sm'
-                                                placeholder={
-                                                    scope === 'history' ? 'Search recorded output'
-                                                    :   'Filter output'
-                                                }
+                                                startIcon={MagnifyingGlassIcon}
                                                 value={contains}
                                                 hasClear
                                                 onChange={setContains}

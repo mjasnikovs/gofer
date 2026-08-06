@@ -12,6 +12,7 @@ import {
     workspacePathFromUri
 } from '../../services/monaco-lsp'
 import {callScriptLanguage} from '../../services/script-session'
+import {commandErrorMessage} from '../../utils/command-error'
 import type {ScriptDiagnostic, ScriptPosition} from '../../models/script'
 import type {ScriptBuffer} from '../../hooks/useScriptBuffers'
 import {GDSCRIPT_LANGUAGE_ID} from '../../services/monaco-gdscript'
@@ -86,7 +87,7 @@ export function ScriptEditor({
 
     const reportError = useCallback(
         (error: unknown) => {
-            onError(`The language server request failed: ${String(error)}`)
+            onError(`The language server request failed: ${commandErrorMessage(error)}`)
         },
         [onError]
     )
@@ -98,7 +99,7 @@ export function ScriptEditor({
                 if (!cancelled) setMonaco(loaded)
             })
             .catch((error: unknown) => {
-                onError(`The code editor could not be loaded: ${String(error)}`)
+                onError(`The code editor could not be loaded: ${commandErrorMessage(error)}`)
             })
         return () => {
             cancelled = true

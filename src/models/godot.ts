@@ -4,6 +4,8 @@
  * `src-tauri/src/godot_session.rs`, and `src-tauri/addon/protocol.gd`.
  */
 
+import type {CommandError} from './errors'
+
 export type GodotSessionState =
     | 'offline'
     | 'staging'
@@ -155,14 +157,11 @@ export type GodotSessionStatus = Readonly<{
     canRedo: boolean
 }>
 
-/** The structured failure every Godot session command rejects with. */
-export type GodotError = Readonly<{
-    code: string
-    message: string
-    retryable: boolean
-    readiness?: string | undefined
-    details?: Readonly<Record<string, unknown>> | undefined
-}>
+/**
+ * The structured failure every Godot session command rejects with — the same shape every other
+ * command now uses, kept under this name where the code being read is a session code.
+ */
+export type GodotError = CommandError
 
 export type GodotLogSeverity = 'info' | 'warning' | 'error'
 

@@ -2,9 +2,11 @@ import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
-import {invoke, isTauri, listen} from '../../services/desktop'
+import {invoke, isTauri} from '../../services/desktop'
+import {sendAiMessage} from '../../services/ai-stream'
+import {commandErrorMessage, toCommandError} from '../../utils/command-error'
 import type {TaskSummary} from '../../models/app'
-import type {ChatAttachment, DraftAttachment, Message} from '../../models/chat'
+import type {AiStreamPayload, ChatAttachment, DraftAttachment, Message} from '../../models/chat'
 import {messageUsage} from '../../utils/chat-format'
 import {attachmentData} from '../../services/chat-storage'
 import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS} from '../../models/settings'
@@ -13,6 +15,8 @@ import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useChatPersistence} from '../../hooks/useChatPersistence'
 import {useToolApprovals} from '../../hooks/useToolApprovals'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
+import {ComposerContext} from '../../hooks/useComposer'
+import type {Composer} from '../../hooks/useComposer'
 import {appendReference} from '../../utils/chat-references'
 import type {ChatReference} from '../../utils/chat-references'
 import {ChatConversation} from './ChatConversation'
@@ -67,7 +71,6 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     const [streamError, setStreamError] = useState<string>()
     const nextRequestId = useRef(1)
     const activeRequestId = useRef<number | undefined>(undefined)
-    const attachmentInputRef = useRef<HTMLInputElement>(null)
     const messageScrollRef = useRef<HTMLElement>(null)
 
     const reportError = useCallback((message: string) => {
@@ -84,9 +87,14 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         setAgentMessages,
         taskId,
         takeMessageId,
+        isChatLoaded,
         isMounted
     } = useChatPersistence({onError: reportError, onTasksChanged})
-    const {attachmentPreviews, addPreviews} = useAttachmentPreviews({messages, isMounted})
+    const {attachmentPreviews, addPreviews} = useAttachmentPreviews({
+        messages,
+        isChatLoaded,
+        isMounted
+    })
     const {settings, models, connectionState, connect, applyModel, applyThinkingLevel} =
         useAiConnection({onError: reportError, onConnected: clearError})
     const {approvals, respond: respondToApproval} = useToolApprovals({onError: reportError})
@@ -95,6 +103,11 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         scrollRef: messageScrollRef,
         enabled: messages.length > 0
     })
+
+    const conversation = useRef(messages)
+    useEffect(() => {
+        conversation.current = messages
+    }, [messages])
 
     useEffect(() => {
         chatScroll.scrollIfLocked()
@@ -140,89 +153,89 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             setStreamError(undefined)
             setIsStreaming(true)
 
+            const receive = (payload: AiStreamPayload) => {
+                if (payload.requestId !== requestId) return
+                const event = payload.event
+                if (event.type === 'text-delta') {
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...message,
+                        text: message.text + event.delta
+                    }))
+                }
+                if (event.type === 'thinking-delta') {
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...message,
+                        thinking: (message.thinking ?? '') + event.delta
+                    }))
+                }
+                if (event.type === 'tool-start') {
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...message,
+                        tools: [
+                            ...(message.tools ?? []),
+                            {
+                                id: event.id,
+                                name: event.name,
+                                status: 'running',
+                                startedAt: event.startedAt,
+                                ...(event.target && {target: event.target})
+                            }
+                        ]
+                    }))
+                }
+                if (event.type === 'tool-update' || event.type === 'tool-end') {
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...message,
+                        tools: (message.tools ?? []).map(tool =>
+                            tool.id === event.id ?
+                                {
+                                    ...tool,
+                                    output: event.output,
+                                    ...(event.type === 'tool-end' && {
+                                        status:
+                                            event.isError ?
+                                                ('error' as const)
+                                            :   ('complete' as const),
+                                        endedAt: event.endedAt
+                                    })
+                                }
+                            :   tool
+                        )
+                    }))
+                }
+                if (event.type === 'usage') {
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...message,
+                        usage: event.usage,
+                        model: event.model
+                    }))
+                }
+                if (event.type === 'done') {
+                    setAgentMessages(event.agentMessages)
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...message,
+                        text: event.text || message.text,
+                        usage: event.usage,
+                        model: event.model,
+                        status: 'complete',
+                        ...((event.thinking || message.thinking) && {
+                            thinking: event.thinking || message.thinking
+                        })
+                    }))
+                }
+                if (event.type === 'aborted') {
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...settleRunningTools(message, 'Stopped before it finished.'),
+                        text: message.text || 'Generation stopped.',
+                        status: 'aborted'
+                    }))
+                }
+            }
+
             const run = async () => {
-                let unlisten: (() => void) | undefined
                 try {
-                    unlisten = await listen('ai-stream-event', received => {
-                        if (received.payload.requestId !== requestId) return
-                        const event = received.payload.event
-                        if (event.type === 'text-delta') {
-                            updateAssistant(assistantMessage.id, message => ({
-                                ...message,
-                                text: message.text + event.delta
-                            }))
-                        }
-                        if (event.type === 'thinking-delta') {
-                            updateAssistant(assistantMessage.id, message => ({
-                                ...message,
-                                thinking: (message.thinking ?? '') + event.delta
-                            }))
-                        }
-                        if (event.type === 'tool-start') {
-                            updateAssistant(assistantMessage.id, message => ({
-                                ...message,
-                                tools: [
-                                    ...(message.tools ?? []),
-                                    {
-                                        id: event.id,
-                                        name: event.name,
-                                        status: 'running',
-                                        startedAt: event.startedAt,
-                                        ...(event.target && {target: event.target})
-                                    }
-                                ]
-                            }))
-                        }
-                        if (event.type === 'tool-update' || event.type === 'tool-end') {
-                            updateAssistant(assistantMessage.id, message => ({
-                                ...message,
-                                tools: (message.tools ?? []).map(tool =>
-                                    tool.id === event.id ?
-                                        {
-                                            ...tool,
-                                            output: event.output,
-                                            ...(event.type === 'tool-end' && {
-                                                status:
-                                                    event.isError ?
-                                                        ('error' as const)
-                                                    :   ('complete' as const),
-                                                endedAt: event.endedAt
-                                            })
-                                        }
-                                    :   tool
-                                )
-                            }))
-                        }
-                        if (event.type === 'usage') {
-                            updateAssistant(assistantMessage.id, message => ({
-                                ...message,
-                                usage: event.usage,
-                                model: event.model
-                            }))
-                        }
-                        if (event.type === 'done') {
-                            setAgentMessages(event.agentMessages)
-                            updateAssistant(assistantMessage.id, message => ({
-                                ...message,
-                                text: event.text || message.text,
-                                usage: event.usage,
-                                model: event.model,
-                                status: 'complete',
-                                ...((event.thinking || message.thinking) && {
-                                    thinking: event.thinking || message.thinking
-                                })
-                            }))
-                        }
-                        if (event.type === 'aborted') {
-                            updateAssistant(assistantMessage.id, message => ({
-                                ...settleRunningTools(message, 'Stopped before it finished.'),
-                                text: message.text || 'Generation stopped.',
-                                status: 'aborted'
-                            }))
-                        }
-                    })
-                    await invoke('send_ai_message', {
-                        request: {
+                    await sendAiMessage(
+                        {
                             requestId,
                             taskId,
                             agentMessages,
@@ -232,14 +245,23 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                                 timestamp: message.timestamp,
                                 attachments: message.attachments ?? []
                             }))
-                        }
-                    })
+                        },
+                        receive
+                    )
                 } catch (error) {
-                    const message = String(error)
-                    setStreamError(message)
+                    const failure = toCommandError(error)
+                    setStreamError(failure.message)
                     updateAssistant(assistantMessage.id, entry => ({
                         ...settleRunningTools(entry, 'The turn ended before this call finished.'),
-                        text: entry.text || 'The AI response could not be completed.',
+                        // A turn refused because one was already running never reached the model,
+                        // so the bubble says that rather than claiming an answer was attempted.
+                        // That distinction is the whole point of the backend answering with a code
+                        // instead of a sentence.
+                        text:
+                            entry.text
+                            || (failure.code === 'ai_request_in_progress' ?
+                                'Gofer is still working on the previous message.'
+                            :   'The AI response could not be completed.'),
                         status: 'error'
                     }))
                 } finally {
@@ -248,7 +270,6 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     updateAssistant(assistantMessage.id, entry =>
                         settleRunningTools(entry, 'The turn ended before this call finished.')
                     )
-                    unlisten?.()
                     if (activeRequestId.current === requestId) activeRequestId.current = undefined
                     setIsStreaming(false)
                 }
@@ -295,7 +316,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                 }))
             )
         } catch (error) {
-            setStreamError(`The images could not be attached: ${String(error)}`)
+            setStreamError(`The images could not be attached: ${commandErrorMessage(error)}`)
         } finally {
             setIsSavingAttachments(false)
         }
@@ -336,9 +357,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             setDraftAttachments(previous => [...previous, ...attachments])
             setStreamError(undefined)
         } catch (error) {
-            setStreamError(`The images could not be read: ${String(error)}`)
-        } finally {
-            if (attachmentInputRef.current) attachmentInputRef.current.value = ''
+            setStreamError(`The images could not be read: ${commandErrorMessage(error)}`)
         }
     }
 
@@ -353,28 +372,67 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         try {
             await onMergeTask()
         } catch (error) {
-            setStreamError(`The task could not be merged: ${String(error)}`)
+            setStreamError(`The task could not be merged: ${commandErrorMessage(error)}`)
         }
     }
 
-    const retry = (assistantId: number) => {
-        const assistantIndex = messages.findIndex(message => message.id === assistantId)
-        const userMessage = messages[assistantIndex - 1]
-        if (assistantIndex < 1 || userMessage?.sender !== 'user') return
-        runRequest(userMessage.text, messages.slice(0, assistantIndex - 1), userMessage.attachments)
-    }
+    /**
+     * Retry is handed to every message in the conversation, so it has to keep its identity between
+     * renders or `ConversationMessage`'s memo never holds: a callback redefined per token
+     * re-renders the whole conversation per token. The history it replays comes from a ref rather
+     * than from `messages`, which is a new array on every delta.
+     */
+    const retry = useCallback(
+        (assistantId: number) => {
+            const history = conversation.current
+            const assistantIndex = history.findIndex(message => message.id === assistantId)
+            const userMessage = history[assistantIndex - 1]
+            if (assistantIndex < 1 || userMessage?.sender !== 'user') return
+            runRequest(
+                userMessage.text,
+                history.slice(0, assistantIndex - 1),
+                userMessage.attachments
+            )
+        },
+        [runRequest]
+    )
 
     const usage = messageUsage(messages)
-    const contextWindow = settings?.ai.contextWindow ?? DEFAULT_CONTEXT_WINDOW
-    const selectedModel = settings?.ai.modelName ?? settings?.ai.model ?? 'Loading model…'
-    const thinkingLevel = settings?.ai.thinkingLevel ?? 'off'
-    const thinkingLevels = settings?.ai.reasoning ? ALL_THINKING_LEVELS : NO_THINKING_LEVELS
     const supportsImages = Boolean(settings?.ai.input.includes('image'))
-    const canAttachImages = supportsImages && !isStreaming && !isSavingAttachments && isTauri()
 
     const removeAttachment = useCallback((attachmentId: string) => {
         setDraftAttachments(previous => previous.filter(item => item.id !== attachmentId))
     }, [])
+
+    const composerValue: Composer = {
+        state: {
+            draft,
+            draftAttachments,
+            selectedModel: settings?.ai.modelName ?? settings?.ai.model ?? 'Loading model…',
+            thinkingLevel: settings?.ai.thinkingLevel ?? 'off',
+            usage,
+            ...(streamError && {streamError})
+        },
+        actions: {
+            applyModel,
+            applyThinkingLevel,
+            changeDraft: setDraft,
+            removeAttachment,
+            selectAttachments,
+            stop,
+            submit: submitMessage
+        },
+        meta: {
+            canAttachImages: supportsImages && !isStreaming && !isSavingAttachments && isTauri(),
+            contextWindow: settings?.ai.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+            isSavingAttachments,
+            isStreaming,
+            models,
+            supportsImages,
+            thinkingLevels: settings?.ai.reasoning ? ALL_THINKING_LEVELS : NO_THINKING_LEVELS,
+            ...(settings && {settings})
+        }
+    }
 
     // Every panel below the header can name what it shows in the message being written.
     const references = useMemo(
@@ -386,32 +444,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         []
     )
 
-    const composer = (
-        <WorkspaceComposer
-            attachmentInputRef={attachmentInputRef}
-            canAttachImages={canAttachImages}
-            contextWindow={contextWindow}
-            draft={draft}
-            draftAttachments={draftAttachments}
-            isSavingAttachments={isSavingAttachments}
-            isStreaming={isStreaming}
-            models={models}
-            selectedModel={selectedModel}
-            supportsImages={supportsImages}
-            thinkingLevel={thinkingLevel}
-            thinkingLevels={thinkingLevels}
-            usage={usage}
-            onApplyModel={applyModel}
-            onApplyThinkingLevel={applyThinkingLevel}
-            onChangeDraft={setDraft}
-            onRemoveAttachment={removeAttachment}
-            onSelectAttachments={selectAttachments}
-            onStop={stop}
-            onSubmit={submitMessage}
-            {...(settings && {settings})}
-            {...(streamError && {streamError})}
-        />
-    )
+    const composer = <WorkspaceComposer />
 
     const chat =
         messages.length === 0 ?
@@ -456,31 +489,33 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             </StackItem>
 
     return (
-        <VStack
-            gap={0}
-            height='100%'
-        >
-            <WorkspaceHeader
-                connectionState={connectionState}
-                onConnect={connect}
-                onMergeTask={() => {
-                    void mergeTask()
-                }}
-                {...(activeTask && {activeTask})}
-            />
-            <Divider />
-            <StackItem size='fill'>
-                <ChatReferenceContext.Provider value={references}>
-                    <InspectorWorkspace
-                        chat={chat}
-                        onError={reportError}
-                    />
-                </ChatReferenceContext.Provider>
-            </StackItem>
-            <ToolApprovalDialog
-                onRespond={respondToApproval}
-                {...(approvals[0] && {prompt: approvals[0]})}
-            />
-        </VStack>
+        <ComposerContext value={composerValue}>
+            <VStack
+                gap={0}
+                height='100%'
+            >
+                <WorkspaceHeader
+                    connectionState={connectionState}
+                    onConnect={connect}
+                    onMergeTask={() => {
+                        void mergeTask()
+                    }}
+                    {...(activeTask && {activeTask})}
+                />
+                <Divider />
+                <StackItem size='fill'>
+                    <ChatReferenceContext.Provider value={references}>
+                        <InspectorWorkspace
+                            chat={chat}
+                            onError={reportError}
+                        />
+                    </ChatReferenceContext.Provider>
+                </StackItem>
+                <ToolApprovalDialog
+                    onRespond={respondToApproval}
+                    {...(approvals[0] && {prompt: approvals[0]})}
+                />
+            </VStack>
+        </ComposerContext>
     )
 }

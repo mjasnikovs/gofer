@@ -476,10 +476,13 @@ impl StorageSlot {
 
 impl ProjectStorage {
     pub fn open(data_root: &Path, workspace_path: &Path) -> Result<Self, String> {
+        // Neither sentence names a path: the data root is Gofer's own application directory and
+        // the workspace is the one the user already has open, so a host path in the message is
+        // detail the user cannot act on and the renderer has no reason to print.
         fs::create_dir_all(data_root)
-            .map_err(|error| format!("Could not create {}: {error}", data_root.display()))?;
+            .map_err(|error| format!("Could not create the Gofer data directory: {error}"))?;
         let canonical_path = paths::canonical(workspace_path)
-            .map_err(|error| format!("Could not resolve {}: {error}", workspace_path.display()))?;
+            .map_err(|error| format!("Could not resolve the workspace directory: {error}"))?;
         let catalog_path = data_root.join(CATALOG_FILE_NAME);
         let catalog = open_connection(&catalog_path)?;
         migrate(&catalog, CATALOG_SCHEMA, 1)?;
@@ -1073,7 +1076,7 @@ impl ProjectStorage {
             .parent()
             .ok_or_else(|| "The Godot log path has no parent".to_owned())?;
         fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+            .map_err(|error| format!("Could not create the Godot log directory: {error}"))?;
         let mut json_lines = Vec::new();
         for entry in &request.entries {
             serde_json::to_writer(&mut json_lines, entry)

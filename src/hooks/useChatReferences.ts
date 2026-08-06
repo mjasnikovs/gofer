@@ -1,4 +1,4 @@
-import {createContext, useContext} from 'react'
+import {createContext, use} from 'react'
 import type {ChatReference} from '../utils/chat-references'
 
 /**
@@ -16,5 +16,5 @@ export type ChatReferenceSink = Readonly<{
 export const ChatReferenceContext = createContext<ChatReferenceSink | undefined>(undefined)
 
 export function useChatReferences(): ChatReferenceSink | undefined {
-    return useContext(ChatReferenceContext)
+    return use(ChatReferenceContext)
 }

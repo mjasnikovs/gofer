@@ -10,14 +10,25 @@ export default defineConfig({
     use: {
         baseURL: 'http://127.0.0.1:1420',
         viewport: {width: 1280, height: 800},
-        // The application follows the system and is developed and shipped dark. A light runner was
-        // measuring a screen nobody looks at: contrast, emphasis and every faint control read
-        // differently there, so a snapshot could pass while the real window was unreadable.
-        colorScheme: 'dark',
         locale: 'en-US',
         timezoneId: 'Europe/Riga',
         reducedMotion: 'reduce'
     },
+    /*
+     * Two runs of the same screens, one per colour scheme.
+     *
+     * `src/main.tsx` renders `<Theme mode='system'>`, so the mode is the desktop's, not Gofer's.
+     * Pinning the runner to dark measured the half of the users the developers happen to be in and
+     * left the other half with a theme no baseline had ever looked at — which is where the one
+     * violation the gate carried lived.
+     *
+     * The interaction test is dark only: it measures a row's geometry and its hover strength, and
+     * neither depends on the palette. Running it twice would only double what it costs.
+     */
+    projects: [
+        {name: 'dark', use: {colorScheme: 'dark'}},
+        {name: 'light', use: {colorScheme: 'light'}, grepInvert: /@interaction/u}
+    ],
     webServer: {
         command: 'npm run dev -- --host 127.0.0.1',
         url: 'http://127.0.0.1:1420',

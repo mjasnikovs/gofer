@@ -7,24 +7,50 @@ export const goferTheme = defineTheme({
     radius: {base: 4, multiplier: 0.25},
     tokens: {
         /*
-         * Three roles, three lightnesses. Making disabled text readable by lifting it onto
-         * secondary's exact value bought legibility with meaning: a placeholder, a field's own
-         * label, an inactive tab and a static caption all rendered #d4d4d4, so "Ask anything" read
-         * as a sentence the user had typed. Each step here clears the twelve-point role distance,
-         * and disabled still holds 4.7:1 on the panel surface, which is more than the neutral
-         * theme's own #525252 ever did.
+         * Three roles, three lightnesses.
+         *
+         * Making disabled text readable by lifting it onto secondary's exact value bought
+         * legibility with meaning: a placeholder, a field's own label, an inactive tab and a static
+         * caption all rendered #d4d4d4, so "Ask anything" read as a sentence the user had typed.
+         * Every step here clears the twelve-point role distance the gate measures.
+         *
+         * The weakest role is not decoration — Astryx spends it on a tool call's target, which is
+         * the one place a chat message says *what* the agent ran — so it holds 4.5:1 on every
+         * surface it can land on, from the frame at the bottom of the ramp to the popover at the
+         * top. That is what moved both values when the surfaces below them moved: the light pair
+         * had to go darker together, because a weaker role that clears 4.5:1 on a panel one shade
+         * off white is only three points from the role above it unless that one moves too.
          */
-        '--color-text-secondary': ['#525252', '#c2c2c2'],
-        '--color-text-disabled': ['#7d7d7d', '#8f8f8f'],
+        '--color-text-secondary': ['#454545', '#c2c2c2'],
+        '--color-text-disabled': ['#636363', '#a1a1a1'],
+        /*
+         * The four surfaces, in the order Astryx documents them: body → surface → card → popover,
+         * each one visibly above the last.
+         *
+         * Inherited, the top three collapsed. Dark put card and popover on #1b1b1b — the frame
+         * colour, *below* the panel — so a dropdown opened darker than the panel it covered. Light
+         * put surface, card and popover all on #ffffff, which left a floating menu separated from
+         * the page by a hairline and nothing else.
+         *
+         * Light is the awkward half: nothing can be lighter than white, so a ramp that ends at
+         * white has to start below it. The panels give up pure white and the popover keeps it,
+         * which is the only arrangement in which the documented order can be expressed at all.
+         * Every step here is about 3.5 L*, just over the gate's three.
+         */
+        '--color-background-body': ['#e1e1e1', '#1b1b1b'],
+        '--color-background-surface': ['#ebebeb', '#262626'],
+        '--color-background-card': ['#f5f5f5', '#2e2e2e'],
+        '--color-background-popover': ['#ffffff', '#363636'],
         /*
          * Every rule in the window — the panel dividers, the header's underline, a card's outline —
          * is drawn with this one token, and the neutral theme spends it as a translucent white that
          * composites to #3c3c3c on the panel surface: 1.37:1, which is a line you can only find if
          * you already know it is there. These are solid so the gate can measure them, and both land
          * at 3:1 on the surface they are drawn on, the bar WCAG 1.4.11 sets for a boundary a user
-         * has to find in order to work a control.
+         * has to find in order to work a control. The light value darkened with the panel beneath
+         * it: the same grey that cleared 3:1 on white is 2.5:1 on #ebebeb.
          */
-        '--color-border': ['#949494', '#6f6f6f'],
+        '--color-border': ['#868686', '#6f6f6f'],
         /*
          * The edge a user has to find in order to type in a box. At #525252 on the panel it was
          * 1.93:1, under WCAG 1.4.11, and it has to stay clearly stronger than the plain rule above

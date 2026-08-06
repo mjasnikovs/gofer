@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useState} from 'react'
 import {invoke, isTauri, listen} from '../services/desktop'
+import {commandErrorMessage} from '../utils/command-error'
 import type {ToolApprovalPrompt} from '../models/chat'
 
 type ToolApprovalOptions = Readonly<{
@@ -58,7 +59,7 @@ export function useToolApprovals({onError}: ToolApprovalOptions) {
             setApprovals(previous => previous.filter(prompt => prompt.approvalId !== approvalId))
             void invoke('respond_tool_approval', {request: {approvalId, approved}}).catch(
                 (error: unknown) => {
-                    onError(`The approval could not be sent: ${String(error)}`)
+                    onError(`The approval could not be sent: ${commandErrorMessage(error)}`)
                 }
             )
         },

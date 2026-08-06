@@ -1,5 +1,10 @@
 import {useCallback, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
+import {Icon} from '@astryxdesign/core/Icon'
+import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
+import CameraIcon from '@heroicons/react/24/outline/CameraIcon'
+import StopIcon from '@heroicons/react/24/outline/StopIcon'
+import ViewfinderCircleIcon from '@heroicons/react/24/outline/ViewfinderCircleIcon'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
@@ -7,6 +12,9 @@ import {toGodotError} from '../../services/godot-session'
 import type {GodotError, GodotFrame, GodotSessionState} from '../../models/godot'
 import type {GodotCall} from '../../models/workspace'
 import {PanelState} from './PanelState'
+
+/** The capture is the game's own resolution; the panel is whatever the user dragged it to. */
+const CAPTURE_FRAME_STYLE = {maxWidth: '100%', height: 'auto'} as const
 
 type GameViewProps = Readonly<{
     call: GodotCall
@@ -79,6 +87,10 @@ export function GameView({call, state}: GameViewProps) {
                         :   'No frame captured'}
                     </Text>
                 }
+                /*
+                 * Run keeps its label; the four beside it do not fit one in a panel this narrow.
+                 * Each carries its label as its tooltip and its accessible name.
+                 */
                 endContent={
                     <HStack gap={1}>
                         <Button
@@ -93,6 +105,9 @@ export function GameView({call, state}: GameViewProps) {
                             label='Restart'
                             size='sm'
                             variant='ghost'
+                            isIconOnly
+                            icon={<Icon icon={ArrowPathIcon} />}
+                            tooltip='Restart'
                             isDisabled={isOffline || isBusy}
                             clickAction={() => {
                                 run('runtime.restart')
@@ -102,6 +117,9 @@ export function GameView({call, state}: GameViewProps) {
                             label='Stop'
                             size='sm'
                             variant='ghost'
+                            isIconOnly
+                            icon={<Icon icon={StopIcon} />}
+                            tooltip='Stop'
                             isDisabled={isOffline || isBusy}
                             clickAction={() => {
                                 run('runtime.stop')
@@ -111,6 +129,9 @@ export function GameView({call, state}: GameViewProps) {
                             label='Capture game'
                             size='sm'
                             variant='ghost'
+                            isIconOnly
+                            icon={<Icon icon={CameraIcon} />}
+                            tooltip='Capture game'
                             isDisabled={isOffline || isBusy}
                             clickAction={() => {
                                 run('runtime.capture')
@@ -120,6 +141,9 @@ export function GameView({call, state}: GameViewProps) {
                             label='Capture editor'
                             size='sm'
                             variant='ghost'
+                            isIconOnly
+                            icon={<Icon icon={ViewfinderCircleIcon} />}
+                            tooltip='Capture editor'
                             isDisabled={isOffline || isBusy}
                             clickAction={() => {
                                 run('runtime.capture', 'editor')
@@ -147,7 +171,7 @@ export function GameView({call, state}: GameViewProps) {
                                 alt={`The ${capture.source === 'editor' ? 'editor viewport' : 'running game'}, captured at ${new Date(capture.at).toLocaleTimeString()}`}
                                 width={capture.frame.width}
                                 height={capture.frame.height}
-                                style={{maxWidth: '100%', height: 'auto'}}
+                                style={CAPTURE_FRAME_STYLE}
                             />
                         </VStack>
                     :   null}

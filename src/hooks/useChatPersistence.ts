@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
 import {invoke, isTauri} from '../services/desktop'
+import {commandErrorMessage} from '../utils/command-error'
 import type {Message, StoredChat} from '../models/chat'
 import {
     clearLegacyChat,
@@ -50,7 +51,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
                     if (isMounted.current) onTasksChanged?.()
                 } catch (error) {
                     if (isMounted.current)
-                        onError(`Chat history could not be saved: ${String(error)}`)
+                        onError(`Chat history could not be saved: ${commandErrorMessage(error)}`)
                 }
             }
         } finally {
@@ -86,7 +87,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
                 setMessages(legacy.messages)
                 setAgentMessages(legacy.agentMessages)
                 nextMessageId.current = nextStoredMessageId(legacy.messages)
-                onError(`Chat history could not be loaded: ${String(error)}`)
+                onError(`Chat history could not be loaded: ${commandErrorMessage(error)}`)
             } finally {
                 if (!isCancelled) setIsChatLoaded(true)
             }
@@ -125,6 +126,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
         setAgentMessages,
         taskId,
         takeMessageId,
+        isChatLoaded,
         isMounted
     }
 }

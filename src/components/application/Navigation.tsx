@@ -15,6 +15,7 @@ import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
 import PlusIcon from '@heroicons/react/24/outline/PlusIcon'
 import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
 import TrashIcon from '@heroicons/react/24/outline/TrashIcon'
+import {preloadSettingsPage, preloadWorkspace} from '../../app/routes-preload'
 import type {Page, TaskSummary} from '../../models/app'
 
 type NavigationProps = Readonly<{
@@ -54,6 +55,14 @@ function TaskRow({task, isSelected, onOpenTask, onDeleteTask}: TaskRowProps) {
                     label={task.title}
                     href={`#/tasks/${encodeURIComponent(task.id)}`}
                     isSelected={isSelected}
+                    // The workspace chunk starts downloading while the pointer is still on its way
+                    // to the click, rather than after it.
+                    onMouseEnter={() => {
+                        void preloadWorkspace()
+                    }}
+                    onFocus={() => {
+                        void preloadWorkspace()
+                    }}
                     onClick={event => {
                         event.preventDefault()
                         onOpenTask(task.id)
@@ -124,6 +133,12 @@ export function Navigation({
                             icon={Cog6ToothIcon}
                             href='#/settings'
                             isSelected={page === 'settings'}
+                            onMouseEnter={() => {
+                                void preloadSettingsPage()
+                            }}
+                            onFocus={() => {
+                                void preloadSettingsPage()
+                            }}
                             onClick={event => {
                                 event.preventDefault()
                                 onNavigate('settings')

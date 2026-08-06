@@ -74,6 +74,12 @@ function read(tokens, mode, name) {
     return pair && HEX.test(pair[mode]) ? pair[mode] : undefined
 }
 
+/**
+ * Two roles far enough apart to read as two, in whichever direction.
+ *
+ * Use this where only the size of the gap carries meaning — a value against its supporting text,
+ * the accent against body text. Where the order carries meaning too, use `ascent`.
+ */
 function separation({tokens, rule, mode, from, to, minimum, why}) {
     const one = read(tokens, mode, from)
     const other = read(tokens, mode, to)
@@ -85,6 +91,39 @@ function separation({tokens, rule, mode, from, to, minimum, why}) {
         rule,
         mode,
         detail: `${from} (${one}) and ${to} (${other}) are ${distance.toFixed(1)} L* apart, need ${String(minimum)}`,
+        why
+    }
+}
+
+/**
+ * One step up the surface ramp: `to` has to be both far enough from `from` and above it.
+ *
+ * An unsigned distance passes a ramp that runs backwards, which is how dark mode shipped a popover
+ * five points *below* the panel it floats over and the gate saw nothing. Astryx documents the order
+ * — body → surface → card → popover, each level above the previous — so the order is measurable and
+ * a step in the wrong direction is a violation of the same rule, not a separate one.
+ */
+function ascent({tokens, rule, mode, from, to, minimum, why}) {
+    const one = read(tokens, mode, from)
+    const other = read(tokens, mode, to)
+    if (one === undefined || other === undefined) return undefined
+    const rise = lightness(other) - lightness(one)
+    if (rise >= minimum) return undefined
+    const id = `${rule}:${mode}:${from}:${to}`
+    if (rise <= 0) {
+        return {
+            id,
+            rule,
+            mode,
+            detail: `${to} (${other}) is ${Math.abs(rise).toFixed(1)} L* below ${from} (${one}), and has to be ${String(minimum)} above it`,
+            why
+        }
+    }
+    return {
+        id,
+        rule,
+        mode,
+        detail: `${to} (${other}) is only ${rise.toFixed(1)} L* above ${from} (${one}), need ${String(minimum)}`,
         why
     }
 }
@@ -132,7 +171,7 @@ export function findViolations(tokens) {
                 minimum: MIN_ROLE_DISTANCE,
                 why: 'a placeholder reads as text the user typed'
             }),
-            separation({
+            ascent({
                 tokens,
                 rule: 'surface-ramp',
                 mode,
@@ -141,14 +180,23 @@ export function findViolations(tokens) {
                 minimum: MIN_SURFACE_DISTANCE,
                 why: 'panels and the frame behind them read as one flat sheet'
             }),
-            separation({
+            ascent({
                 tokens,
                 rule: 'surface-ramp',
                 mode,
                 from: '--color-background-surface',
+                to: '--color-background-card',
+                minimum: MIN_SURFACE_DISTANCE,
+                why: 'a card is the panel it sits on, with a hairline drawn round it'
+            }),
+            ascent({
+                tokens,
+                rule: 'surface-ramp',
+                mode,
+                from: '--color-background-card',
                 to: '--color-background-popover',
                 minimum: MIN_SURFACE_DISTANCE,
-                why: 'a popover does not read as floating over the panel it covers'
+                why: 'a popover does not read as floating over what it covers'
             }),
             separation({
                 tokens,

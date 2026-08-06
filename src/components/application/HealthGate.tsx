@@ -153,9 +153,10 @@ export function HealthGate({onReady}: HealthGateProps) {
                             gap={6}
                             hAlign='stretch'
                         >
+                            {/* One axis, the same one the splash uses. */}
                             <VStack
                                 gap={3}
-                                hAlign='center'
+                                hAlign='start'
                             >
                                 <Icon
                                     icon={WrenchScrewdriverIcon}
@@ -164,7 +165,7 @@ export function HealthGate({onReady}: HealthGateProps) {
                                 />
                                 <VStack
                                     gap={1}
-                                    hAlign='center'
+                                    hAlign='start'
                                 >
                                     <Heading
                                         level={1}

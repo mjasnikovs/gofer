@@ -97,18 +97,63 @@ test('a border below 3:1 against its surface fails the boundary rule', () => {
     assert.match(violations[0].detail, /1\.94:1, need 3:1/)
 })
 
-test('surfaces that differ by an edge alone still pass', () => {
+test('a surface that never rises above the one below it is reported per step', () => {
     const violations = findViolations(
         theme({
             '--color-background-body': ['#f1f1f1', '#1b1b1b'],
             '--color-background-surface': ['#ffffff', '#262626'],
-            '--color-background-popover': ['#ffffff', '#2f2f2f']
+            '--color-background-card': ['#ffffff', '#2f2f2f'],
+            '--color-background-popover': ['#ffffff', '#383838']
         })
     )
     assert.deepEqual(
         violations.map(violation => violation.id),
-        ['surface-ramp:light:--color-background-surface:--color-background-popover']
+        [
+            'surface-ramp:light:--color-background-surface:--color-background-card',
+            'surface-ramp:light:--color-background-card:--color-background-popover'
+        ]
     )
+    assert.match(violations[0].why, /a card is the panel it sits on/)
+})
+
+test('a popover below the panel it floats over fails, however far below', () => {
+    // The unsigned distance this replaced passed both of these: the ramp ran backwards by more
+    // than the three points a forwards ramp needs.
+    const violations = findViolations(
+        theme({
+            '--color-background-body': ['#f1f1f1', '#1b1b1b'],
+            '--color-background-surface': ['#ffffff', '#262626'],
+            '--color-background-card': ['#f5f5f5', '#1b1b1b'],
+            '--color-background-popover': ['#ffffff', '#1b1b1b']
+        })
+    )
+    const dark = violations.filter(violation => violation.mode === 'dark')
+    assert.deepEqual(
+        dark.map(violation => violation.id),
+        [
+            'surface-ramp:dark:--color-background-surface:--color-background-card',
+            'surface-ramp:dark:--color-background-card:--color-background-popover'
+        ]
+    )
+    assert.match(dark[0].detail, /5\.4 L\* below --color-background-surface/)
+    // Equal is a failure too, and it is reported as the zero-rise case rather than a short one.
+    assert.match(dark[1].detail, /0\.0 L\* below --color-background-card/)
+})
+
+test('surfaces a short step apart are reported as short, not as inverted', () => {
+    const violations = findViolations(
+        theme({
+            '--color-background-body': ['#e1e1e1', '#1b1b1b'],
+            '--color-background-surface': ['#e5e5e5', '#262626'],
+            '--color-background-card': ['#f5f5f5', '#303030'],
+            '--color-background-popover': ['#ffffff', '#383838']
+        })
+    )
+    assert.deepEqual(
+        violations.map(violation => violation.id),
+        ['surface-ramp:light:--color-background-body:--color-background-surface']
+    )
+    assert.match(violations[0].detail, /only 1\.4 L\* above/)
 })
 
 test('a rule stays silent when the theme has no such token', () => {

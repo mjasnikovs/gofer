@@ -311,6 +311,7 @@ export function ScriptWorkspace({scripts, reveal, onError}: ScriptWorkspaceProps
                     />
                     <Button
                         label='Apply to buffer'
+                        variant='primary'
                         isDisabled={!formatPreview?.changed}
                         clickAction={() => {
                             if (formatPreview) applyFormat(formatPreview)
@@ -358,6 +359,7 @@ export function ScriptWorkspace({scripts, reveal, onError}: ScriptWorkspaceProps
                         />
                         <Button
                             label='Preview rename'
+                            variant='primary'
                             isDisabled={(renameTarget?.name ?? '').trim() === ''}
                             clickAction={requestRenamePreview}
                         />
@@ -410,6 +412,7 @@ export function ScriptWorkspace({scripts, reveal, onError}: ScriptWorkspaceProps
                         />
                         <Button
                             label='Apply rename'
+                            variant='primary'
                             isDisabled={renamePreview?.files.length === 0}
                             clickAction={() => {
                                 if (renamePreview) void commitRename(renamePreview)

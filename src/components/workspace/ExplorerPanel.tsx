@@ -1,7 +1,7 @@
 import {useCallback, useMemo, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {EmptyState} from '@astryxdesign/core/EmptyState'
-import {StackItem, VStack} from '@astryxdesign/core/Stack'
+import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
@@ -64,38 +64,34 @@ const EDITABLE_SUFFIXES = ['.gd', '.cfg', '.godot', '.json', '.md', '.txt', '.tr
  */
 const SCENE_SUFFIX = '.tscn'
 
-const ROW_LABEL_STYLE = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 'var(--spacing-2)',
-    width: '100%',
-    // A deep branch leaves a long name less room, and a name that refuses to shrink drags the row
-    // wider than the column — taking the row's action off the right edge with it.
-    minWidth: 0,
-    overflow: 'hidden'
-} as const
+/*
+ * A deep branch leaves a long name less room, and a name that refuses to shrink drags the row wider
+ * than the column — taking the row's action off the right edge with it. `HStack` has no prop for
+ * either, so this is the whole of what the row still carries by hand.
+ */
+const ROW_LABEL_STYLE = {minWidth: 0, overflow: 'hidden'} as const
+
+/** The name itself, which is the part allowed to run out of room. */
+const ROW_NAME_STYLE = {minWidth: 0} as const
 
 /**
- * The name itself, which is the part allowed to run out of room.
+ * Godot draws its class icons at 16 px; the slot holds that whether or not an icon fills it.
  *
- * `text-overflow` needs a block box with the text inside it: on the row's flex container the
- * property is inherited but never applied, so a name too long for a deep branch was cut off
- * mid-letter instead of trailing off.
+ * The element stays raw: Astryx has no component for a bitmap another process drew, and an empty
+ * span is the only way to hold the width while none has arrived. Both values are spacing tokens.
  */
-const ROW_NAME_STYLE = {
-    minWidth: 0,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap'
-} as const
-
-/** Godot draws its class icons at 16 px; the slot holds that whether or not an icon fills it. */
 const NODE_ICON_STYLE = {
     width: 'var(--spacing-4)',
     height: 'var(--spacing-4)',
     flexShrink: 0
 } as const
 
+/*
+ * No placeholder in these filter boxes. The label is hidden — a filter row in a narrow panel
+ * cannot spare a label line above a 28 px box — and a placeholder that only repeats the label
+ * leaves the field looking like it already holds a value. The magnifier says what the box is for,
+ * and the hidden label is what a screen reader announces.
+ */
 function isListable(path: string) {
     if (HIDDEN_SUFFIXES.some(suffix => path.endsWith(suffix))) return false
     return !HIDDEN_PREFIXES.some(prefix => path.startsWith(prefix))
@@ -164,13 +160,23 @@ function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData 
                 alignment='start'
                 hasHoverIndication={false}
             >
-                <span style={ROW_LABEL_STYLE}>
+                <HStack
+                    gap={2}
+                    vAlign='center'
+                    width='100%'
+                    style={ROW_LABEL_STYLE}
+                >
                     <NodeIcon
                         icon={icons[node.icon ?? node.type]}
                         type={node.type}
                     />
-                    <span style={ROW_NAME_STYLE}>{node.name}</span>
-                </span>
+                    <Text
+                        maxLines={1}
+                        style={ROW_NAME_STYLE}
+                    >
+                        {node.name}
+                    </Text>
+                </HStack>
             </Tooltip>
         ),
         // At the head of the row, ahead of the class icon, because that is where the row's own
@@ -179,6 +185,9 @@ function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData 
         // message rather than creating one, which is what a plus promised and this does not do.
         ...(references && {
             startContent: (
+                // Raw, and deliberately: the wrapper exists so `src/theme/rows.css` can reveal the
+                // button when its row is hovered or focused, which is a relationship between two
+                // elements that no component prop expresses.
                 <span className='gofer-row-action'>
                     <IconButton
                         label={`Mention ${node.name} in the message`}
@@ -375,7 +384,6 @@ export function ExplorerPanel({
                         label='Filter files'
                         isLabelHidden
                         size='sm'
-                        placeholder='Filter files'
                         startIcon={MagnifyingGlassIcon}
                         value={fileFilter}
                         hasClear
@@ -415,7 +423,6 @@ export function ExplorerPanel({
                                 label='Filter nodes'
                                 isLabelHidden
                                 size='sm'
-                                placeholder='Filter nodes'
                                 startIcon={MagnifyingGlassIcon}
                                 value={nodeFilter}
                                 hasClear

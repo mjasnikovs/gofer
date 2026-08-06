@@ -18,6 +18,7 @@ import {invoke, isTauri} from '../services/desktop'
 import {HealthGate} from '../components/application/HealthGate'
 import {InitializationSplash} from '../components/application/InitializationSplash'
 import {Navigation} from '../components/application/Navigation'
+import {preloadSettingsPage, preloadWorkspace} from './routes-preload'
 import {isTaskSummary} from '../models/app'
 import type {Page, TaskSummary} from '../models/app'
 
@@ -28,10 +29,8 @@ type ApplicationContextValue = Readonly<{
 }>
 
 const ApplicationContext = createContext<ApplicationContextValue | undefined>(undefined)
-const SettingsPage = lazy(() => import('../components/settings/SettingsPage'))
-const Workspace = lazy(() =>
-    import('../components/workspace/Workspace').then(module => ({default: module.Workspace}))
-)
+const SettingsPage = lazy(preloadSettingsPage)
+const Workspace = lazy(() => preloadWorkspace().then(module => ({default: module.Workspace})))
 
 async function loadTasks() {
     if (!isTauri()) return []

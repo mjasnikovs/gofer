@@ -1,5 +1,7 @@
 import {useCallback, useEffect, useState} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
+import {Button} from '@astryxdesign/core/Button'
+import {EmptyState} from '@astryxdesign/core/EmptyState'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Table} from '@astryxdesign/core/Table'
@@ -7,6 +9,7 @@ import {proportional} from '@astryxdesign/core/Table'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Token} from '@astryxdesign/core/Token'
+import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon'
 import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {formatGodotValue} from '../../utils/godot-format'
 import {isSessionReadable} from '../../models/godot'
@@ -25,6 +28,7 @@ type InspectorPanelProps = Readonly<{
     scenePath: string
     selection: GodotSelection | undefined
     sceneEpoch: number
+    onStartSession: () => void
 }>
 
 type SettingRow = Readonly<{
@@ -34,6 +38,12 @@ type SettingRow = Readonly<{
     [key: string]: unknown
 }>
 
+/*
+ * No placeholder in these filter boxes. The label is hidden — a filter row in a narrow panel
+ * cannot spare a label line above a 28 px box — and a placeholder that only repeats the label
+ * leaves the field looking like it already holds a value. The magnifier says what the box is for,
+ * and the hidden label is what a screen reader announces.
+ */
 const SEARCH_DEBOUNCE_MS = 250
 
 /** Search reaches the editor's main loop, so keystrokes settle before one query is sent. */
@@ -74,7 +84,8 @@ export function InspectorPanel({
     state,
     scenePath,
     selection,
-    sceneEpoch
+    sceneEpoch,
+    onStartSession
 }: InspectorPanelProps) {
     const [projectQuery, setProjectQuery] = useState('')
     const [editorQuery, setEditorQuery] = useState('')
@@ -115,14 +126,26 @@ export function InspectorPanel({
         isOffline || isSettling || tab !== 'editor' ? undefined : loadEditor
     )
 
+    /*
+     * The same shape the explorer uses for the same condition. Both panels are on screen together,
+     * and offline as one dim sentence beside a titled empty state with an action read as a panel
+     * that had failed rather than one waiting for a session that has not started.
+     */
     const offlineNotice = (
         <VStack padding={3}>
-            <Text
-                type='supporting'
-                color='secondary'
-            >
-                The inspector reads a running editor session.
-            </Text>
+            <EmptyState
+                isCompact
+                headingLevel={3}
+                title='No editor session'
+                description='The inspector reads a running editor session.'
+                actions={
+                    <Button
+                        label='Start editor session'
+                        size='sm'
+                        clickAction={onStartSession}
+                    />
+                }
+            />
         </VStack>
     )
 
@@ -249,7 +272,7 @@ export function InspectorPanel({
                                     label='Search project settings'
                                     isLabelHidden
                                     size='sm'
-                                    placeholder='Search project settings'
+                                    startIcon={MagnifyingGlassIcon}
                                     value={projectQuery}
                                     hasClear
                                     onChange={setProjectQuery}
@@ -325,7 +348,7 @@ export function InspectorPanel({
                                     label='Search editor settings'
                                     isLabelHidden
                                     size='sm'
-                                    placeholder='Search editor settings'
+                                    startIcon={MagnifyingGlassIcon}
                                     value={editorQuery}
                                     hasClear
                                     onChange={setEditorQuery}

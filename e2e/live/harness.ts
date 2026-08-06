@@ -164,7 +164,9 @@ async function plantActivityProbe() {
             attributes: true
         })
 
-        for (const name of ['godot-session-event', 'ai-stream-event', 'rag-progress'])
+        // The AI turn is not here: its deltas ride a channel, and the DOM they change is what the
+        // observer above already counts as activity.
+        for (const name of ['godot-session-event', 'rag-progress'])
             scope.__TAURI__?.event?.listen?.(name, received => {
                 touch()
                 const payload = (received as {payload?: {type?: string; state?: string}}).payload

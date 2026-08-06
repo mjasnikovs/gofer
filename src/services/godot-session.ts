@@ -1,5 +1,6 @@
 import {Channel} from '@tauri-apps/api/core'
 import {invoke} from './desktop'
+import {toCommandError} from '../utils/command-error'
 import type {
     DebugRequest,
     DebugResponse,
@@ -89,22 +90,5 @@ export function unsubscribeGodotEvents(): Promise<void> {
     return invoke('unsubscribe_godot_events')
 }
 
-/**
- * Restores the structured failure Rust rejected with. Tauri hands the serialized struct straight to
- * the promise rejection, so an object carrying a string `code` is the backend's own error and
- * anything else is a transport or renderer fault.
- */
-export function toGodotError(error: unknown): GodotError {
-    if (typeof error === 'object' && error !== null && 'code' in error && 'message' in error) {
-        const candidate = error as Partial<GodotError>
-        if (typeof candidate.code === 'string' && typeof candidate.message === 'string') {
-            return {
-                code: candidate.code,
-                message: candidate.message,
-                retryable: candidate.retryable === true,
-                details: candidate.details ?? {}
-            }
-        }
-    }
-    return {code: 'command_failed', message: String(error), retryable: false, details: {}}
-}
+/** The shared converter, under the name the session panels read it by. */
+export const toGodotError: (error: unknown) => GodotError = toCommandError

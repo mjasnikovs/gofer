@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useState} from 'react'
 import {invoke, isTauri} from '../services/desktop'
+import {commandErrorMessage} from '../utils/command-error'
 import {normalizeSettings} from '../models/settings'
 import type {AiModelOption, GoferSettings, ThinkingLevel} from '../models/settings'
 
@@ -33,7 +34,7 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
                 })
                 onConnected()
             } catch (error) {
-                onError(`${failure}: ${String(error)}`)
+                onError(`${failure}: ${commandErrorMessage(error)}`)
             }
         },
         [onConnected, onError]
@@ -97,7 +98,7 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
             }
         } catch (error) {
             setConnectionState('offline')
-            onError(`Local AI is unavailable: ${String(error)}`)
+            onError(`Local AI is unavailable: ${commandErrorMessage(error)}`)
         }
     }, [applyModel, onConnected, onError])
 

@@ -5,11 +5,11 @@ import {Button} from '@astryxdesign/core/Button'
 import {Icon} from '@astryxdesign/core/Icon'
 import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {ProgressBar} from '@astryxdesign/core/ProgressBar'
-import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import CircleStackIcon from '@heroicons/react/24/outline/CircleStackIcon'
 import {invoke, isTauri, listen} from '../../services/desktop'
+import {commandErrorMessage} from '../../utils/command-error'
 import type {InitializationState} from '../../models/chat'
 import {progressLabel, progressValue} from '../../models/settings'
 
@@ -38,7 +38,7 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
             setState({status: 'ready'})
             onReady()
         } catch (error) {
-            setState({status: 'error', message: String(error)})
+            setState({status: 'error', message: commandErrorMessage(error)})
         } finally {
             unlisten?.()
         }
@@ -69,9 +69,14 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                             hAlign='stretch'
                             vAlign='center'
                         >
+                            {/*
+                             * One axis for the screen. Centred, the title and subtitle sat over a
+                             * left-aligned banner, paragraph and progress label in the same 592 px
+                             * column, so the block read as two screens stacked.
+                             */}
                             <VStack
                                 gap={3}
-                                hAlign='center'
+                                hAlign='start'
                             >
                                 <Icon
                                     icon={CircleStackIcon}
@@ -80,7 +85,7 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                 />
                                 <VStack
                                     gap={1}
-                                    hAlign='center'
+                                    hAlign='start'
                                 >
                                     <Heading
                                         level={1}
@@ -102,15 +107,11 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                         title='Preparing documentation models'
                                         description='Missing models download automatically. Existing models are reused from the local cache.'
                                     />
-                                    <Spinner
-                                        size='lg'
-                                        label='Initializing documentation search'
-                                    />
                                     {/*
-                                     * The bar carries its own label, so the caption underneath was
-                                     * printing the same sentence a second time, forty pixels lower
-                                     * and one shade dimmer — which reads as two different pieces of
-                                     * news about the same download.
+                                     * One indicator for one download. The bar carries its own
+                                     * label and its indeterminate state covers the phase before a
+                                     * byte count exists, which is what the spinner above it was
+                                     * for — two of them side by side read as two things happening.
                                      */}
                                     <ProgressBar
                                         label={progressLabel(progress)}

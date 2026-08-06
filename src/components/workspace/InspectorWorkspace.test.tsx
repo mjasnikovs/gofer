@@ -398,9 +398,16 @@ function renderWithChatReferences(added: ChatReference[]) {
     )
 }
 
+/** The explorer's own offer to start one. The inspector beside it makes the same offer. */
+function startSessionButton() {
+    return within(screen.getByRole('navigation', {name: 'Explorer'})).findByRole('button', {
+        name: 'Start editor session'
+    })
+}
+
 /** Starts the editor session the way the explorer's empty state offers to. */
 async function startSession(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(await screen.findByRole('button', {name: 'Start editor session'}))
+    await user.click(await startSessionButton())
     await waitFor(() => {
         expect(screen.getByText('Player')).toBeInTheDocument()
     })
@@ -408,7 +415,7 @@ async function startSession(user: ReturnType<typeof userEvent.setup>) {
 
 /** The same start, for a session whose editor is editing no scene yet. */
 async function startSessionWithoutScene(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(await screen.findByRole('button', {name: 'Start editor session'}))
+    await user.click(await startSessionButton())
     await waitFor(() => {
         expect(screen.getByText('No scene is open')).toBeInTheDocument()
     })
@@ -447,7 +454,11 @@ describe('InspectorWorkspace', () => {
         const user = userEvent.setup()
         renderWorkspace()
 
-        expect(await screen.findByText('No editor session')).toBeInTheDocument()
+        expect(
+            await within(screen.getByRole('navigation', {name: 'Explorer'})).findByText(
+                'No editor session'
+            )
+        ).toBeInTheDocument()
         expect(screen.getByText('No problems')).toBeInTheDocument()
 
         await startSession(user)

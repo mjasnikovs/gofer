@@ -519,9 +519,14 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     let base_url = start_model(Arc::clone(&transcript));
     let app = mock_app();
 
+    // The turn's stream. Nothing reads it here — the assertions are about what the tools did, not
+    // what the renderer was told — but the worker writes to it, so it has to exist.
+    let stream = tauri::ipc::Channel::new(|_| Ok(()));
+
     let completion = crate::run_ai_worker_with(
         app.handle(),
         1,
+        &stream,
         AiWorkerRequest {
             settings: AiSettings {
                 base_url,

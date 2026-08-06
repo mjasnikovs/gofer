@@ -1,4 +1,4 @@
-import type {RefObject} from 'react'
+import {useRef} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {
     ChatComposer,
@@ -16,137 +16,248 @@ import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
 import PhotoIcon from '@heroicons/react/24/outline/PhotoIcon'
 import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
 import {contextProgressVariant, formatContextUsage} from '../../utils/chat-format'
-import type {DraftAttachment} from '../../models/chat'
-import type {AiModelOption, GoferSettings, ThinkingLevel} from '../../models/settings'
-
-type TokenCounts = Readonly<{
-    context: number
-    total: number
-}>
-
-type WorkspaceComposerProps = Readonly<{
-    attachmentInputRef: RefObject<HTMLInputElement | null>
-    canAttachImages: boolean
-    contextWindow: number
-    draft: string
-    draftAttachments: readonly DraftAttachment[]
-    isSavingAttachments: boolean
-    isStreaming: boolean
-    models: readonly AiModelOption[]
-    selectedModel: string
-    settings?: GoferSettings
-    streamError?: string
-    supportsImages: boolean
-    thinkingLevel: ThinkingLevel
-    thinkingLevels: readonly ThinkingLevel[]
-    usage: TokenCounts
-    onApplyModel: (model: AiModelOption, previous?: GoferSettings) => Promise<void>
-    onApplyThinkingLevel: (level: ThinkingLevel, previous?: GoferSettings) => Promise<void>
-    onChangeDraft: (value: string) => void
-    onRemoveAttachment: (attachmentId: string) => void
-    onSelectAttachments: (files: FileList | null) => Promise<void>
-    onStop: () => void
-    onSubmit: (value: string) => Promise<void>
-}>
+import {useComposer} from '../../hooks/useComposer'
 
 const CHAT_ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif'
 const SPACIOUS_COMPOSER_INPUT_STYLE = {
     minHeight: 'calc(var(--spacing-12) + var(--spacing-10))'
 } as const
 
-export function WorkspaceComposer({
-    attachmentInputRef,
-    canAttachImages,
-    contextWindow,
-    draft,
-    draftAttachments,
-    isSavingAttachments,
-    isStreaming,
-    models,
-    selectedModel,
-    settings,
-    streamError,
-    supportsImages,
-    thinkingLevel,
-    thinkingLevels,
-    usage,
-    onApplyModel,
-    onApplyThinkingLevel,
-    onChangeDraft,
-    onRemoveAttachment,
-    onSelectAttachments,
-    onStop,
-    onSubmit
-}: WorkspaceComposerProps) {
+/**
+ * The file picker, which Astryx has no equivalent for: `<input type='file'>` is the only element
+ * that opens the browser's own dialog, and it has to be a raw one.
+ */
+function AttachmentPicker() {
+    const {actions, meta} = useComposer()
+    const input = useRef<HTMLInputElement>(null)
     return (
-        <VStack gap={1}>
+        <>
             <input
-                ref={attachmentInputRef}
+                ref={input}
                 type='file'
                 accept={CHAT_ATTACHMENT_ACCEPT}
                 multiple
                 hidden
                 onChange={event => {
-                    void onSelectAttachments(event.currentTarget.files)
+                    // The same file picked twice in a row fires no change event unless the value is
+                    // cleared, and it cannot be cleared until the read has finished with it.
+                    const element = event.currentTarget
+                    void actions.selectAttachments(element.files).finally(() => {
+                        element.value = ''
+                    })
                 }}
             />
-            <ChatComposer
-                value={draft}
-                onChange={onChangeDraft}
-                onSubmit={value => {
-                    void onSubmit(value)
+            <Button
+                label='Attach images'
+                variant='ghost'
+                size='sm'
+                isIconOnly
+                icon={<Icon icon={PhotoIcon} />}
+                isDisabled={!meta.canAttachImages}
+                tooltip={
+                    meta.supportsImages ? 'Attach up to 5 images' : (
+                        'The selected model does not support image input'
+                    )
+                }
+                onClick={() => {
+                    input.current?.click()
                 }}
-                onStop={onStop}
-                isStopShown={isStreaming}
+            />
+        </>
+    )
+}
+
+function AttachmentDrawer() {
+    const {state, actions, meta} = useComposer()
+    return (
+        <ChatComposerDrawer>
+            <HStack
+                gap={2}
+                wrap='wrap'
+            >
+                {state.draftAttachments.map(attachment => (
+                    <Thumbnail
+                        key={attachment.id}
+                        src={attachment.previewUrl}
+                        alt={`Attached image: ${attachment.name}`}
+                        label={attachment.name}
+                        isDisabled={meta.isStreaming || meta.isSavingAttachments}
+                        showRemoveOn='always'
+                        onRemove={() => {
+                            actions.removeAttachment(attachment.id)
+                        }}
+                    />
+                ))}
+            </HStack>
+        </ChatComposerDrawer>
+    )
+}
+
+function ModelMenu() {
+    const {state, actions, meta} = useComposer()
+    return (
+        <DropdownMenu
+            button={{
+                label: `Model: ${state.selectedModel}`,
+                variant: 'ghost',
+                size: 'sm',
+                icon: (
+                    <Icon
+                        icon={SparklesIcon}
+                        size='sm'
+                        color='secondary'
+                    />
+                ),
+                endContent: (
+                    <Icon
+                        icon='chevronDown'
+                        size='sm'
+                        color='secondary'
+                    />
+                ),
+                children: (
+                    <Text
+                        type='supporting'
+                        color='secondary'
+                    >
+                        Model: {state.selectedModel}
+                    </Text>
+                )
+            }}
+            menuWidth={320}
+            items={meta.models.map(model => ({
+                label: model.name,
+                onClick: () => {
+                    void actions.applyModel(model, meta.settings)
+                }
+            }))}
+        />
+    )
+}
+
+function ReasoningMenu() {
+    const {state, actions, meta} = useComposer()
+    return (
+        <DropdownMenu
+            button={{
+                label: `Reasoning: ${state.thinkingLevel}`,
+                variant: 'ghost',
+                size: 'sm',
+                icon: (
+                    <Icon
+                        icon={Cog6ToothIcon}
+                        size='sm'
+                        color='secondary'
+                    />
+                ),
+                endContent: (
+                    <Icon
+                        icon='chevronDown'
+                        size='sm'
+                        color='secondary'
+                    />
+                ),
+                children: (
+                    <Text
+                        type='supporting'
+                        color='secondary'
+                    >
+                        Reasoning: {state.thinkingLevel}
+                    </Text>
+                )
+            }}
+            items={meta.thinkingLevels.map(level => ({
+                label: level,
+                onClick: () => {
+                    void actions.applyThinkingLevel(level, meta.settings)
+                }
+            }))}
+        />
+    )
+}
+
+function ContextUsage() {
+    const {state, meta} = useComposer()
+    return (
+        <HStack
+            gap={2}
+            width={200}
+            vAlign='center'
+        >
+            <StackItem size='fill'>
+                <ProgressBar
+                    label='Context usage'
+                    value={state.usage.context}
+                    max={meta.contextWindow}
+                    variant={contextProgressVariant(state.usage.context, meta.contextWindow)}
+                    isLabelHidden
+                />
+            </StackItem>
+            <Text
+                type='supporting'
+                color='secondary'
+            >
+                {formatContextUsage(state.usage.context, meta.contextWindow)}
+            </Text>
+        </HStack>
+    )
+}
+
+/**
+ * The row under the input.
+ *
+ * It wraps: the chat column is narrower than the welcome block the same composer renders in, and
+ * held on one line the reasoning menu's chevron was cut in half by the column's right edge.
+ */
+function ComposerFooter() {
+    const {state} = useComposer()
+    return (
+        <HStack
+            gap={1}
+            paddingInline={2}
+            vAlign='center'
+            wrap='wrap'
+        >
+            <ModelMenu />
+            <ReasoningMenu />
+            <ContextUsage />
+            <Text
+                type='supporting'
+                color='secondary'
+            >
+                ·
+            </Text>
+            <Text
+                type='supporting'
+                color='secondary'
+            >
+                {state.usage.total.toLocaleString()} tokens
+            </Text>
+        </HStack>
+    )
+}
+
+export function WorkspaceComposer() {
+    const {state, actions, meta} = useComposer()
+    return (
+        <VStack gap={1}>
+            <ChatComposer
+                value={state.draft}
+                onChange={actions.changeDraft}
+                onSubmit={value => {
+                    void actions.submit(value)
+                }}
+                onStop={actions.stop}
+                isStopShown={meta.isStreaming}
                 density='spacious'
                 placeholder={
-                    isSavingAttachments ? 'Attaching images…'
-                    : isStreaming ?
+                    meta.isSavingAttachments ? 'Attaching images…'
+                    : meta.isStreaming ?
                         'Gofer is working…'
                     :   'Ask anything'
                 }
-                drawer={
-                    draftAttachments.length > 0 ?
-                        <ChatComposerDrawer>
-                            <HStack
-                                gap={2}
-                                wrap='wrap'
-                            >
-                                {draftAttachments.map(attachment => (
-                                    <Thumbnail
-                                        key={attachment.id}
-                                        src={attachment.previewUrl}
-                                        alt={`Attached image: ${attachment.name}`}
-                                        label={attachment.name}
-                                        isDisabled={isStreaming || isSavingAttachments}
-                                        showRemoveOn='always'
-                                        onRemove={() => {
-                                            onRemoveAttachment(attachment.id)
-                                        }}
-                                    />
-                                ))}
-                            </HStack>
-                        </ChatComposerDrawer>
-                    :   undefined
-                }
-                headerActions={
-                    <Button
-                        label='Attach images'
-                        variant='ghost'
-                        size='sm'
-                        isIconOnly
-                        icon={<Icon icon={PhotoIcon} />}
-                        isDisabled={!canAttachImages}
-                        tooltip={
-                            supportsImages ? 'Attach up to 5 images' : (
-                                'The selected model does not support image input'
-                            )
-                        }
-                        onClick={() => {
-                            attachmentInputRef.current?.click()
-                        }}
-                    />
-                }
+                drawer={state.draftAttachments.length > 0 ? <AttachmentDrawer /> : undefined}
+                headerActions={<AttachmentPicker />}
                 input={
                     <ChatComposerInput
                         maxRows={8}
@@ -155,140 +266,34 @@ export function WorkspaceComposer({
                             if (
                                 event.key !== 'Enter'
                                 || event.shiftKey
-                                || draft.trim()
-                                || draftAttachments.length === 0
+                                || state.draft.trim()
+                                || state.draftAttachments.length === 0
                                 || event.nativeEvent.isComposing
                             )
                                 return
                             event.preventDefault()
-                            void onSubmit('')
+                            void actions.submit('')
                         }}
                     />
                 }
                 sendButton={
                     <ChatSendButton
-                        isStopShown={isStreaming}
+                        isStopShown={meta.isStreaming}
                         isDisabled={
-                            isSavingAttachments || (!draft.trim() && draftAttachments.length === 0)
+                            meta.isSavingAttachments
+                            || (!state.draft.trim() && state.draftAttachments.length === 0)
                         }
                         onSend={() => {
-                            void onSubmit(draft)
+                            void actions.submit(state.draft)
                         }}
-                        onStop={onStop}
+                        onStop={actions.stop}
                     />
                 }
-                {...(streamError && {status: {type: 'error' as const, message: streamError}})}
+                {...(state.streamError && {
+                    status: {type: 'error' as const, message: state.streamError}
+                })}
             />
-            <HStack
-                gap={1}
-                paddingInline={2}
-                vAlign='center'
-            >
-                <DropdownMenu
-                    button={{
-                        label: `Model: ${selectedModel}`,
-                        variant: 'ghost',
-                        size: 'sm',
-                        icon: (
-                            <Icon
-                                icon={SparklesIcon}
-                                size='sm'
-                                color='secondary'
-                            />
-                        ),
-                        endContent: (
-                            <Icon
-                                icon='chevronDown'
-                                size='sm'
-                                color='secondary'
-                            />
-                        ),
-                        children: (
-                            <Text
-                                type='supporting'
-                                color='secondary'
-                            >
-                                Model: {selectedModel}
-                            </Text>
-                        )
-                    }}
-                    menuWidth={320}
-                    items={models.map(model => ({
-                        label: model.name,
-                        onClick: () => {
-                            void onApplyModel(model, settings)
-                        }
-                    }))}
-                />
-                <DropdownMenu
-                    button={{
-                        label: `Reasoning: ${thinkingLevel}`,
-                        variant: 'ghost',
-                        size: 'sm',
-                        icon: (
-                            <Icon
-                                icon={Cog6ToothIcon}
-                                size='sm'
-                                color='secondary'
-                            />
-                        ),
-                        endContent: (
-                            <Icon
-                                icon='chevronDown'
-                                size='sm'
-                                color='secondary'
-                            />
-                        ),
-                        children: (
-                            <Text
-                                type='supporting'
-                                color='secondary'
-                            >
-                                Reasoning: {thinkingLevel}
-                            </Text>
-                        )
-                    }}
-                    items={thinkingLevels.map(level => ({
-                        label: level,
-                        onClick: () => {
-                            void onApplyThinkingLevel(level, settings)
-                        }
-                    }))}
-                />
-                <HStack
-                    gap={2}
-                    width={200}
-                    vAlign='center'
-                >
-                    <StackItem size='fill'>
-                        <ProgressBar
-                            label='Context usage'
-                            value={usage.context}
-                            max={contextWindow}
-                            variant={contextProgressVariant(usage.context, contextWindow)}
-                            isLabelHidden
-                        />
-                    </StackItem>
-                    <Text
-                        type='supporting'
-                        color='secondary'
-                    >
-                        {formatContextUsage(usage.context, contextWindow)}
-                    </Text>
-                </HStack>
-                <Text
-                    type='supporting'
-                    color='secondary'
-                >
-                    ·
-                </Text>
-                <Text
-                    type='supporting'
-                    color='secondary'
-                >
-                    {usage.total.toLocaleString()} tokens
-                </Text>
-            </HStack>
+            <ComposerFooter />
         </VStack>
     )
 }

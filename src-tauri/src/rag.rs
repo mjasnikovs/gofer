@@ -242,22 +242,19 @@ fn delete_cache_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
+    // The sentences below name the cache, not its path. `cache_status` already reports the
+    // location as a field the renderer can show deliberately; an error message is not the place to
+    // put a host path the user did not ask for.
     let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
+        .map_err(|error| format!("Could not inspect the Gofer RAG cache: {error}"))?;
     if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "Refusing to delete the symlink at {}",
-            path.display()
-        ));
+        return Err("Refusing to delete the Gofer RAG cache: it is a symbolic link".to_owned());
     }
     if !metadata.is_dir() {
-        return Err(format!(
-            "The Gofer RAG cache path is not a directory: {}",
-            path.display()
-        ));
+        return Err("The Gofer RAG cache path is not a directory".to_owned());
     }
     fs::remove_dir_all(path)
-        .map_err(|error| format!("Could not delete {}: {error}", path.display()))
+        .map_err(|error| format!("Could not delete the Gofer RAG cache: {error}"))
 }
 // coverage-critical-end: cache
 
@@ -283,14 +280,14 @@ fn required_model_files(cache: &Path) -> [PathBuf; 10] {
 fn directory_size(path: &Path) -> Result<u64, String> {
     let mut total = 0;
     for entry in fs::read_dir(path)
-        .map_err(|error| format!("Could not read cache directory {}: {error}", path.display()))?
+        .map_err(|error| format!("Could not read the Gofer RAG cache directory: {error}"))?
     {
-        let entry =
-            entry.map_err(|error| format!("Could not inspect {}: {error}", path.display()))?;
-        let metadata = entry
-            .path()
-            .symlink_metadata()
-            .map_err(|error| format!("Could not inspect {}: {error}", entry.path().display()))?;
+        let entry = entry.map_err(|error| {
+            format!("Could not inspect an entry in the Gofer RAG cache: {error}")
+        })?;
+        let metadata = entry.path().symlink_metadata().map_err(|error| {
+            format!("Could not inspect an entry in the Gofer RAG cache: {error}")
+        })?;
         if metadata.file_type().is_symlink() {
             continue;
         }
@@ -733,7 +730,7 @@ mod tests {
         assert!(
             delete_cache_path(&link)
                 .unwrap_err()
-                .contains("Refusing to delete the symlink")
+                .contains("it is a symbolic link")
         );
         assert!(target.exists());
     }

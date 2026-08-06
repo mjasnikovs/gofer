@@ -75,13 +75,14 @@ surface, weight, and size, because it cannot come from hue. Plan for that instea
 npm run check:design
 ```
 
-This measures the built theme for collapsed distinctions: text roles less than 12 L* apart, surfaces
-less than 3 L* apart, an accent no brighter than body text, and control borders under WCAG 1.4.11's
-3:1. It runs inside `npm run check`.
+This measures the built theme for collapsed distinctions: text roles less than 12 L* apart, each
+step of the surface ramp less than 3 L* _above_ the one below it, an accent no brighter than body
+text, and control borders under WCAG 1.4.11's 3:1. It runs inside `npm run check`.
 
-It is a ratchet, not a bar. `scripts/design-baseline.json` lists the seven violations the theme
-carries today; anything new fails, and fixing one means deleting its line in the same commit. Never
-add a line to that file.
+It is a ratchet, not a bar. `scripts/design-baseline.json` lists the violations the theme is allowed
+to keep; anything new fails, and fixing one means deleting its line in the same commit. The list is
+empty today, which is the state to keep it in. Never add a line to that file — read the count out of
+the file rather than from this sentence.
 
 ## Checking a screen by measurement, not by eye
 

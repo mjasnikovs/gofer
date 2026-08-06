@@ -1,10 +1,10 @@
 import {useCallback, useState} from 'react'
-import {Badge} from '@astryxdesign/core/Badge'
 import {Button} from '@astryxdesign/core/Button'
 import {Divider} from '@astryxdesign/core/Divider'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
+import {Token} from '@astryxdesign/core/Token'
 import {queryGodotDocs, toGodotError} from '../../services/godot-session'
 import type {DocsPassage, GodotError} from '../../models/godot'
 import {PanelState} from './PanelState'
@@ -97,10 +97,12 @@ export function DocsView() {
                                     align='center'
                                 >
                                     <Text weight='semibold'>{passage.chapter}</Text>
-                                    <Badge
-                                        variant='neutral'
-                                        label={`Section ${String(passage.order)}`}
-                                    />
+                                    {/*
+                                     * Token, not Badge: which section of the chapter this passage
+                                     * came from is a label on the result, not a count and not one
+                                     * of a fixed set of states.
+                                     */}
+                                    <Token label={`Section ${String(passage.order)}`} />
                                     <Text
                                         type='supporting'
                                         color='secondary'

@@ -12,6 +12,9 @@ import type {StoredChat} from '../models/chat'
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean
 type EventHandler = (event: {payload: never}) => void
+interface AiStream {
+    onmessage: (payload: unknown) => void
+}
 type ListenFunction = (event?: string, handler?: EventHandler) => Promise<() => void>
 
 const tauri = vi.hoisted(() => ({
@@ -25,6 +28,13 @@ vi.mock('../services/desktop', () => ({
     isTauri: tauri.isTauri,
     listen: tauri.listen
 }))
+
+/** The channel `send_ai_message` now streams its deltas down, as the fixture receives it. */
+function streamOf(args: unknown): AiStream {
+    const stream = (args as {stream?: AiStream} | undefined)?.stream
+    if (!stream) throw new Error('send_ai_message was invoked without its stream channel')
+    return stream
+}
 
 const settingsResponse = {
     settings: {
@@ -284,6 +294,7 @@ describe('Workspace', () => {
             expect(serializedSaveRequest).toContain('"data":"aGk="')
             expect(serializedSaveRequest).toMatch(/"id":"[a-z\d-]+"/u)
             expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
+                stream: expect.anything() as unknown,
                 request: {
                     requestId: 1,
                     agentMessages: [],
@@ -443,19 +454,12 @@ describe('Workspace', () => {
     })
 
     it('streams a Pi AI response into the assistant message', async () => {
-        let handler: EventHandler | undefined
-        tauri.listen.mockImplementation(async (_event, nextHandler) => {
-            handler = nextHandler
-            return () => undefined
-        })
-        tauri.invoke.mockImplementation(async command => {
+        tauri.invoke.mockImplementation(async (command, args) => {
             if (command === 'list_workspace_files') return []
             if (command === 'send_ai_message') {
-                handler?.({
-                    payload: {
-                        requestId: 1,
-                        event: {type: 'text-delta', delta: 'Hello from local AI'}
-                    } as never
+                streamOf(args).onmessage({
+                    requestId: 1,
+                    event: {type: 'text-delta', delta: 'Hello from local AI'}
                 })
             }
             return undefined
@@ -466,6 +470,7 @@ describe('Workspace', () => {
 
         expect(await screen.findByText('Hello from local AI')).toBeInTheDocument()
         expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
+            stream: expect.anything() as unknown,
             request: {
                 requestId: 1,
                 agentMessages: [],
@@ -475,12 +480,7 @@ describe('Workspace', () => {
     })
 
     it('renders agent tool activity and token usage', async () => {
-        let handler: EventHandler | undefined
-        tauri.listen.mockImplementation(async (_event, nextHandler) => {
-            handler = nextHandler
-            return () => undefined
-        })
-        tauri.invoke.mockImplementation(async command => {
+        tauri.invoke.mockImplementation(async (command, args) => {
             if (command === 'list_workspace_files') return []
             if (command === 'load_settings') return settingsResponse
             if (command === 'list_ai_models') {
@@ -531,9 +531,7 @@ describe('Workspace', () => {
                         }
                     }
                 ]
-                for (const event of events) {
-                    handler?.({payload: {requestId: 1, event} as never})
-                }
+                for (const event of events) streamOf(args).onmessage({requestId: 1, event})
             }
             return undefined
         })
@@ -551,18 +549,16 @@ describe('Workspace', () => {
     })
 
     it('settles the running tool calls when the user stops the turn', async () => {
-        let handler: EventHandler | undefined
         let finishRequest: (() => void) | undefined
-        tauri.listen.mockImplementation(async (_event, nextHandler) => {
-            handler = nextHandler
-            return () => undefined
-        })
+        // The turn's own stream: the abort the backend sends on cancellation rides it too.
+        let stream: AiStream | undefined
         const emit = (event: unknown) => {
-            handler?.({payload: {requestId: 1, event} as never})
+            stream?.onmessage({requestId: 1, event})
         }
-        tauri.invoke.mockImplementation(async command => {
+        tauri.invoke.mockImplementation(async (command, args) => {
             if (command === 'list_workspace_files') return []
             if (command === 'send_ai_message') {
+                stream = streamOf(args)
                 emit({type: 'text-delta', delta: 'Working on it'})
                 emit({
                     type: 'tool-start',

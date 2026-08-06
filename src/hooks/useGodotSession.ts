@@ -172,16 +172,22 @@ export function useGodotSession({onError}: GodotSessionOptions) {
     // renderer needs them even before it has subscribed to the addon's own stream.
     useEffect(() => {
         if (!isTauri()) return
+        let isCancelled = false
         let unlisten: (() => void) | undefined
         void listen('godot-session-event', received => {
+            if (isCancelled) return
             if (received.payload.type !== 'stateChanged') return
             setState(received.payload.state)
             if (received.payload.state === 'playing' || received.payload.state === 'ready')
                 setRuntimeEpoch(previous => previous + 1)
         }).then(cancel => {
-            unlisten = cancel
+            // The disposer can arrive after the effect has already torn down — StrictMode
+            // guarantees it on every development mount — so a late one is disposed on arrival.
+            if (isCancelled) cancel()
+            else unlisten = cancel
         })
         return () => {
+            isCancelled = true
             unlisten?.()
         }
     }, [])

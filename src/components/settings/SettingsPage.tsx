@@ -20,6 +20,7 @@ import KeyIcon from '@heroicons/react/24/outline/KeyIcon'
 import ServerStackIcon from '@heroicons/react/24/outline/ServerStackIcon'
 import TrashIcon from '@heroicons/react/24/outline/TrashIcon'
 import {invoke, isTauri, listen} from '../../services/desktop'
+import {commandErrorMessage} from '../../utils/command-error'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import {
     ALL_THINKING_LEVELS,
@@ -42,6 +43,9 @@ import type {
     Notice,
     SettingsRequest
 } from '../../models/settings'
+
+/** Every settings group breaks to one column at the same width. */
+const SETTINGS_GRID_COLUMNS = {minWidth: 320} as const
 
 type SettingsPageProps = Readonly<{
     isOpen: boolean
@@ -108,7 +112,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                 setNotice({
                     status: 'error',
                     title: 'Settings could not be loaded',
-                    description: String(error)
+                    description: commandErrorMessage(error)
                 })
             } finally {
                 setIsLoading(false)
@@ -147,7 +151,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             setNotice({
                 status: 'error',
                 title: 'Connection test failed',
-                description: String(error)
+                description: commandErrorMessage(error)
             })
         } finally {
             setIsTesting(false)
@@ -182,7 +186,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             setNotice({
                 status: 'error',
                 title: 'Settings could not be saved',
-                description: String(error)
+                description: commandErrorMessage(error)
             })
         } finally {
             setIsSaving(false)
@@ -210,7 +214,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             setNotice({
                 status: 'error',
                 title: 'Models could not be installed',
-                description: String(error)
+                description: commandErrorMessage(error)
             })
         } finally {
             unlisten?.()
@@ -231,7 +235,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             setNotice({
                 status: 'error',
                 title: 'Model cache could not be deleted',
-                description: String(error)
+                description: commandErrorMessage(error)
             })
         } finally {
             setIsDeleting(false)
@@ -249,7 +253,11 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                 description: result.path
             })
         } catch (error) {
-            setNotice({status: 'error', title: 'Backup failed', description: String(error)})
+            setNotice({
+                status: 'error',
+                title: 'Backup failed',
+                description: commandErrorMessage(error)
+            })
         } finally {
             setIsBackingUp(false)
         }
@@ -269,7 +277,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             setNotice({
                 status: 'error',
                 title: 'Storage cleanup failed',
-                description: String(error)
+                description: commandErrorMessage(error)
             })
         } finally {
             setIsCleaningStorage(false)
@@ -326,7 +334,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 )}
 
                                 <Grid
-                                    columns={{minWidth: 320}}
+                                    columns={SETTINGS_GRID_COLUMNS}
                                     gap={10}
                                 >
                                     <VStack gap={2}>
@@ -521,7 +529,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 <Divider />
 
                                 <Grid
-                                    columns={{minWidth: 320}}
+                                    columns={SETTINGS_GRID_COLUMNS}
                                     gap={10}
                                 >
                                     <VStack gap={2}>
@@ -629,7 +637,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 <Divider />
 
                                 <Grid
-                                    columns={{minWidth: 320}}
+                                    columns={SETTINGS_GRID_COLUMNS}
                                     gap={10}
                                 >
                                     <VStack gap={2}>
@@ -662,9 +670,14 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                             isDisabled={isBackingUp}
                                             clickAction={cleanStorage}
                                         />
+                                        {/*
+                                         * Secondary, not primary: the footer's Save is pinned, so
+                                         * scrolling to this row puts both blues on screen at once
+                                         * and neither one says what the dialog is for.
+                                         */}
                                         <Button
                                             label='Back up project'
-                                            variant='primary'
+                                            variant='secondary'
                                             isLoading={isBackingUp}
                                             isDisabled={isCleaningStorage}
                                             clickAction={createBackup}

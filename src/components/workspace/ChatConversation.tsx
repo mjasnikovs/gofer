@@ -1,4 +1,4 @@
-import {Suspense, lazy} from 'react'
+import {Suspense, lazy, memo} from 'react'
 import type {RefObject} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {
@@ -24,6 +24,11 @@ type ChatConversationProps = Readonly<{
     onRetry: (assistantId: number) => void
 }>
 
+/*
+ * Gofer's conversation is one left-aligned column, and `ChatMessage sender='user'` lays its bubble
+ * out on the right. Neither `ChatMessage` nor `ChatMessageBubble` takes an alignment prop
+ * (`npm run astryx -- component ChatMessage`), so the override stays until one of them does.
+ */
 const LEFT_ALIGNED_USER_BUBBLE_STYLE = {alignSelf: 'flex-start'} as const
 // The conversation sits in a centre-aligned column: without an explicit width it
 // would shrink to the widest message and grow as the reply streams in.
@@ -111,67 +116,78 @@ type ConversationMessageProps = Readonly<{
     onRetry: (assistantId: number) => void
 }>
 
-function ConversationMessage({attachmentPreviews, message, onRetry}: ConversationMessageProps) {
-    const isAssistant = message.sender === 'assistant'
-    return (
-        <ChatMessage sender={message.sender}>
-            {isAssistant ?
-                <AssistantToolCalls message={message} />
-            :   null}
-            {isAssistant && message.thinking ?
+/**
+ * Memoized because every streamed token replaces the `messages` array.
+ *
+ * The message objects themselves keep their identity through that replacement — only the one being
+ * streamed is rebuilt — so a hundred-message conversation re-rendered a hundred messages, and their
+ * lazily loaded tool output, per token. The memo only holds while `attachmentPreviews` and
+ * `onRetry` keep their identity too, which is what `Workspace` guarantees for both.
+ */
+const ConversationMessage = memo(
+    ({attachmentPreviews, message, onRetry}: ConversationMessageProps) => {
+        const isAssistant = message.sender === 'assistant'
+        return (
+            <ChatMessage sender={message.sender}>
+                {isAssistant ?
+                    <AssistantToolCalls message={message} />
+                :   null}
+                {isAssistant && message.thinking ?
+                    <ChatMessageBubble
+                        variant='ghost'
+                        name='Reasoning'
+                    >
+                        <Text color='secondary'>{message.thinking}</Text>
+                    </ChatMessageBubble>
+                :   null}
                 <ChatMessageBubble
-                    variant='ghost'
-                    name='Reasoning'
+                    variant={isAssistant ? 'ghost' : 'filled'}
+                    style={isAssistant ? undefined : LEFT_ALIGNED_USER_BUBBLE_STYLE}
+                    metadata={
+                        isAssistant ?
+                            <AssistantMetadata
+                                message={message}
+                                onRetry={onRetry}
+                            />
+                        :   undefined
+                    }
                 >
-                    <Text color='secondary'>{message.thinking}</Text>
+                    <VStack
+                        gap={2}
+                        hAlign='start'
+                    >
+                        {message.attachments?.length ?
+                            <HStack
+                                gap={2}
+                                wrap='wrap'
+                            >
+                                {message.attachments.map(attachment => (
+                                    <Thumbnail
+                                        key={attachment.id}
+                                        alt={`Attached image: ${attachment.name}`}
+                                        label={attachment.name}
+                                        {...(attachmentPreviews[attachment.id] && {
+                                            src: attachmentPreviews[attachment.id]
+                                        })}
+                                    />
+                                ))}
+                            </HStack>
+                        :   null}
+                        {message.text ?
+                            <Text>{message.text}</Text>
+                        : isAssistant ?
+                            <Spinner
+                                size='sm'
+                                label='Generating response'
+                            />
+                        :   null}
+                    </VStack>
                 </ChatMessageBubble>
-            :   null}
-            <ChatMessageBubble
-                variant={isAssistant ? 'ghost' : 'filled'}
-                style={isAssistant ? undefined : LEFT_ALIGNED_USER_BUBBLE_STYLE}
-                metadata={
-                    isAssistant ?
-                        <AssistantMetadata
-                            message={message}
-                            onRetry={onRetry}
-                        />
-                    :   undefined
-                }
-            >
-                <VStack
-                    gap={2}
-                    hAlign='start'
-                >
-                    {message.attachments?.length ?
-                        <HStack
-                            gap={2}
-                            wrap='wrap'
-                        >
-                            {message.attachments.map(attachment => (
-                                <Thumbnail
-                                    key={attachment.id}
-                                    alt={`Attached image: ${attachment.name}`}
-                                    label={attachment.name}
-                                    {...(attachmentPreviews[attachment.id] && {
-                                        src: attachmentPreviews[attachment.id]
-                                    })}
-                                />
-                            ))}
-                        </HStack>
-                    :   null}
-                    {message.text ?
-                        <Text>{message.text}</Text>
-                    : isAssistant ?
-                        <Spinner
-                            size='sm'
-                            label='Generating response'
-                        />
-                    :   null}
-                </VStack>
-            </ChatMessageBubble>
-        </ChatMessage>
-    )
-}
+            </ChatMessage>
+        )
+    }
+)
+ConversationMessage.displayName = 'ConversationMessage'
 
 export function ChatConversation({
     attachmentPreviews,
