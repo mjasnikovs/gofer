@@ -45,6 +45,11 @@ var _scene_pending: Array[Dictionary] = []
 
 ## A scene switch outlives a cold import of everything the scene depends on.
 const SCENE_SWITCH_TIMEOUT_MS := 30000
+## How often a scene switch the editor has not obeyed is asked for again. The editor drops the
+## request while it is busy, so it has to be repeated — but a scene the editor cannot build prints
+## its complaint on every attempt, and asking at frame rate turned one bad file into a thousand
+## errors and a stack of modal dialogs.
+const SCENE_SWITCH_RETRY_MS := 1000
 
 # Runtime bridge state. `_runtime_session_id` names the debugger session of the running game and
 # `_runtime_ready` flips when its GoferRuntime autoload announces itself. `_runtime_pending` holds
@@ -109,10 +114,6 @@ const MUTATING_COMMANDS: Array[String] = [
     "node.reparent",
     "node.delete",
     "node.set_property",
-    "node.add_to_group",
-    "node.remove_from_group",
-    "node.connect_signal",
-    "node.disconnect_signal",
 ]
 
 ## The editor half of the debugger channel. Godot calls `_setup_session` as debugger sessions
@@ -1283,7 +1284,11 @@ func _scene_create(params: Dictionary) -> Dictionary:
                 "details": {"rootType": root_type}
             }
         }
-    root.name = path.get_file().get_basename()
+    # `rootName` is what the caller asked the root to be called; the file's own name is only the
+    # fallback. Ignoring it left every agent-created scene rooted at `level_1` however clearly the
+    # request named `Level1`.
+    var root_name: String = params.get("rootName", "")
+    root.name = root_name if not root_name.is_empty() else path.get_file().get_basename()
     var scene := PackedScene.new()
     var pack_error := scene.pack(root)
     if pack_error != OK:
@@ -1392,6 +1397,7 @@ func _pending_scene_switch(mode: String, path: String, replaced: int) -> Diction
         "path": path,
         "replaced": replaced,
         "deadline": Time.get_ticks_msec() + SCENE_SWITCH_TIMEOUT_MS,
+        "next_ask": Time.get_ticks_msec() + SCENE_SWITCH_RETRY_MS,
     }
     _ask_editor_to_switch(pending)
     return {"_gofer_pending_scene": pending}
@@ -1407,6 +1413,25 @@ func _ask_editor_to_switch(pending: Dictionary) -> void:
         EditorInterface.reload_scene_from_path(pending["path"])
     else:
         EditorInterface.open_scene_from_path(pending["path"])
+
+## Why the editor never opened a scene, in the words the user needs to act on it.
+##
+## A scene file the editor cannot build from is by far the likeliest reason — a `.tscn` written by
+## hand, or by an agent, with a node that names no parent. The editor says so in its own log and
+## then does nothing, so the refusal has to carry the same fact.
+func _scene_switch_failure(path: String) -> String:
+    var resource := ResourceLoader.load(path, "PackedScene")
+    if resource == null or not (resource is PackedScene):
+        return "%s is not a scene the editor can read" % path
+    # `can_instantiate` answers for the scene's *types*, not for its contents: a node that names no
+    # parent passes it and then fails to build. Building it is the only question worth asking, and
+    # by this point the editor has already refused to for thirty seconds.
+    var probe: Node = (resource as PackedScene).instantiate()
+    if probe == null:
+        var reason := "%s could not be built into a scene: the editor rejected its contents."
+        return reason % path + " Godot's own reason is in the session output."
+    probe.free()
+    return "The editor did not open %s" % path
 
 ## True once the editor really edits the scene the request named, rather than having merely been
 ## asked to.
@@ -1446,12 +1471,14 @@ func _sweep_scene_pending() -> void:
             _respond_error(
                 pending["id"],
                 "scene_switch_timeout",
-                "The editor did not open %s" % pending["path"],
+                _scene_switch_failure(String(pending["path"])),
                 true,
                 {"path": pending["path"]}
             )
         else:
-            _ask_editor_to_switch(pending)
+            if int(pending["next_ask"]) <= now:
+                pending["next_ask"] = now + SCENE_SWITCH_RETRY_MS
+                _ask_editor_to_switch(pending)
             kept.append(pending)
     _scene_pending = kept
 
@@ -1475,7 +1502,7 @@ func _node_create(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.create requires scene, parent, name, and type",
+                "message": "node.create requires parent, name, and type",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
@@ -1521,7 +1548,7 @@ func _node_duplicate(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.duplicate requires scene and node",
+                "message": "node.duplicate requires node",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
@@ -1559,7 +1586,7 @@ func _node_rename(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.rename requires scene, node, and name",
+                "message": "node.rename requires node and name",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
@@ -1592,7 +1619,7 @@ func _node_reparent(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.reparent requires scene, node, and newParent",
+                "message": "node.reparent requires node and newParent",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
@@ -1630,7 +1657,7 @@ func _node_delete(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.delete requires scene and node",
+                "message": "node.delete requires node",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
@@ -1666,7 +1693,7 @@ func _node_set_property(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.set_property requires scene, node, property, and value",
+                "message": "node.set_property requires node, property, and value",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
@@ -1720,7 +1747,7 @@ func _node_inspect(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_params",
-                "message": "node.inspect requires scene and node",
+                "message": "node.inspect requires node",
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
@@ -1737,7 +1764,16 @@ func _node_inspect(params: Dictionary) -> Dictionary:
         "groups": Array(node.get_groups()),
     }
 
+## Checks that a request names the scene the editor is actually editing.
+##
+## An omitted name means "whatever is open", which is what a caller that has just read the tree is
+## asking for. Demanding it left the AI tools unusable: their catalog documents no `scene` parameter
+## at all, so every authoring call arrived without one and was refused against the empty string.
+## `expectedRevision` still carries the real protection — a scene that changed under the caller is
+## refused whether or not it was named.
 func _require_current_scene(scene: String) -> Dictionary:
+    if scene.is_empty():
+        return {}
     if scene != _current_scene_path:
         return {
             "_gofer_error": {

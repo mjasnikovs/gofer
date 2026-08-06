@@ -388,9 +388,11 @@ fn the_addon_authors_scenes_undoably_inside_a_real_editor() {
     let created = session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
     assert_eq!(created["scene"], scene);
 
+    // No `scene`: the AI tool catalog documents none, so an authoring call that omits it has to
+    // mean the scene the editor is editing rather than be refused against the empty string.
     session.mutate(
         "node.create",
-        json!({"scene": scene, "parent": "/acceptance", "name": "Sprite", "type": "Sprite2D"}),
+        json!({"parent": "/acceptance", "name": "Sprite", "type": "Sprite2D"}),
     );
     assert_eq!(
         child_names(&session.call("scene.get_tree", json!({}))),

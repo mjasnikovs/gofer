@@ -197,6 +197,12 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
                     setIsLaunched(false)
                     return
                 }
+                // Stepping out of the outermost frame is resuming: there is no caller to land in,
+                // so the game runs on and the panel waits for whatever stops it next.
+                if (answered.outcome.kind === 'resumed') {
+                    await awaitStop()
+                    return
+                }
                 setStopped(answered.outcome.stop)
                 await readStack()
                 return

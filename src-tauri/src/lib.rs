@@ -681,7 +681,13 @@ fn list_project_tasks(app: AppHandle) -> Result<Vec<TaskRecord>, String> {
 
 #[tauri::command(async)]
 fn merge_task_worktree(app: AppHandle, task_id: String) -> Result<MergeTaskResult, String> {
-    project_storage(&app)?.merge_task(&task_id)
+    // The addon ledger knows what Gofer added to this worktree's `project.godot`; the merge records
+    // the file without it, so a task merged while its editor is running leaves nothing of Gofer's
+    // behind in the project.
+    let stager = godot_session_api::addon_stager(&app);
+    project_storage(&app)?.merge_task(&task_id, |worktree| {
+        stager.project_file_for_git(worktree).ok().flatten()
+    })
 }
 
 #[tauri::command(async)]

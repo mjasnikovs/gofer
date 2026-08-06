@@ -54,6 +54,24 @@ const BUSY_MARKERS = [
  * would report the sidebar instead of the thing that went wrong. */
 const EXCERPT_CHARS = 4_000
 
+/**
+ * How long the driver lets one in-page wait block.
+ *
+ * Every wait in this file runs inside the page, so this is the ceiling on all of them: a budget
+ * shorter than the longest step turns a working application into a driver error that says nothing
+ * about it. An agent turn that authors a scene is the longest step there is.
+ */
+const SCRIPT_BUDGET_MS = 1_800_000
+
+/**
+ * How long one call into the page may block.
+ *
+ * The driver's transport gives up on a request of its own accord well before the longest wait this
+ * sweep makes, so waits are handed over in stretches of this length and resumed. It is a property
+ * of the wire, not of the application.
+ */
+const STRETCH_MS = 120_000
+
 export type Outcome = Readonly<{ok: boolean; reason: string; elapsedMs: number}>
 
 /** The activity record the page keeps about itself, read by every wait below. */
@@ -84,8 +102,30 @@ type ActivityWindow = Window & {__goferActivity: Activity}
  * a scene load or a model download gives — and the on-screen busy text covers what the others miss.
  */
 export async function installActivityProbe() {
-    // The waits below block inside the page, so the driver's script budget has to outlast them.
-    await browser.setTimeout({script: 300_000})
+    // The waits below block inside the page, so the driver's script budget has to outlast them —
+    // including the one that waits out an agent turn authoring a scene.
+    await browser.setTimeout({script: SCRIPT_BUDGET_MS})
+    // A reloading window throws the probe away, and it throws away a probe installed into the
+    // document it is replacing too — so installation is repeated until the page it landed in is
+    // the page that stayed.
+    for (let attempt = 0; attempt < 50; attempt++) {
+        await plantActivityProbe().catch(() => undefined)
+        const patched = await browser
+            .execute(
+                () =>
+                    (window as unknown as {__goferActivity?: {patched?: boolean}}).__goferActivity
+                        ?.patched === true
+            )
+            .catch(() => false)
+        if (patched) return
+        await browser.pause(200)
+    }
+    throw new Error(
+        'the Tauri command bridge was not instrumented, so a busy backend would read as a still application'
+    )
+}
+
+async function plantActivityProbe() {
     await browser.execute(() => {
         interface MutableActivity {
             lastActivity: number
@@ -163,13 +203,6 @@ export async function installActivityProbe() {
             originalError(...args)
         }
     })
-    const patched = await browser.execute(
-        () => (window as unknown as ActivityWindow).__goferActivity.patched
-    )
-    if (!patched)
-        throw new Error(
-            'the Tauri command bridge was not instrumented, so a busy backend would read as a still application'
-        )
 }
 
 /** What the application currently shows, as the failure messages quote it. */
@@ -220,10 +253,41 @@ type TextOptions = Readonly<{
  *
  * The third case is the one that matters. A test that waits a fixed span for a click to have an
  * effect cannot tell a slow application from a dead one, and reports the same timeout for both.
+ *
+ * The waiting is handed to the page in stretches rather than in one call, because the transport
+ * between this process and the window has its own limit: a single script that blocks past it comes
+ * back as `UND_ERR_HEADERS_TIMEOUT`, which says nothing about the application. Stretching across
+ * several calls changes nothing the page sees — the activity record it polls lives in the page and
+ * outlives each one — so a step may still wait out an agent turn that takes a quarter of an hour.
  */
 export async function untilText(
     wanted: readonly string[],
     options: TextOptions = {}
+): Promise<Outcome> {
+    const limitMs = options.limitMs ?? 60_000
+    const started = Date.now()
+    for (;;) {
+        const remaining = limitMs - (Date.now() - started)
+        if (remaining <= 0)
+            return {
+                ok: false,
+                reason:
+                    `still working after ${String(Date.now() - started)}ms without `
+                    + `${JSON.stringify(wanted)}; it shows: ${await pageText()}`,
+                elapsedMs: Date.now() - started
+            }
+        const outcome = await untilTextOnce(wanted, options, Math.min(remaining, STRETCH_MS))
+        // An empty reason on a failed outcome is this stretch expiring, not the application.
+        if (outcome.ok || outcome.reason !== '')
+            return {...outcome, elapsedMs: Date.now() - started}
+    }
+}
+
+/** One stretch of the wait above, bounded by what the transport will carry. */
+async function untilTextOnce(
+    wanted: readonly string[],
+    options: TextOptions,
+    limitMs: number
 ): Promise<Outcome> {
     return browser.execute(
         (
@@ -242,20 +306,25 @@ export async function untilText(
                     }
                 ).__goferActivity
                 const started = performance.now()
-                const excerpt = () =>
-                    document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, excerptChars)
+                // Monaco renders a run of spaces as non-breaking ones, and a rendered line ends
+                // with no separator at all — so the window's raw text holds "#\u00a0changed" where
+                // the eye reads "# changed". Every comparison below is made on the same normalized
+                // text the failure quotes, or a step would fail against a window that shows exactly
+                // what it asked for.
+                const readable = () => document.body.innerText.replace(/\s+/gu, ' ')
+                const excerpt = () => readable().trim().slice(0, excerptChars)
                 // A failure the window was already showing belongs to the step that produced it.
                 // The panels keep their last error until something replaces it, so counting those
                 // would fail every later step with a sentence about an earlier one.
                 const alreadyShown = new Set(
-                    failures.filter(failure => document.body.innerText.includes(failure))
+                    failures.filter(failure => readable().includes(failure))
                 )
                 const finish = (outcome: Outcome) => {
                     clearInterval(poll)
                     resolve(outcome)
                 }
                 const poll = setInterval(() => {
-                    const text = document.body.innerText
+                    const text = readable()
                     const elapsedMs = performance.now() - started
                     // Failure first: a page can hold a wanted word inside the very sentence that
                     // reports the failure.
@@ -295,25 +364,19 @@ export async function untilText(
                         })
                         return
                     }
-                    if (elapsedMs >= limit)
-                        finish({
-                            ok: false,
-                            reason:
-                                `still working after ${String(Math.round(elapsedMs))}ms without `
-                                + `${JSON.stringify(needles)}; it shows: ${excerpt()}`,
-                            elapsedMs
-                        })
+                    // The stretch is up: an empty reason asks the caller for another one.
+                    if (elapsedMs >= limit) finish({ok: false, reason: '', elapsedMs})
                 }, 100)
             }),
-        [...wanted],
+        wanted.map(needle => needle.replace(/\s+/gu, ' ')),
         [
             ...FAILURES.filter(failure => !(options.allow ?? []).includes(failure)),
             ...(options.failures ?? [])
         ],
-        [...(options.absent ?? [])],
+        (options.absent ?? []).map(needle => needle.replace(/\s+/gu, ' ')),
         [...BUSY_MARKERS],
         IDLE_MS,
-        options.limitMs ?? 60_000,
+        limitMs,
         EXCERPT_CHARS
     )
 }
@@ -574,12 +637,181 @@ export async function clickText(text: string, limitMs = 15_000) {
     )
 }
 
-/** Types into a labelled control, replacing whatever it held. */
+/**
+ * Types into a labelled control, replacing whatever it held, and checks that it took the text.
+ *
+ * One field can be several fields over its lifetime — the output panel's box changes its label with
+ * the scope it is filtering — and a click that lands just before that remount leaves the typing with
+ * an element the document no longer has. What the field holds afterwards is the only proof.
+ */
 export async function fillInput(selector: string, value: string) {
-    const field = browser.$(selector)
-    await field.waitForDisplayed({timeout: 15_000})
-    await field.click()
-    await field.setValue(value)
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const field = browser.$(selector)
+        await field.waitForDisplayed({timeout: 15_000})
+        try {
+            await field.click()
+            await field.setValue(value)
+            if ((await field.getValue()) === value) return
+        } catch {
+            // A remount between the click and the typing; the next attempt finds the new element.
+        }
+        await browser.pause(200)
+    }
+    throw new Error(
+        `${selector} would not take ${JSON.stringify(value)}; the window shows: ${await pageText()}`
+    )
+}
+
+/**
+ * Finds a field by the name a person reads, and gives it an id if it has none.
+ *
+ * The design system labels its inputs through `aria-labelledby`, so there is no attribute on the
+ * input itself carrying the words on screen; the placeholder the other waits use exists on some
+ * fields and not on the settings form at all. Resolving the accessible name in the page is what
+ * lets a step name "Base URL" rather than an id React generated this render.
+ */
+async function labelledInputId(label: string): Promise<string> {
+    return browser.execute((wanted: string) => {
+        const fields = Array.from(
+            document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')
+        )
+        const nameOf = (field: Element) => {
+            const direct = field.getAttribute('aria-label')
+            if (direct) return direct.trim()
+            const labelledBy = field.getAttribute('aria-labelledby')
+            if (labelledBy)
+                return labelledBy
+                    .split(/\s+/)
+                    .map(id => document.getElementById(id)?.textContent ?? '')
+                    .join(' ')
+                    .trim()
+            if (field.id) {
+                const own = Array.from(document.querySelectorAll('label')).find(
+                    entry => entry.getAttribute('for') === field.id
+                )
+                if (own) return own.textContent.trim()
+            }
+            return ''
+        }
+        // The accessible name carries more than the words on the label: the design system appends
+        // "∙ Required" or "∙ Optional", and some labels name their unit in brackets.
+        const plain = (name: string) =>
+            name
+                .split('∙')[0]
+                ?.replace(/\s*\([^)]*\)\s*$/u, '')
+                .trim() ?? ''
+        const matched = fields.find(field => plain(nameOf(field)) === wanted)
+        if (!matched) return ''
+        if (!matched.id) matched.id = `gofer-live-${String(Math.floor(Math.random() * 1e9))}`
+        return matched.id
+    }, label)
+}
+
+/** Types into the field a person would find by this label. */
+export async function fillLabelledInput(label: string, value: string) {
+    const id = await labelledInputId(label)
+    if (id === '')
+        throw new Error(`no field is labelled “${label}”; the window shows: ${await pageText()}`)
+    await fillInput(`#${id}`, value)
+}
+
+/** What the field with this label currently holds. */
+export async function labelledInputValue(label: string): Promise<string> {
+    const id = await labelledInputId(label)
+    if (id === '') throw new Error(`no field is labelled “${label}”`)
+    return browser.execute(
+        (fieldId: string) =>
+            document.querySelector<HTMLInputElement>(`#${fieldId}`)?.value ?? '(missing)',
+        id
+    )
+}
+
+/**
+ * Whether the field with this label refuses input, which is how the form says it is fixed.
+ *
+ * A design system has three ways to say it, and which one it picked is its business: the DOM's own
+ * `disabled`, the ARIA attribute a still-focusable control uses instead, and read-only.
+ */
+export async function labelledInputIsDisabled(label: string): Promise<boolean> {
+    const id = await labelledInputId(label)
+    if (id === '') throw new Error(`no field is labelled “${label}”`)
+    return browser.execute((fieldId: string) => {
+        const field = document.querySelector<HTMLInputElement>(`#${fieldId}`)
+        if (!field) return false
+        return field.disabled || field.readOnly || field.getAttribute('aria-disabled') === 'true'
+    }, id)
+}
+
+/** Clicks an item in whichever menu is open. */
+export async function clickMenuItem(label: string) {
+    const quoted = JSON.stringify(label)
+    await clickSelector(
+        `//*[@role="menuitem"][normalize-space(.)=${quoted} or starts-with(normalize-space(.), ${quoted})]`,
+        `menu item “${label}”`
+    )
+}
+
+/**
+ * Hands a file to the composer's picker without opening the desktop's file dialog.
+ *
+ * Pressing "Attach images" calls `click()` on a hidden `input[type=file]`, and a real file dialog
+ * has no window this driver can reach — it would hang the sweep on a modal only a person can
+ * dismiss. WebKitGTK's driver refuses to upload into the control directly as well, so what is built
+ * here is the exact result the dialog produces: a `FileList` holding one real `File`, on the input,
+ * followed by the `change` event the application listens for. The list is read back before the
+ * event, because assigning `files` is not implemented everywhere and a silent no-op would look like
+ * an application that ignored the picture.
+ */
+export async function attachImage(name: string, mimeType: string, base64: string) {
+    const attached = await browser.execute(
+        (fileName: string, type: string, data: string) => {
+            const input = document.querySelector<HTMLInputElement>('input[type="file"]')
+            if (!input) return 'the composer has no file picker'
+            const binary = atob(data)
+            const bytes = new Uint8Array(binary.length)
+            for (let index = 0; index < binary.length; index++)
+                bytes[index] = binary.charCodeAt(index)
+            const transfer = new DataTransfer()
+            transfer.items.add(new File([bytes], fileName, {type}))
+            try {
+                input.files = transfer.files
+            } catch {
+                // Older WebKit leaves `files` read-only; shadowing it on the element itself is what
+                // the application's own handler reads either way.
+            }
+            if (input.files?.length !== 1)
+                Object.defineProperty(input, 'files', {
+                    configurable: true,
+                    value: transfer.files
+                })
+            if (input.files?.length !== 1) return 'the file picker would not take the file'
+            input.dispatchEvent(new Event('change', {bubbles: true}))
+            return ''
+        },
+        name,
+        mimeType,
+        base64
+    )
+    if (attached !== '') throw new Error(`${name} was not attached: ${attached}`)
+}
+
+/** The width a resize handle reports, which is the panel's own size. */
+export async function handleSize(label: string): Promise<number> {
+    return browser.execute((wanted: string) => {
+        const handle = Array.from(document.querySelectorAll('[role="separator"]')).find(
+            entry => entry.getAttribute('aria-label') === wanted
+        )
+        return Number(handle?.getAttribute('aria-valuenow') ?? Number.NaN)
+    }, label)
+}
+
+/** Drags a resize handle with the keyboard, which is the way it is reachable without a pointer. */
+export async function nudgeHandle(label: string, key: string, presses: number) {
+    await clickSelector(
+        `//*[@role="separator"][@aria-label=${JSON.stringify(label)}]`,
+        `the ${label} handle`
+    )
+    for (let press = 0; press < presses; press++) await browser.keys(key)
 }
 
 /**
@@ -615,9 +847,28 @@ export async function isNarrowLayout(): Promise<boolean> {
     return browser.execute(() => window.matchMedia('(max-width: 1024px)').matches)
 }
 
+/**
+ * What one labelled region of the window reads.
+ *
+ * The whole page is the wrong thing to assert a panel against: the chat column holds the agent's
+ * own answer, and an answer that names the nodes it created satisfies a search for those names
+ * whether or not the panel ever showed them.
+ */
+export async function regionText(label: string): Promise<string> {
+    return browser.execute((wanted: string) => {
+        const region = Array.from(document.querySelectorAll('[aria-label]')).find(
+            entry => entry.getAttribute('aria-label') === wanted
+        )
+        return (region as HTMLElement | null)?.innerText.replace(/\s+/gu, ' ').trim() ?? ''
+    }, label)
+}
+
 /** Whether the page currently shows this text. A question, not a wait. */
 export async function shows(text: string): Promise<boolean> {
-    return browser.execute((needle: string) => document.body.innerText.includes(needle), text)
+    return browser.execute(
+        (needle: string) => document.body.innerText.replace(/\s+/gu, ' ').includes(needle),
+        text.replace(/\s+/gu, ' ')
+    )
 }
 
 /** The line numbers Monaco currently has in the document. It renders no others. */
@@ -643,7 +894,13 @@ const KEY = {
 } as const
 
 /** The keys a sweep presses one at a time, which is the only way this platform delivers them. */
-export const KEYS = {delete: '\uE017'} as const
+export const KEYS = {
+    delete: '\uE017',
+    arrowLeft: '\uE012',
+    arrowRight: '\uE014',
+    end: '\uE010',
+    f2: '\uE032'
+} as const
 
 const EDITOR_HOST = '[data-testid="script-editor-host"]'
 
@@ -733,17 +990,40 @@ export async function revealLine(line: number) {
  * first line's left edge is a place a person can put it and a place this sweep can name.
  */
 export async function placeCaretAtStart() {
-    await revealLine(1)
-    const point = await browser.execute((host: string) => {
-        const lines = document.querySelector(`${host} .monaco-editor .view-lines`)
-        if (!lines) return undefined
-        const topmost = Array.from(lines.children)
-            .map(line => line.getBoundingClientRect())
-            .sort((left, right) => left.top - right.top)[0]
-        if (!topmost) return undefined
-        return {x: topmost.left + 1, y: topmost.top + topmost.height / 2}
-    }, EDITOR_HOST)
-    if (!point) throw new Error('Monaco is rendering no lines to put the caret on')
+    await placeCaretAtLineStart(1)
+}
+
+/**
+ * Puts the caret at the left edge of one line.
+ *
+ * Which line matters as soon as the text being typed has to be valid: GDScript accepts `extends`
+ * only at the top of a file, so an edit typed at position zero produces a script the language
+ * server refuses — and every later step then measures a broken file instead of the feature.
+ * The line is found by its gutter number rather than by counting rendered rows, which are only the
+ * ones Monaco is showing.
+ */
+export async function placeCaretAtLineStart(line: number) {
+    await revealLine(line)
+    const point = await browser.execute(
+        (host: string, wanted: number) => {
+            const editor = document.querySelector(`${host} .monaco-editor`)
+            if (!editor) return undefined
+            const overlay = Array.from(editor.querySelectorAll('.margin-view-overlays > div')).find(
+                entry => entry.querySelector('.line-numbers')?.textContent === String(wanted)
+            )
+            const lines = editor.querySelector('.view-lines')
+            if (!overlay || !lines) return undefined
+            const row = overlay.getBoundingClientRect()
+            // The gutter says which row; the text column says where the line's own left edge is.
+            return {
+                x: lines.getBoundingClientRect().left + 1,
+                y: row.top + row.height / 2
+            }
+        },
+        EDITOR_HOST,
+        line
+    )
+    if (!point) throw new Error(`Monaco is not rendering line ${String(line)} to put the caret on`)
     await clickPoint(point.x, point.y)
 }
 

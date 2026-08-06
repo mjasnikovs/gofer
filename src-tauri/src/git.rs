@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 #[derive(Clone, Debug)]
 pub struct CreatedWorktree {
@@ -55,15 +56,22 @@ pub fn create_task_worktree(
     }))
 }
 
+/// Merges a task branch into the project.
+///
+/// `staged_project_file` is the content `project.godot` should be *recorded* with, for a task whose
+/// editor session is still running: staging the Gofer addon adds two lines to that file, and they
+/// belong to Gofer rather than to the user's game. It is committed instead of the working copy,
+/// which is left alone — the editor is still reading it.
 pub fn merge_task_worktree(
     workspace_path: &Path,
     worktree_path: &Path,
     branch_name: &str,
+    staged_project_file: Option<&str>,
 ) -> Result<MergeResult, String> {
     let repository_root = repository_root(workspace_path)?
         .ok_or_else(|| "The project is not a Git repository".to_owned())?;
     ensure_clean(&repository_root)?;
-    commit_pending_task_changes(worktree_path)?;
+    commit_pending_task_changes(worktree_path, staged_project_file)?;
     let head_commit = git_text(worktree_path, &["rev-parse", "HEAD"])?;
     let output = git_output(
         &repository_root,
@@ -96,17 +104,61 @@ pub fn merge_task_worktree(
     })
 }
 
-fn commit_pending_task_changes(worktree_path: &Path) -> Result<(), String> {
-    if git_text(worktree_path, &["status", "--porcelain"])?.is_empty() {
+fn commit_pending_task_changes(
+    worktree_path: &Path,
+    staged_project_file: Option<&str>,
+) -> Result<(), String> {
+    let is_clean = git_text(worktree_path, &["status", "--porcelain"])?.is_empty();
+    if is_clean && staged_project_file.is_none() {
         return Ok(());
     }
     let add = git_output(worktree_path, &["add", "--all"])?;
     if !add.status.success() {
         return Err(git_failure("stage the task changes", &add));
     }
+    if let Some(text) = staged_project_file {
+        stage_content(worktree_path, crate::addon::PROJECT_FILE, text)?;
+    }
+    // Overriding the project file can leave the index identical to HEAD — a task that changed
+    // nothing but the addon's own two lines — and Git refuses an empty commit.
+    if git_text(worktree_path, &["diff", "--cached", "--name-only"])?.is_empty() {
+        return Ok(());
+    }
     let commit = git_output(worktree_path, &["commit", "-m", "Complete Gofer task"])?;
     if !commit.status.success() {
         return Err(git_failure("commit the task changes", &commit));
+    }
+    Ok(())
+}
+
+/// Records `text` as the content of `path` in the index, leaving the file on disk untouched.
+fn stage_content(worktree_path: &Path, path: &str, text: &str) -> Result<(), String> {
+    let mut child = git_command(
+        worktree_path,
+        &["hash-object", "-w", "--path", path, "--stdin"],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|error| format!("Could not start Git: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "Git would not accept the project file".to_owned())?
+        .write_all(text.as_bytes())
+        .map_err(|error| format!("Could not write the project file to Git: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Could not read Git's answer: {error}"))?;
+    if !output.status.success() {
+        return Err(git_failure("record the project file", &output));
+    }
+    let hash = output_text(&output)?;
+    let entry = format!("100644,{hash},{path}");
+    let update = git_output(worktree_path, &["update-index", "--cacheinfo", &entry])?;
+    if !update.status.success() {
+        return Err(git_failure("stage the project file", &update));
     }
     Ok(())
 }
@@ -169,7 +221,15 @@ fn git_text(directory: &Path, arguments: &[&str]) -> Result<String, String> {
 }
 
 fn git_output(directory: &Path, arguments: &[&str]) -> Result<Output, String> {
-    Command::new("git")
+    git_command(directory, arguments)
+        .output()
+        .map_err(|error| format!("Could not start Git: {error}"))
+}
+
+/// Git, detached from whatever repository the caller's own environment points at.
+fn git_command(directory: &Path, arguments: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
         .args(arguments)
         .current_dir(directory)
         .env_remove("GIT_DIR")
@@ -178,9 +238,8 @@ fn git_output(directory: &Path, arguments: &[&str]) -> Result<Output, String> {
         .env_remove("GIT_OBJECT_DIRECTORY")
         .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_PREFIX")
-        .output()
-        .map_err(|error| format!("Could not start Git: {error}"))
+        .env_remove("GIT_PREFIX");
+    command
 }
 
 fn output_text(output: &Output) -> Result<String, String> {
@@ -235,7 +294,7 @@ mod tests {
             .expect("Git worktree");
         fs::write(worktree.join("player.gd"), "extends Node\n").expect("task change");
 
-        let merged = merge_task_worktree(repository.path(), &worktree, &created.branch_name)
+        let merged = merge_task_worktree(repository.path(), &worktree, &created.branch_name, None)
             .expect("merge task");
 
         assert_ne!(merged.head_commit, created.head_commit);
@@ -244,6 +303,43 @@ mod tests {
             git_text(repository.path(), &["rev-parse", "HEAD"]).expect("merged HEAD"),
             merged.merged_commit
         );
+    }
+
+    /// A task merged while its editor session runs must not carry Gofer's own two `project.godot`
+    /// lines into the project: they are removed when the session stops, and a merge that recorded
+    /// them would leave them in the history where nothing ever takes them out again.
+    #[test]
+    fn the_project_file_is_recorded_without_what_the_addon_added() {
+        let repository = repository();
+        let worktree_root = TempDir::new().expect("temporary worktree root");
+        let worktree = worktree_root.path().join("task-worktree");
+        let created = create_task_worktree(repository.path(), &worktree, "gofer/task-staged")
+            .expect("create worktree")
+            .expect("Git worktree");
+        let staged = "[application]\nrun/main_scene=\"res://level.tscn\"\n\n[editor_plugins]\n\nenabled=PackedStringArray(\"res://addons/gofer/plugin.cfg\")\n";
+        fs::write(worktree.join("project.godot"), staged).expect("staged project file");
+        fs::write(worktree.join("level.tscn"), "[gd_scene]\n").expect("task change");
+        let user = "[application]\nrun/main_scene=\"res://level.tscn\"\n";
+
+        merge_task_worktree(
+            repository.path(),
+            &worktree,
+            &created.branch_name,
+            Some(user),
+        )
+        .expect("merge task");
+
+        assert_eq!(
+            fs::read_to_string(repository.path().join("project.godot")).expect("merged project"),
+            user,
+            "the merge must record the project file the user's game has"
+        );
+        assert_eq!(
+            fs::read_to_string(worktree.join("project.godot")).expect("worktree project"),
+            staged,
+            "the running editor's own copy must be left alone"
+        );
+        assert!(repository.path().join("level.tscn").is_file());
     }
 
     #[test]
@@ -256,7 +352,7 @@ mod tests {
             .expect("Git worktree");
         fs::write(repository.path().join("untracked.txt"), "dirty").expect("dirty file");
 
-        let error = merge_task_worktree(repository.path(), &worktree, &created.branch_name)
+        let error = merge_task_worktree(repository.path(), &worktree, &created.branch_name, None)
             .expect_err("dirty merge must fail");
 
         assert!(error.contains("must be clean"));
@@ -272,7 +368,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            merge_task_worktree(directory.path(), &target, "gofer/task-none")
+            merge_task_worktree(directory.path(), &target, "gofer/task-none", None)
                 .unwrap_err()
                 .contains("not a Git repository")
         );
@@ -311,7 +407,7 @@ mod tests {
         git(repository.path(), &["add", "project.godot"]);
         git(repository.path(), &["commit", "-m", "Main edit"]);
 
-        let error = merge_task_worktree(repository.path(), &worktree, &created.branch_name)
+        let error = merge_task_worktree(repository.path(), &worktree, &created.branch_name, None)
             .expect_err("two edits to one file must conflict");
 
         assert!(error.contains("merge the task branch"), "{error}");
@@ -337,7 +433,7 @@ mod tests {
             .expect("Git worktree");
         let before = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("HEAD");
 
-        let merged = merge_task_worktree(repository.path(), &worktree, &created.branch_name)
+        let merged = merge_task_worktree(repository.path(), &worktree, &created.branch_name, None)
             .expect("an unchanged task still merges");
 
         assert_eq!(

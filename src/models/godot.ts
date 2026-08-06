@@ -242,6 +242,7 @@ export type DebugSourceBreakpoints = Readonly<{
 export type DebugStepOutcome =
     | Readonly<{kind: 'steppedOut'; stop: DebugStopped}>
     | Readonly<{kind: 'interrupted'; stop: DebugStopped}>
+    | Readonly<{kind: 'resumed'}>
     | Readonly<{kind: 'terminated'}>
 
 export type DebugRequest =

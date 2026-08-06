@@ -178,6 +178,32 @@ impl AddonStager {
         })
     }
 
+    /// The project file of a staged worktree as Git should record it, or `None` when there is
+    /// nothing of Gofer's in it.
+    ///
+    /// The addon's own files are kept out of Git by an exclude entry, but `project.godot` cannot
+    /// be excluded — the task's real work edits it too. Committing it while a session is running
+    /// would put Gofer's editor plugin and its runtime autoload into the user's project history,
+    /// where stopping the session no longer removes them.
+    pub fn project_file_for_git(&self, worktree: &Path) -> Result<Option<String>, FileError> {
+        let key = worktree.display().to_string();
+        let ledger = self.ledger()?;
+        let Some(entry) = ledger.entries.iter().find(|entry| entry.worktree == key) else {
+            return Ok(None);
+        };
+        let workspace = Workspace::open(worktree)?;
+        let contents = match workspace.read(PROJECT_FILE) {
+            Ok(contents) => contents,
+            Err(error) if error.code == "not_found" => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut lines = split_lines(&contents.text);
+        disable_plugin(&mut lines, &entry.plugin);
+        remove_autoload(&mut lines, &entry.autoload);
+        let text = join_lines(&lines);
+        Ok((text != contents.text).then_some(text))
+    }
+
     pub fn staged(&self, worktree: &Path) -> Result<bool, FileError> {
         let key = worktree.display().to_string();
         Ok(self

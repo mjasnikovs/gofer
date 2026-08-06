@@ -747,7 +747,17 @@ impl ProjectStorage {
         Ok(path)
     }
 
-    pub fn merge_task(&self, task_id: &str) -> Result<MergeTaskResult, String> {
+    /// Merges a task branch into the project.
+    ///
+    /// `staged_project_file` is asked what `project.godot` should be recorded as, given the task's
+    /// worktree. The answer comes from the addon ledger, which storage has no business reading: a
+    /// task whose editor session is running holds Gofer's own two lines in that file, and they must
+    /// not reach the user's history.
+    pub fn merge_task(
+        &self,
+        task_id: &str,
+        staged_project_file: impl FnOnce(&Path) -> Option<String>,
+    ) -> Result<MergeTaskResult, String> {
         let connection = self.connection()?;
         require_task(&connection, task_id)?;
         let (branch_name, worktree_path) = connection
@@ -759,10 +769,12 @@ impl ProjectStorage {
             .optional()
             .map_err(database_error)?
             .ok_or_else(|| "The task does not have an isolated Git worktree".to_owned())?;
+        let recorded = staged_project_file(Path::new(&worktree_path));
         let merged = git::merge_task_worktree(
             &self.workspace_path,
             Path::new(&worktree_path),
             &branch_name,
+            recorded.as_deref(),
         )?;
         let now = now_millis()?;
         drop(connection);

@@ -133,6 +133,12 @@ struct RunLogger {
 static RUN_LOGGER: Mutex<Option<RunLogger>> = Mutex::new(None);
 
 /// Starts a Godot editor session bound to the active task's worktree.
+///
+/// Starting a session that is already running answers with the one that is running. The AI agent is
+/// told to start the session when it is offline and cannot always tell, and the cost of getting it
+/// wrong used to be severe: staging the addon begins by *unstaging* it, so a redundant start pulled
+/// `addons/gofer` out from under the live editor and rewrote its `project.godot`, killing the very
+/// session it was asked to make sure of — and only then failed with "already active".
 pub fn start_session<R: Runtime>(
     app: &AppHandle<R>,
     _request: StartGodotSessionRequest,
@@ -145,7 +151,25 @@ pub fn start_session<R: Runtime>(
         )
     })?;
 
-    let stager = AddonStager::new(ledger_path(app));
+    if let Some(running) = godot_session::current_info() {
+        // The running session reports the path it resolved; the task table holds the one it was
+        // given, and on a machine with a symlinked temporary directory those are different strings
+        // for one directory.
+        let resolved = crate::paths::canonical(&worktree).unwrap_or_else(|_| worktree.clone());
+        if Path::new(&running.worktree) == resolved {
+            return Ok(to_response(&running));
+        }
+        return Err(SessionError::new(
+            "session_already_active",
+            format!(
+                "A Godot session is already running for {}. Stop it before starting one for {}.",
+                running.worktree,
+                worktree.display()
+            ),
+        ));
+    }
+
+    let stager = addon_stager(app);
     let workspace = Workspace::open(&worktree).map_err(|error| {
         SessionError::new(
             "worktree_unavailable",
@@ -324,7 +348,7 @@ pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> 
     });
     if let Some(worktree) = worktree {
         // Unstaging must read the same ledger staging wrote, or the addon is left in the worktree.
-        let _ = AddonStager::new(ledger_path(app)).unstage(&worktree);
+        let _ = addon_stager(app).unstage(&worktree);
     }
     stop_event_subscription();
     result
@@ -477,6 +501,11 @@ fn project_storage<R: Runtime>(app: &AppHandle<R>) -> Result<ProjectStorage, Ses
                 "Project storage has not been initialized",
             )
         })
+}
+
+/// The stager that owns this installation's addon ledger.
+pub fn addon_stager<R: Runtime>(app: &AppHandle<R>) -> AddonStager {
+    AddonStager::new(ledger_path(app))
 }
 
 fn ledger_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf {

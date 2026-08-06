@@ -55,6 +55,9 @@ const MAX_HEADER_LINES: usize = 32;
 /// Step-out is emulated through repeated `next` requests; without a bound, a function that never
 /// returns (an endless loop the user is debugging, say) would spin the client forever.
 pub const MAX_STEP_OUT_STEPS: u32 = 256;
+/// How long a step-out that resumed waits for the game to stop again before reporting that it is
+/// simply running. Short, because the answer is a fact about the game either way.
+const STEP_OUT_RESUME_TIMEOUT: Duration = Duration::from_secs(5);
 /// Godot only supports debugging one thread and hardcodes it to id 1.
 pub const MAIN_THREAD_ID: i64 = 1;
 /// How long a request that depends on the debuggee's scope dump keeps retrying a rejection.
@@ -240,6 +243,8 @@ pub enum StepOutcome {
     SteppedOut { stop: StoppedDetails },
     /// A breakpoint, exception, or pause interrupted the emulation before the escape.
     Interrupted { stop: StoppedDetails },
+    /// The outermost frame was left by resuming, and nothing has stopped the game since.
+    Resumed,
     /// The debuggee terminated mid-emulation.
     Terminated,
 }
@@ -576,9 +581,28 @@ impl DapClient {
     /// stack depth drops below the depth the frame started at. The loop stops immediately when a
     /// breakpoint, exception, or pause interrupts it, when the debuggee terminates, or when the
     /// safety limit is reached without escaping.
+    ///
+    /// The outermost frame is the exception, and it is the common one: a script stopped inside a
+    /// signal handler has no caller on the stack, so no number of steps can ever put the depth
+    /// below where it started — stepping over the last line simply returns to the engine and the
+    /// next call arrives at the same depth. Leaving that frame *is* resuming, which is what every
+    /// debugger does for a step-out at the top of the stack, so that is what happens here rather
+    /// than 256 pointless steps ending in a failure the user cannot act on.
     pub fn step_out(&self, thread_id: i64) -> Result<StepOutcome, DapError> {
         let initial_depth = self.stack_depth(thread_id)?;
         let events = self.subscribe_events();
+        if initial_depth <= 1 {
+            self.continue_execution(thread_id)?;
+            // A game with a breakpoint left in it stops again almost at once and the step-out ends
+            // where a person would expect; one with nothing left to stop it simply runs, and that
+            // is the honest answer rather than a failure.
+            return match self.await_stop(&events, thread_id, STEP_OUT_RESUME_TIMEOUT) {
+                Ok(Some(stop)) => Ok(StepOutcome::SteppedOut { stop }),
+                Ok(None) => Ok(StepOutcome::Terminated),
+                Err(error) if error.code == "stop_timeout" => Ok(StepOutcome::Resumed),
+                Err(error) => Err(error),
+            };
+        }
         for _ in 0..MAX_STEP_OUT_STEPS {
             self.next(thread_id)?;
             let Some(stop) = self.await_stop(&events, thread_id, DEFAULT_REQUEST_TIMEOUT)? else {

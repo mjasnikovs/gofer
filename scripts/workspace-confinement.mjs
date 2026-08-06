@@ -12,7 +12,43 @@
  */
 
 import {realpath} from 'node:fs/promises'
-import {dirname, isAbsolute, relative, resolve, sep} from 'node:path'
+import {basename, dirname, extname, isAbsolute, relative, resolve, sep} from 'node:path'
+
+/**
+ * The files the running editor owns, and the tool that edits each of them properly.
+ *
+ * A scene is not a document. The editor holds it in memory, and a `.tscn` written behind its back
+ * makes it stop and ask the user which copy to keep — a modal dialog in a window the agent cannot
+ * reach, which hangs the session until a person clicks it. When the text is also malformed, and
+ * text a model wrote by hand usually is, the editor adds a second dialog about the parse error and
+ * the scene is unopenable besides. Every one of these files has a Godot tool that edits it through
+ * the editor, so the raw write is refused and the agent is told which tool to reach for instead.
+ */
+const EDITOR_OWNED = [
+    {
+        matches: path => ['.tscn', '.scn'].includes(extname(path)),
+        instead:
+            'Scenes belong to the running editor. Build this one with godot_scene create, '
+            + 'godot_node create and godot_node set_property, then godot_scene save. A .tscn '
+            + 'written as text makes the editor stop and ask which copy to keep.'
+    },
+    {
+        matches: path => basename(path) === 'project.godot',
+        instead:
+            'project.godot belongs to the running editor. Use godot_project set_setting, '
+            + 'set_input_action, set_autoload or set_plugin_enabled, which write it through the '
+            + 'editor and keep its own copy in step.'
+    }
+]
+
+/** Tools that put text on disk. Reading an editor-owned file is always fine. */
+const WRITING_TOOLS = ['write', 'edit']
+
+function refuseEditorOwnedWrite(toolName, path) {
+    if (!WRITING_TOOLS.includes(toolName)) return
+    const owned = EDITOR_OWNED.find(entry => entry.matches(path))
+    if (owned) throw new Error(`${path} cannot be written directly. ${owned.instead}`)
+}
 
 function isInside(root, path) {
     const difference = relative(root, path)
@@ -64,6 +100,7 @@ export function confineTool(tool, workspacePath) {
             }
             const resolved = {...params, path: worktreePath(params.path)}
             await validateToolPath(workspacePath, resolved.path)
+            refuseEditorOwnedWrite(tool.name, resolved.path)
             return tool.execute(id, resolved, signal, onUpdate, context)
         }
     }

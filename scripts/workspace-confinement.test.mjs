@@ -11,6 +11,8 @@ async function workspace() {
     const outside = join(root, 'outside')
     await mkdir(path)
     await mkdir(outside)
+    await mkdir(join(path, 'scenes'))
+    await mkdir(join(path, 'scripts'))
     await writeFile(join(path, 'inside.txt'), 'inside')
     await writeFile(join(outside, 'secret.txt'), 'secret')
     await symlink(join(outside, 'secret.txt'), join(path, 'escape.txt'))
@@ -56,6 +58,39 @@ test('rejects malformed, traversal, and escaping-symlink tool paths', async cont
 
     for (const path of [undefined, '', 'bad\0path', '../outside/secret.txt', 'escape.txt'])
         await assert.rejects(tool.execute('1', {path}), /path|workspace/iu)
+})
+
+test('refuses to let the raw file tools write what the editor owns', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+
+    for (const name of ['write', 'edit']) {
+        const tool = confineTool(fakeTool(name), current.path)
+        // Both of these hang the editor on a modal nobody can answer when they are written as text.
+        await assert.rejects(
+            tool.execute('1', {path: 'scenes/level.tscn', text: '[gd_scene]'}),
+            /godot_scene/u
+        )
+        await assert.rejects(
+            tool.execute('2', {path: 'res://scenes/level.scn', text: 'x'}),
+            /godot_scene/u
+        )
+        await assert.rejects(
+            tool.execute('3', {path: 'project.godot', text: 'x'}),
+            /godot_project/u
+        )
+        // Everything else the project holds is the agent's to write.
+        assert.deepEqual(await tool.execute('4', {path: 'scripts/player.gd', text: 'x'}), {
+            path: 'scripts/player.gd',
+            text: 'x'
+        })
+    }
+
+    // Reading one is how the agent finds out what is in it, and that stays allowed.
+    const reader = confineTool(fakeTool('read'), current.path)
+    assert.deepEqual(await reader.execute('5', {path: 'scenes/level.tscn'}), {
+        path: 'scenes/level.tscn'
+    })
 })
 
 test('allows workspace shell commands and rejects every explicit escape form', async context => {

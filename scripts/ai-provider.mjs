@@ -22,6 +22,7 @@ You can inspect and modify files and run shell commands with the provided tools.
  */
 const GODOT_TOOL_PROMPT = `A Gofer-managed Godot editor is available through the godot_* tools. Start with godot_session status, and start the session if it is offline.
 The edited scene (godot_scene, godot_node) and the running game (godot_runtime) are separate: editing one never changes the other. Scene mutations take expectedRevision from the last read that reported one, and are undoable in the editor until godot_scene save writes them.
+Scenes and project.godot belong to the editor, which holds them open: build and change them with godot_scene, godot_node and godot_project, never by writing the file as text. The write and edit tools refuse those files for that reason; scripts and every other file are yours to write.
 After godot_debug launch, wait with await_stop before reading the stack, scopes, or variables. Read godot_logs when something fails without explanation.
 A few operations ask the user first — deleting or moving a file, enabling a plugin, and writing a machine-wide editor setting. The call waits for their answer, and approval_denied means they said no: do not retry it, ask what to do instead.`
 

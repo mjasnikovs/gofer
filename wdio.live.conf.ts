@@ -1,5 +1,6 @@
 import type {Options} from '@wdio/types'
-import {copyFileSync, existsSync, mkdirSync} from 'node:fs'
+import {execFileSync} from 'node:child_process'
+import {copyFileSync, existsSync, mkdirSync, rmSync} from 'node:fs'
 import {homedir, tmpdir} from 'node:os'
 import {join} from 'node:path'
 
@@ -16,7 +17,7 @@ const executable =
         'src-tauri/target/release/gofer.exe'
     :   'src-tauri/target/release/gofer'
 
-const workspace = process.env.GOFER_LIVE_WORKSPACE ?? join(homedir(), 'hub/test-gd')
+const workspace = process.env.GOFER_LIVE_WORKSPACE ?? join(homedir(), 'hub/mario-test')
 const dataRoot = join(tmpdir(), 'gofer-live-run')
 const appDataDir = join(dataRoot, 'data')
 mkdirSync(appDataDir, {recursive: true})
@@ -61,19 +62,118 @@ export const config: Options.Testrunner = {
     logLevel: 'error',
     bail: 0,
     waitforTimeout: 10_000,
-    connectionRetryTimeout: 180_000,
+    /**
+     * How long one WebDriver command may take.
+     *
+     * Every wait in this sweep blocks inside the page, so this is the ceiling on all of them: the
+     * default three minutes turned an agent turn that was still authoring a scene into "the
+     * operation was aborted due to timeout", which says nothing about the application.
+     */
+    connectionRetryTimeout: 1_860_000,
     connectionRetryCount: 0,
     framework: 'mocha',
     reporters: ['spec'],
     specFileRetries: 0,
-    mochaOpts: {ui: 'bdd', timeout: 300_000},
+    /**
+     * The outer bound on one scenario, not a schedule.
+     *
+     * A step that asks the agent to build part of a level waits for as many turns as it takes, and
+     * the harness ends a turn that has stopped working within seconds — so this only has to be
+     * longer than the slowest honest scenario rather than tuned to it.
+     */
+    mochaOpts: {ui: 'bdd', timeout: 3_600_000},
     onPrepare: () => {
         if (!existsSync(join(workspace, 'project.godot'))) {
             throw new Error(`${workspace} is not a Godot project`)
         }
+        stopAStaleApplication()
+        // A run starts from nothing: the tasks, chats and worktrees of an earlier one would change
+        // what this one is asked to build, and a sweep whose first run differs from its second is
+        // not a regression test.
+        rmSync(dataRoot, {recursive: true, force: true})
+        mkdirSync(appDataDir, {recursive: true})
+        restoreWorkspace()
         const userSettings = join(homedir(), '.config/com.gofer.desktop/settings.json')
         const settings = join(appDataDir, 'settings.json')
         // The sweep talks to whatever model the user configured, so it starts from their settings.
         if (!existsSync(settings) && existsSync(userSettings)) copyFileSync(userSettings, settings)
+        seedCommit = git('rev-parse', 'HEAD')
+    },
+    /**
+     * Puts the project back the way the sweep found it.
+     *
+     * This runs after the application has exited, which is the first moment its worktrees can be
+     * taken away from it. The sweep merges a task, so without this the project would gain a commit
+     * per run — and the next run would be asked to build a level that is already there.
+     */
+    onComplete: () => {
+        restoreWorkspace()
     }
+}
+
+/** The commit the project was on before the sweep, read once the runner has checked the path. */
+let seedCommit = ''
+
+/**
+ * Clears an application a previous sweep left running.
+ *
+ * The embedded driver listens on one fixed port, so a leftover window answers this run instead of
+ * the one it is about to start — and the data directory wiped below is that window's, which then
+ * fails every step with a database it can no longer open. The binary named here is the test build
+ * this configuration drives, never an installed Gofer, so the only thing this can end is debris
+ * from a sweep that did not shut down.
+ */
+function stopAStaleApplication() {
+    for (let attempt = 0; attempt < 20; attempt++) {
+        // `pgrep` exits non-zero when it matches nothing, which is the ordinary case.
+        const running = (() => {
+            try {
+                return execFileSync('pgrep', ['-f', executable], {encoding: 'utf8'}).trim()
+            } catch {
+                return ''
+            }
+        })()
+        if (running === '') return
+        if (attempt === 0)
+            console.log(`stopping a ${executable} a previous sweep left running: ${running}`)
+        for (const pid of running.split('\n')) {
+            try {
+                process.kill(Number(pid), attempt < 5 ? 'SIGTERM' : 'SIGKILL')
+            } catch {
+                // It exited between the listing and the signal, which is the outcome wanted.
+            }
+        }
+        execFileSync('sleep', ['0.5'])
+    }
+    throw new Error(`${executable} is still running and this sweep cannot drive a second one`)
+}
+
+function git(...arguments_: string[]) {
+    return execFileSync('git', ['-C', workspace, ...arguments_], {encoding: 'utf8'}).trim()
+}
+
+/**
+ * Puts the project back to the commit the sweep started from, with none of its task checkouts left.
+ *
+ * The order matters: a branch Git still believes is checked out somewhere cannot be deleted, so the
+ * worktrees go first — including the registrations whose directories are already gone.
+ */
+function restoreWorkspace() {
+    for (const line of git('worktree', 'list').split('\n')) {
+        const root = line.split(' ')[0] ?? ''
+        if (root === '' || root === workspace) continue
+        try {
+            git('worktree', 'remove', '--force', root)
+        } catch {
+            // A directory that is already gone is removed by the prune below instead.
+        }
+    }
+    git('worktree', 'prune')
+    for (const line of git('branch', '--list', 'gofer/task-*').split('\n')) {
+        const name = line.replace(/^[*+]/u, '').trim()
+        if (name !== '') git('branch', '-D', name)
+    }
+    if (seedCommit !== '') git('reset', '--hard', seedCommit)
+    // `.godot` is Godot's own import cache: regenerating it costs a scan the sweep does not need.
+    git('clean', '-fd')
 }

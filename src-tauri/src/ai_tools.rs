@@ -130,8 +130,14 @@ pub const CATALOG: &[ToolDomain] = &[
                 "get_state",
                 "Asks the addon for readiness, the open scene, and its revision.",
             ),
-            operation("undo", "Undoes the last editor operation."),
-            operation("redo", "Redoes the last undone editor operation."),
+            operation(
+                "undo",
+                "Undoes the last editor operation: {expectedRevision}.",
+            ),
+            operation(
+                "redo",
+                "Redoes the last undone editor operation: {expectedRevision}.",
+            ),
         ],
     },
     ToolDomain {
@@ -140,43 +146,56 @@ pub const CATALOG: &[ToolDomain] = &[
         operations: &[
             operation("list", "Lists the scene files in the project."),
             operation("open", "Opens a scene: {path}."),
-            operation("create", "Creates a scene: {path, rootType, rootName?}."),
+            operation(
+                "create",
+                "Creates a scene and opens it: {path, rootType, rootName?, expectedRevision}.",
+            ),
             operation(
                 "get_tree",
-                "Returns the edited scene hierarchy and its revision.",
+                "Returns the edited scene hierarchy and its revision. Read this before every \
+                 mutation: its `revision` is the `expectedRevision` the mutation needs.",
             ),
-            operation("save", "Saves the edited scene."),
-            operation("save_as", "Saves the edited scene to a new path: {path}."),
+            operation("save", "Saves the edited scene: {expectedRevision}."),
+            operation(
+                "save_as",
+                "Saves the edited scene to a new path: {path, expectedRevision}.",
+            ),
             operation(
                 "reload",
-                "Reloads the edited scene from disk, discarding in-memory edits.",
+                "Reloads the edited scene from disk, discarding in-memory edits: \
+                 {expectedRevision}.",
             ),
         ],
     },
     ToolDomain {
         name: "godot_node",
-        description: "Node authoring inside the edited scene. Every mutation is undoable and takes \
-                      expectedRevision from the last godot_scene get_tree.",
+        description: "Node authoring inside the edited scene. Every mutation is undoable and every \
+                      one of them needs expectedRevision — the `revision` the last godot_scene \
+                      get_tree reported. A mutation without it is refused, so read the tree, then \
+                      mutate, then read it again for the next one. Paths are the scene's own, like \
+                      /Level1 or /Level1/Ground.",
         operations: &[
-            operation("inspect", "Inspects a node: {path}."),
-            operation("create", "Creates a node: {parent, type, name?}."),
-            operation("duplicate", "Duplicates a node: {path, name?}."),
-            operation("rename", "Renames a node: {path, name}."),
-            operation("reparent", "Reparents a node: {path, parent, index?}."),
-            operation("delete", "Deletes a node: {path}."),
-            operation("set_property", "Sets a property: {path, property, value}."),
-            operation("add_to_group", "Adds a node to a group: {path, group}."),
+            operation("inspect", "Inspects a node: {node}."),
             operation(
-                "remove_from_group",
-                "Removes a node from a group: {path, group}.",
+                "create",
+                "Creates a node: {parent, type, name, index?, expectedRevision}. `parent` is the \
+                 parent's path — the root's own path, like /Level1, for a direct child.",
             ),
             operation(
-                "connect_signal",
-                "Connects a signal: {path, signal, target, method}.",
+                "duplicate",
+                "Duplicates a node: {node, name?, expectedRevision}.",
             ),
+            operation("rename", "Renames a node: {node, name, expectedRevision}."),
             operation(
-                "disconnect_signal",
-                "Disconnects a signal: {path, signal, target, method}.",
+                "reparent",
+                "Reparents a node: {node, newParent, index?, expectedRevision}.",
+            ),
+            operation("delete", "Deletes a node: {node, expectedRevision}."),
+            operation(
+                "set_property",
+                "Sets a property: {node, property, value, expectedRevision}. `value` is tagged \
+                 with its type, as {type, value}: {\"type\": \"vector2\", \"value\": [12, 34]}, \
+                 {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}.",
             ),
         ],
     },
@@ -191,14 +210,11 @@ pub const CATALOG: &[ToolDomain] = &[
                 "search_settings",
                 "Searches project settings: {query, limit?}.",
             ),
-            operation("get_setting", "Reads one project setting: {setting}."),
-            operation(
-                "set_setting",
-                "Writes one project setting: {setting, value}.",
-            ),
+            operation("get_setting", "Reads one project setting: {name}."),
+            operation("set_setting", "Writes one project setting: {name, value}."),
             operation(
                 "reset_setting",
-                "Resets a project setting to its default: {setting}.",
+                "Resets a project setting to its default: {name}.",
             ),
             operation("list_autoloads", "Lists the configured autoloads."),
             operation(
@@ -209,15 +225,17 @@ pub const CATALOG: &[ToolDomain] = &[
             operation("list_input_actions", "Lists the Input Map actions."),
             operation(
                 "set_input_action",
-                "Writes an input action: {action, events, deadzone?}.",
+                "Writes an input action: {name, events, deadzone?}. `name` is the action's own \
+                 name, like move_left, never a settings path. Each event is tagged, as \
+                 {\"type\": \"key\", \"keycode\": \"A\"}.",
             ),
             operation(
                 "remove_input_action",
-                "Removes a project input action: {action}.",
+                "Removes a project input action: {name}.",
             ),
             operation(
                 "reset_input_action",
-                "Drops the override of a built-in action: {action}.",
+                "Drops the override of a built-in action: {name}.",
             ),
             operation("list_plugins", "Lists the project's editor plugins."),
             operation(
@@ -230,11 +248,11 @@ pub const CATALOG: &[ToolDomain] = &[
             ),
             operation(
                 "get_editor_setting",
-                "Reads one machine-wide editor setting: {setting}.",
+                "Reads one machine-wide editor setting: {name}.",
             ),
             operation(
                 "set_editor_setting",
-                "Writes one machine-wide editor setting: {setting, value}.",
+                "Writes one machine-wide editor setting: {name, value}.",
             ),
         ],
     },
@@ -704,6 +722,86 @@ mod tests {
         tauri::test::mock_builder()
             .build(tauri::generate_context!())
             .expect("build mock Tauri app")
+    }
+
+    /// Every operation the catalog offers for the editor's own domains has to exist in the addon.
+    ///
+    /// The catalog is what the model reads and the addon is what answers, and nothing else keeps
+    /// them together: four node operations were advertised for months with no handler behind them,
+    /// so an agent that reached for one could only ever be told the command was unknown.
+    #[test]
+    fn every_editor_operation_the_catalog_offers_has_an_addon_handler() {
+        const ADDON: &str = include_str!("../addon/plugin.gd");
+        for domain in CATALOG {
+            let prefix = match domain.name {
+                "godot_session" => "session",
+                "godot_scene" => "scene",
+                "godot_node" => "node",
+                "godot_project" => "project",
+                _ => continue,
+            };
+            for operation in domain.operations {
+                // The three editor-settings operations are the addon's `editor.` domain, and
+                // `project_command` is the one place that mapping lives.
+                let command = if prefix == "project" {
+                    project_command(operation.op)
+                } else {
+                    format!("{prefix}.{}", operation.op)
+                };
+                // `session.start`, `stop` and `status` are the desktop's own, not the addon's.
+                if matches!(
+                    command.as_str(),
+                    "session.start" | "session.stop" | "session.status"
+                ) {
+                    continue;
+                }
+                assert!(
+                    ADDON.contains(&format!("\"{command}\":")),
+                    "{} {} is offered to the model but the addon has no handler for {command}",
+                    domain.name,
+                    operation.op
+                );
+            }
+        }
+    }
+
+    /// Every mutation the addon guards with a revision has to say so where the model reads it.
+    ///
+    /// Without this the catalog documented the parameter nowhere an operation names its arguments,
+    /// and a live agent spent a whole turn being refused with `revision_conflict` on every
+    /// authoring call it made.
+    #[test]
+    fn mutating_operations_document_the_revision_they_require() {
+        let mutating = [
+            ("godot_node", "create"),
+            ("godot_node", "duplicate"),
+            ("godot_node", "rename"),
+            ("godot_node", "reparent"),
+            ("godot_node", "delete"),
+            ("godot_node", "set_property"),
+            ("godot_scene", "create"),
+            ("godot_scene", "save"),
+            ("godot_scene", "save_as"),
+            ("godot_scene", "reload"),
+            ("godot_session", "undo"),
+            ("godot_session", "redo"),
+        ];
+        for (tool, op) in mutating {
+            let domain = CATALOG
+                .iter()
+                .find(|domain| domain.name == tool)
+                .unwrap_or_else(|| panic!("{tool} is in the catalog"));
+            let operation = domain
+                .operations
+                .iter()
+                .find(|operation| operation.op == op)
+                .unwrap_or_else(|| panic!("{tool} {op} is in the catalog"));
+            assert!(
+                operation.summary.contains("expectedRevision"),
+                "{tool} {op} must tell the model it needs expectedRevision: {}",
+                operation.summary
+            );
+        }
     }
 
     fn call(tool: &str, op: &str, params: Value) -> ToolRequest {
