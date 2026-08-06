@@ -311,6 +311,16 @@ fn start_with(
     }
 
     let worktree = canonical_worktree(&request.worktree)?;
+    // Godot opens any directory as a project, inventing an empty one where there is none, so a
+    // workspace that is not a Godot project fails later as a scene that will not load rather than
+    // here as the plain fact it is. Naming the directory is the whole point: Gofer takes its
+    // workspace from the directory it was started in, which is not always the one the user meant.
+    if !worktree.join(crate::addon::PROJECT_FILE).is_file() {
+        return Err(SessionError::new(
+            "not_a_godot_project",
+            crate::addon::missing_project_message(&worktree),
+        ));
+    }
     let binary = discover_binary(spawner)?;
     let godot_version = verify_version(spawner, &binary)?;
     let lsp_remote_host = read_lsp_remote_host()?;
@@ -950,8 +960,15 @@ mod tests {
         }
     }
 
+    /// A worktree a session will open: a directory that is a Godot project, because a session
+    /// refuses one that is not.
     fn workspace() -> (TempDir, PathBuf) {
         let directory = TempDir::new().expect("temporary worktree");
+        fs::write(
+            directory.path().join("project.godot"),
+            "config_version=5\n\n[application]\n\nconfig/name=\"Session fixture\"\n",
+        )
+        .expect("project file");
         let path = paths::canonical(directory.path()).expect("canonicalize");
         (directory, path)
     }
@@ -1041,6 +1058,30 @@ mod tests {
         // Whatever this machine has — a real settings file or none at all — the answer is a host,
         // never a failure.
         assert!(!read_lsp_remote_host().expect("discovered host").is_empty());
+    }
+
+    #[test]
+    fn a_workspace_without_a_project_file_is_refused_by_name() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        let directory = TempDir::new().expect("temporary worktree");
+        let worktree = paths::canonical(directory.path()).expect("canonicalize");
+        let spawner = FakeSpawner::new("4.7.1.stable");
+
+        let error = start_with(
+            LaunchRequest {
+                worktree: worktree.clone(),
+            },
+            &spawner,
+        )
+        .expect_err("a directory that is not a Godot project cannot host a session");
+
+        assert_eq!(error.code, "not_a_godot_project");
+        // The directory is what the user has to change, so the message has to name it.
+        assert!(error.message.contains(&worktree.display().to_string()));
+        assert!(
+            spawner.arguments.lock().expect("arguments").is_empty(),
+            "no editor is launched for a directory that is not a project"
+        );
     }
 
     #[test]

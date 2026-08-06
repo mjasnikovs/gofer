@@ -26,6 +26,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const LEDGER_FILE_NAME: &str = "godot-addon-ledger.json";
 const EVENT_FORWARD_INTERVAL_MS: u64 = 50;
+/// Opening a scene loads its resources, which is slower than an ordinary addon request.
+const SCENE_OPEN_TIMEOUT_MS: u64 = 30_000;
 /// How often buffered session output is written to durable storage. The session buffer is bounded,
 /// so a long import can push lines out of it; flushing on a timer is what keeps them.
 const LOG_FLUSH_INTERVAL_MS: u64 = 1_000;
@@ -347,6 +349,55 @@ pub fn call_godot(request: CallGodotRequest) -> Result<CallGodotResponse, RpcErr
     Ok(to_call_response(response))
 }
 
+/// Opens the scene `project.godot` names, unless the editor is already editing one.
+///
+/// A fresh worktree has no editor state to restore, so Godot settles on an empty tab: the scene
+/// tree, the inspector, and the debugger's launch all read nothing, and the launch in particular
+/// starts a game that exits before it draws a frame. Opening the project's own main scene is what
+/// the editor's Play button means by "the project", so it is what a ready session starts from.
+pub(crate) fn open_main_scene_if_none() -> Result<(), RpcError> {
+    let rpc = godot_session::rpc_session()
+        .ok_or_else(|| RpcError::new("session_not_active", "No Godot session is active"))?;
+    let state = addon_call(&rpc, "session.get_state", json!({}))?;
+    if state
+        .get("scene")
+        .and_then(Value::as_str)
+        .is_some_and(|scene| !scene.is_empty())
+    {
+        return Ok(());
+    }
+    let settings = addon_call(&rpc, "project.get_settings", json!({}))?;
+    let main_scene = settings
+        .get("mainScene")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if main_scene.is_empty() {
+        return Err(RpcError::new(
+            "no_main_scene",
+            "No scene is open and the project names no main scene",
+        ));
+    }
+    addon_call(&rpc, "scene.open", json!({ "path": main_scene }))?;
+    Ok(())
+}
+
+/// One addon request this module makes on its own behalf rather than on the renderer's.
+fn addon_call(
+    rpc: &crate::godot_rpc::RpcSession,
+    command: &str,
+    params: Value,
+) -> Result<Value, RpcError> {
+    rpc.call(RpcCallRequest {
+        id: format!("session-{}", uuid::Uuid::now_v7()),
+        command: command.to_owned(),
+        params,
+        expected_revision: None,
+        timeout_ms: Some(SCENE_OPEN_TIMEOUT_MS),
+    })
+    .map(|response| response.result)
+}
+
 /// Streams addon events through a Tauri channel until the session stops or the renderer
 /// unsubscribes.
 pub fn subscribe_godot_events<R: Runtime>(
@@ -373,6 +424,14 @@ pub fn subscribe_godot_events<R: Runtime>(
                     update_state_from_event(&envelope);
                     let current = godot_session::current_state();
                     if current != last_state {
+                        // The scene is opened off this thread: the open is an RPC round trip, and
+                        // the events arriving behind it — including the `scene.changed` the open
+                        // itself raises — must keep flowing while it is in flight.
+                        if current == SessionState::Ready {
+                            thread::spawn(|| {
+                                let _ = open_main_scene_if_none();
+                            });
+                        }
                         last_state = current;
                         emit_state_changed(&app, current);
                     }

@@ -265,14 +265,12 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     );
 
     // The exact Godot 4.7 sequence: launch first (its response is deferred until
-    // configurationDone spawns the game, so the call blocks on its own thread), then
+    // configurationDone spawns the game, so it is written now and collected below), then
     // breakpoints, then configurationDone. Godot does not forward --headless to the game it
     // spawns, so the play argument does.
-    let launching = thread::spawn({
-        let client = Arc::clone(&client);
-        let project = worktree.clone();
-        move || client.launch(&project, &["--headless".to_owned()])
-    });
+    let launching = client
+        .start_launch(&worktree, &["--headless".to_owned()])
+        .expect("start launch");
 
     let breakpoints = client
         .set_breakpoints(&script, &[BREAK_LINE])
@@ -284,10 +282,7 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     assert_eq!(verified.line, Some(BREAK_LINE));
 
     client.configuration_done().expect("configuration done");
-    launching
-        .join()
-        .expect("launch thread")
-        .expect("launch response");
+    client.await_launch(launching).expect("launch response");
     await_breakpoint(&client, &events, &editor);
 
     // One thread, two frames: _tick called from _process, stopped on the probe line.

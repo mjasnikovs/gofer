@@ -155,6 +155,8 @@ export type ScriptRequest =
     | Readonly<{op: 'prepareRename'; path: string; position: ScriptPosition}>
     | Readonly<{op: 'rename'; path: string; position: ScriptPosition; newName: string}>
     | Readonly<{op: 'workspaceSymbols'; query: string}>
+    /** Reads what the server last published for one file, waiting briefly for a first answer. */
+    | Readonly<{op: 'diagnostics'; path: string; timeoutMs?: number}>
 
 export type ScriptResponse =
     | Readonly<{op: 'hover'; hover?: ScriptHover | undefined}>
@@ -170,6 +172,13 @@ export type ScriptResponse =
     | Readonly<{op: 'prepareRename'; range?: ScriptRange | undefined; placeholder?: string}>
     | Readonly<{op: 'rename'; files: readonly PlannedScriptFile[]}>
     | Readonly<{op: 'workspaceSymbols'; symbols: readonly ScriptWorkspaceSymbol[]}>
+    | Readonly<{
+          op: 'diagnostics'
+          path: string
+          version?: number | undefined
+          published: boolean
+          diagnostics: readonly ScriptDiagnostic[]
+      }>
 
 /** The structured failure every script command rejects with. */
 export type ScriptError = Readonly<{

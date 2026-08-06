@@ -22,6 +22,19 @@ function isInside(root, path) {
     )
 }
 
+/**
+ * The worktree path of a file the agent named the way Godot names it.
+ *
+ * `res://` is how the editor, the addon, and Gofer's own errors write a project path, so it is what
+ * the agent writes back. Passing it through untouched resolved to a `res:/` directory that has
+ * never existed, and the tool answered with a raw `ENOENT` about a path nobody typed.
+ */
+function worktreePath(path) {
+    return typeof path === 'string' && path.startsWith('res://') ?
+            path.slice('res://'.length)
+        :   path
+}
+
 async function validateToolPath(workspacePath, path) {
     if (typeof path !== 'string' || path.length === 0 || path.includes('\0'))
         throw new Error('Tool paths must be non-empty strings')
@@ -45,9 +58,13 @@ export function confineTool(tool, workspacePath) {
     return {
         ...tool,
         execute: async (id, params, signal, onUpdate, context) => {
-            if (tool.name === 'bash') validateBashCommand(params.command)
-            else await validateToolPath(workspacePath, params.path)
-            return tool.execute(id, params, signal, onUpdate, context)
+            if (tool.name === 'bash') {
+                validateBashCommand(params.command)
+                return tool.execute(id, params, signal, onUpdate, context)
+            }
+            const resolved = {...params, path: worktreePath(params.path)}
+            await validateToolPath(workspacePath, resolved.path)
+            return tool.execute(id, resolved, signal, onUpdate, context)
         }
     }
 }

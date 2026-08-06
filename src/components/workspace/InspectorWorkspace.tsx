@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import type {ReactNode} from 'react'
+import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {Divider} from '@astryxdesign/core/Divider'
@@ -14,8 +15,11 @@ import {useDebugSession} from '../../hooks/useDebugSession'
 import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {useGodotSession} from '../../hooks/useGodotSession'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
+import {toGodotError} from '../../services/godot-session'
+import {isSessionReadable} from '../../models/godot'
 import type {
     DebugSourceBreakpoints,
+    GodotProjectSettings,
     GodotSessionState,
     GodotSessionStatus
 } from '../../models/godot'
@@ -54,6 +58,11 @@ const INSPECTOR_WIDTH = 380
 const INSPECTOR_MIN = 320
 const INSPECTOR_MAX = 480
 const BOTTOM_HEIGHT = 240
+
+/** The editor names a scene by its resource path; the explorer names a file by its worktree path. */
+function resourcePath(path: string) {
+    return path.startsWith('res://') ? path : `res://${path}`
+}
 
 const STATE_VARIANT: Readonly<
     Record<GodotSessionState, 'success' | 'warning' | 'error' | 'neutral'>
@@ -103,10 +112,28 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
     const [selection, setSelection] = useState<GodotSelection>()
     const [fileFilter, setFileFilter] = useState('')
     const [reveal, setReveal] = useState<ScriptReveal>()
+    const [failure, setFailure] = useState<string>()
     const inspectorButton = useRef<HTMLButtonElement>(null)
 
+    /**
+     * Reports a failure where the person who caused it is looking.
+     *
+     * The chat composer is where the workspace's errors are shown, and it is on screen only while
+     * the chat is. A scene that will not open, a session that will not start, and a debugger that
+     * will not launch are all things a user provokes from the frame — from a tab that is not the
+     * chat — so the frame keeps its own banner rather than reporting into a column nobody is
+     * looking at. The message still reaches the conversation, which is where it belongs afterwards.
+     */
+    const report = useCallback(
+        (message: string) => {
+            setFailure(message)
+            onError(message)
+        },
+        [onError]
+    )
+
     const isNarrow = useNarrowViewport()
-    const scripts = useScriptBuffers({onError})
+    const scripts = useScriptBuffers({onError: report})
     const {
         call,
         ensureReady,
@@ -118,7 +145,7 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
         start,
         state,
         stop
-    } = useGodotSession({onError})
+    } = useGodotSession({onError: report})
 
     const explorer = useResizable({
         defaultSize: EXPLORER_WIDTH,
@@ -141,7 +168,8 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
         return call('session.get_state') as Promise<GodotSessionStatus>
     }, [call, sceneEpoch])
 
-    const status = useGodotQuery(isOffline ? undefined : loadStatus)
+    // A session still coming up has no scene to name; asking now would keep that empty answer.
+    const status = useGodotQuery(isOffline || !isSessionReadable(state) ? undefined : loadStatus)
     const scenePath = scene?.path ?? status.data?.scene ?? ''
 
     const breakpoints = useMemo<readonly DebugSourceBreakpoints[]>(
@@ -152,7 +180,7 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
         [scripts.buffers]
     )
 
-    const debug = useDebugSession({breakpoints})
+    const debug = useDebugSession({breakpoints, onError: report})
 
     /**
      * The Run control: ensure the managed editor session, then launch the game through Godot's own
@@ -184,6 +212,48 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
         },
         [scripts]
     )
+
+    /**
+     * Opens a scene in the managed editor and shows what it opened.
+     *
+     * The editor owns the edited scene, so this is a request to it rather than a local state
+     * change; the tree, the inspector, and Run all follow the addon's own `scene.changed` event.
+     */
+    const openScene = useCallback(
+        (path: string) => {
+            void (async () => {
+                if (!(await ensureReady())) return
+                try {
+                    // The explorer names a file by its place in the worktree; the editor names a
+                    // scene by its resource path, and `scene.open` is the editor's command. Sending
+                    // the worktree path asks the editor to open a scene it has never heard of.
+                    await call('scene.open', {path: resourcePath(path)})
+                    setExplorerTab('scene')
+                } catch (error) {
+                    report(`The scene could not be opened: ${toGodotError(error).message}`)
+                }
+            })()
+        },
+        [call, ensureReady, report]
+    )
+
+    /** Opens the scene `project.godot` names, which is the scene Run plays. */
+    const openMainScene = useCallback(() => {
+        void (async () => {
+            if (!(await ensureReady())) return
+            try {
+                const settings = (await call('project.get_settings')) as GodotProjectSettings
+                if (!settings.mainScene) {
+                    report('This project names no main scene, so there is none to open.')
+                    return
+                }
+                await call('scene.open', {path: resourcePath(settings.mainScene)})
+                setExplorerTab('scene')
+            } catch (error) {
+                report(`The main scene could not be opened: ${toGodotError(error).message}`)
+            }
+        })()
+    }, [call, ensureReady, report])
 
     const openLocation = useCallback(
         (path: string, line: number) => {
@@ -245,6 +315,8 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                             selection={selection}
                             onSelect={select}
                             onOpenFile={openFile}
+                            onOpenScene={openScene}
+                            onOpenMainScene={openMainScene}
                             onStartSession={startSession}
                         />
                     </LayoutPanel>
@@ -320,6 +392,18 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                                 </HStack>
                             }
                         />
+                        {failure === undefined ? null : (
+                            <Banner
+                                container='section'
+                                status='error'
+                                title='The workspace could not do that'
+                                description={failure}
+                                isDismissable
+                                onDismiss={() => {
+                                    setFailure(undefined)
+                                }}
+                            />
+                        )}
                         <TabList
                             size='sm'
                             hasDivider

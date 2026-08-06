@@ -303,6 +303,20 @@ fn missing_directories(workspace: &Workspace) -> Vec<String> {
         .collect()
 }
 
+/// What a directory holding no `project.godot` means, and what the user can do about it.
+///
+/// Gofer takes its workspace from the directory it was started in, which is not always the one the
+/// user meant, so naming the directory is half the message and naming the fix is the other half.
+/// Every path that refuses such a directory says this, because the user cannot tell which of them
+/// got there first.
+pub fn missing_project_message(directory: &std::path::Path) -> String {
+    format!(
+        "{} contains no {PROJECT_FILE}, so there is no Godot project to open. Start Gofer from \
+         your project directory, or set GOFER_WORKSPACE_DIR to it.",
+        directory.display()
+    )
+}
+
 fn read_project_file(workspace: &Workspace) -> Result<FileContents, FileError> {
     workspace.read(PROJECT_FILE).map_err(|error| {
         if error.code != "not_found" {
@@ -310,7 +324,7 @@ fn read_project_file(workspace: &Workspace) -> Result<FileContents, FileError> {
         }
         FileError::refuse(
             "project_missing",
-            format!("{} holds no {PROJECT_FILE}", workspace.root().display()),
+            missing_project_message(workspace.root()),
             json!({"worktree": workspace.root().display().to_string()}),
         )
     })

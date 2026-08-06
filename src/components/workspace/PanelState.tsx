@@ -14,6 +14,8 @@ type PanelStateProps = Readonly<{
     isEmpty: boolean
     emptyTitle: string
     emptyDescription?: string | undefined
+    /** What the user can do about the emptiness, when it is something they can act on. */
+    emptyAction?: ReactNode
     children: ReactNode
 }>
 
@@ -30,6 +32,7 @@ export function PanelState({
     isEmpty,
     emptyTitle,
     emptyDescription,
+    emptyAction,
     children
 }: PanelStateProps) {
     if (error)
@@ -66,6 +69,7 @@ export function PanelState({
                     headingLevel={3}
                     title={emptyTitle}
                     {...(emptyDescription && {description: emptyDescription})}
+                    {...(emptyAction && {actions: emptyAction})}
                 />
             </VStack>
         )

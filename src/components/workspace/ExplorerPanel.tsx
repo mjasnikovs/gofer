@@ -12,6 +12,7 @@ import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {buildPathTree} from '../../utils/godot-format'
 import type {PathTreeNode} from '../../utils/godot-format'
 import type {GodotCall, GodotSelection} from '../../models/workspace'
+import {isSessionReadable} from '../../models/godot'
 import type {GodotNode, GodotSceneTree, GodotSessionState} from '../../models/godot'
 import type {WorkspaceEntry} from '../../models/script'
 import {PanelState} from './PanelState'
@@ -32,6 +33,10 @@ type ExplorerPanelProps = Readonly<{
     selection: GodotSelection | undefined
     onSelect: (selection: GodotSelection) => void
     onOpenFile: (path: string) => void
+    /** Opens a scene in the managed editor, which is what every scene-reading panel follows. */
+    onOpenScene: (path: string) => void
+    /** Opens the scene `project.godot` names, for a session that is editing none. */
+    onOpenMainScene: () => void
     onStartSession: () => void
 }>
 
@@ -40,7 +45,15 @@ const MAX_LISTED_FILES = 400
 const HIDDEN_SUFFIXES = ['.import', '.uid', '.tmp']
 const HIDDEN_PREFIXES = ['.godot/', '.git/', 'addons/gofer/']
 /** Only text Gofer can actually open in Monaco is clickable; the rest is listed as context. */
-const EDITABLE_SUFFIXES = ['.gd', '.cfg', '.godot', '.json', '.md', '.txt', '.tres', '.tscn']
+const EDITABLE_SUFFIXES = ['.gd', '.cfg', '.godot', '.json', '.md', '.txt', '.tres']
+/**
+ * A scene is opened in the editor rather than in Monaco.
+ *
+ * Its text is the editor's serialization, not something a person edits by hand, and every panel
+ * that reads a scene — the tree, the inspector, the debugger's Run — reads the *edited* scene. A
+ * scene opened as text would leave all of them empty while looking like it had been opened.
+ */
+const SCENE_SUFFIX = '.tscn'
 
 function isListable(path: string) {
     if (HIDDEN_SUFFIXES.some(suffix => path.endsWith(suffix))) return false
@@ -49,6 +62,10 @@ function isListable(path: string) {
 
 function isEditable(path: string) {
     return EDITABLE_SUFFIXES.some(suffix => path.endsWith(suffix))
+}
+
+function isScene(path: string) {
+    return path.endsWith(SCENE_SUFFIX)
 }
 
 function nodeItems(
@@ -74,17 +91,19 @@ function nodeItems(
 
 function fileItems(
     nodes: readonly PathTreeNode[],
-    onOpenFile: (path: string) => void
+    onOpenFile: (path: string) => void,
+    onOpenScene: (path: string) => void
 ): TreeListItemData[] {
     return nodes.map(node => ({
         id: node.path,
         label: node.name,
         ...(node.isDirectory ?
-            {isExpanded: true, children: fileItems(node.children, onOpenFile)}
+            {isExpanded: true, children: fileItems(node.children, onOpenFile, onOpenScene)}
         :   {
-                isDisabled: !isEditable(node.path),
+                isDisabled: !isEditable(node.path) && !isScene(node.path),
                 onClick: () => {
-                    onOpenFile(node.path)
+                    if (isScene(node.path)) onOpenScene(node.path)
+                    else onOpenFile(node.path)
                 }
             })
     }))
@@ -111,9 +130,13 @@ export function ExplorerPanel({
     selection,
     onSelect,
     onOpenFile,
+    onOpenScene,
+    onOpenMainScene,
     onStartSession
 }: ExplorerPanelProps) {
     const isOffline = state === 'offline' || state === 'error'
+    // A session that is staging, starting, or importing is not offline and has nothing to show yet.
+    const isSettling = !isOffline && !isSessionReadable(state)
 
     const loadScene = useCallback(() => {
         // The epoch is what makes an editor-side change refetch; reading it here is the dependency.
@@ -127,8 +150,20 @@ export function ExplorerPanel({
         return call('runtime.get_tree') as Promise<GodotSceneTree>
     }, [call, runtimeEpoch])
 
-    const scene = useGodotQuery(isOffline || tab !== 'scene' ? undefined : loadScene)
-    const runtime = useGodotQuery(isOffline || tab !== 'runtime' ? undefined : loadRuntime)
+    const scene = useGodotQuery(isOffline || isSettling || tab !== 'scene' ? undefined : loadScene)
+    const runtime = useGodotQuery(
+        isOffline || isSettling || tab !== 'runtime' ? undefined : loadRuntime
+    )
+
+    /**
+     * "No game is running" arrives as an error code, and for this panel it is the ordinary state.
+     *
+     * The addon answers `runtime.get_tree` with `runtime_not_running` whenever no game holds the
+     * Gofer helper, which is true of every session that has not pressed Run. Rendering that as
+     * "The runtime tree could not be read" told the user something had gone wrong, and made the
+     * empty message this panel already has — "The game is not running" — unreachable.
+     */
+    const isGameIdle = runtime.error?.code === 'runtime_not_running'
 
     const listed = useMemo(
         () =>
@@ -140,8 +175,8 @@ export function ExplorerPanel({
     )
 
     const fileTree = useMemo(
-        () => fileItems(buildPathTree(listed.map(file => file.path)), onOpenFile),
-        [listed, onOpenFile]
+        () => fileItems(buildPathTree(listed.map(file => file.path)), onOpenFile, onOpenScene),
+        [listed, onOpenFile, onOpenScene]
     )
 
     const offline = (
@@ -236,11 +271,18 @@ export function ExplorerPanel({
                     && (isOffline ? offline : (
                         <PanelState
                             label='scene tree'
-                            isLoading={scene.isLoading}
+                            isLoading={scene.isLoading || isSettling}
                             error={scene.error}
                             isEmpty={!scene.data?.root}
                             emptyTitle='No scene is open'
-                            emptyDescription='Open a scene in the editor to inspect its hierarchy.'
+                            emptyDescription='Open a scene from Files, or open the one the project runs.'
+                            emptyAction={
+                                <Button
+                                    label='Open main scene'
+                                    size='sm'
+                                    clickAction={onOpenMainScene}
+                                />
+                            }
                         >
                             {scene.data?.root ?
                                 <TreeList
@@ -262,9 +304,9 @@ export function ExplorerPanel({
                     && (isOffline ? offline : (
                         <PanelState
                             label='runtime tree'
-                            isLoading={runtime.isLoading}
-                            error={runtime.error}
-                            isEmpty={!runtime.data?.root}
+                            isLoading={runtime.isLoading || isSettling}
+                            {...(!isGameIdle && {error: runtime.error})}
+                            isEmpty={isGameIdle || !runtime.data?.root}
                             emptyTitle='The game is not running'
                             emptyDescription='Run the game to inspect the tree it holds in memory.'
                         >

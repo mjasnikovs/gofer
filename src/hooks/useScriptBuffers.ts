@@ -2,6 +2,7 @@ import {useCallback, useEffect, useRef, useState} from 'react'
 import {invoke, isTauri} from '../services/desktop'
 import {
     applyScriptRename,
+    callScriptLanguage,
     closeScriptDocument,
     openScriptDocument,
     saveScriptDocument,
@@ -89,6 +90,7 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
     const [files, setFiles] = useState<readonly WorkspaceEntry[]>([])
     const [diagnostics, setDiagnostics] = useState<Readonly<Record<string, ScriptDiagnostic[]>>>({})
     const changeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+    const isFollowingDiagnostics = useRef(false)
     // The external-change handler runs outside React's render, so it reads the buffers from a ref
     // rather than deciding inside a state updater, which StrictMode would run twice.
     const buffersRef = useRef<readonly ScriptBuffer[]>([])
@@ -117,11 +119,42 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
         changeTimers.current.delete(path)
     }, [])
 
+    /**
+     * Follows the language server's published diagnostics.
+     *
+     * The workspace mounts long before any editor session exists, and there is no server to
+     * subscribe to until one does — so a single attempt at mount left the Problems panel silent
+     * for the whole run. Every opened script tries again, which is the first moment a server is
+     * known to be there.
+     */
+    const followDiagnostics = useCallback(() => {
+        if (isFollowingDiagnostics.current || !isTauri()) return
+        isFollowingDiagnostics.current = true
+        void subscribeScriptDiagnostics(event => {
+            setDiagnostics(previous => ({...previous, [event.path]: [...event.diagnostics]}))
+        }).catch(() => {
+            isFollowingDiagnostics.current = false
+        })
+    }, [])
+
+    /** Asks the server what it last published for one file and records it. */
+    const pullDiagnostics = useCallback((path: string) => {
+        void callScriptLanguage({op: 'diagnostics', path})
+            .then(response => {
+                if (response.op !== 'diagnostics') return
+                setDiagnostics(previous => ({...previous, [path]: [...response.diagnostics]}))
+            })
+            .catch(() => {
+                // No language server yet, which is the ordinary state before a session starts.
+            })
+    }, [])
+
     const openBuffer = useCallback(
         async (path: string, activate = true) => {
             if (!isTauri()) return
             try {
                 const document = await openScriptDocument(path)
+                followDiagnostics()
                 setBuffers(previous => {
                     const existing = previous.find(buffer => buffer.path === path)
                     const next: ScriptBuffer = {
@@ -139,11 +172,14 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
                         :   [...previous, next]
                 })
                 if (activate) setActivePath(path)
+                // What the server already thinks of this file, rather than only what it says
+                // next: a script opened with an error in it should show that error now.
+                pullDiagnostics(path)
             } catch (error) {
                 report(error, `${path} could not be opened`)
             }
         },
-        [report]
+        [followDiagnostics, pullDiagnostics, report]
     )
 
     const closeBuffer = useCallback(
@@ -358,17 +394,12 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
     // Published diagnostics arrive for every file the server knows about, including ones no tab
     // holds, so they are kept by path rather than folded into the open buffers.
     useEffect(() => {
-        if (!isTauri()) return
-        void subscribeScriptDiagnostics(event => {
-            setDiagnostics(previous => ({...previous, [event.path]: [...event.diagnostics]}))
-        }).catch(() => {
-            // A session that is not running yet publishes nothing; opening a script subscribes
-            // again, so a failure here is not worth interrupting the user for.
-        })
+        followDiagnostics()
         return () => {
+            isFollowingDiagnostics.current = false
             void unsubscribeScriptDiagnostics().catch(() => undefined)
         }
-    }, [])
+    }, [followDiagnostics])
 
     // An external change — Godot, the AI agent, a confined shell command — reloads a clean buffer
     // and marks a dirty one instead of overwriting the user's work.

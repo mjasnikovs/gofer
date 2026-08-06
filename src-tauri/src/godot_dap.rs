@@ -251,6 +251,13 @@ struct Shared {
     closed: bool,
 }
 
+/// A launch that is on the wire but not yet answered, held between the request and the
+/// `configurationDone` that makes Godot answer it.
+pub struct PendingLaunch {
+    seq: u64,
+    receiver: Receiver<Result<Value, DapError>>,
+}
+
 /// A connected Godot debug adapter session.
 pub struct DapClient {
     shared: Arc<Mutex<Shared>>,
@@ -354,13 +361,23 @@ impl DapClient {
         receiver
     }
 
-    /// Queues the game launch. Godot defers the response until [`Self::configuration_done`]
-    /// actually spawns the process, so this call blocks across that boundary; callers send
-    /// `configuration_done` from another thread or task. `project` must be the editor's own
-    /// project path — Godot rejects anything outside it with `wrong_path`. `play_args` are
-    /// forwarded to the game process verbatim, which is how a headless editor passes `--headless`
-    /// on to the game: Godot does not forward it itself.
-    pub fn launch(&self, project: &Path, play_args: &[String]) -> Result<(), DapError> {
+    /// Writes the game launch and hands back its unanswered response.
+    ///
+    /// Godot defers the answer until [`Self::configuration_done`] actually spawns the process, so
+    /// a call that both wrote and waited would have to be overlapped with the very request it is
+    /// waiting for. Ordering is not merely preferred here: a `configurationDone` that arrives
+    /// with no launch pending is answered and discarded, and the launch behind it is then never
+    /// spawned and never answered — a silent hang rather than a failure. Writing the launch on the
+    /// caller's own thread is what makes that order a fact instead of a race.
+    ///
+    /// `project` must be the editor's own project path — Godot rejects anything outside it with
+    /// `wrong_path`. `play_args` are forwarded to the game process verbatim, which is how a
+    /// headless editor passes `--headless` on to the game: Godot does not forward it itself.
+    pub fn start_launch(
+        &self,
+        project: &Path,
+        play_args: &[String],
+    ) -> Result<PendingLaunch, DapError> {
         let arguments = json!({
             "project": project.to_string_lossy(),
             "scene": "main",
@@ -370,7 +387,15 @@ impl DapClient {
             .launch_arguments
             .lock()
             .map_err(|_| DapError::poisoned())? = Some(arguments.clone());
-        self.request_with_timeout("launch", arguments, LAUNCH_TIMEOUT)?;
+        let (seq, receiver) = self.start_request("launch", arguments)?;
+        Ok(PendingLaunch { seq, receiver })
+    }
+
+    /// Collects the answer [`Self::start_launch`] left outstanding, which Godot only sends once
+    /// `configurationDone` has spawned the game.
+    pub fn await_launch(&self, pending: PendingLaunch) -> Result<(), DapError> {
+        let response = self.await_response(pending.seq, &pending.receiver, LAUNCH_TIMEOUT)?;
+        succeeded(response)?;
         Ok(())
     }
 
@@ -703,15 +728,7 @@ impl DapClient {
         timeout: Duration,
     ) -> Result<Value, DapError> {
         let (seq, receiver) = self.start_request(command, arguments)?;
-        let response = self.await_response(seq, &receiver, timeout)?;
-        if !response
-            .get("success")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            return Err(server_error(&response));
-        }
-        Ok(response.get("body").cloned().unwrap_or(Value::Null))
+        succeeded(self.await_response(seq, &receiver, timeout)?)
     }
 
     fn lock_shared(&self) -> Result<MutexGuard<'_, Shared>, DapError> {
@@ -781,6 +798,18 @@ fn parse_body<T: serde::de::DeserializeOwned>(body: &Value, key: &str) -> Result
             format!("The {key} answer did not match the protocol: {error}"),
         )
     })
+}
+
+/// Unwraps a response body, turning the adapter's own refusal into this module's error.
+fn succeeded(response: Value) -> Result<Value, DapError> {
+    if !response
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(server_error(&response));
+    }
+    Ok(response.get("body").cloned().unwrap_or(Value::Null))
 }
 
 fn server_error(response: &Value) -> DapError {
@@ -1152,6 +1181,9 @@ mod tests {
                     FakeAction::Ignore
                 }
                 "configurationDone" => {
+                    // Godot spawns nothing for a configurationDone that precedes its launch, and
+                    // answers the launch never. The client owes this server that order, so the
+                    // fake refuses to invent a launch that had not arrived.
                     let seq = server_launch_seq
                         .lock()
                         .expect("launch seq")
@@ -1173,13 +1205,11 @@ mod tests {
         client.initialize().expect("initialize");
         let script = PathBuf::from("/project/scripts/main.gd");
 
-        // launch blocks until configurationDone, so it runs on its own thread.
-        let client = Arc::new(client);
-        let launch_handle = thread::spawn({
-            let client = Arc::clone(&client);
-            move || client.launch(Path::new("/project"), &["--headless".to_owned()])
-        });
-        // Let launch reach the server before configuration is marked done.
+        // One thread, in the order Godot requires: the launch is written, then everything that
+        // rides behind it, and only then is its deferred answer collected.
+        let launching = client
+            .start_launch(Path::new("/project"), &["--headless".to_owned()])
+            .expect("start launch");
         let launch = recv_command(&server, "launch");
         let breakpoints = client
             .set_breakpoints(&script, &[4, 7])
@@ -1189,9 +1219,8 @@ mod tests {
             "the canned handler sends an empty list"
         );
         client.configuration_done().expect("configuration done");
-        launch_handle
-            .join()
-            .expect("launch thread")
+        client
+            .await_launch(launching)
             .expect("launch succeeds once configurationDone arrives");
 
         assert_eq!(launch["arguments"]["project"], "/project");
@@ -1699,9 +1728,10 @@ mod tests {
             }
         });
         let client = connected_client(&server);
-        client
-            .launch(Path::new("/project"), &["--headless".to_owned()])
-            .expect("launch");
+        let launching = client
+            .start_launch(Path::new("/project"), &["--headless".to_owned()])
+            .expect("start launch");
+        client.await_launch(launching).expect("launch");
         client.restart().expect("restart");
         client.terminate().expect("terminate");
         client.disconnect(false).expect("disconnect");

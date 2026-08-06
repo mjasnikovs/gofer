@@ -24,6 +24,18 @@ npm run tauri dev
 
 Start only the browser frontend with `npm run dev`.
 
+### The workspace Gofer manages
+
+Gofer manages the directory it was started in. `tauri dev` runs the binary from `src-tauri`, which
+is not a Godot project, so a development run has to be told where the project is:
+
+```bash
+GOFER_WORKSPACE_DIR=/path/to/your/godot/project npm run tauri dev
+```
+
+A built Gofer takes the directory it is launched from. Either way the directory must contain
+`project.godot`; a session refuses one that does not, and says which directory it looked in.
+
 ## Godot documentation RAG
 
 The project pins [`@mjasnikovs/gofer-rag`](https://github.com/mjasnikovs/gofer-rag) at
@@ -137,6 +149,33 @@ npm run build
 
 `check` verifies formatting, type-aware ESLint, TypeScript, and the Rust crate. Use `npm run format`
 and `npm run lint:fix` to apply safe automatic fixes.
+
+### The live sweep
+
+`npm run check` stubs what it has to. One suite stubs nothing:
+
+```bash
+npm run build:desktop:test
+node node_modules/@wdio/cli/bin/wdio.js run wdio.live.conf.ts
+```
+
+It drives the built application against a real Godot project — `~/hub/test-gd` unless
+`GOFER_LIVE_WORKSPACE` says otherwise — with the AI endpoint you configured, the retrieval models in
+your own cache, and a real windowed Godot 4.7. Only the application data directory is redirected
+(`/tmp/gofer-live-run`), so a sweep cannot touch your projects; the task worktrees it creates live
+there too. Between runs:
+
+```bash
+rm -rf /tmp/gofer-live-run
+git -C ~/hub/test-gd worktree prune
+git -C ~/hub/test-gd branch | grep gofer/task | xargs -r git -C ~/hub/test-gd branch -D
+```
+
+Nothing in the suite waits on a clock. Every wait runs inside the page, resolves the instant its
+condition holds or the application reports a failure, and gives up the moment the application stops
+doing anything at all — no DOM mutation, no backend event, no command in flight, nothing on screen
+claiming to be busy — quoting what the window actually showed. It is not part of `npm run check`,
+because it needs a display, a Godot install, and a model server that a CI machine does not have.
 
 Astryx's project guidance lives in `AGENTS.md`. Refresh it after an Astryx upgrade with:
 

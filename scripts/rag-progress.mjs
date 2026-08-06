@@ -2,16 +2,35 @@ export const EVENT_PREFIX = 'GOFER_RAG_EVENT:'
 
 export function createProgressReporter({emit, now = Date.now, emitIntervalMs = 250}) {
     const fileProgress = new Map()
+    /**
+     * The models the run has touched, whether or not any of them had to be downloaded.
+     *
+     * Nothing approves a download when the cache is already populated, so a warm start would
+     * otherwise report "0 models" against a total of zero while gigabytes were being read — a
+     * splash with no name for what it is doing and no percentage it can compute.
+     */
+    const observedModels = new Set()
     let expectedBytes = 0
-    let modelCount = 0
+    let approvedModels = 0
     let lastEmitTime = Number.NEGATIVE_INFINITY
 
+    const modelLabel = () => {
+        const count = approvedModels || observedModels.size
+        return `${String(count)} ${count === 1 ? 'model' : 'models'}`
+    }
+
+    /** What the run is working through: the approved download, or the files it has seen. */
+    const totalBytes = () =>
+        expectedBytes > 0 ? expectedBytes : (
+            [...fileProgress.values()].reduce((total, file) => total + file.total, 0)
+        )
+
     const approveDownloads = models => {
-        modelCount = models.length
+        approvedModels = models.length
         expectedBytes = models.reduce((total, model) => total + model.expectedBytes, 0)
         emit({
             status: 'downloading',
-            model: `${String(modelCount)} models`,
+            model: modelLabel(),
             loaded: 0,
             total: expectedBytes,
             progress: 0
@@ -20,6 +39,7 @@ export function createProgressReporter({emit, now = Date.now, emitIntervalMs = 2
     }
 
     const reportProgress = progress => {
+        if (progress.model) observedModels.add(progress.model)
         if (progress.file && progress.total !== undefined) {
             const key = `${progress.model}:${progress.file}`
             const previous = fileProgress.get(key)
@@ -36,21 +56,23 @@ export function createProgressReporter({emit, now = Date.now, emitIntervalMs = 2
         const currentTime = now()
         if (currentTime - lastEmitTime < emitIntervalMs) return
         lastEmitTime = currentTime
+        const total = totalBytes()
         emit({
             status: 'downloading',
-            model: `${String(modelCount)} models`,
+            model: modelLabel(),
             loaded,
-            total: expectedBytes,
-            progress: expectedBytes > 0 ? Math.min(99, (loaded / expectedBytes) * 100) : undefined
+            total,
+            progress: total > 0 ? Math.min(99, (loaded / total) * 100) : undefined
         })
     }
 
     const reportReady = () => {
+        const total = totalBytes()
         emit({
             status: 'ready',
-            model: `${String(modelCount)} models`,
-            loaded: expectedBytes,
-            total: expectedBytes,
+            model: modelLabel(),
+            loaded: total,
+            total,
             progress: 100
         })
     }

@@ -25,7 +25,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
 /// Godot debugs exactly one thread, and every request that takes a thread id defaults to it.
@@ -338,20 +337,22 @@ pub fn disconnect() {
     }
 }
 
-/// Runs Godot's exact launch sequence: the launch request is answered only after
-/// `configurationDone` spawns the game, so it rides its own thread while the breakpoints and the
-/// configuration-done request go out behind it.
+/// Runs Godot's exact launch sequence: the launch request goes out first and is answered only
+/// after `configurationDone` spawns the game, so it is written here and collected at the end while
+/// the breakpoints and the configuration-done request go out in between.
+///
+/// The order is the whole point. Godot answers a `configurationDone` that arrives with no launch
+/// pending and then forgets it, leaving the launch behind it unspawned and unanswered — a game
+/// that never starts and a request that only ends at its own timeout. Writing the launch on this
+/// thread rather than on one that may not have been scheduled yet is what rules that out.
 fn launch(
-    client: &Arc<DapClient>,
+    client: &DapClient,
     workspace: &Workspace,
     play_args: Vec<String>,
     breakpoints: Vec<SourceBreakpoints>,
 ) -> Result<DebugResponse, DapError> {
-    let project = workspace.root().to_path_buf();
-    let launching = thread::spawn({
-        let client = Arc::clone(client);
-        move || client.launch(&project, &play_args)
-    });
+    ensure_scene_open()?;
+    let launching = client.start_launch(workspace.root(), &play_args)?;
 
     let mut verified = Vec::new();
     let mut install_error = None;
@@ -366,11 +367,9 @@ fn launch(
     }
 
     // configurationDone goes out even when a breakpoint failed: without it the launch request is
-    // never answered and the thread below would block until its own timeout.
+    // never answered and the wait below would run to its own timeout.
     let configured = client.configuration_done();
-    let launched = launching
-        .join()
-        .map_err(|_| DapError::new("launch_thread_failed", "The launch thread panicked"))?;
+    let launched = client.await_launch(launching);
     launched?;
     configured?;
     if let Some(error) = install_error {
@@ -378,6 +377,30 @@ fn launch(
     }
     Ok(DebugResponse::Launched {
         breakpoints: verified,
+    })
+}
+
+/// Opens the project's main scene when the editor is editing none.
+///
+/// Godot's adapter launches the *edited* scene: with no scene open it spawns a process that exits
+/// with code 0 before it draws a frame, and the launch reports success. The editor's own Play
+/// button plays the project's main scene instead, and Run means the same thing here, so the scene
+/// the game needs is opened before the launch rather than discovered missing after it.
+fn ensure_scene_open() -> Result<(), DapError> {
+    crate::godot_session_api::open_main_scene_if_none().map_err(|error| {
+        let failure = DapError::new(
+            if error.code == "no_main_scene" {
+                "no_scene_to_run"
+            } else {
+                "scene_open_failed"
+            },
+            error.message,
+        );
+        if error.retryable {
+            failure.retryable()
+        } else {
+            failure
+        }
     })
 }
 

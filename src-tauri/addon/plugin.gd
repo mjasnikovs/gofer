@@ -203,6 +203,7 @@ func _process(_delta: float) -> void:
             _set_readiness("importing")
 
     _track_play_state()
+    _track_edited_scene()
 
     var available := _peer.get_available_bytes()
     while available > 0:
@@ -482,6 +483,34 @@ func _editor_finished_starting() -> bool:
 func _set_readiness(readiness: String) -> void:
     _readiness = readiness
     _send_event("session.%s" % readiness, {"readiness": readiness})
+
+## Follows the scene the editor opens for itself.
+##
+## `_sweep_scene_pending` adopts the switches Gofer asked for. The editor performs others on its
+## own: the scene it opens after its first import scan, and every scene a person opens in the
+## editor window. Without this the session reports no open scene while one is being edited — the
+## toolbar says so, `session.get_state` says so, and the debugger's launch, which plays the *edited*
+## scene, starts a game with nothing in it. Every panel that refetches on `scene.changed` would
+## likewise keep showing whatever it read before the editor had opened anything.
+func _track_edited_scene() -> void:
+    # A switch Gofer asked for is still in flight; the sweep owns the adoption and the answer.
+    if not _scene_pending.is_empty():
+        return
+    var root := _edited_root()
+    var path := "" if root == null else root.scene_file_path
+    if path == _current_scene_path:
+        return
+    # A different scene is a different revision baseline, exactly as a Gofer-driven switch is.
+    _current_scene_path = path
+    _scene_revision = 0
+    _scene_dirty = false
+    _undo_depth = 0
+    _redo_depth = 0
+    _send_event("scene.changed", {
+        "scene": _current_scene_path,
+        "revision": _scene_revision,
+        "dirty": _scene_dirty
+    })
 
 ## Godot raises no signal when the project starts or stops running, so the plugin polls the editor
 ## and reports the transition. Gofer maps these events onto its own session lifecycle.

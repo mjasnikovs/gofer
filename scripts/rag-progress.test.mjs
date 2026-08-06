@@ -74,9 +74,34 @@ test('throttles intermediate updates and always reports final readiness', () => 
     assert.equal(events.length, 3)
     assert.deepEqual(events.at(-1), {
         status: 'ready',
-        model: '1 models',
+        model: '1 model',
         loaded: 100,
         total: 100,
+        progress: 100
+    })
+})
+
+test('a warm cache reports the models it loads rather than none at all', () => {
+    const {events, reporter, advance} = setup()
+
+    // Nothing approves a download: every file is already in the cache and is only being read.
+    reporter.reportProgress({model: 'embedding', file: 'model.onnx', loaded: 250, total: 1_000})
+    advance(250)
+    reporter.reportProgress({model: 'reranker', file: 'model.onnx', loaded: 500, total: 1_000})
+    reporter.reportReady()
+
+    assert.deepEqual(events.at(-2), {
+        status: 'downloading',
+        model: '2 models',
+        loaded: 750,
+        total: 2_000,
+        progress: 37.5
+    })
+    assert.deepEqual(events.at(-1), {
+        status: 'ready',
+        model: '2 models',
+        loaded: 2_000,
+        total: 2_000,
         progress: 100
     })
 })

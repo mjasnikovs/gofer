@@ -2031,8 +2031,16 @@ pub fn run() {
     ]);
 
     builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // The editor is Gofer's own child, and the addon it staged lives in the user's
+            // worktree. Closing the window without this leaves both behind: a Godot process the
+            // user did not start, editing files Gofer promised to clean up.
+            if matches!(event, tauri::RunEvent::Exit) {
+                let _ = godot_session_api::stop_session(app);
+            }
+        });
 }
 
 #[cfg(test)]

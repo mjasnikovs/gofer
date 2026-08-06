@@ -30,6 +30,8 @@ const CONNECT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
 const MAX_RECONNECT_ATTEMPTS: usize = 3;
 const RECONNECT_BACKOFF_MS: u64 = 500;
+/// How often the accept loop looks up from the socket to check the deadline and the stop signal.
+const ACCEPT_POLL_MS: u64 = 25;
 
 /// A structured, actionable RPC failure.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -242,20 +244,32 @@ fn run_session(
     let mut reconnects = 0;
     let deadline = Instant::now() + Duration::from_millis(CONNECT_TIMEOUT_MS);
 
+    // The wait for the addon polls rather than blocks. A blocking `accept` observes neither the
+    // deadline nor the stop signal, so an editor that never connects — one that failed to start,
+    // or one whose plugin never loaded — left this thread parked on the socket for the life of the
+    // process, keeping the port bound and the process alive long after anything wanted it.
+    listener
+        .set_nonblocking(true)
+        .expect("listener non-blocking mode");
+
     while reconnects <= MAX_RECONNECT_ATTEMPTS && Instant::now() < deadline {
         if stop_signal.load(Ordering::Acquire) {
             break;
         }
-        listener
-            .set_nonblocking(false)
-            .expect("listener blocking mode");
         match listener.accept().map(|(stream, _)| stream) {
             Ok(stream) => {
+                // The connection itself is read and written blocking, with its own timeouts.
+                stream
+                    .set_nonblocking(false)
+                    .expect("connection blocking mode");
                 if handle_connection(stream, &state, &request_rx, &stop_signal) {
                     reconnects = 0;
                 } else {
                     break;
                 }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
             }
             Err(_) => {
                 reconnects += 1;
@@ -808,6 +822,26 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn a_session_nothing_connects_to_releases_its_socket_when_stopped() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let session = RpcSession::start(listener, "token".to_owned(), "/project".to_owned());
+
+        session.stop();
+
+        // The accept loop owns the listener, so the port returns only once that loop has left it.
+        // Before the loop polled, a blocking accept held it until the process died.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if TcpListener::bind(address).is_ok() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("the accept loop kept the socket after the session was stopped");
+    }
 
     fn handshake(token: &str, project_path: &str) -> Value {
         json!({

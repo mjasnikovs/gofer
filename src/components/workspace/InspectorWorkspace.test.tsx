@@ -63,7 +63,20 @@ type Backend = Readonly<{
     session: {started: boolean}
     calls: string[]
     debugCalls: string[]
+    /** Every path handed to `scene.open`, in order. */
+    sceneOpens: string[]
+    /** What the editor is editing, as `scene.open` changes it. */
+    edited: {scene: string}
 }>
+
+type BackendOptions = Readonly<{
+    /** The scene the editor already has open; empty models a session editing none. */
+    openScene?: string
+    /** Whether a debugger launch succeeds. */
+    canLaunch?: boolean
+}>
+
+const MAIN_SCENE = 'res://scenes/main.tscn'
 
 const SESSION = {
     sessionId: 'session-1',
@@ -75,10 +88,12 @@ const SESSION = {
     worktree: '/tmp/task'
 }
 
-function backend(): Backend {
+function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptions = {}): Backend {
     const session = {started: false}
     const calls: string[] = []
     const debugCalls: string[] = []
+    const sceneOpens: string[] = []
+    const edited = {scene: openScene}
     tauri.invoke.mockImplementation(async (command, args) => {
         const request = (args as {request?: CallRequest} | undefined)?.request ?? {}
         switch (command) {
@@ -86,6 +101,7 @@ function backend(): Backend {
                 return [
                     {path: 'scripts/player.gd', bytes: SCRIPT.length},
                     {path: 'scripts/player.gd.uid', bytes: 40},
+                    {path: 'scenes/main.tscn', bytes: 200},
                     {path: 'art/tile.png.import', bytes: 120},
                     {path: 'addons/gofer/plugin.gd', bytes: 10}
                 ]
@@ -107,6 +123,12 @@ function backend(): Backend {
                 debugCalls.push(op)
                 switch (op) {
                     case 'launch':
+                        if (!canLaunch)
+                            throw new GodotFailure(
+                                'no_scene_to_run',
+                                'No scene is open and the project names no main scene',
+                                false
+                            )
                         return {op: 'launched', breakpoints: []}
                     case 'awaitStop':
                         return {
@@ -200,7 +222,7 @@ function backend(): Backend {
                             id: 'x',
                             result: {
                                 state: 'ready',
-                                scene: 'res://main.tscn',
+                                scene: edited.scene,
                                 revision: 2,
                                 dirty: false,
                                 canUndo: false,
@@ -208,7 +230,23 @@ function backend(): Backend {
                             }
                         }
                     case 'scene.get_tree':
-                        return {id: 'x', result: SCENE_TREE}
+                        return {id: 'x', result: edited.scene ? SCENE_TREE : {root: null}}
+                    case 'scene.open': {
+                        const requested = request.params?.['path']
+                        const path = typeof requested === 'string' ? requested : ''
+                        sceneOpens.push(path)
+                        edited.scene = path
+                        return {id: 'x', result: {scene: path, revision: 3}}
+                    }
+                    case 'project.get_settings':
+                        return {
+                            id: 'x',
+                            result: {
+                                projectName: 'Fixture',
+                                mainScene: MAIN_SCENE,
+                                renderingMethod: 'gl_compatibility'
+                            }
+                        }
                     case 'runtime.get_tree':
                         throw new GodotFailure(
                             'runtime_not_running',
@@ -264,7 +302,7 @@ function backend(): Backend {
                 return undefined
         }
     })
-    return {session, calls, debugCalls}
+    return {session, calls, debugCalls, sceneOpens, edited}
 }
 
 /** Publishes one diagnostic through the channel the frame subscribed with. */
@@ -310,11 +348,11 @@ function narrowViewport(isNarrow: boolean) {
     })
 }
 
-function renderWorkspace() {
+function renderWorkspace(onError: (message: string) => void = vi.fn()) {
     return render(
         <InspectorWorkspace
             chat={<p>Chat column</p>}
-            onError={vi.fn()}
+            onError={onError}
         />
     )
 }
@@ -324,6 +362,14 @@ async function startSession(user: ReturnType<typeof userEvent.setup>) {
     await user.click(await screen.findByRole('button', {name: 'Start editor session'}))
     await waitFor(() => {
         expect(screen.getByText('Player')).toBeInTheDocument()
+    })
+}
+
+/** The same start, for a session whose editor is editing no scene yet. */
+async function startSessionWithoutScene(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole('button', {name: 'Start editor session'}))
+    await waitFor(() => {
+        expect(screen.getByText('No scene is open')).toBeInTheDocument()
     })
 }
 
@@ -395,12 +441,12 @@ describe('InspectorWorkspace', () => {
 
         await user.click(screen.getByRole('button', {name: 'Runtime'}))
 
-        expect(await screen.findByText('The runtime tree could not be read')).toBeInTheDocument()
-        expect(
-            screen.getAllByText(
-                /No game with the Gofer runtime helper is running \(runtime_not_running\)/
-            ).length
-        ).toBeGreaterThan(0)
+        // The addon answers `runtime.get_tree` with an error code whenever no game holds its
+        // helper, which is true of every session that has not pressed Run. The panel has an empty
+        // message for exactly that, and reporting it as a failed read would have made the message
+        // unreachable and told the user something had gone wrong.
+        expect(await screen.findByText('The game is not running')).toBeInTheDocument()
+        expect(screen.queryByText('The runtime tree could not be read')).not.toBeInTheDocument()
     })
 
     it('opens a worktree file into the script editor and hides generated sidecars', async () => {
@@ -420,6 +466,56 @@ describe('InspectorWorkspace', () => {
             expect(editor.state?.editors).toBe(1)
         })
         expect(editor.state?.activeText()).toBe(SCRIPT)
+    })
+
+    it('opens a scene in the editor rather than as text in Monaco', async () => {
+        const server = backend({openScene: ''})
+        const user = userEvent.setup()
+        renderWorkspace()
+        await startSessionWithoutScene(user)
+
+        await user.click(screen.getByRole('button', {name: 'Files'}))
+        await user.click(await screen.findByText('main.tscn'))
+
+        // The editor owns the edited scene: a scene opened as text would leave the tree, the
+        // inspector, and Run reading nothing while looking like it had been opened.
+        await waitFor(() => {
+            // The editor names a scene by its resource path; the explorer names a file by its
+            // place in the worktree, and the editor has never heard of that name.
+            expect(server.sceneOpens).toEqual(['res://scenes/main.tscn'])
+        })
+        expect(editor.state?.editors).toBe(0)
+    })
+
+    it('offers the scene the project runs when the editor is editing none', async () => {
+        const server = backend({openScene: ''})
+        const user = userEvent.setup()
+        renderWorkspace()
+        await startSessionWithoutScene(user)
+
+        await user.click(await screen.findByRole('button', {name: 'Open main scene'}))
+
+        await waitFor(() => {
+            expect(server.sceneOpens).toEqual([MAIN_SCENE])
+        })
+        expect(server.calls).toContain('project.get_settings')
+    })
+
+    it('reports a launch the debugger refused instead of leaving the button unchanged', async () => {
+        backend({canLaunch: false})
+        const onError = vi.fn()
+        const user = userEvent.setup()
+        renderWorkspace(onError)
+
+        await user.click(await screen.findByRole('button', {name: 'Run project'}))
+
+        await waitFor(() => {
+            expect(onError).toHaveBeenCalledWith(
+                expect.stringContaining('No scene is open and the project names no main scene')
+            )
+        })
+        // The game never started, so the control still offers to start it.
+        expect(screen.getByRole('button', {name: 'Run project'})).toBeInTheDocument()
     })
 
     it('jumps from a problem to the line that produced it', async () => {

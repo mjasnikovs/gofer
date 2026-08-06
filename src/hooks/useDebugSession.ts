@@ -1,4 +1,4 @@
-import {useCallback, useRef, useState} from 'react'
+import {useCallback, useEffect, useRef, useState} from 'react'
 import {callGodotDebug, toGodotError} from '../services/godot-session'
 import {isTauri} from '../services/desktop'
 import type {
@@ -14,6 +14,14 @@ import type {
 type DebugSessionOptions = Readonly<{
     /** The breakpoints Monaco's gutter holds, installed with the launch. */
     breakpoints: readonly DebugSourceBreakpoints[]
+    /**
+     * Where a failed debugger request is reported.
+     *
+     * The panel keeps the last error for its own display, but a Run pressed from the toolbar has
+     * no panel in view: without this, a launch that fails leaves the button unchanged and says
+     * nothing at all.
+     */
+    onError: (message: string) => void
 }>
 
 /**
@@ -35,7 +43,7 @@ export type ScopeVariables = Readonly<{
  * has actually stopped. `variables` is the one request Godot rejects rather than defers when the
  * debuggee has not dumped the reference yet, and Rust already retries it, so the panel asks once.
  */
-export function useDebugSession({breakpoints}: DebugSessionOptions) {
+export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
     const [stopped, setStopped] = useState<DebugStopped>()
     const [frames, setFrames] = useState<readonly DebugStackFrame[]>([])
     const [frameId, setFrameId] = useState<number>()
@@ -44,23 +52,58 @@ export function useDebugSession({breakpoints}: DebugSessionOptions) {
     const [isBusy, setIsBusy] = useState(false)
     const [error, setError] = useState<GodotError>()
     const pending = useRef(0)
+    /**
+     * What the adapter has been told about the breakpoints, so only a real change is sent again.
+     *
+     * The paths are kept beside the signature because a file whose last breakpoint was removed
+     * drops out of the list entirely, and clearing it means naming it one more time.
+     */
+    const installed = useRef<{signature: string; paths: readonly string[]}>({
+        signature: '',
+        paths: []
+    })
+    /**
+     * Whether a wait for the next stop is already outstanding.
+     *
+     * There is one event stream, so there can only be one waiter. A Continue leaves its wait
+     * running until something stops the game — and Pause is exactly that something, so a second
+     * wait started alongside it would watch a stop that the first one had already taken, and end
+     * at its own timeout with an error about a pause that had in fact worked.
+     */
+    const isAwaitingStop = useRef(false)
 
-    const request = useCallback(async (input: DebugRequest) => {
-        if (!isTauri()) return undefined
-        pending.current += 1
-        setIsBusy(true)
-        try {
-            const response = await callGodotDebug(input)
-            setError(undefined)
-            return response
-        } catch (failure) {
-            setError(toGodotError(failure))
-            return undefined
-        } finally {
-            pending.current -= 1
-            if (pending.current === 0) setIsBusy(false)
-        }
-    }, [])
+    const request = useCallback(
+        async (input: DebugRequest) => {
+            if (!isTauri()) return undefined
+            // Waiting for the next stop is not work the user is waiting on — it is the debugger
+            // listening. Counting it as busy disabled every control for the length of the wait,
+            // Pause included, which is the one control whose whole purpose is to end it.
+            const isWatching = input.op === 'awaitStop'
+            if (!isWatching) {
+                pending.current += 1
+                setIsBusy(true)
+            }
+            try {
+                const response = await callGodotDebug(input)
+                setError(undefined)
+                return response
+            } catch (failure) {
+                const reported = toGodotError(failure)
+                // A wait that has not seen a stop is not a failure: the game is simply still
+                // running, which is what the user asked for when they pressed Continue.
+                if (input.op === 'awaitStop' && reported.code === 'stop_timeout') return undefined
+                setError(reported)
+                onError(`The debugger could not ${input.op}: ${reported.message}`)
+                return undefined
+            } finally {
+                if (!isWatching) {
+                    pending.current -= 1
+                    if (pending.current === 0) setIsBusy(false)
+                }
+            }
+        },
+        [onError]
+    )
 
     /** Reads one frame's scopes and every variable in them. */
     const loadScopes = useCallback(
@@ -106,7 +149,14 @@ export function useDebugSession({breakpoints}: DebugSessionOptions) {
     )
 
     const awaitStop = useCallback(async () => {
-        const answered = await request({op: 'awaitStop'})
+        if (isAwaitingStop.current) return
+        isAwaitingStop.current = true
+        let answered
+        try {
+            answered = await request({op: 'awaitStop'})
+        } finally {
+            isAwaitingStop.current = false
+        }
         if (answered?.op !== 'stopped') return
         if (!answered.stopped) {
             // The debuggee ended before it stopped again: the session is over, not paused.
@@ -124,6 +174,10 @@ export function useDebugSession({breakpoints}: DebugSessionOptions) {
     const launch = useCallback(async () => {
         const answered = await request({op: 'launch', breakpoints, playArgs: []})
         if (answered?.op !== 'launched') return
+        installed.current = {
+            signature: JSON.stringify(breakpoints),
+            paths: breakpoints.map(source => source.path)
+        }
         setIsLaunched(true)
         setStopped(undefined)
         await awaitStop()
@@ -153,10 +207,42 @@ export function useDebugSession({breakpoints}: DebugSessionOptions) {
     )
 
     const pause = useCallback(async () => {
+        // Whatever stop the pause produces is the one an outstanding wait is already watching for,
+        // and there can only be one waiter — so a second wait started here would find the event
+        // already taken and end at its own timeout, reporting a pause that had in fact worked.
+        const isWatched = isAwaitingStop.current
         const answered = await request({op: 'pause'})
         if (!answered) return
-        await awaitStop()
+        if (!isWatched) await awaitStop()
     }, [awaitStop, request])
+
+    /**
+     * Keeps the running game's breakpoints the ones the gutter shows.
+     *
+     * Godot applies breakpoint changes to a debuggee that is already running, and the launch is
+     * the only place they were ever sent. Without this, a breakpoint removed mid-run keeps
+     * stopping the game at a line Monaco no longer marks, and one added mid-run never stops it at
+     * all — the gutter and the debugger would be describing two different games.
+     */
+    useEffect(() => {
+        if (!isLaunched) {
+            installed.current = {signature: '', paths: []}
+            return
+        }
+        const signature = JSON.stringify(breakpoints)
+        // Every keystroke rebuilds the list; only a different list is worth a round trip.
+        if (signature === installed.current.signature) return
+        const cleared = installed.current.paths.filter(
+            path => !breakpoints.some(source => source.path === path)
+        )
+        installed.current = {signature, paths: breakpoints.map(source => source.path)}
+        const sync = async () => {
+            for (const source of breakpoints)
+                await request({op: 'setBreakpoints', path: source.path, lines: [...source.lines]})
+            for (const path of cleared) await request({op: 'setBreakpoints', path, lines: []})
+        }
+        void sync()
+    }, [breakpoints, isLaunched, request])
 
     const terminate = useCallback(async () => {
         await request({op: 'terminate'})

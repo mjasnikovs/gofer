@@ -34,6 +34,21 @@ test('allows existing and new paths that remain in the workspace', async context
     assert.deepEqual(await tool.execute('3', {path: '.'}), {path: '.'})
 })
 
+test('accepts the resource paths Godot names files by', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('read'), current.path)
+
+    // The agent writes back the names it reads — the editor's, the addon's, and Gofer's own errors
+    // all say `res://`. Untranslated they resolved to a `res:/` directory that never existed.
+    assert.deepEqual(await tool.execute('1', {path: 'res://inside.txt'}), {path: 'inside.txt'})
+    assert.deepEqual(await tool.execute('2', {path: 'res://new.txt', text: 'x'}), {
+        path: 'new.txt',
+        text: 'x'
+    })
+    await assert.rejects(tool.execute('3', {path: 'res://../outside/secret.txt'}), /workspace/iu)
+})
+
 test('rejects malformed, traversal, and escaping-symlink tool paths', async context => {
     const current = await workspace()
     context.after(current.remove)

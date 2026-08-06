@@ -15,6 +15,20 @@ export type GodotSessionState =
     | 'stopping'
     | 'error'
 
+/**
+ * Whether a session in this state can answer a panel's read.
+ *
+ * `offline` and `error` have no editor at all. `staging`, `starting`, and `importing` have one that
+ * is still coming up: it answers, but it answers with nothing, because the editor has not opened the
+ * scene it opens for itself yet. That empty answer would then be kept — nothing refetches on a state
+ * change, only on the scene's own events — and a panel would go on reporting "No scene is open" over
+ * a project that has one. Waiting until the session can answer is what makes an empty panel mean the
+ * project rather than the clock.
+ */
+export function isSessionReadable(state: GodotSessionState) {
+    return state === 'ready' || state === 'playing' || state === 'debugPaused'
+}
+
 export type GodotSessionSummary = Readonly<{
     /** Names the editor session; stored run logging is keyed by it. */
     sessionId: string
@@ -100,6 +114,13 @@ export type GodotSettingsPage = Readonly<{
     settings: readonly GodotSetting[]
     totalMatches: number
     truncated: boolean
+}>
+
+/** What `project.get_settings` answers: the project's identity and the scene it runs. */
+export type GodotProjectSettings = Readonly<{
+    projectName: string
+    mainScene: string
+    renderingMethod: string
 }>
 
 /** A captured viewport frame: PNG, base64, at most 1920 px on the longest edge. */

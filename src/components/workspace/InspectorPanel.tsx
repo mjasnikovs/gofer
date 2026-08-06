@@ -9,6 +9,7 @@ import {TextInput} from '@astryxdesign/core/TextInput'
 import {Token} from '@astryxdesign/core/Token'
 import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {formatGodotValue} from '../../utils/godot-format'
+import {isSessionReadable} from '../../models/godot'
 import type {GodotNodeDetails, GodotSessionState, GodotSettingsPage} from '../../models/godot'
 import type {GodotCall, GodotSelection} from '../../models/workspace'
 import {PanelState} from './PanelState'
@@ -80,6 +81,8 @@ export function InspectorPanel({
     const settledProject = useDebounced(projectQuery)
     const settledEditor = useDebounced(editorQuery)
     const isOffline = state === 'offline' || state === 'error'
+    // A session still coming up answers every read with nothing, and nothing would refetch it.
+    const isSettling = !isOffline && !isSessionReadable(state)
 
     const loadNode = useCallback(() => {
         if (!selection) return Promise.resolve(undefined)
@@ -102,9 +105,15 @@ export function InspectorPanel({
         [call, settledEditor]
     )
 
-    const node = useGodotQuery(isOffline || tab !== 'node' || !selection ? undefined : loadNode)
-    const project = useGodotQuery(isOffline || tab !== 'project' ? undefined : loadProject)
-    const editor = useGodotQuery(isOffline || tab !== 'editor' ? undefined : loadEditor)
+    const node = useGodotQuery(
+        isOffline || isSettling || tab !== 'node' || !selection ? undefined : loadNode
+    )
+    const project = useGodotQuery(
+        isOffline || isSettling || tab !== 'project' ? undefined : loadProject
+    )
+    const editor = useGodotQuery(
+        isOffline || isSettling || tab !== 'editor' ? undefined : loadEditor
+    )
 
     const offlineNotice = (
         <VStack padding={3}>
@@ -153,7 +162,7 @@ export function InspectorPanel({
                     && (isOffline ? offlineNotice : (
                         <PanelState
                             label='node'
-                            isLoading={node.isLoading}
+                            isLoading={node.isLoading || (isSettling && Boolean(selection))}
                             error={node.error}
                             isEmpty={!node.data}
                             emptyTitle='Nothing selected'
@@ -248,7 +257,7 @@ export function InspectorPanel({
                             </VStack>
                             <PanelState
                                 label='project settings'
-                                isLoading={project.isLoading}
+                                isLoading={project.isLoading || isSettling}
                                 error={project.error}
                                 isEmpty={(project.data?.settings.length ?? 0) === 0}
                                 emptyTitle='No settings match'
@@ -331,7 +340,7 @@ export function InspectorPanel({
                             </VStack>
                             <PanelState
                                 label='editor settings'
-                                isLoading={editor.isLoading}
+                                isLoading={editor.isLoading || isSettling}
                                 error={editor.error}
                                 isEmpty={(editor.data?.settings.length ?? 0) === 0}
                                 emptyTitle='No settings match'
