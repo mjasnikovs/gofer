@@ -3488,4 +3488,47 @@ mod tests {
             .contains("10 MiB")
         );
     }
+
+    /// A command the main window cannot call is a command that does not exist, and nothing says so
+    /// until the window invokes it: Tauri's ACL is enforced at runtime, so registering a command
+    /// without allowing it fails only in front of the user. This compares the two lists directly.
+    #[test]
+    fn every_registered_command_is_allowed_for_the_main_window() {
+        use std::collections::BTreeSet;
+
+        let source = include_str!("lib.rs");
+        let handler = source
+            .split_once("invoke_handler(tauri::generate_handler![")
+            .expect("the invoke handler is registered")
+            .1
+            .split_once("]);")
+            .expect("the invoke handler list is closed")
+            .0;
+        let registered: BTreeSet<&str> = handler
+            .lines()
+            .map(|line| line.trim().trim_end_matches(','))
+            .filter(|name| !name.is_empty() && !name.starts_with("//"))
+            .collect();
+
+        let permissions = include_str!("../permissions/main-window-commands.toml");
+        let allowed: BTreeSet<&str> = permissions
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('"'))
+            .filter_map(|line| line.split_once('"'))
+            .map(|(name, _)| name)
+            .collect();
+
+        assert_eq!(
+            registered.difference(&allowed).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "these commands are registered but the main window may not call them; \
+             add them to src-tauri/permissions/main-window-commands.toml"
+        );
+        assert_eq!(
+            allowed.difference(&registered).collect::<Vec<_>>(),
+            Vec::<&&str>::new(),
+            "these commands are allowed but no longer registered; remove them from \
+             src-tauri/permissions/main-window-commands.toml"
+        );
+    }
 }

@@ -3,11 +3,13 @@ identifier = "main-window-commands"
 description = "Allows the main window to use Gofer's user-facing application commands."
 commands.allow = [
     "activate_chat_task",
+    "apply_health_remedy",
     "apply_script_rename",
     "call_godot",
     "call_godot_debug",
     "call_script_language",
     "cancel_ai_request",
+    "check_workspace_health",
     "close_script_document",
     "create_chat_task",
     "create_project_backup",

@@ -48,6 +48,15 @@ async function installDesktop(page: Page, state: VisualState) {
                 return () => handlers.delete(handler)
             },
             invoke: async (command: string, arguments_: unknown) => {
+                // The health gate stands in front of every screen below, so the fixture workspace
+                // has to answer it before any of them can render.
+                if (command === 'check_workspace_health')
+                    return {
+                        workspace: '/fixture/workspace',
+                        workspaceSource: 'working-directory',
+                        checks: [],
+                        isReady: true
+                    }
                 if (command === 'initialize_rag') {
                     if (currentState === 'first-run') return new Promise(() => undefined)
                     if (currentState === 'error')
