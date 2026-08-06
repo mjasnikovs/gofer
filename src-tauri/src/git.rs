@@ -242,6 +242,99 @@ fn git_command(directory: &Path, arguments: &[&str]) -> Command {
     command
 }
 
+/// What the health check needs to know about the repository behind a workspace.
+///
+/// Every field is answered even when an earlier one already failed, because the report shows the
+/// whole chain at once: a user whose folder is not a repository should still be able to read that
+/// their Git is installed and their identity is set, rather than discover each missing piece one
+/// restart at a time.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RepositoryStatus {
+    pub is_installed: bool,
+    pub root: Option<PathBuf>,
+    pub has_commit: bool,
+    pub has_identity: bool,
+    pub is_clean: bool,
+}
+
+pub fn inspect(workspace: &Path) -> RepositoryStatus {
+    if !is_installed() {
+        return RepositoryStatus::default();
+    }
+    let root = repository_root(workspace).ok().flatten();
+    let Some(root) = root else {
+        return RepositoryStatus {
+            is_installed: true,
+            has_identity: has_identity(workspace),
+            ..RepositoryStatus::default()
+        };
+    };
+    RepositoryStatus {
+        is_installed: true,
+        has_commit: git_output(&root, &["rev-parse", "--verify", "HEAD"])
+            .is_ok_and(|output| output.status.success()),
+        has_identity: has_identity(&root),
+        is_clean: git_text(&root, &["status", "--porcelain"]).is_ok_and(|text| text.is_empty()),
+        root: Some(root),
+    }
+}
+
+/// Whether Git is on the path at all. A missing Git and a directory that is not a repository are
+/// the same "no repository root" answer from `rev-parse`, and they need opposite instructions.
+pub fn is_installed() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Git refuses to commit without an author, and answers `GIT_COMMITTER_IDENT` only when it has one.
+fn has_identity(directory: &Path) -> bool {
+    git_output(directory, &["var", "GIT_COMMITTER_IDENT"])
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Makes `workspace` a repository. Task worktrees branch from the project's history, so a project
+/// that has none cannot be worked on at all.
+pub fn initialize_repository(workspace: &Path) -> Result<(), String> {
+    let output = git_output(workspace, &["init", "-b", "main"])?;
+    if !output.status.success() {
+        return Err(git_failure("initialize the repository", &output));
+    }
+    Ok(())
+}
+
+/// Records a repository-local identity, so committing works without touching the user's global
+/// Git configuration.
+pub fn set_local_identity(workspace: &Path, name: &str, email: &str) -> Result<(), String> {
+    for (key, value) in [("user.name", name), ("user.email", email)] {
+        let output = git_output(workspace, &["config", "--local", key, value])?;
+        if !output.status.success() {
+            return Err(git_failure("record the Git identity", &output));
+        }
+    }
+    Ok(())
+}
+
+/// Gives the repository the first commit a worktree can branch from.
+///
+/// The commit is deliberately empty: the files already in the folder are the user's, and staging
+/// them on their behalf is a decision Gofer has no business making. A branch point is all a task
+/// worktree needs.
+pub fn create_initial_commit(workspace: &Path) -> Result<(), String> {
+    let output = git_output(
+        workspace,
+        &["commit", "--allow-empty", "-m", "Initial commit"],
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("create the first commit", &output));
+    }
+    Ok(())
+}
+
 fn output_text(output: &Output) -> Result<String, String> {
     String::from_utf8(output.stdout.clone())
         .map(|value| value.trim().to_owned())

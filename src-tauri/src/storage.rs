@@ -439,6 +439,41 @@ pub struct ProjectStorage {
     write_lock: Arc<Mutex<()>>,
 }
 
+/// The one project database, and why it could not be opened when it could not be.
+///
+/// Opening depends on the workspace, and the workspace can be wrong: a folder Gofer cannot write,
+/// or a repository whose state stops a task from being created. That used to fail Tauri's `setup`,
+/// which panics — no window, no message, nothing for the user to act on. Holding the failure here
+/// instead lets the interface open, report it, and reopen the database once the health check has
+/// repaired what was wrong.
+#[derive(Clone)]
+pub struct StorageSlot(Arc<Mutex<Result<ProjectStorage, String>>>);
+
+impl StorageSlot {
+    pub fn new(storage: Result<ProjectStorage, String>) -> Self {
+        Self(Arc::new(Mutex::new(storage)))
+    }
+
+    pub fn get(&self) -> Result<ProjectStorage, String> {
+        self.0
+            .lock()
+            .map_err(|_| "The project storage lock is poisoned".to_owned())?
+            .clone()
+    }
+
+    pub fn replace(
+        &self,
+        storage: Result<ProjectStorage, String>,
+    ) -> Result<ProjectStorage, String> {
+        let mut slot = self
+            .0
+            .lock()
+            .map_err(|_| "The project storage lock is poisoned".to_owned())?;
+        *slot = storage;
+        slot.clone()
+    }
+}
+
 impl ProjectStorage {
     pub fn open(data_root: &Path, workspace_path: &Path) -> Result<Self, String> {
         fs::create_dir_all(data_root)
@@ -481,7 +516,12 @@ impl ProjectStorage {
             .map_err(|error| format!("Could not create project storage: {error}"))?;
         let project = storage.connection()?;
         migrate_project(&project)?;
-        storage.ensure_active_task(&project)?;
+        // A workspace whose Git repository cannot yet supply a worktree — one with no commits, most
+        // often — must not stop the database from opening. Failing here failed Tauri's `setup`,
+        // which panics: the user got no window at all, in a repository they could have fixed with
+        // one commit. The health check reports it instead, and the task is created the moment it is
+        // asked for.
+        let _ = storage.ensure_active_task(&project);
         Ok(storage)
     }
 
@@ -2014,6 +2054,29 @@ mod tests {
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).expect("workspace directory");
         ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage")
+    }
+
+    /// A repository with no commits has no branch point, so no task worktree can be created in it.
+    /// That used to fail `open`, which failed Tauri's `setup`, which panics — the user got no
+    /// window at all. The database has to open anyway, so the health check can say so and offer the
+    /// first commit.
+    #[test]
+    fn a_repository_without_commits_still_opens_its_project_database() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&workspace)
+            .output()
+            .expect("run Git");
+        assert!(status.status.success());
+
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+
+        // No task could be created, so nothing claims a worktree the repository cannot supply.
+        assert_eq!(storage.list_tasks().expect("tasks").len(), 0);
     }
 
     #[test]

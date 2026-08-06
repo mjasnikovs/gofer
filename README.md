@@ -33,8 +33,37 @@ is not a Godot project, so a development run has to be told where the project is
 GOFER_WORKSPACE_DIR=/path/to/your/godot/project npm run tauri dev
 ```
 
-A built Gofer takes the directory it is launched from. Either way the directory must contain
-`project.godot`; a session refuses one that does not, and says which directory it looked in.
+A built Gofer takes the directory it is launched from, unless a folder was chosen in the health
+check — that choice is recorded in `environment.json` beside the settings file and wins over the
+launch directory.
+
+### The health check
+
+Gofer needs several unrelated things before it can do any work, and each of them used to be
+discovered late and reported in the vocabulary of whichever subsystem happened to notice. Starting
+an editor in a folder that was never a Godot project reported "A Godot session can only start for an
+active task worktree", and a repository with no commits failed Tauri's `setup` — which panics, so
+there was no window at all.
+
+Every launch now answers all of it first, and pairs each failure with the button that repairs it:
+
+| Check                 | Blocks | Fix offered                                           |
+| --------------------- | ------ | ----------------------------------------------------- |
+| Project folder        | Yes    | Choose project folder… (records it and reopens)       |
+| Git installed         | Yes    | Instructions — Gofer cannot install it                |
+| Git repository        | Yes    | Initialize a Git repository                           |
+| Git identity          | Yes    | Use a repository-local `Gofer <gofer@localhost>`      |
+| Project history       | Yes    | Create the first commit (empty; nothing is staged)    |
+| Uncommitted changes   | No     | Reported, because merging a task needs a clean tree   |
+| Godot project         | Yes    | Create a starter Godot project (never overwrites)     |
+| Godot editor          | Yes    | Locate Godot… (version-checked before it is recorded) |
+| Godot language server | Yes    | Instructions — it is the engine's own editor setting  |
+| AI model              | No     | Reported; a server that is not running yet is normal  |
+| GDScript formatter    | No     | Reported; only Format Document is unavailable         |
+
+The checklist appears only when something blocks. Applying the last fix continues straight into the
+workspace, and the workspace is checked before the documentation models are downloaded — a folder
+Gofer cannot work in is not worth a gigabyte of models.
 
 ## Godot documentation RAG
 

@@ -245,7 +245,7 @@ impl Journey {
         tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .expect("build mock webview");
-        app.manage(storage.clone());
+        app.manage(crate::storage::StorageSlot::new(Ok(storage.clone())));
         // A turn is running: gated tool calls only ever wait for a user inside one.
         approvals::open();
 

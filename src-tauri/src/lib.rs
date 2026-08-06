@@ -22,6 +22,7 @@ mod godot_lsp;
 mod godot_rpc;
 mod godot_session;
 mod godot_session_api;
+mod health;
 // Drives the staged addon inside a real editor. Gated so the default gate needs no Godot binary.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_addon_acceptance;
@@ -54,7 +55,8 @@ mod storage;
 use process::{ProcessSpawner, SystemProcessSpawner};
 use storage::{
     BackupResult, MaintenanceResult, MergeTaskResult, ProjectStorage, SaveMemoryEmbeddingRequest,
-    SearchMemoryRequest, StoredAttachment, StoredChat, TaskRecord, UpsertMemoryRequest,
+    SearchMemoryRequest, StorageSlot, StoredAttachment, StoredChat, TaskRecord,
+    UpsertMemoryRequest,
 };
 
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
@@ -64,6 +66,11 @@ const AI_EVENT_PREFIX: &str = "GOFER_AI_EVENT:";
 /// their own, and anything unprefixed on stdout stays diagnostic output rather than protocol.
 const AI_TOOL_PREFIX: &str = "GOFER_AI_TOOL:";
 const SETTINGS_FILE_NAME: &str = "settings.json";
+/// Where the workspace folder and the Godot executable the user chose are recorded.
+///
+/// Deliberately not part of `settings.json`: the renderer round-trips that whole document when it
+/// saves the AI connection, and a field it does not know about would be erased by the next save.
+const ENVIRONMENT_FILE_NAME: &str = "environment.json";
 const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
 const SETTINGS_VERSION: u32 = 1;
 const MAX_CHAT_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -422,11 +429,22 @@ struct ModelsRequest {
     builder: reqwest::RequestBuilder,
 }
 
+/// How long a user-initiated connection test waits for the AI server.
+const AI_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the startup health check waits for it.
+///
+/// Deliberately shorter: the report is what stands between the user and their project, and a
+/// server that is simply not running yet must not hold the window blank while it is waited for.
+const AI_HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Validates settings, resolves the credential, and builds the models-endpoint request.
 ///
 /// Sending is left to the caller because the two commands classify transport failures
 /// differently: the connection test reports them as a status, model listing as an error.
-async fn prepare_models_request(request: SettingsRequest) -> Result<ModelsRequest, String> {
+async fn prepare_models_request(
+    request: SettingsRequest,
+    timeout: Duration,
+) -> Result<ModelsRequest, String> {
     let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
         let settings = validate_settings(request.settings)?;
         let api_key = resolve_api_key(&request.api_key)?;
@@ -439,7 +457,7 @@ async fn prepare_models_request(request: SettingsRequest) -> Result<ModelsReques
         .and_then(|url| url.join("models"))
         .map_err(|error| format!("Could not construct the models endpoint: {error}"))?;
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .build()
         .map_err(|error| format!("Could not create the AI connection client: {error}"))?;
     let mut builder = client.get(models_url);
@@ -451,7 +469,14 @@ async fn prepare_models_request(request: SettingsRequest) -> Result<ModelsReques
 
 #[tauri::command]
 async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestResult, String> {
-    let ModelsRequest { settings, builder } = prepare_models_request(request).await?;
+    run_connection_test(request, AI_REQUEST_TIMEOUT).await
+}
+
+async fn run_connection_test(
+    request: SettingsRequest,
+    timeout: Duration,
+) -> Result<ConnectionTestResult, String> {
+    let ModelsRequest { settings, builder } = prepare_models_request(request, timeout).await?;
 
     let response = match builder.send().await {
         Ok(response) => response,
@@ -506,7 +531,8 @@ async fn test_ai_connection(request: SettingsRequest) -> Result<ConnectionTestRe
 
 #[tauri::command]
 async fn list_ai_models(request: SettingsRequest) -> Result<Vec<AiModelOption>, String> {
-    let ModelsRequest { settings, builder } = prepare_models_request(request).await?;
+    let ModelsRequest { settings, builder } =
+        prepare_models_request(request, AI_REQUEST_TIMEOUT).await?;
     let response = builder
         .send()
         .await
@@ -1134,6 +1160,248 @@ async fn query_godot_docs(request: rag::GodotDocsQuery) -> Result<rag::GodotDocs
         .map_err(|error| format!("Gofer RAG query task failed: {error}"))?
 }
 
+/// The workspace folder and Godot executable the user chose in the health check.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentSettings {
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    godot_binary: Option<String>,
+}
+
+/// The workspace Gofer is bound to, and how it came to be that one.
+struct WorkspaceBinding {
+    path: PathBuf,
+    source: health::WorkspaceSource,
+}
+
+fn environment_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+    if let Some(path) = configured_app_data_path()? {
+        return Ok(path.join(ENVIRONMENT_FILE_NAME));
+    }
+    app.path()
+        .app_config_dir()
+        .map(|path| path.join(ENVIRONMENT_FILE_NAME))
+        .map_err(|error| format!("Could not resolve Gofer's configuration directory: {error}"))
+}
+
+/// Reads the recorded environment, treating an unreadable or invalid file as "nothing recorded".
+///
+/// This file decides which folder Gofer opens. Refusing to start over a corrupt one would strand
+/// the user in exactly the state the health check exists to get them out of.
+fn read_environment<R: Runtime>(app: &AppHandle<R>) -> EnvironmentSettings {
+    let Ok(path) = environment_path(app) else {
+        return EnvironmentSettings::default();
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
+/// The editor the user pointed Gofer at, for the session supervisor to launch.
+pub(crate) fn configured_godot_binary<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    read_environment(app).godot_binary
+}
+
+fn write_environment<R: Runtime>(
+    app: &AppHandle<R>,
+    environment: &EnvironmentSettings,
+) -> Result<(), String> {
+    let path = environment_path(app)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Gofer environment path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    let contents = serde_json::to_string_pretty(environment)
+        .map_err(|error| format!("Could not serialize the Gofer environment: {error}"))?;
+    fs::write(&path, format!("{contents}\n"))
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))
+}
+
+fn resolve_workspace<R: Runtime>(app: &AppHandle<R>) -> Result<WorkspaceBinding, String> {
+    // `GOFER_WORKSPACE_DIR` wins so a test harness can point a launched application at a prepared
+    // repository regardless of what the user last chose.
+    if let Some(configured) = std::env::var_os("GOFER_WORKSPACE_DIR") {
+        return Ok(WorkspaceBinding {
+            path: validate_configured_directory(
+                PathBuf::from(configured),
+                "GOFER_WORKSPACE_DIR must be an absolute path without traversal",
+            )?,
+            source: health::WorkspaceSource::Environment,
+        });
+    }
+    if let Some(chosen) = read_environment(app).workspace {
+        let path = PathBuf::from(chosen);
+        // A folder that has since been deleted or moved falls back rather than blocking startup;
+        // the health check then reports the working directory it landed on.
+        if path.is_dir() {
+            return Ok(WorkspaceBinding {
+                path,
+                source: health::WorkspaceSource::Configured,
+            });
+        }
+    }
+    Ok(WorkspaceBinding {
+        path: std::env::current_dir()
+            .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?,
+        source: health::WorkspaceSource::WorkingDirectory,
+    })
+}
+
+/// Reports everything Gofer needs in order to work here, and what repairs each missing piece.
+#[tauri::command]
+async fn check_workspace_health(app: AppHandle) -> Result<health::HealthReport, String> {
+    let ai = ai_health(&app).await;
+    tauri::async_runtime::spawn_blocking(move || workspace_health(&app, ai))
+        .await
+        .map_err(|error| format!("The health check task failed: {error}"))
+}
+
+/// Applies one repair and answers with the report as it stands afterwards, so the interface never
+/// shows a fix that has already been applied.
+#[tauri::command]
+async fn apply_health_remedy(
+    app: AppHandle,
+    request: HealthRemedyRequest,
+) -> Result<health::HealthReport, String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || apply_remedy(&handle, request))
+        .await
+        .map_err(|error| format!("The health repair task failed: {error}"))??;
+    check_workspace_health(app).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HealthRemedyRequest {
+    action: health::RemedyAction,
+    /// The folder or executable the user picked, for the remedies that need one.
+    #[serde(default)]
+    path: Option<String>,
+}
+
+fn apply_remedy(app: &AppHandle, request: HealthRemedyRequest) -> Result<(), String> {
+    match request.action {
+        health::RemedyAction::ChooseWorkspace => {
+            let path = chosen_path(request.path, "a project folder")?;
+            if !path.is_dir() {
+                return Err(format!("{} is not a folder.", path.display()));
+            }
+            let mut environment = read_environment(app);
+            environment.workspace = Some(path.display().to_string());
+            write_environment(app, &environment)?;
+            // Reopening binds every later command to the new folder without a restart. The health
+            // check runs before any session, watcher, or task exists, so nothing is left pointing
+            // at the old one.
+            reopen_storage(app).map(|_| ())
+        }
+        health::RemedyAction::LocateGodotBinary => {
+            let path = chosen_path(request.path, "the Godot executable")?;
+            let binary = path.display().to_string();
+            let probe = godot_session::probe_binary(Some(&binary));
+            if let Some(error) = probe.error {
+                return Err(error);
+            }
+            let mut environment = read_environment(app);
+            environment.godot_binary = Some(binary);
+            write_environment(app, &environment)
+        }
+        action => {
+            let workspace = resolve_workspace(app)?.path;
+            health::apply(&workspace, action)?;
+            // Git repairs are exactly what a failed open was waiting for.
+            let _ = reopen_storage(app);
+            Ok(())
+        }
+    }
+}
+
+fn chosen_path(path: Option<String>, what: &str) -> Result<PathBuf, String> {
+    let path = path
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| format!("Gofer needs {what} to be chosen first."))?;
+    Ok(PathBuf::from(path))
+}
+
+fn workspace_health(app: &AppHandle, ai: health::AiHealth) -> health::HealthReport {
+    let binding = resolve_workspace(app);
+    let (workspace, source) = match &binding {
+        Ok(binding) => (binding.path.clone(), binding.source),
+        Err(_) => (PathBuf::new(), health::WorkspaceSource::WorkingDirectory),
+    };
+    let storage_error = match binding {
+        Err(error) => Some(error),
+        Ok(_) => project_storage(app).err(),
+    };
+    let environment = read_environment(app);
+    health::report(&health::HealthInput {
+        workspace,
+        workspace_source: source,
+        storage_error,
+        godot: godot_session::probe_binary(environment.godot_binary.as_deref()),
+        ai,
+        formatter_error: gdformat_binary(app).err().map(|error| error.message),
+    })
+}
+
+/// Asks the configured AI server whether it is there and serving the configured model.
+///
+/// Unreachable is reported, never fatal: a local model the user has not started yet is the ordinary
+/// case, and it must not stand between them and their project.
+async fn ai_health(app: &AppHandle) -> health::AiHealth {
+    let loaded = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || read_settings(&app)
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|settings| settings);
+    let settings = match loaded {
+        Ok(settings) => settings,
+        Err(error) => {
+            return health::AiHealth {
+                base_url: String::new(),
+                model: String::new(),
+                reachability: health::AiReachability::ServerError,
+                message: format!("Gofer's AI settings could not be read: {error}"),
+            };
+        }
+    };
+    let base_url = settings.ai.base_url.clone();
+    let model = settings.ai.model.clone();
+    let result = run_connection_test(
+        SettingsRequest {
+            settings,
+            api_key: ApiKeyUpdate::Keep,
+        },
+        AI_HEALTH_TIMEOUT,
+    )
+    .await;
+    let (reachability, message) = match result {
+        Ok(result) => (
+            match result.status {
+                ConnectionTestStatus::Connected => health::AiReachability::Connected,
+                ConnectionTestStatus::ModelUnavailable => health::AiReachability::ModelUnavailable,
+                ConnectionTestStatus::Unauthorized => health::AiReachability::Unauthorized,
+                ConnectionTestStatus::ServerError => health::AiReachability::ServerError,
+                ConnectionTestStatus::ServerUnreachable => health::AiReachability::Unreachable,
+            },
+            result.message,
+        ),
+        Err(error) => (health::AiReachability::ServerError, error),
+    };
+    health::AiHealth {
+        base_url,
+        model,
+        reachability,
+        message,
+    }
+}
+
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = configured_app_data_path()? {
         return Ok(path.join(SETTINGS_FILE_NAME));
@@ -1233,26 +1501,29 @@ fn read_chat_attachment_bytes(
 }
 
 fn project_storage<R: Runtime>(app: &AppHandle<R>) -> Result<ProjectStorage, String> {
-    app.try_state::<ProjectStorage>()
-        .map(|storage| storage.inner().clone())
-        .ok_or_else(|| "Project storage has not been initialized".to_owned())
+    app.try_state::<StorageSlot>()
+        .ok_or_else(|| "Project storage has not been initialized".to_owned())?
+        .get()
 }
 
+/// Opens the project database for whatever folder Gofer is currently bound to.
+///
+/// The workspace is normally the directory Gofer was started in. `GOFER_WORKSPACE_DIR` names it
+/// explicitly, which is how the packaged journey points a launched application at a prepared
+/// repository instead of at whatever directory the test runner happened to be in; the health check
+/// records a folder the user chose. It is validated exactly like `GOFER_APP_DATA_DIR`, because both
+/// name a directory Gofer will write.
 fn open_project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
     let data_root = app_data_path(app)?;
-    // The workspace is normally the directory Gofer was started in. `GOFER_WORKSPACE_DIR` names it
-    // explicitly, which is how the packaged journey points a launched application at a prepared
-    // repository instead of at whatever directory the test runner happened to be in. It is
-    // validated exactly like `GOFER_APP_DATA_DIR`, because both name a directory Gofer will write.
-    let workspace = match std::env::var_os("GOFER_WORKSPACE_DIR") {
-        Some(configured) => validate_configured_directory(
-            PathBuf::from(configured),
-            "GOFER_WORKSPACE_DIR must be an absolute path without traversal",
-        )?,
-        None => std::env::current_dir()
-            .map_err(|error| format!("Could not resolve the agent workspace: {error}"))?,
-    };
+    let workspace = resolve_workspace(app)?.path;
     ProjectStorage::open(&data_root, &workspace)
+}
+
+/// Rebinds the project database after the health check changed what it depends on.
+fn reopen_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
+    app.try_state::<StorageSlot>()
+        .ok_or_else(|| "Project storage has not been initialized".to_owned())?
+        .replace(open_project_storage(app))
 }
 
 fn hydrate_chat_messages(
@@ -1979,16 +2250,22 @@ pub fn run() {
         .plugin(tauri_plugin_wdio::init())
         .plugin(tauri_plugin_wdio_webdriver::init());
 
+    let builder = builder.plugin(tauri_plugin_dialog::init());
+
+    // A workspace Gofer cannot open is the health check's problem, not a reason to refuse to
+    // start: failing here fails `build`, which panics, and the user is left with no window and no
+    // way to point Gofer at a folder that would have worked.
     let builder = builder.setup(|app| {
-        let storage = open_project_storage(app.handle()).map_err(std::io::Error::other)?;
-        app.manage(storage);
+        app.manage(StorageSlot::new(open_project_storage(app.handle())));
         Ok(())
     });
 
     let builder = builder.invoke_handler(tauri::generate_handler![
         activate_chat_task,
+        apply_health_remedy,
         apply_script_rename,
         call_godot,
+        check_workspace_health,
         call_godot_debug,
         call_script_language,
         cancel_ai_request,
@@ -2599,7 +2876,7 @@ mod tests {
             ])
             .build(tauri::generate_context!())
             .expect("build mock Tauri app");
-        app.manage(storage);
+        app.manage(StorageSlot::new(Ok(storage)));
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .expect("build mock webview");

@@ -128,6 +128,19 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                         title='Models could not be initialized'
                                         description={state.message}
                                     />
+                                    {/*
+                                     * A half-written cache fails the same way on every retry, so
+                                     * the second button is the one that actually gets the user
+                                     * moving: it clears what was downloaded and starts over.
+                                     */}
+                                    <Text
+                                        type='supporting'
+                                        color='secondary'
+                                    >
+                                        Downloads resume where they stopped. If retrying keeps
+                                        failing, delete the cache — Settings › Documentation models
+                                        › Delete cache — and prepare it again.
+                                    </Text>
                                     <Button
                                         label='Try again'
                                         variant='primary'

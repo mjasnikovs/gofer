@@ -188,6 +188,7 @@ pub fn start_session<R: Runtime>(
 
     match godot_session::start(LaunchRequest {
         worktree: worktree.clone(),
+        binary: crate::configured_godot_binary(app),
     }) {
         Ok(info) => {
             start_run_logging(&storage, &info, &worktree);
@@ -493,14 +494,15 @@ pub fn respond_tool_approval(request: ToolApprovalRequest) -> Result<(), Approva
 }
 
 fn project_storage<R: Runtime>(app: &AppHandle<R>) -> Result<ProjectStorage, SessionError> {
-    app.try_state::<ProjectStorage>()
-        .map(|storage| storage.inner().clone())
+    app.try_state::<crate::storage::StorageSlot>()
         .ok_or_else(|| {
             SessionError::new(
                 "storage_unavailable",
                 "Project storage has not been initialized",
             )
-        })
+        })?
+        .get()
+        .map_err(|error| SessionError::new("storage_unavailable", error))
 }
 
 /// The stager that owns this installation's addon ledger.

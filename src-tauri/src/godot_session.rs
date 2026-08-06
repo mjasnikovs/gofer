@@ -100,6 +100,10 @@ impl SessionError {
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRequest {
     pub worktree: PathBuf,
+    /// The editor the user pointed Gofer at in settings, when they have. Gofer finds `godot4` or
+    /// `godot` on the path without help; an engine installed anywhere else can only be named.
+    #[serde(default)]
+    pub binary: Option<String>,
 }
 
 /// Summary of a running session returned to callers.
@@ -321,7 +325,7 @@ fn start_with(
             crate::addon::missing_project_message(&worktree),
         ));
     }
-    let binary = discover_binary(spawner)?;
+    let binary = discover_binary(spawner, request.binary.as_deref())?;
     let godot_version = verify_version(spawner, &binary)?;
     let lsp_remote_host = read_lsp_remote_host()?;
     if !is_loopback_host(&lsp_remote_host) {
@@ -631,7 +635,10 @@ fn is_supported_version(version: &str) -> bool {
 }
 // coverage-critical-end: version
 
-fn discover_binary(spawner: &impl ProcessSpawner) -> Result<String, SessionError> {
+fn discover_binary(
+    spawner: &impl ProcessSpawner,
+    configured: Option<&str>,
+) -> Result<String, SessionError> {
     if let Ok(binary) = std::env::var("GOFER_GODOT_BINARY") {
         if command_text(spawner, &binary, &["--version"]).is_ok() {
             return Ok(binary);
@@ -641,6 +648,21 @@ fn discover_binary(spawner: &impl ProcessSpawner) -> Result<String, SessionError
             format!("GOFER_GODOT_BINARY points to an unusable executable: {binary}"),
         ));
     }
+    if let Some(binary) = configured
+        .map(str::trim)
+        .filter(|binary| !binary.is_empty())
+    {
+        if command_text(spawner, binary, &["--version"]).is_ok() {
+            return Ok(binary.to_owned());
+        }
+        return Err(SessionError::new(
+            "configured_binary_unusable",
+            format!(
+                "The Godot editor recorded in Gofer's settings could not be run: {binary}. Choose \
+                 it again in the health check."
+            ),
+        ));
+    }
     for binary in ["godot4", "godot"] {
         if command_text(spawner, binary, &["--version"]).is_ok() {
             return Ok(binary.to_owned());
@@ -648,8 +670,66 @@ fn discover_binary(spawner: &impl ProcessSpawner) -> Result<String, SessionError
     }
     Err(SessionError::new(
         "godot_not_found",
-        "Godot was not found. Install Godot 4.7.1-stable or set GOFER_GODOT_BINARY.",
+        format!(
+            "Godot was not found on the path. Install Godot \
+             {REQUIRED_ENGINE_VERSION}-{REQUIRED_CHANNEL}, or point Gofer at the editor you \
+             already have."
+        ),
     ))
+}
+
+/// What the health check knows about the editor Gofer would launch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BinaryProbe {
+    pub binary: Option<String>,
+    pub version: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Resolves and version-checks the editor without starting anything.
+///
+/// The health check answers before the user has a task, and starting a session to find out whether
+/// Godot is installed would be a strange way to ask.
+pub fn probe_binary(configured: Option<&str>) -> BinaryProbe {
+    probe_binary_with(&crate::process::SystemProcessSpawner, configured)
+}
+
+fn probe_binary_with(spawner: &impl ProcessSpawner, configured: Option<&str>) -> BinaryProbe {
+    let binary = match discover_binary(spawner, configured) {
+        Ok(binary) => binary,
+        Err(error) => {
+            return BinaryProbe {
+                binary: None,
+                version: None,
+                error: Some(error.message),
+            };
+        }
+    };
+    match verify_version(spawner, &binary) {
+        Ok(version) => BinaryProbe {
+            binary: Some(binary),
+            version: Some(version),
+            error: None,
+        },
+        Err(error) => BinaryProbe {
+            binary: Some(binary),
+            version: error
+                .details
+                .get("detected")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            error: Some(error.message),
+        },
+    }
+}
+
+/// The editor setting Gofer needs pointed at loopback, and where the user changes it.
+pub fn probe_lsp_remote_host() -> Result<String, String> {
+    read_lsp_remote_host().map_err(|error| error.message)
+}
+
+pub fn is_loopback(host: &str) -> bool {
+    is_loopback_host(host)
 }
 
 fn command_text(
@@ -1070,6 +1150,7 @@ mod tests {
         let error = start_with(
             LaunchRequest {
                 worktree: worktree.clone(),
+                binary: None,
             },
             &spawner,
         )
@@ -1098,7 +1179,14 @@ mod tests {
         };
         let spawner = FakeSpawner::new("4.7.1.stable");
 
-        let info = start_with(LaunchRequest { worktree }, &spawner).expect("start session");
+        let info = start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+            },
+            &spawner,
+        )
+        .expect("start session");
 
         assert_eq!(info.state, SessionState::Starting);
         assert_eq!(info.godot_version, "4.7.1.stable");
@@ -1129,7 +1217,14 @@ mod tests {
         };
         let spawner = FakeSpawner::new("4.7.0.stable");
 
-        let error = start_with(LaunchRequest { worktree }, &spawner).expect_err("bad version");
+        let error = start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+            },
+            &spawner,
+        )
+        .expect_err("bad version");
         assert_eq!(error.code, "unsupported_godot_version");
 
         unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
@@ -1148,7 +1243,14 @@ mod tests {
         };
         let spawner = FakeSpawner::new("4.7.1.stable");
 
-        let error = start_with(LaunchRequest { worktree }, &spawner).expect_err("non-loopback");
+        let error = start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+            },
+            &spawner,
+        )
+        .expect_err("non-loopback");
         assert_eq!(error.code, "lsp_host_not_loopback");
 
         unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
@@ -1167,13 +1269,21 @@ mod tests {
         };
         let spawner = FakeSpawner::new("4.7.1.stable");
 
-        start_with(LaunchRequest { worktree }, &spawner).expect("start first session");
+        start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+            },
+            &spawner,
+        )
+        .expect("start first session");
         assert_eq!(current_state(), SessionState::Starting);
 
         assert_eq!(
             start_with(
                 LaunchRequest {
-                    worktree: PathBuf::from("/tmp")
+                    worktree: PathBuf::from("/tmp"),
+                    binary: None,
                 },
                 &spawner
             )

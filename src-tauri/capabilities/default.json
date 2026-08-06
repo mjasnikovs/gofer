@@ -3,5 +3,10 @@
     "identifier": "default",
     "description": "Capability for the main window",
     "windows": ["main"],
-    "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "main-window-commands"]
+    "permissions": [
+        "core:event:allow-listen",
+        "core:event:allow-unlisten",
+        "main-window-commands",
+        "dialog:allow-open"
+    ]
 }

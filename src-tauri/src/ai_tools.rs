@@ -856,7 +856,7 @@ mod tests {
             crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace)
                 .expect("open project storage");
         let app = unattended_app();
-        app.manage(storage);
+        app.manage(crate::storage::StorageSlot::new(Ok(storage)));
 
         for params in [
             json!({"path": "../escape.gd"}),

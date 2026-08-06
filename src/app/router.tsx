@@ -15,6 +15,7 @@ import {
 import type {RouterHistory} from '@tanstack/react-router'
 import {AppShell} from '@astryxdesign/core/AppShell'
 import {invoke, isTauri} from '../services/desktop'
+import {HealthGate} from '../components/application/HealthGate'
 import {InitializationSplash} from '../components/application/InitializationSplash'
 import {Navigation} from '../components/application/Navigation'
 import {isTaskSummary} from '../models/app'
@@ -58,6 +59,7 @@ function useApplication() {
 
 function Application() {
     const [tasks, setTasks] = useState<readonly TaskSummary[]>([])
+    const [isHealthy, setIsHealthy] = useState(false)
     const [isReady, setIsReady] = useState(false)
     const navigate = useNavigate()
     const pathname = useRouterState({select: state => state.location.pathname})
@@ -75,6 +77,9 @@ function Application() {
     }, [])
     const showApplication = useCallback(() => {
         setIsReady(true)
+    }, [])
+    const acceptWorkspace = useCallback(() => {
+        setIsHealthy(true)
     }, [])
     const prepareModels = useCallback(() => {
         setIsReady(false)
@@ -133,6 +138,9 @@ function Application() {
         }
     }, [isReady, refreshTasks])
 
+    // The workspace is checked before the models are downloaded: a folder Gofer cannot work in is
+    // not worth a gigabyte of models, and the fixes for it are the ones the user can actually make.
+    if (!isHealthy) return <HealthGate onReady={acceptWorkspace} />
     if (!isReady) return <InitializationSplash onReady={showApplication} />
 
     return (

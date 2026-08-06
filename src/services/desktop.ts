@@ -3,6 +3,7 @@ import {listen as tauriListen} from '@tauri-apps/api/event'
 import type {EventCallback, UnlistenFn} from '@tauri-apps/api/event'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import type {TaskSummary} from '../models/app'
+import type {HealthRemedyRequest, HealthReport} from '../models/health'
 import type {
     DeleteWorkspacePathRequest,
     EditWorkspaceFileRequest,
@@ -108,15 +109,29 @@ type StoredChatPayload = Omit<StoredChat, 'taskId'>
         taskId?: string | undefined
     }>
 
+/**
+ * The system file picker, invoked directly rather than through @tauri-apps/plugin-dialog so that
+ * the test driver intercepts it like every other desktop call.
+ */
+type OpenDialogOptions = Readonly<{
+    directory: boolean
+    multiple: false
+    title: string
+    defaultPath?: string | undefined
+}>
+
 type DesktopCommandMap = Readonly<{
     activate_chat_task: CommandSpec<{taskId: string}, StoredChat>
+    apply_health_remedy: CommandSpec<{request: HealthRemedyRequest}, HealthReport>
     apply_script_rename: CommandSpec<{request: ApplyScriptRenameRequest}, readonly ScriptStamp[]>
     call_godot: CommandSpec<{request: CallGodotRequest}, CallGodotResponse>
     call_godot_debug: CommandSpec<{request: DebugRequest}, DebugResponse>
     call_script_language: CommandSpec<{request: ScriptRequest}, ScriptResponse>
     cancel_ai_request: CommandSpec<{requestId: number}, boolean>
+    check_workspace_health: CommandSpec<undefined, HealthReport>
     close_script_document: CommandSpec<{request: OpenScriptRequest}, void>
     create_chat_task: CommandSpec<undefined, StoredChat>
+    'plugin:dialog|open': CommandSpec<{options: OpenDialogOptions}, string | null>
     create_project_backup: CommandSpec<undefined, BackupResult>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
