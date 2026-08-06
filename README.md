@@ -106,6 +106,13 @@ module generates the tool descriptions the model sees and validates the operatio
 the two cannot drift apart. Captured frames come back as real images rather than base64 text, and
 every failure keeps its structured code — `revision_conflict` stays `revision_conflict`.
 
+Beside those the agent has the ordinary file and shell tools, confined to the task worktree. Scenes
+and `project.godot` are excluded from all three: the editor holds them open, so a `.tscn` written as
+text makes it stop and ask which copy to keep. The write and edit tools refuse them by path, and a
+shell command that names one is refused whatever it meant to do with it — a model told "no" by the
+first two otherwise reaches for `cat >` and `sed -i`, and the file it leaves is one Godot's own
+writer would never produce.
+
 ## Local project data
 
 Gofer's Rust backend owns durable project data. A small `catalog.sqlite` in the operating system

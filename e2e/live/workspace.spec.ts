@@ -12,6 +12,7 @@ import {
     clickSelector,
     clickTab,
     clickText,
+    conversationText,
     count,
     expectElement,
     expectEnabled,
@@ -144,6 +145,80 @@ async function sceneNodeCount() {
     return browser.execute(
         () => document.querySelectorAll('[aria-label="Explorer"] [role="treeitem"]').length
     )
+}
+
+interface StoppedFrame {
+    /** The words on the row, which is what a person clicks. */
+    label: string
+    /** The script part of them, which is what the editor has to open. */
+    path: string
+}
+
+/**
+ * The script the debugger's stack is stopped in, read from the panel rather than assumed.
+ *
+ * The row writes the file and the line as one text node — `scripts/player.gd:9` — so the node is
+ * asked for its own text rather than an ancestor's, which would carry the frame's name as well.
+ */
+async function stoppedFrameScript(): Promise<StoppedFrame> {
+    const label = await browser.execute(() => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            const text = (node.textContent ?? '').trim()
+            if (/^[\w./-]+\.gd:\d+$/u.test(text)) return text
+        }
+        return ''
+    })
+    if (label === '')
+        throw new Error(
+            `the debugger named no stopped frame; the window shows: ${await pageText()}`
+        )
+    return {label, path: label.slice(0, label.lastIndexOf(':'))}
+}
+
+/**
+ * Blocks until the conversation itself holds this, rather than the part of it on screen.
+ *
+ * An answer of any length scrolls its own beginning out of the window, and the window's text is
+ * only what can be seen — so what the model said has to be read from the transcript.
+ */
+async function expectInConversation(
+    wanted: readonly string[],
+    limitMs: number,
+    forbidden: readonly string[] = []
+) {
+    const deadline = Date.now() + limitMs
+    let shown = ''
+    for (;;) {
+        shown = await conversationText()
+        const said = forbidden.find(needle => shown.includes(needle))
+        if (said !== undefined)
+            throw new Error(
+                `the conversation answered ${JSON.stringify(said)}: ${shown.slice(-400)}`
+            )
+        if (wanted.every(needle => shown.includes(needle))) return
+        if (Date.now() >= deadline) break
+        await browser.pause(500)
+    }
+    throw new Error(
+        `the conversation never held ${JSON.stringify(wanted)}; it ends: ${shown.slice(-600)}`
+    )
+}
+
+/**
+ * Whether the explorer comes to show all of these, without failing if it does not.
+ *
+ * The scene tree is fetched when the tab is switched to, so reading it the moment the click returns
+ * reads the tree the panel had before. A check that answers "no" to that costs an agent turn.
+ */
+async function explorerShows(wanted: readonly string[], limitMs = 30_000) {
+    const deadline = Date.now() + limitMs
+    for (;;) {
+        const shown = await regionText('Explorer')
+        if (wanted.every(needle => shown.includes(needle))) return true
+        if (Date.now() >= deadline) return false
+        await browser.pause(500)
+    }
 }
 
 /** Blocks until the explorer column itself shows this, rather than anywhere in the window. */
@@ -658,20 +733,20 @@ describe('the live workspace', () => {
 
         it('searches the project settings', async () => {
             await clickTab('Project')
-            await fillInput('input[placeholder="Search project settings"]', 'main_scene')
+            await fillLabelledInput('Search project settings', 'main_scene')
             await expectText(['application/run/main_scene', 'res://scenes/main.tscn'], {
                 limitMs: 30_000
             })
         })
 
         it('marks the settings that need a restart', async () => {
-            await fillInput('input[placeholder="Search project settings"]', 'rendering_method')
+            await fillLabelledInput('Search project settings', 'rendering_method')
             await expectText(['rendering/renderer/rendering_method', 'Restart'], {limitMs: 30_000})
         })
 
         it('searches the editor’s own settings', async () => {
             await clickTab('Editor')
-            await fillInput('input[placeholder="Search editor settings"]', 'font_size')
+            await fillLabelledInput('Search editor settings', 'font_size')
             await expectText(['font_size'], {limitMs: 30_000})
         })
 
@@ -690,9 +765,9 @@ describe('the live workspace', () => {
         it('lists the worktree files and filters them', async () => {
             await clickTab('Files')
             await expectText(['main.gd', 'player.gd', 'main.tscn'], {limitMs: 30_000})
-            await fillInput('input[placeholder="Filter files"]', 'player')
+            await fillLabelledInput('Filter files', 'player')
             await expectText(['player.gd'], {absent: ['main.gd']})
-            await fillInput('input[placeholder="Filter files"]', '')
+            await fillLabelledInput('Filter files', '')
             await expectText(['main.gd', 'player.gd'])
         })
 
@@ -931,34 +1006,35 @@ describe('the live workspace', () => {
         })
 
         it('steps over a line', async () => {
-            await clickButton('Step over')
+            await clickControl('Step over')
             await expectText(['Stopped: step'], {limitMs: 60_000})
         })
 
         it('steps into a line', async () => {
-            await clickButton('Step in')
+            await clickControl('Step in')
             await expectText(['Stopped: '], {limitMs: 60_000})
         })
 
         it('steps out of the frame it stepped into', async () => {
-            await clickButton('Step out')
+            await clickControl('Step out')
             await expectText(['Stopped: '], {limitMs: 60_000})
         })
 
         it('opens the script the stopped frame names', async () => {
+            // Which script the stack is in is the debuggee's business — a step-over walks into
+            // whatever runs next, and in this fixture that is as often the player's `_process` as
+            // the timer's own handler. So the frame on screen is read first, and the editor is
+            // held to that file rather than to the one the sweep set the breakpoint in.
+            const named = await stoppedFrameScript()
             // Clicking a frame is how a person gets from the stack to the line, so it selects the
             // frame and reveals its source in the editor at once.
-            await clickSelector(
-                '//*[contains(normalize-space(.), "scripts/main.gd:")][not(.//*[contains('
-                    + 'normalize-space(.), "scripts/main.gd:")])]',
-                'the stopped frame'
-            )
-            await expectText(['scripts/main.gd', 'TICK_MESSAGE'], {limitMs: 30_000})
+            await clickText(named.label)
+            await expectText([named.path], {limitMs: 30_000})
             await clickTab('Debugger')
         })
 
         it('continues to the next breakpoint', async () => {
-            await clickButton('Continue')
+            await clickControl('Continue')
             await expectText(['Stopped: breakpoint'], {limitMs: 90_000})
         })
 
@@ -973,6 +1049,11 @@ describe('the live workspace', () => {
 
         it('clears the breakpoint from the gutter', async () => {
             await clickTab('Scripts')
+            // The frame the debugger stopped in decided which buffer is in front, and the
+            // breakpoint is in the other one — a step-over walks into whatever runs next, which in
+            // this fixture is as often the player's `_process`.
+            await clickTab('main.gd')
+            await expectText(['scripts/main.gd'], {limitMs: 30_000})
             await pressBreakpointGutter()
             await browser.waitUntil(async () => (await count('.gofer-breakpoint')) === 0, {
                 timeout: 15_000,
@@ -983,7 +1064,7 @@ describe('the live workspace', () => {
 
         it('resumes a game with nothing left to stop it', async () => {
             await clickTab('Debugger')
-            await clickButton('Continue')
+            await clickControl('Continue')
             await expectText(['Running'], {limitMs: 60_000})
         })
 
@@ -999,12 +1080,12 @@ describe('the live workspace', () => {
 
         it('pauses a running game', async () => {
             await clickTab('Debugger')
-            await clickButton('Pause')
+            await clickControl('Pause')
             await expectText(['Stopped: '], {limitMs: 60_000})
         })
 
         it('terminates the game', async () => {
-            await clickButton('Terminate')
+            await clickControl('Terminate')
             await expectText(['Not running', 'Run project'], {limitMs: 60_000})
         })
 
@@ -1036,7 +1117,7 @@ describe('the live workspace', () => {
         })
 
         it('captures a frame of the running game on demand', async () => {
-            await clickButton('Capture game')
+            await clickControl('Capture game')
             // A capture that fails replaces the picture with the reason it failed; one that
             // answers leaves a frame of the game's own size on screen.
             await expectText(['Game · 640×360'], {
@@ -1047,7 +1128,7 @@ describe('the live workspace', () => {
         })
 
         it('restarts the game', async () => {
-            await clickButton('Restart')
+            await clickControl('Restart')
             await expectText(['Game · 640×360'], {
                 absent: ['The game frame could not be read'],
                 limitMs: 120_000
@@ -1057,12 +1138,12 @@ describe('the live workspace', () => {
         })
 
         it('stops the game', async () => {
-            await clickButton('Stop')
+            await clickControl('Stop')
             await expectText(['No frame captured'], {limitMs: 60_000})
         })
 
         it('captures the editor viewport with no game running', async () => {
-            await clickButton('Capture editor')
+            await clickControl('Capture editor')
             await expectSelector('img[alt*="editor viewport"]', 60_000)
             await expectText(['Editor · '], {limitMs: 30_000})
             // Kept for the chat further down, which sends this very picture to the model.
@@ -1096,16 +1177,16 @@ describe('the live workspace', () => {
         })
 
         it('filters the output by text', async () => {
-            await fillInput('input[placeholder="Filter output"]', 'live tick')
+            await fillLabelledInput('Filter output', 'live tick')
             await expectText(['live tick'], {absent: ['Godot Engine v4.7.1'], limitMs: 30_000})
-            await fillInput('input[placeholder="Filter output"]', '')
+            await fillLabelledInput('Filter output', '')
         })
 
         it('searches the recorded output of every session', async () => {
             await clickControl('History')
             // The archive keeps the warnings and errors of every session, so the sweep searches it
             // for one it caused itself: the parse error the broken script produced further up.
-            await fillInput('input[placeholder="Search recorded output"]', 'Parse Error')
+            await fillLabelledInput('Search recorded output', 'Parse Error')
             await expectText(['Parse Error'], {limitMs: 60_000})
             await clickControl('Session')
         })
@@ -1184,7 +1265,7 @@ describe('the live workspace', () => {
             await sendChat('List every node in the main scene using your Godot tools.')
             // The tool the agent reached for is named in the answer's own activity; the node names
             // it reports are also in the explorer, so they would prove nothing on their own.
-            await expectText(['godot_scene'], {limitMs: 240_000})
+            await expectInConversation(['godot_scene'], 240_000)
         })
 
         it('stops an answer in flight and offers to retry it', async () => {
@@ -1246,7 +1327,7 @@ describe('the live workspace', () => {
             )
             // The word is the proof the bytes reached the model, which nothing on the Gofer side
             // of the request can fake.
-            await expectText(['SEEN'], {failures: ['BLIND'], limitMs: 300_000})
+            await expectInConversation(['SEEN'], 300_000, ['BLIND'])
         })
     })
 
@@ -1317,15 +1398,25 @@ describe('the live workspace', () => {
                     + 'Finish by opening the scene with godot_scene open to prove it loads.',
                 async () => {
                     if (!existsSync(join(bound, LEVEL_SCENE))) return false
+                    // A collision shape with no shape in it is scenery, not ground: the player
+                    // falls through it, and the level is a picture of a game rather than one. The
+                    // scene names its shapes the way Godot's own writer does or not at all.
+                    if (
+                        !/shape = (?:Sub|Ext)Resource\(/u.test(
+                            readFileSync(join(bound, LEVEL_SCENE), 'utf8')
+                        )
+                    )
+                        return false
                     // Whether the agent left the level open in the editor or not, opening it is
                     // what a person does next — and it is the only way the tree read below is the
                     // level's own.
                     await openLevelInEditor()
-                    const shown = await regionText('Explorer')
-                    return shown.includes('Level1') && shown.includes('Ground')
+                    return explorerShows(['Level1', 'Ground'])
                 },
                 `${LEVEL_SCENE_RESOURCE} must exist and hold a Node2D root named Level1 with a `
-                    + 'StaticBody2D named Ground under it.'
+                    + 'StaticBody2D named Ground under it, and the Ground’s CollisionShape2D needs '
+                    + 'a real shape resource — a shape property that is not one leaves the player '
+                    + 'falling through the ground.'
             )
         })
 
@@ -1350,7 +1441,7 @@ describe('the live workspace', () => {
                     )
                         return false
                     await openLevelInEditor()
-                    return (await regionText('Explorer')).includes('Player')
+                    return explorerShows(['Player'])
                 },
                 'the level needs a CharacterBody2D named Player carrying res://scripts/mario.gd, '
                     + 'and the project needs the move_left, move_right and jump input actions.'
@@ -1375,11 +1466,18 @@ describe('the live workspace', () => {
                     await openLevelInEditor()
                     await clickButton('Refresh')
                     // A level with ground, a player, blocks, pipes and a flag is not a four-node
-                    // scene.
-                    return (await sceneNodeCount()) >= 8
+                    // scene. The tree arrives with the fetch behind the tab, so the count is
+                    // watched rather than sampled.
+                    const deadline = Date.now() + 30_000
+                    for (;;) {
+                        if ((await sceneNodeCount()) >= 8) return true
+                        if (Date.now() >= deadline) return false
+                        await browser.pause(500)
+                    }
                 },
                 'the level still needs brick or question blocks, at least two pipes, and a goal '
-                    + 'flag, saved into the scene.'
+                    + 'flag, saved into the scene. Call godot_scene save as you go: the scene is '
+                    + 'reopened from disk to check it, so nodes you built but never saved are gone.'
             )
         })
 
@@ -1398,7 +1496,7 @@ describe('the live workspace', () => {
             // The inspector reads the setting from the running editor, not from the file.
             await openInspector()
             await clickTab('Project')
-            await fillInput('input[placeholder="Search project settings"]', 'main_scene')
+            await fillLabelledInput('Search project settings', 'main_scene')
             await expectText([LEVEL_SCENE_RESOURCE], {limitMs: 60_000})
             await closeInspector()
         })
@@ -1422,15 +1520,15 @@ describe('the live workspace', () => {
             // that actually runs is named by nothing here. The session's own log holds errors from
             // the broken script this sweep saved on purpose much earlier, so the search is narrowed
             // to the file the agent wrote.
-            await fillInput('input[placeholder="Filter output"]', 'mario.gd')
+            await fillLabelledInput('Filter output', 'mario.gd')
             await expectText(['No output'], {limitMs: 60_000})
-            await fillInput('input[placeholder="Filter output"]', '')
+            await fillLabelledInput('Filter output', '')
             await clickControl('All')
         })
 
         it('stops the level again', async () => {
             await clickTab('Game')
-            await clickButton('Stop')
+            await clickControl('Stop')
             await expectText(['No frame captured'], {limitMs: 60_000})
         })
     })
@@ -1483,7 +1581,14 @@ describe('the live workspace', () => {
             try {
                 await clickButton('Start session')
                 await expectText(
-                    ['contains no project.godot', 'Start Gofer from your project directory', bound],
+                    // A task worktree is a linked checkout, so the refusal names the fix that
+                    // belongs to one: pointing Gofer somewhere else would not help, because the
+                    // directory is Gofer's own and it came off a commit without the project in it.
+                    [
+                        'contains no project.godot',
+                        'Commit your project files in your project folder',
+                        bound
+                    ],
                     // The refusal is the outcome under test, so it must not end the wait early.
                     {allow: REFUSAL, limitMs: 60_000}
                 )

@@ -336,7 +336,7 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     assert_eq!(evaluation.result, "3");
 
     // Step-out is emulated: bounded step-overs until the stack shrinks back into _process.
-    let outcome = client.step_out(MAIN_THREAD_ID).expect("step out");
+    let outcome = client.step_out(&events, MAIN_THREAD_ID).expect("step out");
     let StepOutcome::SteppedOut { .. } = outcome else {
         panic!("the probe must step out into _process, got {outcome:?}")
     };
@@ -347,8 +347,8 @@ fn the_editor_runs_breaks_steps_and_terminates() {
 
     // With the breakpoint cleared, the game runs free until it is paused. Mid-session
     // breakpoint changes do take effect on the debuggee even though Godot does not broadcast
-    // `breakpoint` events for them. The outer receiver still holds the step stops the emulation
-    // broadcast, so it is drained first: with no breakpoints left, no new stop can arrive
+    // `breakpoint` events for them. The stream is drained before the pause anyway: the step-out
+    // above consumed its own stops from it, and with no breakpoints left no new one can arrive
     // between the drain and the pause.
     let cleared = client
         .set_breakpoints(&script, &[])

@@ -44,6 +44,17 @@ const EDITOR_OWNED = [
 /** Tools that put text on disk. Reading an editor-owned file is always fine. */
 const WRITING_TOOLS = ['write', 'edit']
 
+/**
+ * An editor-owned file as a shell command spells it.
+ *
+ * A shell does not have to say what it is doing to a path, and no amount of parsing would tell a
+ * `cat file` from a `cat > file`: a live agent, refused by the write tool, rebuilt a whole scene
+ * with `cat > scenes/level_1.tscn << EOF` and patched it further with `sed -i`, leaving a file
+ * Godot's own writer would never produce. So a command that names one of these is refused whatever
+ * it meant to do with it — reading one is what the read tool is for.
+ */
+const EDITOR_OWNED_IN_SHELL = /\.(?:tscn|scn)(?![\w-])|(?:^|[\s"'/=])project\.godot(?![\w-])/u
+
 function refuseEditorOwnedWrite(toolName, path) {
     if (!WRITING_TOOLS.includes(toolName)) return
     const owned = EDITOR_OWNED.find(entry => entry.matches(path))
@@ -88,6 +99,12 @@ function validateBashCommand(command) {
         throw new Error('Shell command paths must stay inside the workspace')
     if (/(?:^|[;&|]\s*)cd(?:\s|$)/u.test(command))
         throw new Error('Shell commands cannot change the workspace directory')
+    if (EDITOR_OWNED_IN_SHELL.test(command))
+        throw new Error(
+            'Shell commands cannot name a scene or project.godot. Read one with the read tool, '
+                + 'and change it with godot_scene, godot_node and godot_project, which write it '
+                + 'through the editor that has it open.'
+        )
 }
 
 export function confineTool(tool, workspacePath) {

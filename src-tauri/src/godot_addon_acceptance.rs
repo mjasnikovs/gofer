@@ -370,10 +370,19 @@ fn a_ready_session_owns_the_edited_scene() {
         "node.create",
         json!({"scene": scene, "parent": "/owned", "name": "Marker", "type": "Marker2D"}),
     );
+    let tree = session.call("scene.get_tree", json!({}));
     assert_eq!(
-        child_names(&session.call("scene.get_tree", json!({}))),
+        child_names(&tree),
         vec!["Marker".to_owned()],
         "the created node must appear in the scene the session opened"
+    );
+    // The tree is the one command documented as the source of `expectedRevision`, and it is not a
+    // mutating command — so the revision has to be in its own result or an agent that reads the
+    // tree before every mutation has no number to send back.
+    assert_eq!(
+        tree["revision"].as_u64(),
+        Some(session.revision),
+        "scene.get_tree must report the revision its mutations reached: {tree}"
     );
 }
 

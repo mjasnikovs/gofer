@@ -1573,11 +1573,16 @@ func _sweep_scene_pending() -> void:
             kept.append(pending)
     _scene_pending = kept
 
+## The edited hierarchy and the revision it is at.
+##
+## The revision travels in the envelope for a mutating command, and `scene.get_tree` is not one —
+## so without it here the one command documented as the source of `expectedRevision` answered
+## without it, and an agent that read the tree before every mutation had no number to send.
 func _scene_tree() -> Dictionary:
     var root := _edited_root()
     if root == null:
-        return {"root": null}
-    return {"root": _node_summary(root)}
+        return {"root": null, "revision": _scene_revision}
+    return {"root": _node_summary(root), "revision": _scene_revision}
 
 func _node_create(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
@@ -1816,7 +1821,18 @@ func _node_set_property(params: Dictionary) -> Dictionary:
                 "details": {"property": property}
             }
         }
-    var new_value: Variant = decoded["value"]
+    var fitted := _fit_to_property(node, property, decoded["value"])
+    if not fitted["ok"]:
+        return {
+            "_gofer_error": {
+                "code": "type_mismatch",
+                "message": "%s.%s: %s" % [node_path_str, property, fitted["message"]],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"property": property}
+            }
+        }
+    var new_value: Variant = fitted["value"]
 
     var old_value: Variant = node.get(property)
     var undo := _begin_action("Set %s.%s" % [node.name, property])
@@ -2116,6 +2132,39 @@ func _decode_value(value: Variant) -> Dictionary:
                 return _decode_failed("Resource %s could not be loaded" % path)
             return _decoded(resource)
     return _decode_failed("Value type '%s' is not supported" % kind)
+
+## Fits a decoded value onto the type the node declares the property with.
+##
+## `Object.set` takes what it is given for a property whose type the engine does not enforce: a
+## `res://…` path written as a string landed in a CollisionShape2D's `shape` and was saved into the
+## scene, which then opened with a String where a Shape2D belongs. What the node says the property
+## is, is therefore checked before the value reaches it, so a mistyped write is an error naming the
+## type it wanted rather than a level that will not run.
+func _fit_to_property(node: Node, property: String, value: Variant) -> Dictionary:
+    var declared: Dictionary = {}
+    for info in node.get_property_list():
+        if str(info.get("name", "")) == property:
+            declared = info
+            break
+    # A property reachable through `in` but absent from the list is the script's own business.
+    if declared.is_empty():
+        return _decoded(value)
+    var wanted := int(declared.get("type", TYPE_NIL))
+    # Clearing a resource or a node reference is what null is for, and every object takes it.
+    if value == null and wanted == TYPE_OBJECT:
+        return _decoded(null)
+    var fitted := _fit_to_declared_type(value, wanted)
+    if not fitted["ok"]:
+        return fitted
+    var wanted_class := str(declared.get("class_name", ""))
+    # Only an engine class is checked: a property typed with a script's `class_name` reports that
+    # name here, and the resource carrying that script is an ordinary Resource to `is_class`.
+    if wanted != TYPE_OBJECT or wanted_class.is_empty() or not ClassDB.class_exists(wanted_class):
+        return fitted
+    var object: Object = fitted["value"]
+    if object != null and not object.is_class(wanted_class):
+        return _decode_failed("expected %s, received %s" % [wanted_class, object.get_class()])
+    return fitted
 
 ## Fits a decoded value onto the type a setting was declared with, in the `_decode_value` shape.
 ##

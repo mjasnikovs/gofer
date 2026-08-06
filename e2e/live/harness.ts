@@ -215,6 +215,19 @@ export async function pageText(): Promise<string> {
     )
 }
 
+/**
+ * Everything the conversation holds, including what its viewport has scrolled past.
+ *
+ * WebKit's `innerText` is what the eye can see: a message list that has scrolled leaves its earlier
+ * answers out of it entirely, so an assertion about what the model said cannot be made against the
+ * window's text. The list is a `role="log"` region, and its `textContent` is the whole transcript.
+ */
+export async function conversationText(): Promise<string> {
+    return browser.execute(() =>
+        (document.querySelector('[role="log"]')?.textContent ?? '').replace(/\s+/gu, ' ')
+    )
+}
+
 /** Everything the renderer logged as an error, in order. */
 export async function pageErrors(): Promise<readonly string[]> {
     return browser
@@ -593,21 +606,23 @@ export async function clickButton(label: string, limitMs = 15_000) {
 }
 
 /**
- * Clicks whatever interactive thing carries this label — a button, a tab, a segment, a menu item,
- * or an icon that only has an accessible name. The user does not distinguish them, and neither do
- * the coverage requirements.
+ * Whatever interactive thing carries this label — a button, a tab, a segment, a menu item, or an
+ * icon that only has an accessible name. The user does not distinguish them, and neither do the
+ * coverage requirements.
  */
-export async function clickControl(label: string, limitMs = 15_000) {
+export function controlSelector(label: string) {
     const quoted = JSON.stringify(label)
     const doubled = JSON.stringify(label + label)
-    await clickSelector(
+    return (
         '//*[self::button or self::a or @role="tab" or @role="radio" or @role="menuitem" '
-            + 'or @role="option" or @role="switch"]'
-            + `[normalize-space(.)=${quoted} or normalize-space(.)=${doubled} `
-            + `or @aria-label=${quoted} or @title=${quoted}]`,
-        `control “${label}”`,
-        limitMs
+        + 'or @role="option" or @role="switch"]'
+        + `[normalize-space(.)=${quoted} or normalize-space(.)=${doubled} `
+        + `or @aria-label=${quoted} or @title=${quoted}]`
     )
+}
+
+export async function clickControl(label: string, limitMs = 15_000) {
+    await clickSelector(controlSelector(label), `control “${label}”`, limitMs)
 }
 
 /**
@@ -709,17 +724,48 @@ async function labelledInputId(label: string): Promise<string> {
     }, label)
 }
 
-/** Types into the field a person would find by this label. */
+/**
+ * The id of the field with this label, waited for rather than asked once.
+ *
+ * A panel that has just been switched to renders its filter box after the fetch behind it answers,
+ * so asking the moment the tab click returns is asking too early.
+ */
+async function labelledInputIdWhenReady(label: string, limitMs = 15_000): Promise<string> {
+    const deadline = Date.now() + limitMs
+    for (;;) {
+        const id = await labelledInputId(label)
+        if (id !== '') return id
+        if (Date.now() >= deadline) return ''
+        await browser.pause(200)
+    }
+}
+
+/**
+ * Types into the field a person would find by this label.
+ *
+ * The id is re-resolved on every attempt: `labelledInputId` puts a generated id on a field that has
+ * none, and a remount takes that id away with the element, so a single lookup would leave the typing
+ * addressed to something the document no longer holds.
+ */
 export async function fillLabelledInput(label: string, value: string) {
-    const id = await labelledInputId(label)
-    if (id === '')
-        throw new Error(`no field is labelled “${label}”; the window shows: ${await pageText()}`)
-    await fillInput(`#${id}`, value)
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const id = await labelledInputIdWhenReady(label)
+        if (id === '') break
+        try {
+            await fillInput(`#${id}`, value)
+            return
+        } catch {
+            // The field was remounted under the id this attempt gave it; the next one re-finds it.
+        }
+    }
+    throw new Error(
+        `the field labelled “${label}” would not take ${JSON.stringify(value)}; the window shows: ${await pageText()}`
+    )
 }
 
 /** What the field with this label currently holds. */
 export async function labelledInputValue(label: string): Promise<string> {
-    const id = await labelledInputId(label)
+    const id = await labelledInputIdWhenReady(label)
     if (id === '') throw new Error(`no field is labelled “${label}”`)
     return browser.execute(
         (fieldId: string) =>
@@ -735,7 +781,7 @@ export async function labelledInputValue(label: string): Promise<string> {
  * `disabled`, the ARIA attribute a still-focusable control uses instead, and read-only.
  */
 export async function labelledInputIsDisabled(label: string): Promise<boolean> {
-    const id = await labelledInputId(label)
+    const id = await labelledInputIdWhenReady(label)
     if (id === '') throw new Error(`no field is labelled “${label}”`)
     return browser.execute((fieldId: string) => {
         const field = document.querySelector<HTMLInputElement>(`#${fieldId}`)
@@ -1031,7 +1077,9 @@ export async function placeCaretAtLineStart(line: number) {
 
 /** Blocks until a control is enabled again, which is how a busy panel says it has finished. */
 export async function expectEnabled(label: string, limitMs = 60_000) {
-    const selector = buttonSelector(label)
+    // A toolbar too narrow for seven labels draws its actions as icons, so the control carrying
+    // this label is as often named by `aria-label` as by the words inside it.
+    const selector = controlSelector(label)
     const deadline = Date.now() + limitMs
     while (Date.now() < deadline) {
         const [button] = await browser.$$(selector).getElements()

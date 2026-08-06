@@ -211,6 +211,8 @@ pub struct DapEvent {
     pub seq: u64,
     pub event: String,
     pub body: Value,
+    /// Which debuggee this belongs to. See [`DapClient::begin_run`].
+    pub run: u64,
 }
 
 /// The parsed body of a `stopped` event.
@@ -267,6 +269,8 @@ pub struct PendingLaunch {
 pub struct DapClient {
     shared: Arc<Mutex<Shared>>,
     next_seq: Arc<AtomicU64>,
+    /// Which debuggee the adapter is on. See [`DapClient::begin_run`].
+    run: Arc<AtomicU64>,
     reader: Mutex<Option<JoinHandle<()>>>,
     capabilities: DapCapabilities,
     launch_arguments: Mutex<Option<Value>>,
@@ -306,15 +310,18 @@ impl DapClient {
             closed: false,
         }));
         let next_seq = Arc::new(AtomicU64::new(1));
+        let run = Arc::new(AtomicU64::new(1));
         let reader = thread::spawn({
             let shared = Arc::clone(&shared);
             let next_seq = Arc::clone(&next_seq);
-            move || read_loop(BufReader::new(reader_stream), shared, next_seq)
+            let run = Arc::clone(&run);
+            move || read_loop(BufReader::new(reader_stream), shared, next_seq, run)
         });
 
         Ok(Self {
             shared,
             next_seq,
+            run,
             reader: Mutex::new(Some(reader)),
             capabilities: DapCapabilities::default(),
             launch_arguments: Mutex::new(None),
@@ -356,6 +363,18 @@ impl DapClient {
         &self.capabilities
     }
 
+    /// Starts a new debuggee, and stops the old one's events from being read as this one's.
+    ///
+    /// One adapter session launches many games, and the events of the one that ended stay in every
+    /// subscriber's queue until something reads them — a `terminated` and an `exited` per stop, at
+    /// least. The next launch's wait would take the first of those and report the game it had just
+    /// started as already over: the panel then said "Not running" over a game that was printing to
+    /// its own output. Each event is stamped with the debuggee that was current when it arrived,
+    /// and [`Self::await_stop`] ignores the ones from a debuggee that is gone.
+    pub fn begin_run(&self) {
+        self.run.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Subscribes to every event the adapter pushes: stopped, continued, terminated, exited,
     /// output, process, breakpoint, and Godot's `godot/custom_data`.
     pub fn subscribe_events(&self) -> Receiver<DapEvent> {
@@ -383,6 +402,9 @@ impl DapClient {
         project: &Path,
         play_args: &[String],
     ) -> Result<PendingLaunch, DapError> {
+        // A new game, so whatever the last one left in the event queues is no longer an answer
+        // about this one.
+        self.begin_run();
         let arguments = json!({
             "project": project.to_string_lossy(),
             "scene": "main",
@@ -407,6 +429,7 @@ impl DapClient {
     /// Attaches to the game the editor is already running. Godot answers `not_running` when no
     /// debug session is active.
     pub fn attach(&self) -> Result<(), DapError> {
+        self.begin_run();
         *self
             .launch_arguments
             .lock()
@@ -588,15 +611,24 @@ impl DapClient {
     /// next call arrives at the same depth. Leaving that frame *is* resuming, which is what every
     /// debugger does for a step-out at the top of the stack, so that is what happens here rather
     /// than 256 pointless steps ending in a failure the user cannot act on.
-    pub fn step_out(&self, thread_id: i64) -> Result<StepOutcome, DapError> {
+    ///
+    /// The caller's own event stream is stepped through rather than a receiver subscribed here.
+    /// Every subscriber is sent a copy of every event, so a private one would leave the `stopped`
+    /// events this consumes sitting unread in the caller's queue — and the next wait for a stop
+    /// would answer instantly with a step that had already happened, reporting a running game as
+    /// stopped in a frame it had long left.
+    pub fn step_out(
+        &self,
+        events: &Receiver<DapEvent>,
+        thread_id: i64,
+    ) -> Result<StepOutcome, DapError> {
         let initial_depth = self.stack_depth(thread_id)?;
-        let events = self.subscribe_events();
         if initial_depth <= 1 {
             self.continue_execution(thread_id)?;
             // A game with a breakpoint left in it stops again almost at once and the step-out ends
             // where a person would expect; one with nothing left to stop it simply runs, and that
             // is the honest answer rather than a failure.
-            return match self.await_stop(&events, thread_id, STEP_OUT_RESUME_TIMEOUT) {
+            return match self.await_stop(events, thread_id, STEP_OUT_RESUME_TIMEOUT) {
                 Ok(Some(stop)) => Ok(StepOutcome::SteppedOut { stop }),
                 Ok(None) => Ok(StepOutcome::Terminated),
                 Err(error) if error.code == "stop_timeout" => Ok(StepOutcome::Resumed),
@@ -605,7 +637,7 @@ impl DapClient {
         }
         for _ in 0..MAX_STEP_OUT_STEPS {
             self.next(thread_id)?;
-            let Some(stop) = self.await_stop(&events, thread_id, DEFAULT_REQUEST_TIMEOUT)? else {
+            let Some(stop) = self.await_stop(events, thread_id, DEFAULT_REQUEST_TIMEOUT)? else {
                 return Ok(StepOutcome::Terminated);
             };
             if stop.reason != "step" {
@@ -625,6 +657,7 @@ impl DapClient {
     /// Relaunches the game with the arguments of the last launch or attach, nested the way
     /// Godot's restart handler expects (`arguments.arguments`).
     pub fn restart(&self) -> Result<(), DapError> {
+        self.begin_run();
         let arguments = self
             .launch_arguments
             .lock()
@@ -655,13 +688,15 @@ impl DapClient {
     /// Waits for the next `stopped` event on `thread_id` (a missing thread id matches, since
     /// Godot only has one thread). Returns `None` when the debuggee terminates or exits first.
     /// Output, process, and breakpoint events are skipped; a subscriber that wants them holds its
-    /// own receiver.
+    /// own receiver, and so is anything the debuggee before this one left behind — see
+    /// [`Self::begin_run`].
     pub fn await_stop(
         &self,
         events: &Receiver<DapEvent>,
         thread_id: i64,
         timeout: Duration,
     ) -> Result<Option<StoppedDetails>, DapError> {
+        let run = self.run.load(Ordering::Relaxed);
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -682,6 +717,11 @@ impl DapClient {
                 )
                 .retryable(),
             })?;
+            // The debuggee that produced this one is gone, and so is anything it has to say about
+            // whether it stopped.
+            if event.run < run {
+                continue;
+            }
             match event.event.as_str() {
                 "stopped" => {
                     let Some(stop) = StoppedDetails::from_event_body(&event.body) else {
@@ -871,12 +911,17 @@ fn server_error(response: &Value) -> DapError {
     }))
 }
 
-fn read_loop(reader: BufReader<TcpStream>, shared: Arc<Mutex<Shared>>, next_seq: Arc<AtomicU64>) {
+fn read_loop(
+    reader: BufReader<TcpStream>,
+    shared: Arc<Mutex<Shared>>,
+    next_seq: Arc<AtomicU64>,
+    run: Arc<AtomicU64>,
+) {
     let mut reader = reader;
     let mut failure = None;
     loop {
         match read_message(&mut reader) {
-            Ok(Some(message)) => dispatch(&shared, &next_seq, message),
+            Ok(Some(message)) => dispatch(&shared, &next_seq, &run, message),
             Ok(None) => break,
             Err(error) => {
                 failure = Some(error);
@@ -897,7 +942,7 @@ fn read_loop(reader: BufReader<TcpStream>, shared: Arc<Mutex<Shared>>, next_seq:
     }
 }
 
-fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, message: Value) {
+fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, message: Value) {
     match message.get("type").and_then(Value::as_str) {
         Some("response") => {
             let Some(seq) = message.get("request_seq").and_then(Value::as_u64) else {
@@ -920,6 +965,7 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, message: Value) {
                 seq: message.get("seq").and_then(Value::as_u64).unwrap_or(0),
                 event: name.to_owned(),
                 body: message.get("body").cloned().unwrap_or(Value::Null),
+                run: run.load(Ordering::Relaxed),
             };
             if let Ok(mut shared) = shared.lock() {
                 shared
@@ -1635,6 +1681,52 @@ mod tests {
         server.join.join().expect("server thread");
     }
 
+    /// The game that ended does not get to answer for the one that started.
+    ///
+    /// A `terminated` nobody read stays in the queue, and the next launch's wait would take it and
+    /// report a game that is running as already over — which is what the workspace showed: "Not
+    /// running" over a game printing its own output.
+    #[test]
+    fn a_new_run_ignores_the_events_the_last_one_left_behind() {
+        let server = start_fake_server(|message, writer| {
+            match message["command"].as_str().unwrap_or_default() {
+                "initialize" => handshake_handler(message, writer),
+                "terminate" => {
+                    for event in [
+                        json!({"seq": 901, "type": "event", "event": "terminated"}),
+                        json!({"seq": 902, "type": "event", "event": "exited",
+                           "body": {"exitCode": 0}}),
+                    ] {
+                        write_message(writer, &event).expect("push the end of the old game");
+                    }
+                    FakeAction::Result(json!({}))
+                }
+                "continue" => {
+                    let event = json!({"seq": 903, "type": "event", "event": "stopped",
+                       "body": {"reason": "breakpoint", "threadId": 1}});
+                    write_message(writer, &event).expect("push stopped");
+                    FakeAction::Result(json!({}))
+                }
+                _ => FakeAction::Ignore,
+            }
+        });
+        let client = connected_client(&server);
+        let events = client.subscribe_events();
+
+        client.terminate().expect("terminate");
+        // Nothing reads those two events: the panel that asked for the terminate is not waiting
+        // for a stop, which is exactly how they come to be sitting there.
+        client.begin_run();
+        client.continue_execution(MAIN_THREAD_ID).expect("continue");
+        let stop = client
+            .await_stop(&events, MAIN_THREAD_ID, Duration::from_secs(2))
+            .expect("await stop")
+            .expect("the new game's stop, not the old game's end");
+        assert_eq!(stop.reason, "breakpoint");
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
     /// A fake debuggee whose stack depth follows a scripted step counter: every `next` pushes a
     /// `stopped` step event, and `stackTrace` answers with as many frames as the depth says.
     fn stepping_server<F>(initial_depth: i64, mut depth_after_step: F) -> FakeServer
@@ -1676,11 +1768,19 @@ mod tests {
         let server = stepping_server(2, |steps, _depth| if steps >= 3 { 1 } else { 2 });
         let client = connected_client(&server);
 
-        let outcome = client.step_out(MAIN_THREAD_ID).expect("step out");
+        let events = client.subscribe_events();
+        let outcome = client.step_out(&events, MAIN_THREAD_ID).expect("step out");
         let StepOutcome::SteppedOut { stop } = outcome else {
             panic!("expected a clean escape, got {outcome:?}");
         };
         assert_eq!(stop.reason, "step");
+        // The step-out steps through the caller's own stream, so it leaves nothing behind: a stop
+        // still queued here would be handed to the next wait as if the game had just stopped
+        // again, and the panel would report a running game as stopped.
+        assert!(
+            events.try_recv().is_err(),
+            "the step-out left its own stops in the stream it stepped through"
+        );
         client.shutdown();
         server.join.join().expect("server thread");
     }
@@ -1705,7 +1805,8 @@ mod tests {
         });
         let client = connected_client(&server);
 
-        let outcome = client.step_out(MAIN_THREAD_ID).expect("step out");
+        let events = client.subscribe_events();
+        let outcome = client.step_out(&events, MAIN_THREAD_ID).expect("step out");
         let StepOutcome::Interrupted { stop } = outcome else {
             panic!("expected an interruption, got {outcome:?}");
         };
@@ -1733,7 +1834,8 @@ mod tests {
         });
         let client = connected_client(&server);
 
-        let outcome = client.step_out(MAIN_THREAD_ID).expect("step out");
+        let events = client.subscribe_events();
+        let outcome = client.step_out(&events, MAIN_THREAD_ID).expect("step out");
         assert_eq!(outcome, StepOutcome::Terminated);
         client.shutdown();
         server.join.join().expect("server thread");
@@ -1745,7 +1847,10 @@ mod tests {
         let server = stepping_server(2, |_steps, _depth| 2);
         let client = connected_client(&server);
 
-        let error = client.step_out(MAIN_THREAD_ID).expect_err("safety limit");
+        let events = client.subscribe_events();
+        let error = client
+            .step_out(&events, MAIN_THREAD_ID)
+            .expect_err("safety limit");
         assert_eq!(error.code, "step_out_limit");
         assert_eq!(error.details["limit"], json!(MAX_STEP_OUT_STEPS));
         client.shutdown();

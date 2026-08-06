@@ -110,3 +110,25 @@ test('allows workspace shell commands and rejects every explicit escape form', a
     ])
         await assert.rejects(tool.execute('2', {command}), /Shell|workspace/iu)
 })
+
+test('refuses a shell command that names what the editor owns', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+
+    // Every one of these is a way a refused write came back as a shell command instead.
+    for (const command of [
+        'cat > scenes/level_1.tscn << EOF',
+        "sed -i '15a shape = x' scenes/level_1.tscn",
+        'cp scenes/a.scn scenes/b.scn',
+        'echo run/main_scene >> project.godot',
+        'cat scenes/level_1.tscn'
+    ])
+        await assert.rejects(tool.execute('1', {command}), /godot_scene|godot_project/u)
+
+    // The rest of the project is the agent's to work with from a shell.
+    assert.deepEqual(await tool.execute('2', {command: 'cat scripts/player.gd'}), {
+        command: 'cat scripts/player.gd'
+    })
+    assert.deepEqual(await tool.execute('3', {command: 'ls scenes'}), {command: 'ls scenes'})
+})

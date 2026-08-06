@@ -195,7 +195,13 @@ pub const CATALOG: &[ToolDomain] = &[
                 "set_property",
                 "Sets a property: {node, property, value, expectedRevision}. `value` is tagged \
                  with its type, as {type, value}: {\"type\": \"vector2\", \"value\": [12, 34]}, \
-                 {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}.",
+                 {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}. \
+                 A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's \
+                 `texture` — takes {\"type\": \"resource\", \"value\": {\"path\": \"res://…\"}}, \
+                 never a string: a path written as a string is refused. The other tags are null, \
+                 bool, int, color and rect2 (four numbers each), vector2i/3/3i/4/4i, quaternion, \
+                 plane, transform2d, basis, transform3d, array (of tagged values) and dictionary \
+                 (of {key, value} pairs of them).",
             ),
         ],
     },
@@ -576,15 +582,49 @@ fn reject_outside_paths<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Resul
     Ok(())
 }
 
+/// Keeps this domain to the files it is for.
+///
+/// `save` writes whatever path it is given, and the language server behind it only knows GDScript.
+/// A live agent used it to write a `.tscn` by hand rather than build the scene with the node tools:
+/// the text landed under an editor that had its own copy of that scene open, outside the undo stack
+/// and outside the revision guard, in a layout Godot's own writer would never produce. A scene is
+/// the editor's to write, so anything that is not a script is refused with the tool that owns it.
+fn require_script_path(params: &Value) -> Result<(), ToolFailure> {
+    let path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if path.is_empty() || path.ends_with(".gd") {
+        return Ok(());
+    }
+    Err(ToolFailure::new(
+        "unsupported_file",
+        format!(
+            "godot_script works on GDScript, and {path} is not a .gd file. Build and save a scene \
+             with godot_scene and godot_node — a scene written as text is not the scene the editor \
+             has open."
+        ),
+    ))
+}
+
 fn script_domain<R: Runtime>(
     app: &AppHandle<R>,
     op: &str,
     params: Value,
 ) -> Result<Value, ToolFailure> {
     match op {
-        "open" => Ok(to_value(script::open_document(from_params(params)?)?)),
-        "update" => Ok(to_value(script::update_document(from_params(params)?)?)),
-        "save" => Ok(to_value(script::save_document(from_params(params)?)?)),
+        "open" => {
+            require_script_path(&params)?;
+            Ok(to_value(script::open_document(from_params(params)?)?))
+        }
+        "update" => {
+            require_script_path(&params)?;
+            Ok(to_value(script::update_document(from_params(params)?)?))
+        }
+        "save" => {
+            require_script_path(&params)?;
+            Ok(to_value(script::save_document(from_params(params)?)?))
+        }
         "close" => {
             script::close_document(from_params(params)?)?;
             Ok(json!({"closed": true}))
@@ -730,6 +770,27 @@ mod tests {
         tauri::test::mock_builder()
             .build(crate::app_context())
             .expect("build mock Tauri app")
+    }
+
+    /// A scene is not something this domain writes.
+    #[test]
+    fn the_script_domain_refuses_a_file_that_is_not_a_script() {
+        let app = unattended_app();
+        let failure = dispatch(
+            app.handle(),
+            call(
+                "godot_script",
+                "save",
+                json!({"path": "scenes/level_1.tscn", "text": "[gd_scene]"}),
+            ),
+        )
+        .expect_err("a scene written as text must be refused");
+        assert_eq!(failure.code, "unsupported_file");
+        assert!(
+            failure.message.contains("godot_scene"),
+            "the refusal must name the tool that owns a scene: {}",
+            failure.message
+        );
     }
 
     /// Every operation the catalog offers for the editor's own domains has to exist in the addon.

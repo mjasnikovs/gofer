@@ -46,6 +46,8 @@ export function GameView({call, state}: GameViewProps) {
     const [error, setError] = useState<GodotError>()
     const [isBusy, setIsBusy] = useState(false)
     const isOffline = state === 'offline' || state === 'error'
+    // A game stopped on a breakpoint is still a game the editor is running.
+    const isPlaying = state === 'playing' || state === 'debugPaused'
 
     const run = useCallback(
         (command: string, source: 'game' | 'editor' = 'game') => {
@@ -96,7 +98,11 @@ export function GameView({call, state}: GameViewProps) {
                         <Button
                             label='Run'
                             size='sm'
-                            isDisabled={isOffline || isBusy}
+                            // A second run of a game that is already running can only answer
+                            // `already_running`, which is an error the user provoked by pressing a
+                            // control the panel was offering. Restart beside it is the action they
+                            // wanted.
+                            isDisabled={isOffline || isBusy || isPlaying}
                             clickAction={() => {
                                 run('runtime.run')
                             }}

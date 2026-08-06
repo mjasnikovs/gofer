@@ -292,9 +292,14 @@ pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
             client.step_in(thread_id.unwrap_or(MAIN_THREAD_ID))?;
             Ok(DebugResponse::Acknowledged)
         }
-        DebugRequest::StepOut { thread_id } => Ok(DebugResponse::Stepped {
-            outcome: client.step_out(thread_id.unwrap_or(MAIN_THREAD_ID))?,
-        }),
+        DebugRequest::StepOut { thread_id } => {
+            // The one stream, held for the whole emulated step-out: the stops it consumes are the
+            // stops a later `AwaitStop` must no longer see.
+            let events = events.lock().map_err(|_| poisoned())?;
+            Ok(DebugResponse::Stepped {
+                outcome: client.step_out(&events, thread_id.unwrap_or(MAIN_THREAD_ID))?,
+            })
+        }
         DebugRequest::AwaitStop {
             thread_id,
             timeout_ms,
