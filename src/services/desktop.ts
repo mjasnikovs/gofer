@@ -133,6 +133,7 @@ type DesktopCommandMap = Readonly<{
     create_chat_task: CommandSpec<undefined, StoredChat>
     'plugin:dialog|open': CommandSpec<{options: OpenDialogOptions}, string | null>
     create_project_backup: CommandSpec<undefined, BackupResult>
+    delete_chat_task: CommandSpec<{taskId: string}, StoredChat>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>

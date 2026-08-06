@@ -355,6 +355,24 @@ pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> 
     result
 }
 
+/// Stops the session when it is the one editing `worktree`.
+///
+/// A worktree about to be removed must not be pulled out from under a running editor: the editor
+/// would keep writing into a directory that is gone, and the addon Gofer staged in it would never be
+/// unstaged. Any other session — or none — is left alone.
+pub fn release_worktree<R: Runtime>(app: &AppHandle<R>, worktree: &Path) {
+    let Some(running) = godot_session::current_info() else {
+        return;
+    };
+    // The running session reports the path it resolved, so the comparison is made against the
+    // canonical form of the one the task table holds.
+    let resolved = crate::paths::canonical(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    if Path::new(&running.worktree) != resolved {
+        return;
+    }
+    let _ = stop_session(app);
+}
+
 /// Returns the active session summary, if any.
 pub fn get_session() -> Result<Option<GodotSessionResponse>, SessionError> {
     Ok(godot_session::current_info().map(|info| to_response(&info)))

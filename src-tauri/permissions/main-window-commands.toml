@@ -13,6 +13,7 @@ commands.allow = [
     "close_script_document",
     "create_chat_task",
     "create_project_backup",
+    "delete_chat_task",
     "delete_rag_cache",
     "delete_workspace_path",
     "edit_workspace_file",

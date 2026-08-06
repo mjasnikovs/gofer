@@ -686,6 +686,16 @@ fn activate_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, Str
 }
 
 #[tauri::command(async)]
+fn delete_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, String> {
+    let storage = project_storage(&app)?;
+    // Deleting the task the editor is editing stops that editor first, so its worktree can be
+    // removed and the staged addon comes out with it.
+    storage.delete_task(&task_id, |worktree| {
+        godot_session_api::release_worktree(&app, worktree);
+    })
+}
+
+#[tauri::command(async)]
 fn import_legacy_chat(app: AppHandle, chat: StoredChat) -> Result<StoredChat, String> {
     let storage = project_storage(&app)?;
     let legacy_directory = chat_attachments_path(&app)?;
@@ -2272,6 +2282,7 @@ pub fn run() {
         close_script_document,
         create_chat_task,
         create_project_backup,
+        delete_chat_task,
         delete_rag_cache,
         delete_workspace_path,
         edit_workspace_file,

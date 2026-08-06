@@ -6,6 +6,7 @@ import {InitializationSplash} from '../components/application/InitializationSpla
 import {Navigation} from '../components/application/Navigation'
 import {SettingsPage} from '../components/settings/SettingsPage'
 import {Workspace} from '../components/workspace/Workspace'
+import type {TaskSummary} from '../models/app'
 import type {StoredChat} from '../models/chat'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
@@ -607,6 +608,25 @@ describe('Workspace', () => {
 })
 
 describe('Navigation', () => {
+    const tasks: readonly TaskSummary[] = [
+        {
+            id: 'task-1',
+            title: 'Player controller',
+            status: 'active',
+            isCurrent: true,
+            createdAt: 10,
+            updatedAt: 20
+        },
+        {
+            id: 'task-2',
+            title: 'Inventory UI',
+            status: 'active',
+            isCurrent: false,
+            createdAt: 11,
+            updatedAt: 19
+        }
+    ]
+
     it('lists persistent tasks and activates the selected task', async () => {
         const onNewTask = vi.fn()
         const onOpenTask = vi.fn()
@@ -614,27 +634,11 @@ describe('Navigation', () => {
             <Navigation
                 page='workspace'
                 selectedTaskId='task-1'
-                tasks={[
-                    {
-                        id: 'task-1',
-                        title: 'Player controller',
-                        status: 'active',
-                        isCurrent: true,
-                        createdAt: 10,
-                        updatedAt: 20
-                    },
-                    {
-                        id: 'task-2',
-                        title: 'Inventory UI',
-                        status: 'active',
-                        isCurrent: false,
-                        createdAt: 11,
-                        updatedAt: 19
-                    }
-                ]}
+                tasks={tasks}
                 onNavigate={vi.fn()}
                 onNewTask={onNewTask}
                 onOpenTask={onOpenTask}
+                onDeleteTask={vi.fn()}
             />
         )
 
@@ -647,5 +651,35 @@ describe('Navigation', () => {
         )
         expect(onOpenTask).toHaveBeenCalledWith('task-2')
         expect(onNewTask).toHaveBeenCalledOnce()
+    })
+
+    /// Deleting a task destroys its branch and its worktree, so the button asks first — and the
+    /// delete button must not double as the link that opens the task.
+    it('deletes a task only after the warning is confirmed', async () => {
+        const onDeleteTask = vi.fn()
+        const onOpenTask = vi.fn()
+        render(
+            <Navigation
+                page='workspace'
+                selectedTaskId='task-1'
+                tasks={tasks}
+                onNavigate={vi.fn()}
+                onNewTask={vi.fn()}
+                onOpenTask={onOpenTask}
+                onDeleteTask={onDeleteTask}
+            />
+        )
+
+        await userEvent.click(screen.getByLabelText('Delete task Inventory UI'))
+        expect(onDeleteTask).not.toHaveBeenCalled()
+        expect(onOpenTask).not.toHaveBeenCalled()
+        expect(screen.getByText(/cannot be undone/)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', {name: 'Cancel'}))
+        expect(onDeleteTask).not.toHaveBeenCalled()
+
+        await userEvent.click(screen.getByLabelText('Delete task Inventory UI'))
+        await userEvent.click(screen.getByRole('button', {name: 'Delete task'}))
+
+        expect(onDeleteTask).toHaveBeenCalledWith('task-2')
     })
 })

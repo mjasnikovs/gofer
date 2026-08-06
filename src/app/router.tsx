@@ -115,6 +115,21 @@ function Application() {
         },
         [navigate]
     )
+    // The backend answers with the task that took the deleted one's place, so the workspace follows
+    // it rather than being left on a route whose task no longer exists.
+    const deleteTask = useCallback(
+        async (taskId: string) => {
+            if (!isTauri()) return
+            const replacement = await invoke('delete_chat_task', {taskId}).catch(() => undefined)
+            await refreshTasks()
+            if (!replacement?.taskId) {
+                await navigate({to: '/'})
+                return
+            }
+            await navigate({to: '/tasks/$taskId', params: {taskId: replacement.taskId}})
+        },
+        [navigate, refreshTasks]
+    )
     const tasksChanged = useCallback(() => {
         void refreshTasks()
     }, [refreshTasks])
@@ -157,6 +172,9 @@ function Application() {
                             void newTask()
                         }}
                         onOpenTask={openTask}
+                        onDeleteTask={taskId => {
+                            void deleteTask(taskId)
+                        }}
                         {...(selectedTaskId && {selectedTaskId})}
                     />
                 }

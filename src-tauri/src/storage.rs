@@ -741,6 +741,72 @@ impl ProjectStorage {
         self.load_chat()
     }
 
+    /// Deletes a task with its chat and its isolated worktree, and answers with the chat that takes
+    /// its place.
+    ///
+    /// `release_worktree` is called with the worktree before Git is asked to remove it. A task whose
+    /// editor session is running holds that directory open and Gofer's addon inside it; stopping the
+    /// session there is what keeps the removal from leaving either behind.
+    ///
+    /// Unmerged work on the task branch goes with it — that is what deleting a task means. Project
+    /// memory and recorded runs are kept: they outlive the task that produced them, and their task
+    /// reference is cleared by the schema instead.
+    pub fn delete_task(
+        &self,
+        task_id: &str,
+        release_worktree: impl FnOnce(&Path),
+    ) -> Result<StoredChat, String> {
+        let worktree = {
+            let connection = self.connection()?;
+            require_task(&connection, task_id)?;
+            connection
+                .query_row(
+                    "SELECT branch_name, worktree_path FROM task_worktrees WHERE task_id = ?1",
+                    [task_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(database_error)?
+        };
+        if let Some((_, worktree_path)) = &worktree {
+            release_worktree(Path::new(worktree_path));
+        }
+        {
+            let (_write_guard, mut connection) = self.write_connection()?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(database_error)?;
+            require_task(&transaction, task_id)?;
+            transaction
+                .execute("DELETE FROM tasks WHERE id = ?1", [task_id])
+                .map_err(database_error)?;
+            // The deleted task cannot stay the active one. The most recently worked-on task left
+            // takes over, so the user lands on work they recognize rather than an empty new task.
+            if active_task_id(&transaction)?.as_deref() == Some(task_id) {
+                match next_task_id(&transaction)? {
+                    Some(next) => set_active_task(&transaction, &next)?,
+                    None => {
+                        transaction
+                            .execute("DELETE FROM project_state WHERE key = 'active_task_id'", [])
+                            .map_err(database_error)?;
+                    }
+                }
+            }
+            transaction.commit().map_err(database_error)?;
+        }
+        if let Some((branch_name, worktree_path)) = worktree {
+            let path = PathBuf::from(worktree_path);
+            git::discard_created_worktree(&self.workspace_path, &path, &branch_name);
+            // Git refuses to remove a worktree it no longer recognizes, and one it does remove is
+            // gone already. This clears what is left in either case — only ever under Gofer's own
+            // worktree directory, never a path the user chose.
+            if path.starts_with(self.project_directory().join("worktrees")) && path.is_dir() {
+                let _ = fs::remove_dir_all(&path);
+            }
+        }
+        self.load_chat()
+    }
+
     pub fn agent_workspace(&self) -> Result<PathBuf, String> {
         let connection = self.connection()?;
         let Some(task_id) = active_task_id(&connection)? else {
@@ -1808,6 +1874,18 @@ fn set_active_task(connection: &Connection, task_id: &str) -> Result<(), String>
     Ok(())
 }
 
+/// The task that should take over as the active one: the most recently worked on.
+fn next_task_id(connection: &Connection) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT id FROM tasks ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(database_error)
+}
+
 fn require_task(connection: &Connection, task_id: &str) -> Result<(), String> {
     let exists = connection
         .query_row("SELECT 1 FROM tasks WHERE id = ?1", [task_id], |_| Ok(()))
@@ -2054,6 +2132,36 @@ mod tests {
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).expect("workspace directory");
         ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage")
+    }
+
+    fn git_text(workspace: &Path, arguments: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(workspace)
+            .output()
+            .expect("run Git");
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A workspace a task worktree can actually branch from: a repository with one commit in it.
+    fn committed_repository(root: &Path) -> PathBuf {
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).expect("workspace directory");
+        git_text(&workspace, &["init", "-b", "master"]);
+        git_text(&workspace, &["config", "user.name", "Gofer Test"]);
+        git_text(
+            &workspace,
+            &["config", "user.email", "gofer@example.invalid"],
+        );
+        fs::write(workspace.join("project.godot"), "[application]\n").expect("project file");
+        git_text(&workspace, &["add", "project.godot"]);
+        git_text(&workspace, &["commit", "-m", "Initial"]);
+        workspace
     }
 
     /// A repository with no commits has no branch point, so no task worktree can be created in it.
@@ -2433,6 +2541,90 @@ mod tests {
             .activate_task(&previous_task_id)
             .expect("activate previous task");
         assert_eq!(restored.messages[0].text, "First task");
+    }
+
+    /// Deleting a task has to take everything Gofer made for it: the chat, the Git worktree, and the
+    /// branch. Leaving the branch behind would keep the work findable in a repository the user was
+    /// told is rid of it, and leaving the worktree behind would keep the disk it took.
+    #[test]
+    fn deleting_a_task_removes_its_chat_worktree_and_branch() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        let first = storage.load_chat().expect("first task");
+        storage
+            .save_chat(&StoredChat {
+                task_id: first.task_id.clone(),
+                messages: vec![StoredMessage {
+                    id: 1,
+                    sender: "user".to_owned(),
+                    text: "First task".to_owned(),
+                    timestamp: 10,
+                    attachments: Vec::new(),
+                    extra: serde_json::Map::new(),
+                }],
+                agent_messages: Vec::new(),
+            })
+            .expect("save first task");
+        let doomed = storage
+            .create_task()
+            .expect("create task")
+            .task_id
+            .expect("task ID");
+        let worktree = storage
+            .list_tasks()
+            .expect("tasks")
+            .into_iter()
+            .find(|task| task.id == doomed)
+            .expect("the deleted task")
+            .worktree
+            .expect("an isolated worktree");
+        let mut released = Vec::new();
+
+        let replacement = storage
+            .delete_task(&doomed, |path| released.push(path.to_path_buf()))
+            .expect("delete task");
+
+        // The session holding the worktree is offered it before Git takes it away.
+        assert_eq!(released, vec![PathBuf::from(&worktree.worktree_path)]);
+        assert!(
+            !Path::new(&worktree.worktree_path).exists(),
+            "the task worktree must be gone from disk"
+        );
+        assert!(
+            git_text(&workspace, &["branch", "--list", &worktree.branch_name]).is_empty(),
+            "the task branch must be gone from the repository"
+        );
+        // The task the user worked on before takes over, with its chat intact.
+        let tasks = storage.list_tasks().expect("remaining tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(replacement.task_id, first.task_id);
+        assert!(tasks[0].is_current);
+        assert_eq!(replacement.messages[0].text, "First task");
+    }
+
+    /// The workspace is never left without a task: deleting the last one leaves the user in a new,
+    /// empty task rather than in a window with nothing to type into.
+    #[test]
+    fn deleting_the_last_task_opens_a_fresh_one() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let only = storage
+            .load_chat()
+            .expect("only task")
+            .task_id
+            .expect("task ID");
+
+        let replacement = storage.delete_task(&only, |_| {}).expect("delete task");
+
+        let task_id = replacement.task_id.expect("replacement task ID");
+        assert_ne!(task_id, only);
+        assert!(replacement.messages.is_empty());
+        let tasks = storage.list_tasks().expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, task_id);
+        assert!(storage.delete_task(&only, |_| {}).is_err());
     }
 
     #[test]

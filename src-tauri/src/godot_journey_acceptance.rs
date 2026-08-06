@@ -11,12 +11,12 @@
 //! renderer's commands call — so the journey exercises the safety model on the way to the editor
 //! rather than stepping around it.
 //!
-//! The eight steps of the plan are the eight sections of the test: connect to a task worktree;
+//! The nine steps of the plan are the nine sections of the test: connect to a task worktree;
 //! inspect, mutate, undo, redo, and save a scene; author a script, fix its diagnostics, format it,
 //! rename a symbol, and navigate references; break, run, inspect, evaluate, step, and continue;
 //! inspect the runtime tree, inject input, and capture the changed screen; edit project settings
-//! and approve one machine-wide editor setting; retrieve documentation; and switch tasks with a
-//! complete cleanup and rebinding.
+//! and approve one machine-wide editor setting; retrieve documentation; switch tasks with a
+//! complete cleanup and rebinding; and delete a task out from under the editor running in it.
 //!
 //! Two things cannot be carried into a test and are stood in for deliberately, each at the outer
 //! edge of the system: the user who answers an approval prompt, and the embedding index behind
@@ -138,6 +138,29 @@ fn git(workspace: &Path, arguments: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// What Git answers, for the questions whose answer is the assertion rather than the exit status.
+fn git_text(workspace: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(workspace)
+        .args(arguments)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_PREFIX")
+        .output()
+        .unwrap_or_else(|error| panic!("git {arguments:?} could not run: {error}"));
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 fn copy_tree(source: &Path, target: &Path) {
@@ -909,12 +932,56 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "the rebound editor must show the second task's scene"
     );
 
-    journey.call("godot_session", "stop", json!({}));
-    assert!(!second.join("addons").exists());
+    // 9. Delete the task the editor is running in.
+    //
+    // Deleting is how the sidebar gets rid of a task, and an editor holding the worktree is exactly
+    // when that is inconvenient: the session has to stop first, the addon has to come out with it,
+    // and the checkout and the branch have to be gone afterwards.
+    let before = journey.storage.list_tasks().expect("list tasks");
+    let doomed = before
+        .iter()
+        .find(|task| task.is_current)
+        .expect("the second task is the current one")
+        .clone();
+    let branch = doomed
+        .worktree
+        .as_ref()
+        .expect("the second task's worktree")
+        .branch_name
+        .clone();
+    let replacement = journey
+        .storage
+        .delete_task(&doomed.id, |worktree| {
+            crate::godot_session_api::release_worktree(journey.app.handle(), worktree);
+        })
+        .expect("delete the task the editor is running in");
+
+    assert!(
+        godot_session::current_info().is_none(),
+        "deleting a task must stop the editor that was running in it"
+    );
+    assert!(
+        !second.exists(),
+        "the deleted task's worktree must be gone from disk"
+    );
+    assert!(
+        !git_text(&journey.workspace, &["branch", "--list", &branch]).contains(&branch),
+        "the deleted task's branch must be gone from the repository"
+    );
+    // Only the deleted task goes: the first task keeps its place in the list and its checkout.
+    let remaining = journey.storage.list_tasks().expect("remaining tasks");
+    assert_eq!(remaining.len(), before.len() - 1);
+    assert!(!remaining.iter().any(|task| task.id == doomed.id));
+    assert!(worktree.join("project.godot").is_file());
+    let current = remaining
+        .iter()
+        .find(|task| task.is_current)
+        .expect("a task takes over from the deleted one");
+    assert_eq!(replacement.task_id.as_deref(), Some(current.id.as_str()));
     assert!(
         !std::fs::read_to_string(&exclude)
             .expect("read the shared exclude file")
             .contains("addons/gofer/"),
-        "the last session to stop must hand the shared exclude file back"
+        "the session the deletion stopped must hand the shared exclude file back"
     );
 }

@@ -117,6 +117,14 @@ function taskWorktrees() {
         .filter(Boolean)
 }
 
+/** The branches Gofer created for its tasks. */
+function taskBranches() {
+    return git('branch', '--list', 'gofer/task-*')
+        .split('\n')
+        .map(entry => entry.replace('*', '').trim())
+        .filter(Boolean)
+}
+
 /**
  * The worktree the running editor is bound to, as the backend reports it.
  *
@@ -378,6 +386,43 @@ describe('the live workspace', () => {
         it('shows the header controls for the task it is displaying', async () => {
             // A task whose worktree has never been merged is one the header offers to merge.
             await expectText(['Godot 4.7', 'Merge task'])
+        })
+
+        it('deletes a task from the sidebar with its worktree and branch', async () => {
+            const route = await currentRoute()
+            const links = await taskLinks()
+            // The task being shown is left alone: this is the sidebar deleting one in the
+            // background, which is how a user clears a task they are not looking at.
+            const doomed = links.findIndex(href => !route.endsWith(href.slice(1)))
+            expect(doomed).toBeGreaterThanOrEqual(0)
+            const worktreesBefore = taskWorktrees()
+            const branchesBefore = taskBranches()
+
+            // The delete buttons follow the same order as the links they sit beside.
+            await clickSelector(
+                `(//button[starts-with(@aria-label, "Delete task")])[${String(doomed + 1)}]`,
+                'the delete button of the task in the sidebar'
+            )
+            // Nothing is destroyed until the warning is confirmed.
+            await expectText(['Delete this task?', 'cannot be undone'])
+            await clickButton('Delete task')
+
+            await browser.waitUntil(
+                async () => !(await taskLinks()).includes(String(links[doomed])),
+                {
+                    timeout: 30_000,
+                    interval: 200,
+                    timeoutMsg: `the sidebar kept the deleted task; it shows: ${await pageText()}`
+                }
+            )
+            // Git is what is asked about the branch and the checkout, not the rendering.
+            const removedWorktrees = worktreesBefore.filter(root => !taskWorktrees().includes(root))
+            expect(removedWorktrees.length).toBe(1)
+            expect(existsSync(String(removedWorktrees[0]))).toBe(false)
+            expect(taskBranches().length).toBe(branchesBefore.length - 1)
+            // The task that was on screen is still the one on screen, and still usable.
+            expect(await currentRoute()).toBe(route)
+            await expectText(['Merge task'])
         })
     })
 
