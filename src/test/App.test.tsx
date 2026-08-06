@@ -550,6 +550,53 @@ describe('Workspace', () => {
         expect(screen.queryByText('local-model')).not.toBeInTheDocument()
     })
 
+    it('settles the running tool calls when the user stops the turn', async () => {
+        let handler: EventHandler | undefined
+        let finishRequest: (() => void) | undefined
+        tauri.listen.mockImplementation(async (_event, nextHandler) => {
+            handler = nextHandler
+            return () => undefined
+        })
+        const emit = (event: unknown) => {
+            handler?.({payload: {requestId: 1, event} as never})
+        }
+        tauri.invoke.mockImplementation(async command => {
+            if (command === 'list_workspace_files') return []
+            if (command === 'send_ai_message') {
+                emit({type: 'text-delta', delta: 'Working on it'})
+                emit({
+                    type: 'tool-start',
+                    id: 'tool-1',
+                    name: 'bash',
+                    target: 'godot --headless',
+                    startedAt: 10
+                })
+                // The turn stays open until the backend answers the cancellation.
+                return new Promise<undefined>(resolve => {
+                    finishRequest = () => {
+                        resolve(undefined)
+                    }
+                })
+            }
+            if (command === 'cancel_ai_request') {
+                emit({type: 'aborted'})
+                finishRequest?.()
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build a scene{enter}')
+        expect(await screen.findByText('godot --headless')).toBeInTheDocument()
+
+        await userEvent.click(screen.getByRole('button', {name: 'Stop'}))
+        expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId: 1})
+
+        await waitFor(() => {
+            expect(screen.queryByRole('status', {name: 'Loading'})).not.toBeInTheDocument()
+        })
+    })
+
     it('asks the user before the agent runs a gated tool call, and answers the backend', async () => {
         const handlers = new Map<string, EventHandler>()
         tauri.listen.mockImplementation(async (event, handler) => {

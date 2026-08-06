@@ -433,6 +433,14 @@ pub fn dispatch<R: Runtime>(
     app: &AppHandle<R>,
     request: ToolRequest,
 ) -> Result<Value, ToolFailure> {
+    // The agent dispatches its calls in parallel, so a stopped turn usually leaves several queued
+    // behind the one that was running. None of them has an agent left to answer.
+    if crate::cancel::is_cancelled() {
+        return Err(ToolFailure::new(
+            "cancelled",
+            "The turn was stopped before this tool call ran",
+        ));
+    }
     let domain = CATALOG
         .iter()
         .find(|domain| domain.name == request.tool)

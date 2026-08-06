@@ -36,6 +36,26 @@ const CHAT_CONTENT_WIDTH = 960
  */
 const SAFE_CENTRE = {justifyContent: 'safe center'} as const
 
+/**
+ * A turn that ends early takes its unfinished tool calls with it. The backend stops streaming the
+ * moment it is cancelled, so no `tool-end` is ever coming for a call still in flight: left alone it
+ * would spin forever and read as an agent that is still working.
+ */
+function settleRunningTools(message: Message, reason: string): Message {
+    if (!message.tools?.some(tool => tool.status === 'running' || tool.status === 'pending')) {
+        return message
+    }
+    const endedAt = Date.now()
+    return {
+        ...message,
+        tools: message.tools.map(tool =>
+            tool.status === 'running' || tool.status === 'pending' ?
+                {...tool, status: 'error' as const, output: tool.output ?? reason, endedAt}
+            :   tool
+        )
+    }
+}
+
 export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspaceProps) {
     const [draft, setDraft] = useState('')
     const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
@@ -192,7 +212,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                         }
                         if (event.type === 'aborted') {
                             updateAssistant(assistantMessage.id, message => ({
-                                ...message,
+                                ...settleRunningTools(message, 'Stopped before it finished.'),
                                 text: message.text || 'Generation stopped.',
                                 status: 'aborted'
                             }))
@@ -215,11 +235,16 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     const message = String(error)
                     setStreamError(message)
                     updateAssistant(assistantMessage.id, entry => ({
-                        ...entry,
+                        ...settleRunningTools(entry, 'The turn ended before this call finished.'),
                         text: entry.text || 'The AI response could not be completed.',
                         status: 'error'
                     }))
                 } finally {
+                    // The stream is over however it ended, so nothing it started can still be
+                    // running — a `tool-end` the backend never sent is one it never will.
+                    updateAssistant(assistantMessage.id, entry =>
+                        settleRunningTools(entry, 'The turn ended before this call finished.')
+                    )
                     unlisten?.()
                     if (activeRequestId.current === requestId) activeRequestId.current = undefined
                     setIsStreaming(false)

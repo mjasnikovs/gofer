@@ -672,12 +672,15 @@ impl DapClient {
                 )
                 .retryable());
             }
-            let event = events.recv_timeout(remaining).map_err(|_| {
-                DapError::new(
+            let event = crate::cancel::recv_until(events, deadline).map_err(|end| match end {
+                crate::cancel::WaitEnd::Cancelled => {
+                    DapError::new("cancelled", "The wait was stopped with its agent turn")
+                }
+                _ => DapError::new(
                     "stop_timeout",
                     format!("No stopped event arrived within {timeout:?}"),
                 )
-                .retryable()
+                .retryable(),
             })?;
             match event.event.as_str() {
                 "stopped" => {
@@ -726,17 +729,23 @@ impl DapClient {
         receiver: &Receiver<Result<Value, DapError>>,
         timeout: Duration,
     ) -> Result<Value, DapError> {
-        match receiver.recv_timeout(timeout) {
+        match crate::cancel::recv_until(receiver, Instant::now() + timeout) {
             Ok(result) => result,
-            Err(_) => {
+            Err(end) => {
                 if let Ok(mut shared) = self.shared.lock() {
                     shared.pending.remove(&seq);
                 }
-                Err(DapError::new(
-                    "request_timeout",
-                    format!("The debug adapter did not answer within {timeout:?}"),
-                )
-                .retryable())
+                Err(match end {
+                    crate::cancel::WaitEnd::Cancelled => DapError::new(
+                        "cancelled",
+                        "The debug request was stopped with its agent turn",
+                    ),
+                    _ => DapError::new(
+                        "request_timeout",
+                        format!("The debug adapter did not answer within {timeout:?}"),
+                    )
+                    .retryable(),
+                })
             }
         }
     }

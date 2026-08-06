@@ -366,7 +366,9 @@ impl LspClient {
                     return Err(LspError::closed());
                 }
             }
-            if Instant::now() >= deadline {
+            // Nothing published yet is a legitimate answer, so a stopped turn ends the wait the
+            // same way its deadline would rather than failing the call.
+            if Instant::now() >= deadline || crate::cancel::is_cancelled() {
                 return Ok(None);
             }
             thread::sleep(DIAGNOSTICS_POLL);
@@ -552,17 +554,23 @@ impl LspClient {
         receiver: &Receiver<Result<Value, LspError>>,
         timeout: Duration,
     ) -> Result<Value, LspError> {
-        match receiver.recv_timeout(timeout) {
+        match crate::cancel::recv_until(receiver, Instant::now() + timeout) {
             Ok(result) => result,
-            Err(_) => {
+            Err(end) => {
                 if let Ok(mut shared) = self.shared.lock() {
                     shared.pending.remove(&id);
                 }
-                Err(LspError::new(
-                    "request_timeout",
-                    format!("The language server did not answer within {timeout:?}"),
-                )
-                .retryable())
+                Err(match end {
+                    crate::cancel::WaitEnd::Cancelled => LspError::new(
+                        "cancelled",
+                        "The language server request was stopped with its agent turn",
+                    ),
+                    _ => LspError::new(
+                        "request_timeout",
+                        format!("The language server did not answer within {timeout:?}"),
+                    )
+                    .retryable(),
+                })
             }
         }
     }

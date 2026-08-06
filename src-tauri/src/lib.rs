@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 pub mod addon;
 mod ai_tools;
 mod approvals;
+mod cancel;
 mod debug;
 mod files;
 mod gdformat;
@@ -1118,6 +1119,10 @@ fn cancel_ai_request_with<R: Runtime>(app: &AppHandle<R>, request_id: u64) -> Re
     // A tool call waiting for the user belongs to the turn being cancelled: left waiting, it would
     // hold a tool worker open long after the agent that asked for it is gone.
     approvals::cancel_all();
+    // So does one waiting on the editor. Killing the worker below ends the conversation, but the
+    // calls already dispatched into Rust wait on their own timeouts — minutes, for an addon request
+    // that names one — and the turn is not over until they return.
+    cancel::cancel_turn(request_id);
     let active = AI_CHILD
         .lock()
         .map_err(|_| "The AI process lock is poisoned".to_owned())?
@@ -2004,7 +2009,7 @@ fn run_ai_worker_with<R: Runtime>(
         for line in BufReader::new(stdout).lines() {
             let line = line.map_err(|error| format!("Could not read Pi AI output: {error}"))?;
             if let Some(payload) = line.strip_prefix(AI_TOOL_PREFIX) {
-                tool_workers.push(spawn_tool_worker(app, &stdin, payload)?);
+                tool_workers.push(spawn_tool_worker(app, request_id, &stdin, payload)?);
                 continue;
             }
             let Some(payload) = line.strip_prefix(AI_EVENT_PREFIX) else {
@@ -2036,9 +2041,7 @@ fn run_ai_worker_with<R: Runtime>(
     // finite: a tool call still waiting for the user has lost the agent that asked, and a prompt
     // registered after this point is refused rather than left waiting for the whole timeout.
     approvals::cancel_all();
-    for worker in tool_workers {
-        let _ = worker.join();
-    }
+    drain_tool_workers(tool_workers);
     streamed?;
 
     let status = child
@@ -2065,6 +2068,44 @@ fn run_ai_worker_with<R: Runtime>(
     Ok(completion_text)
 }
 
+/// How long a cancelled turn waits for its tool calls to notice before giving up on them.
+///
+/// A cancellation-aware wait ends within a poll, so this is not the normal cost of stopping: it
+/// bounds the calls that cannot be interrupted — starting an editor, retrieving documentation.
+const TOOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+// coverage-critical-start: cancellation
+/// Waits for the turn's tool calls to finish before the turn is declared over.
+///
+/// A turn that ended normally waits as long as it takes: the calls are the work it was asked to do,
+/// and letting the next turn start on top of a half-applied scene edit would be worse than a slow
+/// finish. A turn the user stopped is the opposite case — the wait is what the user asked to end —
+/// so it is bounded, and what has not noticed by then is left to finish on its own. A detached call
+/// can only write into its own turn's channel, which the killed worker already closed, so the cost
+/// of giving up on it is a side effect landing late, never one landing in the next turn's stream.
+fn drain_tool_workers(workers: Vec<std::thread::JoinHandle<()>>) {
+    drain_tool_workers_within(workers, TOOL_DRAIN_TIMEOUT);
+}
+
+fn drain_tool_workers_within(workers: Vec<std::thread::JoinHandle<()>>, limit: Duration) {
+    if workers.is_empty() {
+        return;
+    }
+    let (drained, wait) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for worker in workers {
+            let _ = worker.join();
+        }
+        let _ = drained.send(());
+    });
+    if AI_REQUEST_CANCELLED.load(Ordering::Acquire) {
+        let _ = wait.recv_timeout(limit);
+    } else {
+        let _ = wait.recv();
+    }
+}
+// coverage-critical-end: cancellation
+
 /// Runs one tool request off the stdout loop and answers it on the duplex channel.
 ///
 /// Off the loop because the agent executes tool calls in parallel and the loop must stay free to
@@ -2072,6 +2113,7 @@ fn run_ai_worker_with<R: Runtime>(
 /// would stall every event behind it, including the ones that prove the tool is working.
 fn spawn_tool_worker<R: Runtime>(
     app: &AppHandle<R>,
+    request_id: u64,
     stdin: &Arc<Mutex<process::ProcessWriter>>,
     payload: &str,
 ) -> Result<std::thread::JoinHandle<()>, String> {
@@ -2088,6 +2130,9 @@ fn spawn_tool_worker<R: Runtime>(
     let app = app.clone();
     let stdin = Arc::clone(stdin);
     Ok(std::thread::spawn(move || {
+        // The waits this dispatch makes are the turn's, not the renderer's: stopping the turn ends
+        // them early instead of leaving the user's Stop waiting on a ten-minute addon timeout.
+        let _turn = cancel::ToolTurn::enter(request_id);
         let answer = match ai_tools::dispatch(&app, call.request) {
             Ok(result) => serde_json::json!({
                 "type": "tool-result",
@@ -2740,6 +2785,83 @@ mod tests {
         *AI_CHILD.lock().expect("AI child lock") = None;
         ACTIVE_AI_REQUEST_ID.store(0, Ordering::Release);
         AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+    }
+
+    /// The stop the user pressed has to end the turn, not queue behind it. A tool call that cannot
+    /// notice the cancellation — one starting an editor, one retrieving documentation — is left to
+    /// finish on its own rather than holding the whole turn, and with it the composer, open.
+    #[test]
+    fn a_stopped_turn_stops_waiting_for_a_tool_call_that_cannot_be_interrupted() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let limit = Duration::from_millis(200);
+
+        // Nothing ran, so there is nothing to wait for either way.
+        AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+        drain_tool_workers_within(Vec::new(), limit);
+
+        // A turn that ended on its own waits for its calls however long they take.
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        drain_tool_workers_within(
+            vec![std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                flag.store(true, Ordering::Release);
+            })],
+            limit,
+        );
+        assert!(
+            finished.load(Ordering::Acquire),
+            "an uncancelled turn must not declare itself over while a tool call is running"
+        );
+
+        // A stopped one gives the same call a bounded chance and then leaves it behind.
+        AI_REQUEST_CANCELLED.store(true, Ordering::Release);
+        let stuck = Arc::new(AtomicBool::new(false));
+        let release = Arc::clone(&stuck);
+        let started = std::time::Instant::now();
+        drain_tool_workers_within(
+            vec![std::thread::spawn(move || {
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })],
+            limit,
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a stopped turn must not wait out an uninterruptible tool call"
+        );
+        stuck.store(true, Ordering::Release);
+        AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+    }
+
+    /// Cancellation is scoped to the turn's own tool threads: the renderer calls the same addon
+    /// through the same functions, and a stop must never abort what the user clicked.
+    #[test]
+    fn cancelling_a_turn_refuses_its_queued_tool_calls_and_leaves_the_renderer_alone() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let app = mock_app();
+        let call = ai_tools::ToolRequest {
+            tool: "godot_scene".to_owned(),
+            params: serde_json::json!({"op": "get_tree"}),
+        };
+
+        cancel::cancel_turn(4_242);
+        // The renderer's thread never entered the turn, so the same call still runs — and fails on
+        // the missing session, not on the cancellation.
+        let renderer = ai_tools::dispatch(app.handle(), call.clone()).unwrap_err();
+        assert_ne!(renderer.code, "cancelled");
+
+        let worker = std::thread::spawn(move || {
+            let _turn = cancel::ToolTurn::enter(4_242);
+            ai_tools::dispatch(app.handle(), call).unwrap_err()
+        });
+        assert_eq!(
+            worker.join().expect("tool worker thread").code,
+            "cancelled",
+            "a queued call has no agent left to answer"
+        );
+        cancel::cancel_turn(0);
     }
 
     #[test]

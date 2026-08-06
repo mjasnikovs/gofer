@@ -191,8 +191,20 @@ impl RpcSession {
         self.request_tx
             .send(request)
             .map_err(|_| RpcError::new("session_closed", "The RPC session has stopped"))?;
-        rx.recv_timeout(timeout)
-            .map_err(|_| RpcError::new("request_timeout", "The request timed out").retryable())?
+        // A request may name a timeout of minutes, and an agent turn the user stopped must not be
+        // held open for one, so the wait polls rather than blocks. Giving up leaves the pending
+        // entry behind on purpose: the reader treats a response it cannot match as a stale reply
+        // and fails the connection over it, so the entry has to outlive the waiter and absorb the
+        // answer — into a receiver nobody is holding — rather than the editor losing its session
+        // because a request was abandoned.
+        match crate::cancel::recv_until(&rx, Instant::now() + timeout) {
+            Ok(response) => response,
+            Err(crate::cancel::WaitEnd::Cancelled) => Err(RpcError::new(
+                "cancelled",
+                "The request was stopped with its agent turn",
+            )),
+            Err(_) => Err(RpcError::new("request_timeout", "The request timed out").retryable()),
+        }
     }
 
     /// Current lifecycle readiness reported by the addon.
