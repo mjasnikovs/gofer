@@ -261,7 +261,10 @@ fn delete_cache_path(path: &Path) -> Result<(), String> {
 }
 // coverage-critical-end: cache
 
-fn required_model_files(cache: &Path) -> [PathBuf; 7] {
+/// Mirrors the model definitions gofer-rag downloads, so a cache missing any of
+/// them reads as `Incomplete` rather than claiming a retrieval that cannot run.
+/// Keep this in step with `dist/ai/downloads.js` when the package moves.
+fn required_model_files(cache: &Path) -> [PathBuf; 10] {
     [
         cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/config.json"),
         cache.join("onnx-community/Qwen3-Embedding-0.6B-ONNX/tokenizer.json"),
@@ -270,6 +273,10 @@ fn required_model_files(cache: &Path) -> [PathBuf; 7] {
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/config.json"),
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/tokenizer.json"),
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/onnx/model_quantized.onnx"),
+        // The prefilter that skims the pool before the reranker scores it.
+        cache.join("Xenova/ms-marco-MiniLM-L-6-v2/config.json"),
+        cache.join("Xenova/ms-marco-MiniLM-L-6-v2/tokenizer.json"),
+        cache.join("Xenova/ms-marco-MiniLM-L-6-v2/onnx/model_quantized.onnx"),
     ]
 }
 
