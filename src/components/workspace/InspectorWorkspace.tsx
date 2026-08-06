@@ -492,6 +492,7 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                         <ResizeHandle
                             resizable={inspector.props}
                             direction='horizontal'
+                            isReversed
                             hasDivider
                             label='Resize the inspector'
                         />

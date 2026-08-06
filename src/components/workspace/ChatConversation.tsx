@@ -25,7 +25,9 @@ type ChatConversationProps = Readonly<{
 }>
 
 const LEFT_ALIGNED_USER_BUBBLE_STYLE = {alignSelf: 'flex-start'} as const
-const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex'} as const
+// The conversation sits in a centre-aligned column: without an explicit width it
+// would shrink to the widest message and grow as the reply streams in.
+const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex', width: '100%'} as const
 const ToolOutputCodeBlock = lazy(() =>
     import('@astryxdesign/core/CodeBlock').then(module => ({default: module.CodeBlock}))
 )
