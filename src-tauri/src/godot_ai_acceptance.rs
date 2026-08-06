@@ -504,7 +504,7 @@ fn write_completion(stream: &mut TcpStream, index: usize, turn: ModelTurn) {
 
 fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
     let app = tauri::test::mock_builder()
-        .build(tauri::generate_context!())
+        .build(crate::app_context())
         .expect("build mock Tauri app");
     tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()

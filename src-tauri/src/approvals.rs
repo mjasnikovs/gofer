@@ -355,7 +355,7 @@ mod tests {
     fn mock_app(with_window: bool) -> tauri::App<tauri::test::MockRuntime> {
         open();
         let app = tauri::test::mock_builder()
-            .build(tauri::generate_context!())
+            .build(crate::app_context())
             .expect("build mock Tauri app");
         if with_window {
             tauri::WebviewWindowBuilder::new(&app, MAIN_WINDOW, Default::default())

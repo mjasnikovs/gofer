@@ -261,7 +261,7 @@ impl Journey {
 
         let storage = ProjectStorage::open(&root.join("data"), &workspace).expect("open storage");
         let app = tauri::test::mock_builder()
-            .build(tauri::generate_context!())
+            .build(crate::app_context())
             .expect("build mock Tauri app");
         // Approvals are shown in the main window, and a backend without one refuses rather than
         // deciding for the user.

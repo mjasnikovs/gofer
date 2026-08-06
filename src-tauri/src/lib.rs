@@ -2246,6 +2246,18 @@ fn ai_worker_path() -> Result<PathBuf, String> {
     ))
 }
 
+/// The one place `tauri::generate_context!` may be expanded.
+///
+/// On macOS the macro embeds the Info.plist as `#[no_mangle] static _EMBED_INFO_PLIST`, and
+/// `embed_plist` gives that a stable symbol name on purpose, so a second expansion anywhere in the
+/// crate is a duplicate-symbol link error rather than a second plist. A test build expands
+/// everything the tests need at once, so the mock apps have to share the real application's
+/// context instead of each generating their own. `EmbeddedAssets` implements `Assets<R>` for every
+/// runtime, so the same context serves `MockRuntime` and the real one.
+pub(crate) fn app_context<R: tauri::Runtime>() -> tauri::Context<R> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "linux")]
@@ -2325,7 +2337,7 @@ pub fn run() {
     ]);
 
     builder
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while building tauri application")
         .run(|app, event| {
             // The editor is Gofer's own child, and the addon it staged lives in the user's
@@ -2468,7 +2480,7 @@ mod tests {
 
     fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
         let app = tauri::test::mock_builder()
-            .build(tauri::generate_context!())
+            .build(app_context())
             .expect("build mock Tauri app");
         tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
@@ -2885,7 +2897,7 @@ mod tests {
                 call_godot,
                 respond_tool_approval
             ])
-            .build(tauri::generate_context!())
+            .build(app_context())
             .expect("build mock Tauri app");
         app.manage(StorageSlot::new(Ok(storage)));
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())

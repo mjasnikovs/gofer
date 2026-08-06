@@ -720,7 +720,7 @@ mod tests {
     /// reports `approval_unavailable` proves the gate stopped it before its handler ran.
     fn unattended_app() -> tauri::App<tauri::test::MockRuntime> {
         tauri::test::mock_builder()
-            .build(tauri::generate_context!())
+            .build(crate::app_context())
             .expect("build mock Tauri app")
     }
 
