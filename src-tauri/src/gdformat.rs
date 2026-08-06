@@ -245,6 +245,11 @@ pub fn format_source(
             "gdformat produced output that is not valid UTF-8; the buffer was left unchanged",
         )
     })?;
+    // The frozen sidecar writes its stdout through Python's text mode, which on Windows translates
+    // every newline it emits to CRLF. Gofer's buffers, hashes, and editor are LF throughout, so an
+    // unnormalized answer would report an already-formatted script as changed and rewrite every
+    // line ending in the file the first time anyone formatted it.
+    let formatted = formatted.replace("\r\n", "\n");
     Ok(FormatResponse {
         changed: formatted != source,
         formatted,
@@ -673,6 +678,21 @@ mod tests {
             written.lock().expect("written lock").as_slice(),
             source.as_bytes()
         );
+    }
+
+    /// The Windows sidecar answers in CRLF whatever it was given. Left alone it would make every
+    /// format a whole-file rewrite, and would call a script that is already formatted changed.
+    #[test]
+    fn format_normalizes_the_sidecars_line_endings() {
+        let source = "func f():\n\tpass\n";
+        let (fake, _) = child(b"func f():\r\n\tpass\r\n", b"", success());
+        let spawner = FakeSpawner {
+            child: Mutex::new(Some(fake)),
+            spawn_error: None,
+        };
+        let response = format_source(&spawner, &binary(), source).expect("format");
+        assert_eq!(response.formatted, source);
+        assert!(!response.changed);
     }
 
     #[test]
