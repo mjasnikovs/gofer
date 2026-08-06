@@ -3,6 +3,7 @@ import {execFileSync} from 'node:child_process'
 import {copyFileSync, existsSync, mkdirSync, rmSync} from 'node:fs'
 import {homedir, tmpdir} from 'node:os'
 import {join} from 'node:path'
+import {liveWorkspacePath, seedLiveWorkspace} from './e2e/live/workspace-fixture'
 
 /**
  * Drives the shipped application against a real Godot project on this machine.
@@ -17,7 +18,7 @@ const executable =
         'src-tauri/target/release/gofer.exe'
     :   'src-tauri/target/release/gofer'
 
-const workspace = process.env.GOFER_LIVE_WORKSPACE ?? join(homedir(), 'hub/mario-test')
+const workspace = liveWorkspacePath()
 const dataRoot = join(tmpdir(), 'gofer-live-run')
 const appDataDir = join(dataRoot, 'data')
 mkdirSync(appDataDir, {recursive: true})
@@ -83,9 +84,7 @@ export const config: Options.Testrunner = {
      */
     mochaOpts: {ui: 'bdd', timeout: 3_600_000},
     onPrepare: () => {
-        if (!existsSync(join(workspace, 'project.godot'))) {
-            throw new Error(`${workspace} is not a Godot project`)
-        }
+        seedLiveWorkspace()
         stopAStaleApplication()
         // A run starts from nothing: the tasks, chats and worktrees of an earlier one would change
         // what this one is asked to build, and a sweep whose first run differs from its second is

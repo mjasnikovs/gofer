@@ -2,7 +2,6 @@ import {expect} from '@wdio/globals'
 import {browser} from '@wdio/tauri-service'
 import {execFileSync} from 'node:child_process'
 import {existsSync, readFileSync, readdirSync, renameSync, writeFileSync} from 'node:fs'
-import {homedir} from 'node:os'
 import {join} from 'node:path'
 import {
     attachImage,
@@ -45,6 +44,7 @@ import {
     typeInEditor,
     untilText
 } from './harness'
+import {seedLiveWorkspace} from './workspace-fixture'
 
 /**
  * The whole application, driven against a real Godot project on this machine.
@@ -58,7 +58,7 @@ import {
  * editor, a debugger needs a game, and starting a fresh editor for each assertion would spend
  * minutes proving something the previous test already established.
  */
-const workspace = process.env.GOFER_WORKSPACE_DIR ?? join(homedir(), 'hub/mario-test')
+const workspace = process.env.GOFER_WORKSPACE_DIR ?? seedLiveWorkspace()
 /** A line inside `_on_tick`, which the fixture's timer reaches about once a second. */
 const BREAK_LINE = 19
 /** The fixture's `@export var tick_interval`, which is used again further down the same file. */
