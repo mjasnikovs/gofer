@@ -208,6 +208,11 @@ fn committed_workspace(root: &Path) -> PathBuf {
     git(&workspace, &["init", "--quiet", "--initial-branch", "main"]);
     git(&workspace, &["config", "user.email", "journey@gofer.test"]);
     git(&workspace, &["config", "user.name", "Gofer journey"]);
+    // Git for Windows installs `core.autocrlf=true`, which would check every task worktree out
+    // with CRLF and leave this journey asserting Git's line-ending policy instead of Gofer's own
+    // round trip. The fixture repository hands back the bytes it was given, on every platform.
+    git(&workspace, &["config", "core.autocrlf", "false"]);
+    git(&workspace, &["config", "core.eol", "lf"]);
     git(&workspace, &["add", "--all"]);
     git(&workspace, &["commit", "--quiet", "--message", "Fixture"]);
     crate::paths::canonical(&workspace).expect("canonical workspace")
