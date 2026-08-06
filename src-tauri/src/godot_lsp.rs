@@ -956,7 +956,49 @@ fn read_loop(reader: BufReader<TcpStream>, shared: Arc<Mutex<Shared>>) {
     }
 }
 
+/// Rewrites every file URI in a server message into the spelling [`file_uri`] produces.
+///
+/// Godot builds its URIs by percent-encoding each path segment on its own, and its encoder keeps
+/// only the unreserved characters. A Windows drive letter therefore arrives as `file:///C%3A/…`
+/// where `Url::from_file_path` writes `file:///C:/…`. The two name one file and compare unequal,
+/// and `Url` equality is what routes a published diagnostic to its document and what a navigation
+/// answer is checked against — so on Windows every diagnostic and every jump silently missed.
+/// Round-tripping through the platform's path type settles the spelling once, at the edge, so
+/// nothing downstream has to know that two of them exist. Elsewhere the round trip is an identity.
+fn normalize_uris(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if matches!(key.as_str(), "uri" | "targetUri")
+                    && let Some(text) = child.as_str()
+                    && let Some(normalized) = normalized_file_uri(text)
+                {
+                    *child = Value::String(normalized);
+                } else {
+                    normalize_uris(child);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_uris),
+        _ => {}
+    }
+}
+
+/// The canonical spelling of a `file://` URI, or `None` for anything this client cannot turn into
+/// a local path — a non-file scheme, or a URI naming a file on another host — which is left alone
+/// for the call site that rejects it to report.
+fn normalized_file_uri(text: &str) -> Option<String> {
+    let uri = Url::parse(text).ok()?;
+    if uri.scheme() != "file" {
+        return None;
+    }
+    let path = uri.to_file_path().ok()?;
+    Some(Url::from_file_path(path).ok()?.into())
+}
+
 fn dispatch(shared: &Arc<Mutex<Shared>>, message: Value) {
+    let mut message = message;
+    normalize_uris(&mut message);
     let method = message.get("method").and_then(Value::as_str);
     let id = message.get("id").cloned();
     match (method, id) {
@@ -1484,6 +1526,71 @@ mod tests {
         assert_eq!(params.uri.as_str(), "file:///tmp/broken.gd");
         assert_eq!(params.diagnostics.len(), 1);
         assert_eq!(params.diagnostics[0].message, "Expected ')'");
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    /// Godot percent-encodes each path segment separately, so a Windows drive letter reaches the
+    /// client as `C%3A` while every URI the client builds spells it `C:`. Both spellings have to
+    /// arrive as the one the caller compares against, or a diagnostic is published for a document
+    /// nobody is watching and a definition lands in a file nobody asked about.
+    #[test]
+    fn a_percent_encoded_drive_letter_arrives_spelled_the_way_the_client_writes_it() {
+        let (_directory, root) = workspace();
+        let server = start_fake_server(|message, writer| {
+            match message.get("method").and_then(Value::as_str) {
+                Some("initialize") | Some("shutdown") => handshake_handler(message, writer),
+                Some("initialized") => {
+                    let notification = json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {
+                            "uri": "file:///C%3A/work/broken.gd",
+                            "diagnostics": [{
+                                "range": {
+                                    "start": {"line": 2, "character": 0},
+                                    "end": {"line": 2, "character": 10}
+                                },
+                                "severity": 1,
+                                "message": "Expected ')'"
+                            }]
+                        }
+                    });
+                    write_message(writer, &notification).expect("push diagnostics");
+                    FakeAction::Ignore
+                }
+                Some("textDocument/definition") => FakeAction::Result(json!({
+                    "uri": "file:///C%3A/work/math_utils.gd",
+                    "range": {
+                        "start": {"line": 4, "character": 12},
+                        "end": {"line": 4, "character": 21}
+                    }
+                })),
+                _ => FakeAction::Ignore,
+            }
+        });
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let diagnostics = client.subscribe_diagnostics();
+
+        let params = diagnostics
+            .recv_timeout(Duration::from_secs(2))
+            .expect("diagnostics");
+        assert_eq!(params.uri.as_str(), "file:///C:/work/broken.gd");
+        // The pull reads the same cache the broadcast filled, and it is keyed by URI.
+        let cached = client
+            .diagnostics(&params.uri, Duration::from_secs(2))
+            .expect("cached diagnostics")
+            .expect("a verdict was published");
+        assert_eq!(cached.diagnostics.len(), 1);
+
+        let uri = Url::parse("file:///C:/work/one.gd").expect("uri");
+        let Some(GotoDefinitionResponse::Scalar(location)) = client
+            .definition(&uri, Position::new(6, 10))
+            .expect("definition")
+        else {
+            panic!("expected a single definition location");
+        };
+        assert_eq!(location.uri.as_str(), "file:///C:/work/math_utils.gd");
         client.shutdown();
         server.join.join().expect("server thread");
     }

@@ -284,11 +284,13 @@ impl Journey {
     /// Creates a task and returns its isolated worktree, which is what every session binds to.
     fn new_task(&self) -> PathBuf {
         self.storage.create_task().expect("create task");
-        self.storage
+        let worktree = self
+            .storage
             .active_task_workspace()
-            .expect("the new task must have an isolated worktree")
-            .canonicalize()
-            .expect("canonical task worktree")
+            .expect("the new task must have an isolated worktree");
+        // The session spells its worktree the way `paths::canonical` does, which on Windows is
+        // the plain path and not the verbatim one `fs::canonicalize` returns.
+        crate::paths::canonical(&worktree).expect("canonical task worktree")
     }
 
     fn try_call(&self, tool: &str, params: Value) -> Result<Value, ToolFailure> {
