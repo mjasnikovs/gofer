@@ -173,6 +173,78 @@ pub fn discard_created_worktree(workspace_path: &Path, worktree_path: &Path, bra
     let _ = git_output(&repository_root, &["branch", "-D", branch_name]);
 }
 
+/// Whether Git still holds `worktree_path` as a linked worktree of the workspace's repository.
+///
+/// The directory existing proves nothing. A repository that was deleted and started over — which is
+/// what "let me just re-init this" leaves behind — keeps every task directory on disk with a `.git`
+/// file pointing at administrative data that is gone, and a checkout of nothing is what the editor
+/// session then opens.
+pub fn is_live_worktree(workspace_path: &Path, worktree_path: &Path) -> bool {
+    let Ok(Some(repository_root)) = repository_root(workspace_path) else {
+        return false;
+    };
+    let Ok(listed) = git_text(&repository_root, &["worktree", "list", "--porcelain"]) else {
+        return false;
+    };
+    let wanted = crate::paths::canonical(worktree_path).ok();
+    listed
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|path| crate::paths::canonical(Path::new(path)).ok() == wanted)
+}
+
+/// Re-creates a task worktree Git no longer holds, branching it from where the project stands now.
+///
+/// Nothing is recoverable from the old directory — Git has forgotten the commits it was checked out
+/// from — so the task keeps its chat and its branch name and gets a working checkout back. The
+/// caller clears the abandoned directory first, because only it knows the path is Gofer's own.
+pub fn restore_task_worktree(
+    workspace_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+) -> Result<CreatedWorktree, String> {
+    let repository_root = repository_root(workspace_path)?
+        .ok_or_else(|| "The project is not a Git repository".to_owned())?;
+    // Administrative entries for worktrees whose directories are gone would otherwise refuse the
+    // path and the branch name alike.
+    let _ = git_output(&repository_root, &["worktree", "prune"]);
+    let base_commit = git_text(&repository_root, &["rev-parse", "HEAD"])?;
+    let parent = worktree_path
+        .parent()
+        .ok_or_else(|| "The task worktree path has no parent".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    let target = worktree_path
+        .to_str()
+        .ok_or_else(|| "The task worktree path is not valid UTF-8".to_owned())?;
+    // The branch survives a worktree removed by hand, and is gone with a repository started over.
+    let branch_exists = git_output(
+        &repository_root,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch_name}"),
+        ],
+    )
+    .is_ok_and(|output| output.status.success());
+    let arguments = if branch_exists {
+        vec!["worktree", "add", target, branch_name]
+    } else {
+        vec!["worktree", "add", "-b", branch_name, target, &base_commit]
+    };
+    let output = git_output(&repository_root, &arguments)?;
+    if !output.status.success() {
+        return Err(git_failure("restore the task worktree", &output));
+    }
+    let head_commit = git_text(worktree_path, &["rev-parse", "HEAD"])?;
+    Ok(CreatedWorktree {
+        branch_name: branch_name.to_owned(),
+        worktree_path: worktree_path.to_path_buf(),
+        base_commit,
+        head_commit,
+    })
+}
+
 /// The Git directory shared by the main checkout and every linked worktree. Per-repository excludes
 /// live there, so an entry written for one task worktree is visible to all of them.
 pub fn common_directory(path: &Path) -> Option<PathBuf> {
@@ -253,6 +325,9 @@ pub struct RepositoryStatus {
     pub is_installed: bool,
     pub root: Option<PathBuf>,
     pub has_commit: bool,
+    /// Whether the commit tasks branch from carries `project.godot`. A task worktree is a checkout
+    /// of that commit, so a project file that is only on disk is a project the agent never sees.
+    pub tracks_project_file: bool,
     pub has_identity: bool,
     pub is_clean: bool,
 }
@@ -273,10 +348,20 @@ pub fn inspect(workspace: &Path) -> RepositoryStatus {
         is_installed: true,
         has_commit: git_output(&root, &["rev-parse", "--verify", "HEAD"])
             .is_ok_and(|output| output.status.success()),
+        tracks_project_file: head_tracks_project_file(workspace),
         has_identity: has_identity(&root),
         is_clean: git_text(&root, &["status", "--porcelain"]).is_ok_and(|text| text.is_empty()),
         root: Some(root),
     }
+}
+
+/// Whether `HEAD` holds the workspace's `project.godot`.
+///
+/// The `HEAD:./` form resolves the path against the directory Git runs in, so a game inside a
+/// larger repository is asked about at its own place in the tree rather than at the repository root.
+fn head_tracks_project_file(workspace: &Path) -> bool {
+    let target = format!("HEAD:./{}", crate::addon::PROJECT_FILE);
+    git_output(workspace, &["cat-file", "-e", &target]).is_ok_and(|output| output.status.success())
 }
 
 /// Whether Git is on the path at all. A missing Git and a directory that is not a repository are
@@ -319,18 +404,27 @@ pub fn set_local_identity(workspace: &Path, name: &str, email: &str) -> Result<(
     Ok(())
 }
 
-/// Gives the repository the first commit a worktree can branch from.
+/// Records the workspace's files as the commit task worktrees branch from.
 ///
-/// The commit is deliberately empty: the files already in the folder are the user's, and staging
-/// them on their behalf is a decision Gofer has no business making. A branch point is all a task
-/// worktree needs.
-pub fn create_initial_commit(workspace: &Path) -> Result<(), String> {
+/// A branch point alone is not enough, which is what an empty first commit used to leave behind: a
+/// task worktree is a checkout of that commit, so a `project.godot` that was never committed is
+/// absent from every worktree, and the editor session refuses to start in a directory that holds no
+/// Godot project. Everything Git is not ignoring is staged, because the game is not one file.
+///
+/// The commit is allowed to be empty so an empty folder still gets its branch point, and files
+/// already committed by an earlier run make this a no-op rather than a failure. Staging is limited
+/// to the workspace: a game inside a larger repository is the one thing Gofer was asked about.
+pub fn commit_project_files(workspace: &Path) -> Result<(), String> {
+    let add = git_output(workspace, &["add", "--all", "--", "."])?;
+    if !add.status.success() {
+        return Err(git_failure("stage the project files", &add));
+    }
     let output = git_output(
         workspace,
-        &["commit", "--allow-empty", "-m", "Initial commit"],
+        &["commit", "--allow-empty", "-m", "Add the Godot project"],
     )?;
     if !output.status.success() {
-        return Err(git_failure("create the first commit", &output));
+        return Err(git_failure("commit the project files", &output));
     }
     Ok(())
 }

@@ -11,7 +11,7 @@ export type RemedyAction =
     | 'choose-workspace'
     | 'initialize-git-repository'
     | 'set-git-identity'
-    | 'create-initial-commit'
+    | 'commit-project-files'
     | 'create-godot-project'
     | 'locate-godot-binary'
 

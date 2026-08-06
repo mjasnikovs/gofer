@@ -812,44 +812,82 @@ impl ProjectStorage {
         let Some(task_id) = active_task_id(&connection)? else {
             return Ok(self.workspace_path.clone());
         };
-        let worktree = connection
-            .query_row(
-                "SELECT worktree_path FROM task_worktrees WHERE task_id = ?1",
-                [&task_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(database_error)?;
-        Ok(worktree
-            .map(PathBuf::from)
-            .filter(|path| path.is_dir())
-            .unwrap_or_else(|| self.workspace_path.clone()))
+        drop(connection);
+        Ok(self
+            .task_workspace(&task_id)
+            .unwrap_or_else(|_| self.workspace_path.clone()))
     }
 
     /// Resolves the active task's isolated worktree, failing when no task is active or the
-    /// worktree is missing. The Godot session supervisor uses this instead of `agent_workspace` so
-    /// it never installs the addon in the user's main checkout.
+    /// worktree cannot be made usable. The Godot session supervisor uses this instead of
+    /// `agent_workspace` so it never installs the addon in the user's main checkout.
     pub fn active_task_workspace(&self) -> Result<PathBuf, String> {
         let connection = self.connection()?;
         let Some(task_id) = active_task_id(&connection)? else {
             return Err("No task is active".to_owned());
         };
-        let worktree = connection
-            .query_row(
-                "SELECT worktree_path FROM task_worktrees WHERE task_id = ?1",
-                [&task_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(database_error)?
-            .ok_or_else(|| "The active task does not have an isolated Git worktree".to_owned())?;
-        let path = PathBuf::from(worktree);
-        if !path.is_dir() {
+        drop(connection);
+        self.task_workspace(&task_id)
+    }
+
+    /// The task's worktree, restored first when Git no longer holds it.
+    ///
+    /// A recorded worktree outlives the checkout it names: removed by hand, or emptied when the
+    /// project's repository was deleted and started over. Both used to reach the user as an editor
+    /// session that could not stage the addon into a directory with no project in it, naming a path
+    /// under Gofer's own application data and asking them to fix it. Neither is the user's to fix,
+    /// and nothing in the abandoned directory is recoverable, so the task is given a fresh checkout
+    /// of the project as it stands and keeps its chat and its branch.
+    fn task_workspace(&self, task_id: &str) -> Result<PathBuf, String> {
+        let (branch_name, worktree_path) = {
+            let connection = self.connection()?;
+            connection
+                .query_row(
+                    "SELECT branch_name, worktree_path FROM task_worktrees WHERE task_id = ?1",
+                    [task_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(database_error)?
+                .ok_or_else(|| {
+                    "The active task does not have an isolated Git worktree".to_owned()
+                })?
+        };
+        let path = PathBuf::from(worktree_path);
+        if git::is_live_worktree(&self.workspace_path, &path) {
+            return Ok(path);
+        }
+        // Only ever a directory Gofer made. A worktree the user placed elsewhere is theirs, and
+        // removing it to rebuild it is not a repair Gofer may perform on its own.
+        if !path.starts_with(self.project_directory().join("worktrees")) {
             return Err(format!(
                 "The active task worktree does not exist: {}",
                 path.display()
             ));
         }
+        if path.exists() {
+            fs::remove_dir_all(&path).map_err(|error| {
+                format!(
+                    "Could not clear the abandoned task worktree {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+        let restored = git::restore_task_worktree(&self.workspace_path, &path, &branch_name)?;
+        let (_write_guard, connection) = self.write_connection()?;
+        connection
+            .execute(
+                "UPDATE task_worktrees
+                 SET base_commit = ?1, head_commit = ?2, merged_commit = NULL, updated_at = ?3
+                 WHERE task_id = ?4",
+                params![
+                    restored.base_commit,
+                    restored.head_commit,
+                    now_millis()?,
+                    task_id
+                ],
+            )
+            .map_err(database_error)?;
         Ok(path)
     }
 
@@ -3098,6 +3136,69 @@ mod tests {
                 .contains("needs a query"),
             "a blank needle is a mistake, not a request for every log line ever recorded"
         );
+    }
+
+    /// The project's repository was deleted and started over, which leaves every task directory on
+    /// disk pointing at Git administration that is gone. Both the agent and the editor session used
+    /// to be handed that directory — the session then failed to stage the addon into a checkout of
+    /// nothing, naming a path inside Gofer's application data and asking the user to repair it.
+    #[test]
+    fn a_worktree_git_no_longer_holds_is_rebuilt_for_the_task_that_owns_it() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        let task_id = storage
+            .create_task()
+            .expect("task")
+            .task_id
+            .expect("a task with a worktree");
+        let worktree = storage.active_task_workspace().expect("worktree");
+        assert!(worktree.join("project.godot").is_file());
+
+        // Started over: the worktree directory survives, the repository behind it does not.
+        fs::remove_dir_all(workspace.join(".git")).expect("remove the repository");
+        let rebuilt = committed_repository_in_place(&workspace);
+        assert!(worktree.is_dir(), "the abandoned directory is still there");
+
+        let repaired = storage.active_task_workspace().expect("repaired worktree");
+
+        assert_eq!(repaired, worktree, "the task keeps the path it was given");
+        assert!(
+            repaired.join("project.godot").is_file(),
+            "the rebuilt worktree holds the project the session opens"
+        );
+        assert_eq!(
+            storage.agent_workspace().expect("agent workspace"),
+            worktree,
+            "the agent writes in the task's worktree rather than the user's checkout"
+        );
+        let connection = storage.connection().expect("connection");
+        let base: String = connection
+            .query_row(
+                "SELECT base_commit FROM task_worktrees WHERE task_id = ?1",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .expect("recorded worktree");
+        assert_eq!(
+            base, rebuilt,
+            "the task branches from the project as it is now"
+        );
+    }
+
+    /// A repository started over where one already was, keeping the files on disk. Answers the
+    /// commit the new history stands at.
+    fn committed_repository_in_place(workspace: &Path) -> String {
+        git_text(workspace, &["init", "-b", "master"]);
+        git_text(workspace, &["config", "user.name", "Gofer Test"]);
+        git_text(
+            workspace,
+            &["config", "user.email", "gofer@example.invalid"],
+        );
+        git_text(workspace, &["add", "--all", "--", "."]);
+        git_text(workspace, &["commit", "-m", "Start over"]);
+        git_text(workspace, &["rev-parse", "HEAD"])
     }
 
     /// `agent_workspace` answers where the agent may write, and it falls back to the project

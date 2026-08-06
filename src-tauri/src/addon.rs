@@ -335,12 +335,31 @@ fn missing_directories(workspace: &Workspace) -> Vec<String> {
 /// user meant, so naming the directory is half the message and naming the fix is the other half.
 /// Every path that refuses such a directory says this, because the user cannot tell which of them
 /// got there first.
+///
+/// A task worktree is the same fact with an opposite fix: the directory is Gofer's own and pointing
+/// Gofer elsewhere would not help. It is empty because it was checked out from a commit that never
+/// held the project, so the fix is in the project folder, and the task carrying the old branch point
+/// has to be replaced.
 pub fn missing_project_message(directory: &std::path::Path) -> String {
+    if is_linked_worktree(directory) {
+        return format!(
+            "{} contains no {PROJECT_FILE}, so there is no Godot project to open. This task's \
+             worktree was checked out from your project's last commit, and {PROJECT_FILE} is not \
+             in it. Commit your project files in your project folder, then start a new task.",
+            directory.display()
+        );
+    }
     format!(
         "{} contains no {PROJECT_FILE}, so there is no Godot project to open. Start Gofer from \
          your project directory, or set GOFER_WORKSPACE_DIR to it.",
         directory.display()
     )
+}
+
+/// Git writes a `.git` *file* pointing at the shared repository in a linked worktree, where a
+/// checkout of its own has a `.git` directory.
+fn is_linked_worktree(directory: &std::path::Path) -> bool {
+    directory.join(".git").is_file()
 }
 
 fn read_project_file(workspace: &Workspace) -> Result<FileContents, FileError> {
@@ -1096,6 +1115,54 @@ mod tests {
             .expect("unstage");
 
         assert_eq!(project_text(&fixture), "config_version=5\n");
+    }
+
+    /// A task worktree branched from a commit that never held the project. The message the user
+    /// saw here used to tell them to restart Gofer elsewhere, which cannot help: the directory is
+    /// Gofer's own, and the missing file is missing from the branch point.
+    #[test]
+    fn a_worktree_without_the_project_names_the_commit_rather_than_the_workspace() {
+        let repository_directory = TempDir::new().expect("temporary repository");
+        git(repository_directory.path(), &["init", "-b", "master"]);
+        git(
+            repository_directory.path(),
+            &["config", "user.name", "Gofer Test"],
+        );
+        git(
+            repository_directory.path(),
+            &["config", "user.email", "gofer@example.invalid"],
+        );
+        git(
+            repository_directory.path(),
+            &["commit", "--allow-empty", "-m", "Initial"],
+        );
+        // The project is on disk but was never committed, so the worktree is checked out empty.
+        fs::write(repository_directory.path().join(PROJECT_FILE), PROJECT).expect("project file");
+        let worktree_root = TempDir::new().expect("temporary worktrees");
+        let worktree = worktree_root.path().join("task");
+        git(
+            repository_directory.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "gofer/task-empty",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        let home = TempDir::new().expect("temporary application data");
+        let stager = AddonStager::new(home.path().join("ledger.json"));
+        let workspace = Workspace::open(&worktree).expect("workspace");
+
+        let error = stager.stage(&workspace).expect_err("no project to stage");
+
+        assert_eq!(error.code, "project_missing");
+        assert!(error.message.contains("last commit"), "{}", error.message);
+        assert!(
+            !error.message.contains("GOFER_WORKSPACE_DIR"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

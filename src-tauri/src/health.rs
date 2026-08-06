@@ -72,7 +72,7 @@ pub enum RemedyAction {
     ChooseWorkspace,
     InitializeGitRepository,
     SetGitIdentity,
-    CreateInitialCommit,
+    CommitProjectFiles,
     CreateGodotProject,
     LocateGodotBinary,
 }
@@ -335,6 +335,16 @@ fn git_checks(workspace: &Path, repository: &git::RepositoryStatus) -> Vec<Healt
         ))
     });
 
+    let commit_remedy = || {
+        Remedy::new(
+            RemedyAction::CommitProjectFiles,
+            "Commit the project files",
+            "Stages everything in this folder that Git is not ignoring and records it as a commit. \
+             Your files themselves are not changed.",
+            RemedyInput::None,
+        )
+    };
+
     checks.push(if repository.has_commit {
         HealthCheck::new(
             "git-history",
@@ -350,13 +360,31 @@ fn git_checks(workspace: &Path, repository: &git::RepositoryStatus) -> Vec<Healt
             "The repository has no commits yet. A task worktree is branched from a commit, so \
              there is nothing for Gofer to branch from.",
         )
-        .with_remedy(Remedy::new(
-            RemedyAction::CreateInitialCommit,
-            "Create the first commit",
-            "Makes an empty commit to branch from. Nothing in your folder is staged or changed.",
-            RemedyInput::None,
-        ))
+        .with_remedy(commit_remedy())
     });
+
+    // A commit that does not carry the project is a branch point and nothing more: every task
+    // worktree is checked out from it, so the editor session opens a directory with no
+    // project.godot in it and stops there, long after this report said the workspace was ready.
+    if repository.has_commit
+        && !repository.tracks_project_file
+        && workspace.join(crate::addon::PROJECT_FILE).is_file()
+    {
+        checks.push(
+            HealthCheck::new(
+                "git-project-tracked",
+                "Project in history",
+                HealthStatus::Blocked,
+                format!(
+                    "{} is in this folder but not in the last commit. Each task runs in a worktree \
+                     checked out from that commit, so the task would open a folder with no Godot \
+                     project in it.",
+                    crate::addon::PROJECT_FILE
+                ),
+            )
+            .with_remedy(commit_remedy()),
+        );
+    }
 
     if repository.has_commit && !repository.is_clean {
         checks.push(HealthCheck::new(
@@ -538,7 +566,7 @@ pub fn apply(workspace: &Path, action: RemedyAction) -> Result<(), String> {
         RemedyAction::SetGitIdentity => {
             git::set_local_identity(workspace, FALLBACK_IDENTITY_NAME, FALLBACK_IDENTITY_EMAIL)
         }
-        RemedyAction::CreateInitialCommit => git::create_initial_commit(workspace),
+        RemedyAction::CommitProjectFiles => git::commit_project_files(workspace),
         RemedyAction::CreateGodotProject => create_starter_project(workspace),
         RemedyAction::ChooseWorkspace | RemedyAction::LocateGodotBinary => {
             Err("That fix is applied by Gofer itself, not by the workspace.".to_owned())
@@ -666,13 +694,55 @@ mod tests {
         assert_eq!(history.status, HealthStatus::Blocked);
         assert_eq!(
             history.remedy.as_ref().map(|remedy| remedy.action),
-            Some(RemedyAction::CreateInitialCommit)
+            Some(RemedyAction::CommitProjectFiles)
         );
 
-        apply(directory.path(), RemedyAction::CreateInitialCommit).expect("first commit");
+        apply(directory.path(), RemedyAction::CommitProjectFiles).expect("first commit");
 
         let repaired = super::report(&input(directory.path()));
         assert_eq!(check(&repaired, "git-history").status, HealthStatus::Ok);
+    }
+
+    /// The report used to call this workspace ready, and every task started in it then failed at
+    /// "contains no project.godot" — the worktree was checked out from a commit holding nothing.
+    #[test]
+    fn a_project_missing_from_the_history_blocks_with_the_commit_fix() {
+        let directory = TempDir::new().expect("temporary directory");
+        git(directory.path(), &["init", "-b", "main"]);
+        git(directory.path(), &["config", "user.name", "Test"]);
+        git(directory.path(), &["config", "user.email", "test@local"]);
+        git(
+            directory.path(),
+            &["commit", "--allow-empty", "-m", "Empty"],
+        );
+        fs::write(
+            directory.path().join(crate::addon::PROJECT_FILE),
+            "config_version=5\n",
+        )
+        .expect("project file");
+
+        let report = report(&input(directory.path()));
+
+        assert!(!report.is_ready);
+        // On disk, so the Godot project check is satisfied and says nothing about the history.
+        assert_eq!(check(&report, "godot-project").status, HealthStatus::Ok);
+        let tracked = check(&report, "git-project-tracked");
+        assert_eq!(tracked.status, HealthStatus::Blocked);
+        assert_eq!(
+            tracked.remedy.as_ref().map(|remedy| remedy.action),
+            Some(RemedyAction::CommitProjectFiles)
+        );
+
+        apply(directory.path(), RemedyAction::CommitProjectFiles).expect("commit the project");
+
+        let repaired = super::report(&input(directory.path()));
+        assert!(
+            repaired
+                .checks
+                .iter()
+                .all(|check| check.id != "git-project-tracked")
+        );
+        assert!(repaired.is_ready);
     }
 
     /// The identity fix has to make committing possible, not merely record two strings.
@@ -688,7 +758,7 @@ mod tests {
         );
 
         apply(directory.path(), RemedyAction::SetGitIdentity).expect("identity");
-        apply(directory.path(), RemedyAction::CreateInitialCommit).expect("first commit");
+        apply(directory.path(), RemedyAction::CommitProjectFiles).expect("first commit");
 
         let report = report(&input(directory.path()));
         assert_eq!(check(&report, "git-identity").status, HealthStatus::Ok);
@@ -755,8 +825,8 @@ mod tests {
         git(directory.path(), &["init", "-b", "main"]);
         git(directory.path(), &["config", "user.name", "Test"]);
         git(directory.path(), &["config", "user.email", "test@local"]);
-        apply(directory.path(), RemedyAction::CreateInitialCommit).expect("first commit");
         apply(directory.path(), RemedyAction::CreateGodotProject).expect("starter project");
+        apply(directory.path(), RemedyAction::CommitProjectFiles).expect("first commit");
         let mut probe = input(directory.path());
         probe.ai.reachability = AiReachability::Unreachable;
         probe.ai.message = "The AI server could not be reached.".to_owned();
