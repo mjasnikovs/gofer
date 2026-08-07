@@ -116,6 +116,53 @@ impl EventSubscription {
 
 static EVENT_SUBSCRIPTION: Mutex<Option<EventSubscription>> = Mutex::new(None);
 
+/// The task the running editor session belongs to.
+///
+/// A session is pinned to the worktree it started in; the active task is whatever the sidebar last
+/// pointed at. Nothing kept the two together, so switching tasks with a session running left every
+/// panel reading one task's editor while the file tools — the agent's included — wrote into
+/// another's checkout. The scene that answered was a scene the user was not looking at, and nothing
+/// on screen said so. This is what a call is checked against.
+static SESSION_TASK: Mutex<Option<String>> = Mutex::new(None);
+
+fn remember_session_task(task_id: Option<String>) {
+    if let Ok(mut owner) = SESSION_TASK.lock() {
+        *owner = task_id;
+    }
+}
+
+/// Refuses a call when the editor session belongs to a task the window has moved away from.
+///
+/// Answering would be worse than refusing: the reply describes another checkout entirely, and it
+/// looks exactly like an answer about this one.
+pub fn require_session_task<R: Runtime>(app: &AppHandle<R>) -> Result<(), RpcError> {
+    if godot_session::current_info().is_none() {
+        return Ok(());
+    }
+    let Ok(owner) = SESSION_TASK.lock() else {
+        return Ok(());
+    };
+    let Some(session_task) = owner.clone() else {
+        return Ok(());
+    };
+    drop(owner);
+    // A storage that cannot be read is not evidence of a mismatch, so it is not treated as one.
+    let Ok(storage) = project_storage(app) else {
+        return Ok(());
+    };
+    let Ok(active) = storage.active_task() else {
+        return Ok(());
+    };
+    if active.as_deref() == Some(session_task.as_str()) {
+        return Ok(());
+    }
+    Err(RpcError::new(
+        "session_other_task",
+        "The Godot editor session belongs to another task. Open that task, or stop the session \
+         and start one here.",
+    ))
+}
+
 /// The stored run one editor session is writing its output into.
 ///
 /// Run logging used to belong to the standalone Godot process Gofer launched from the Run button.
@@ -191,6 +238,7 @@ pub fn start_session<R: Runtime>(
         binary: crate::configured_godot_binary(app),
     }) {
         Ok(info) => {
+            remember_session_task(storage.active_task().ok().flatten());
             start_run_logging(&storage, &info, &worktree);
             Ok(to_response(&info))
         }
@@ -352,6 +400,7 @@ pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> 
         let _ = addon_stager(app).unstage(&worktree);
     }
     stop_event_subscription();
+    remember_session_task(None);
     result
 }
 
@@ -379,7 +428,11 @@ pub fn get_session() -> Result<Option<GodotSessionResponse>, SessionError> {
 }
 
 /// Sends one tagged RPC call to the connected addon.
-pub fn call_godot(request: CallGodotRequest) -> Result<CallGodotResponse, RpcError> {
+pub fn call_godot<R: Runtime>(
+    app: &AppHandle<R>,
+    request: CallGodotRequest,
+) -> Result<CallGodotResponse, RpcError> {
+    require_session_task(app)?;
     let rpc = godot_session::rpc_session()
         .ok_or_else(|| RpcError::new("session_not_active", "No Godot session is active"))?;
     let response = rpc.call(RpcCallRequest {

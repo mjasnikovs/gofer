@@ -333,7 +333,12 @@ pub const CATALOG: &[ToolDomain] = &[
     ToolDomain {
         name: "godot_script",
         description: "GDScript editing and intelligence through Godot's language server. Positions \
-                      are {line, character}, zero-based. Open a script before querying it.",
+                      are {line, character}, zero-based. Open a script before querying it — and \
+                      write GDScript here rather than with the file tools, because saving here is \
+                      what tells the server, and `diagnostics` on the same path is then what says \
+                      whether it parses. A script that does not parse stops the scene using it from \
+                      loading. Paths may be named either way, `scripts/mario.gd` or \
+                      res://scripts/mario.gd.",
         operations: &[
             operation(
                 "open",
@@ -546,13 +551,13 @@ pub fn dispatch<R: Runtime>(
 
     match domain.name {
         "godot_session" => session_domain(app, &op, params),
-        "godot_scene" => Ok(rpc(&format!("scene.{op}"), params)?),
-        "godot_node" => Ok(rpc(&format!("node.{op}"), params)?),
-        "godot_project" => Ok(rpc(&project_command(&op), params)?),
+        "godot_scene" => Ok(rpc(app, &format!("scene.{op}"), params)?),
+        "godot_node" => Ok(rpc(app, &format!("node.{op}"), params)?),
+        "godot_project" => Ok(rpc(app, &project_command(&op), params)?),
         "godot_resource" => resource_domain(app, &op, params),
         "godot_script" => script_domain(app, &op, params),
         "godot_debug" => debug_domain(&op, params),
-        "godot_runtime" => Ok(rpc(&format!("runtime.{op}"), params)?),
+        "godot_runtime" => Ok(rpc(app, &format!("runtime.{op}"), params)?),
         "godot_logs" => logs_domain(params),
         "godot_docs_search" => docs_domain(params),
         // Every catalog entry is handled above; a new domain without a route is a build-time
@@ -578,7 +583,7 @@ fn session_domain<R: Runtime>(
             godot_session_api::stop_session(app)?;
             Ok(json!({"stopped": true}))
         }
-        _ => Ok(rpc(&format!("session.{op}"), params)?),
+        _ => Ok(rpc(app, &format!("session.{op}"), params)?),
     }
 }
 
@@ -610,7 +615,7 @@ fn resource_domain<R: Runtime>(
                 .delete(&request.path, request.expected_hash.as_deref())?;
             Ok(json!({"path": request.path, "deleted": true}))
         }
-        _ => Ok(rpc("resource.rescan", params)?),
+        _ => Ok(rpc(app, "resource.rescan", params)?),
     }
 }
 
@@ -640,6 +645,37 @@ fn reject_outside_paths<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Resul
 /// the text landed under an editor that had its own copy of that scene open, outside the undo stack
 /// and outside the revision guard, in a layout Godot's own writer would never produce. A scene is
 /// the editor's to write, so anything that is not a script is refused with the tool that owns it.
+/// Rewrites `res://…` into the worktree-relative path the file tools take.
+///
+/// Two conventions meet in this catalog and neither is wrong: the editor names a file the way Godot
+/// does, `res://scripts/mario.gd`, and everything that reaches the filesystem names it the way the
+/// worktree does, `scripts/mario.gd`. A model has no way to know which domain wants which, and it
+/// reaches for `res://` because that is what it just used to build the scene — then `godot_script
+/// open` answers that the file does not exist, about a file it wrote a moment ago. The mapping is
+/// exact, so it is done here rather than explained. Confinement is untouched: what is left after
+/// the prefix is still a relative path, so `res://../secrets` is refused exactly as `../secrets` is.
+fn accept_resource_paths(mut params: Value) -> Value {
+    fn worktree_relative(value: &mut Value) {
+        if let Some(path) = value.as_str().and_then(|path| path.strip_prefix("res://")) {
+            *value = Value::String(path.to_owned());
+        }
+    }
+    if let Some(path) = params.get_mut("path") {
+        worktree_relative(path);
+    }
+    // `apply_rename` and `set_breakpoints` carry their paths one level down.
+    for key in ["files", "breakpoints"] {
+        if let Some(entries) = params.get_mut(key).and_then(Value::as_array_mut) {
+            for entry in entries {
+                if let Some(path) = entry.get_mut("path") {
+                    worktree_relative(path);
+                }
+            }
+        }
+    }
+    params
+}
+
 fn require_script_path(params: &Value) -> Result<(), ToolFailure> {
     let path = params
         .get("path")
@@ -663,6 +699,7 @@ fn script_domain<R: Runtime>(
     op: &str,
     params: Value,
 ) -> Result<Value, ToolFailure> {
+    let params = accept_resource_paths(params);
     match op {
         "open" => {
             require_script_path(&params)?;
@@ -701,7 +738,8 @@ fn script_domain<R: Runtime>(
 }
 
 fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
-    let request: DebugRequest = from_tagged_params(op, params)?;
+    // A breakpoint names a script, so it meets the same two conventions the script domain does.
+    let request: DebugRequest = from_tagged_params(op, accept_resource_paths(params))?;
     Ok(to_value(debug::call(request)?))
 }
 
@@ -732,16 +770,23 @@ fn project_command(op: &str) -> String {
 /// Sends one addon command through the same session API the renderer's `call_godot` uses.
 /// `expectedRevision` and `timeoutMs` are lifted out of the parameters: every scene mutation
 /// carries a revision, and the wire format keeps it beside the command rather than inside it.
-fn rpc(command: &str, mut params: Value) -> Result<Value, crate::godot_rpc::RpcError> {
+fn rpc<R: Runtime>(
+    app: &AppHandle<R>,
+    command: &str,
+    mut params: Value,
+) -> Result<Value, crate::godot_rpc::RpcError> {
     let expected_revision = take_u64(&mut params, "expectedRevision");
     let timeout_ms = take_u64(&mut params, "timeoutMs");
-    let response = godot_session_api::call_godot(CallGodotRequest {
-        id: format!("ai-{command}-{}", next_call_id()),
-        command: command.to_owned(),
-        params,
-        expected_revision,
-        timeout_ms,
-    })?;
+    let response = godot_session_api::call_godot(
+        app,
+        CallGodotRequest {
+            id: format!("ai-{command}-{}", next_call_id()),
+            command: command.to_owned(),
+            params,
+            expected_revision,
+            timeout_ms,
+        },
+    )?;
     let mut result = response.result;
     if let (Some(revision), Some(object)) = (response.revision, result.as_object_mut()) {
         object.insert("revision".to_owned(), json!(revision));
@@ -905,6 +950,43 @@ mod tests {
                 "the addon must guard {command} with a revision, as the protocol says it does"
             );
         }
+    }
+
+    /// A script named the way the editor names it reaches the file the worktree holds.
+    ///
+    /// The catalog mixes two path conventions because Godot does: a scene is `res://main.tscn` and
+    /// a script is `scripts/main.gd`. A model reaches for the one it just used, so `godot_script
+    /// open` was told a file it had written a moment earlier did not exist.
+    #[test]
+    fn a_resource_path_reaches_the_same_script_as_a_worktree_path() {
+        assert_eq!(
+            accept_resource_paths(json!({"path": "res://scripts/mario.gd"}))["path"],
+            "scripts/mario.gd"
+        );
+        // Already worktree-relative, and left exactly as it is.
+        assert_eq!(
+            accept_resource_paths(json!({"path": "scripts/mario.gd"}))["path"],
+            "scripts/mario.gd"
+        );
+        // The nested paths of `apply_rename` and `set_breakpoints`.
+        let nested = accept_resource_paths(json!({
+            "files": [{"path": "res://scripts/a.gd"}],
+            "breakpoints": [{"path": "res://scripts/b.gd", "lines": [1]}]
+        }));
+        assert_eq!(nested["files"][0]["path"], "scripts/a.gd");
+        assert_eq!(nested["breakpoints"][0]["path"], "scripts/b.gd");
+        // Stripping the prefix must not become a way out of the worktree: what is left is still a
+        // relative path, and a relative path that climbs is refused where every other one is.
+        assert_eq!(
+            accept_resource_paths(json!({"path": "res://../secrets.gd"}))["path"],
+            "../secrets.gd"
+        );
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let workspace = crate::files::Workspace::open(directory.path()).expect("open workspace");
+        assert!(
+            workspace.resolve("../secrets.gd").is_err(),
+            "a path that climbs out of the worktree must still be refused"
+        );
     }
 
     /// The catalog has to name an input event the way the addon reads one.

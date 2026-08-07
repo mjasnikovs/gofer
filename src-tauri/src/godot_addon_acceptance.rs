@@ -1227,6 +1227,38 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("gofer_managed")
         );
 
+        // A setting written with dots where Godot uses slashes is a different setting, and the
+        // difference is invisible: it saves, it reads back, and the one that governs the project is
+        // untouched. A live agent set `application.run.main_scene`, was told `saved: true`, read its
+        // own value back to confirm it, and the game went on running the scene it always had.
+        let mistyped = session.error(
+            "project.set_setting",
+            json!({
+                "name": "application.run.main_scene",
+                "value": {"type": "string", "value": "res://acceptance.tscn"}
+            }),
+            None,
+        );
+        assert!(
+            mistyped.starts_with("setting_not_found")
+                && mistyped.contains("application/run/main_scene"),
+            "a mistyped built-in must be refused by naming the one it meant: {mistyped}"
+        );
+        // A custom setting is not a mistake, so it is still allowed — and says it made one.
+        let invented = session.call(
+            "project.set_setting",
+            json!({"name": "acceptance/custom_knob", "value": {"type": "int", "value": 7}}),
+        );
+        assert_eq!(invented["created"], true);
+        let changed = session.call(
+            "project.set_setting",
+            json!({"name": "acceptance/custom_knob", "value": {"type": "int", "value": 8}}),
+        );
+        assert_eq!(
+            changed["created"], false,
+            "a setting that already existed was changed, not created"
+        );
+
         // Input Map: actions round-trip as typed events, built-ins are marked and protected.
         let action = session.call(
             "project.set_input_action",

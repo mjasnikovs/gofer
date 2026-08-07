@@ -1019,11 +1019,41 @@ func _project_set_setting(params: Dictionary) -> Dictionary:
             "Project setting '%s': %s" % [name, fitted["message"]],
             {"name": name, "expected": type_string(declared)}
         )
+    var existed := ProjectSettings.has_setting(name)
+    if not existed:
+        var meant := _setting_meant(name)
+        if not meant.is_empty():
+            return _config_error(
+                "setting_not_found",
+                "There is no project setting '%s'. Did you mean '%s'?" % [name, meant],
+                {"name": name, "didYouMean": meant}
+            )
     ProjectSettings.set_setting(name, fitted["value"])
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    return {"name": name, "saved": true, "restartRequired": _restart_required(name)}
+    # `created` is the difference between changing the project and inventing a corner of it. A
+    # caller that misspells a built-in setting otherwise gets `saved: true` for a setting nothing
+    # reads, and can even read its own value back — which is what a mistyped
+    # `application.run.main_scene` did: the project kept running the scene it always had.
+    return {
+        "name": name,
+        "saved": true,
+        "created": not existed,
+        "restartRequired": _restart_required(name)
+    }
+
+## The setting a name was probably meant to be, or "" when there is nothing close.
+##
+## Godot names its settings `section/key`, and a caller that writes them with dots gets a brand-new
+## custom setting instead of the built-in one — accepted, saved, and read back, while the setting
+## that governs anything stays untouched. Custom settings are legitimate, so an unknown name is not
+## refused on its own; it is refused only when swapping the separator finds a real one.
+func _setting_meant(name: String) -> String:
+    if not name.contains("."):
+        return ""
+    var candidate := name.replace(".", "/")
+    return candidate if ProjectSettings.has_setting(candidate) else ""
 
 ## Restores a setting's default when it has one and removes it otherwise. An autoload, input
 ## action, or plugin entry must go through its own removal command.

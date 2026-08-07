@@ -848,10 +848,11 @@ async fn get_godot_session()
 
 /// Sends one tagged RPC call to the connected Godot addon.
 #[tauri::command]
-async fn call_godot(
+async fn call_godot<R: Runtime>(
+    app: AppHandle<R>,
     request: godot_session_api::CallGodotRequest,
 ) -> Result<godot_session_api::CallGodotResponse, godot_rpc::RpcError> {
-    tauri::async_runtime::spawn_blocking(move || godot_session_api::call_godot(request))
+    tauri::async_runtime::spawn_blocking(move || godot_session_api::call_godot(&app, request))
         .await
         .map_err(|error| {
             godot_rpc::RpcError::new(

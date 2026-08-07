@@ -1692,19 +1692,40 @@ describe('the live workspace', () => {
             await askUntil(
                 `Make ${LEVEL_SCENE_RESOURCE} the project’s main scene, so running the project `
                     + 'starts the level.',
-                () =>
-                    Promise.resolve(
-                        readFileSync(join(bound, 'project.godot'), 'utf8').includes(
-                            LEVEL_SCENE_RESOURCE
-                        )
-                    ),
-                `project.godot must name ${LEVEL_SCENE_RESOURCE} as application/run/main_scene.`
+                // The setting, not the string. `project.godot` mentions the level in several
+                // places, so a substring search passed while the setting the project actually runs
+                // from was untouched — the agent had written `application.run.main_scene`, with
+                // dots, and every check agreed with it right up until the wrong game started.
+                async () =>
+                    (
+                        await godotCall<{value?: {value?: unknown}}>('project.get_setting', {
+                            name: 'application/run/main_scene'
+                        }).catch(() => ({value: undefined}))
+                    ).value?.value === LEVEL_SCENE_RESOURCE,
+                `application/run/main_scene must be ${LEVEL_SCENE_RESOURCE} — the setting itself, `
+                    + 'spelled with slashes the way Godot names it, not a similar name.'
             )
             // The inspector reads the setting from the running editor, not from the file.
             await openInspector()
             await clickTab('Project')
             await fillLabelledInput('Search project settings', 'main_scene')
-            await expectText([LEVEL_SCENE_RESOURCE], {limitMs: 60_000})
+            // Both halves, inside the inspector: the setting's real name and the level it names.
+            // Whole-window text would have found them in the chat, where the agent has been saying
+            // both for twenty minutes.
+            const deadline = Date.now() + 60_000
+            for (;;) {
+                const settings = await regionText('Inspector')
+                if (
+                    settings.includes('application/run/main_scene')
+                    && settings.includes(LEVEL_SCENE_RESOURCE)
+                )
+                    break
+                if (Date.now() >= deadline)
+                    throw new Error(
+                        `the inspector never showed application/run/main_scene as `
+                            + `${LEVEL_SCENE_RESOURCE}; it reads: ${settings}`
+                    )
+            }
             await closeInspector()
         })
 

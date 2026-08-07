@@ -833,6 +833,15 @@ impl ProjectStorage {
         self.task_workspace(&task_id)
     }
 
+    /// Which task the window is on, or `None` when it is on none.
+    ///
+    /// Cheap on purpose: it reads one row and never restores a checkout, because it is asked on
+    /// every call that has to know whether the editor session still belongs to the task in front of
+    /// the user. [`Self::active_task_workspace`] is the one that may rebuild a worktree.
+    pub fn active_task(&self) -> Result<Option<String>, String> {
+        active_task_id(&self.connection()?)
+    }
+
     /// The task's worktree, restored first when Git no longer holds it.
     ///
     /// A recorded worktree outlives the checkout it names: removed by hand, or emptied when the
