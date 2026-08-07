@@ -1705,28 +1705,22 @@ describe('the live workspace', () => {
                 `application/run/main_scene must be ${LEVEL_SCENE_RESOURCE} — the setting itself, `
                     + 'spelled with slashes the way Godot names it, not a similar name.'
             )
-            // The inspector reads the setting from the running editor, not from the file.
+            // The inspector reads the setting from the running editor, not from the file. Both
+            // halves are required — the setting's real name, spelled with the slashes Godot uses,
+            // and the level it names — because the name alone is what a near miss gets wrong.
+            //
+            // Closed in a `finally`: under 1024px the inspector is a dialog, and one left open sits
+            // over the sidebar, so a failure here would take the next steps down with it.
             await openInspector()
-            await clickTab('Project')
-            await fillLabelledInput('Search project settings', 'main_scene')
-            // Both halves, inside the inspector: the setting's real name and the level it names.
-            // Whole-window text would have found them in the chat, where the agent has been saying
-            // both for twenty minutes.
-            const deadline = Date.now() + 60_000
-            for (;;) {
-                const settings = await regionText('Inspector')
-                if (
-                    settings.includes('application/run/main_scene')
-                    && settings.includes(LEVEL_SCENE_RESOURCE)
-                )
-                    break
-                if (Date.now() >= deadline)
-                    throw new Error(
-                        `the inspector never showed application/run/main_scene as `
-                            + `${LEVEL_SCENE_RESOURCE}; it reads: ${settings}`
-                    )
+            try {
+                await clickTab('Project')
+                await fillLabelledInput('Search project settings', 'main_scene')
+                await expectText(['application/run/main_scene', LEVEL_SCENE_RESOURCE], {
+                    limitMs: 60_000
+                })
+            } finally {
+                await closeInspector()
             }
-            await closeInspector()
         })
 
         /**
@@ -1887,14 +1881,20 @@ describe('the live workspace', () => {
         })
 
         after(async () => {
-            // The story continues on the task the level was built in.
+            // The story continues on the task the level was built in. A hook that throws is
+            // reported as a second failure and takes the rest of the file with it, so this one
+            // reports what it could not do and lets the steps that follow say what that cost.
             if (builtOn === '') return
-            await clickSelector(`a[href="${builtOn}"]`, 'the task the level was built in')
-            await browser.waitUntil(async () => (await currentRoute()) === builtOn, {
-                timeout: 60_000,
-                interval: 200,
-                timeoutMsg: `the window never returned to ${builtOn}`
-            })
+            try {
+                await clickSelector(`a[href="${builtOn}"]`, 'the task the level was built in')
+                await browser.waitUntil(async () => (await currentRoute()) === builtOn, {
+                    timeout: 60_000,
+                    interval: 200,
+                    timeoutMsg: `the window never returned to ${builtOn}`
+                })
+            } catch (error: unknown) {
+                console.log(`could not return to ${builtOn}: ${String(error)}`)
+            }
         })
     })
 
