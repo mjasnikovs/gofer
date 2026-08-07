@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
+import {act, cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {InspectorWorkspace} from './InspectorWorkspace'
@@ -340,6 +340,24 @@ function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptio
     return {session, calls, iconRequests, debugCalls, sceneOpens, edited}
 }
 
+/**
+ * Tells the frame the editor is editing another scene, the way the addon does.
+ *
+ * The edited scene reaches the workspace as a `scene.changed` event and nowhere else — a
+ * `scene.open` answering does not move it — so a test about what a scene change does has to send
+ * one.
+ */
+function publishSceneChanged(scene: string) {
+    const subscription = tauri.invoke.mock.calls.find(
+        call => call[0] === 'subscribe_godot_events'
+    )?.[1] as {events: {onmessage: (event: unknown) => void}} | undefined
+    subscription?.events.onmessage({
+        type: 'rpcEvent',
+        event: 'scene.changed',
+        data: {scene, revision: 0, dirty: false}
+    })
+}
+
 /** Publishes one diagnostic through the channel the frame subscribed with. */
 function publishDiagnostic() {
     const subscription = tauri.invoke.mock.calls.find(
@@ -585,6 +603,41 @@ describe('InspectorWorkspace', () => {
             expect(server.sceneOpens).toEqual(['res://scenes/main.tscn'])
         })
         expect(editor.state?.editors).toBe(0)
+    })
+
+    /**
+     * A node chosen in one scene is not asked about in the next.
+     *
+     * The editor's scene changes under the inspector constantly, and the chosen path went with it —
+     * so the panel asked the new scene for the old scene's node and showed what the addon rightly
+     * answered: `Node /Main/Player was not found in the edited scene`. Reported as an error the
+     * user could neither act on nor get rid of.
+     */
+    it('drops the chosen node when the editor moves to another scene', async () => {
+        backend()
+        const user = userEvent.setup()
+        renderWorkspace()
+        await startSession(user)
+
+        await user.click(screen.getByText('Player'))
+        const inspector = await screen.findByRole('complementary', {name: 'Inspector'})
+        await waitFor(() => {
+            expect(within(inspector).getByText('Main/Player')).toBeInTheDocument()
+        })
+
+        // The editor moves to another scene, which is where the old path stops meaning anything.
+        act(() => {
+            publishSceneChanged('res://scenes/level_1.tscn')
+        })
+
+        await waitFor(() => {
+            expect(within(inspector).getByText('Nothing selected')).toBeInTheDocument()
+        })
+        expect(within(inspector).queryByText('Main/Player')).not.toBeInTheDocument()
+        // The reading is gone rather than replaced by the refusal it used to show.
+        expect(
+            within(inspector).queryByText(/was not found in the edited scene/u)
+        ).not.toBeInTheDocument()
     })
 
     it('offers the scene the project runs when the editor is editing none', async () => {

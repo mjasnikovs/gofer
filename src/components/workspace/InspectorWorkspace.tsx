@@ -43,6 +43,9 @@ type InspectorWorkspaceProps = Readonly<{
 
 type CenterTab = 'chat' | 'scripts' | 'game' | 'docs'
 
+/** A chosen node and the edited scene it was chosen in, which is what makes its path meaningful. */
+type ChosenNode = Readonly<{selection: GodotSelection; scene: string}>
+
 /*
  * Responsive contract:
  *   > 1024px   explorer 260 (resizable) | center | inspector 380 (resizable)
@@ -109,7 +112,7 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
     const [bottomTab, setBottomTab] = useState<BottomTab>('problems')
     const [isBottomCollapsed, setIsBottomCollapsed] = useState(false)
     const [isInspectorOpen, setIsInspectorOpen] = useState(false)
-    const [selection, setSelection] = useState<GodotSelection>()
+    const [chosen, setChosen] = useState<ChosenNode>()
     const [fileFilter, setFileFilter] = useState('')
     const [reveal, setReveal] = useState<ScriptReveal>()
     const [failure, setFailure] = useState<string>()
@@ -267,10 +270,35 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
         [scripts]
     )
 
-    const select = useCallback((next: GodotSelection) => {
-        setSelection(next)
-        setInspectorTab('node')
-    }, [])
+    const select = useCallback(
+        (next: GodotSelection) => {
+            setChosen({selection: next, scene: scenePath})
+            setInspectorTab('node')
+        },
+        [scenePath]
+    )
+
+    /**
+     * A node chosen in one scene does not exist in the next one.
+     *
+     * The editor's scene changes under the inspector all the time — the agent opens one, the user
+     * clicks a `.tscn`, the editor opens one for itself on startup — and the chosen path went with
+     * it. The reading is then made of the new scene against the old scene's path, and the addon
+     * answers exactly what was asked: `Node /Main/Player was not found in the edited scene`. The
+     * error is right and the question was not, so the choice is retired with the scene it was made
+     * in rather than outliving it as an error the user cannot act on.
+     *
+     * Derived rather than cleared, so there is no render that still holds the stale path. A runtime
+     * choice is kept: it belongs to the running game, which the edited scene changing does not
+     * touch.
+     */
+    const selection =
+        (
+            chosen === undefined
+            || (chosen.selection.origin === 'edited' && chosen.scene !== scenePath)
+        ) ?
+            undefined
+        :   chosen.selection
 
     const startSession = useCallback(() => {
         void start()
