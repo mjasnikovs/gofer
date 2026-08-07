@@ -223,7 +223,11 @@ describe('script buffers', () => {
         expect(server.saved).toEqual([])
         expect(hook.result.current.activeBuffer?.conflict).toBe('staleSave')
         expect(hook.result.current.activeBuffer?.dirty).toBe(true)
-        expect(onError).toHaveBeenCalledWith(expect.stringContaining('could not be saved'))
+        // The conflict is the report, and it is attached to the buffer that has the two answers to
+        // it. Sending a copy to the frame as well put the same sentence in a banner that only a
+        // click can remove, so the workspace went on saying the file could not be saved long after
+        // it had been — through every later save, every tab, and every task.
+        expect(onError).not.toHaveBeenCalled()
     })
 
     it('reloads a clean buffer on an external change but conflicts a dirty one', async () => {

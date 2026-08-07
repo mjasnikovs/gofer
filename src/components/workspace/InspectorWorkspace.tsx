@@ -133,7 +133,10 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
     )
 
     const isNarrow = useNarrowViewport()
-    const scripts = useScriptBuffers({onError: report})
+    const clearFailure = useCallback(() => {
+        setFailure(undefined)
+    }, [])
+    const scripts = useScriptBuffers({onError: report, onResolved: clearFailure})
     const {
         call,
         ensureReady,

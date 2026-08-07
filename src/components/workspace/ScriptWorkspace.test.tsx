@@ -386,6 +386,34 @@ describe('ScriptWorkspace', () => {
         expect(screen.getByRole('button', {name: 'Reload from disk'})).toBeInTheDocument()
     })
 
+    /**
+     * The conflict is reported once, where it can be answered.
+     *
+     * The frame's banner has no dismissal but the user's own click, so a copy of this failure sent
+     * there outlives the conflict entirely: the workspace goes on saying the file could not be
+     * saved through every later save, every tab, and every task. Reported as a constant annoyance.
+     */
+    it('does not also report a stale save to the frame, which cannot take it back', async () => {
+        const server = backend()
+        const report = vi.fn()
+        const user = userEvent.setup()
+        render(<Harness onError={report} />)
+        await user.click(screen.getByRole('button', {name: 'Open player.gd'}))
+        await waitFor(() => {
+            expect(openTab()).toBeInTheDocument()
+        })
+
+        server.file.hash = 'hash-external'
+        editor.state?.type('extends Node2D\n')
+        await waitFor(() => {
+            expect(openTab()).toHaveTextContent('•')
+        })
+        await user.click(screen.getByRole('button', {name: 'Save'}))
+
+        expect(await screen.findByText('This buffer is out of date')).toBeInTheDocument()
+        expect(report).not.toHaveBeenCalled()
+    })
+
     it('reveals the line another panel pointed at', async () => {
         backend()
         const report = vi.fn()

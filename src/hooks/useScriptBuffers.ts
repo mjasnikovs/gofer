@@ -60,6 +60,14 @@ export type RenamePreview = Readonly<{
 
 type ScriptBufferOptions = Readonly<{
     onError: (message: string) => void
+    /**
+     * Called when a buffer operation succeeds, so a failure already on screen can be taken down.
+     *
+     * Without it the frame's banner is not a report of what just happened but a record of the first
+     * thing that ever went wrong: a save conflict resolved twenty minutes ago still says the file
+     * could not be saved, through every later save, every tab, and every task.
+     */
+    onResolved?: (() => void) | undefined
 }>
 
 /** Everything the workspace's script surfaces share: one set of buffers, owned by the frame. */
@@ -84,7 +92,7 @@ function replaceBuffer(
  * Rust assigns it — on open, on every debounced change, and on save — so a UI edit and an AI edit
  * of the same file cannot leave two versions of the truth behind.
  */
-export function useScriptBuffers({onError}: ScriptBufferOptions) {
+export function useScriptBuffers({onError, onResolved}: ScriptBufferOptions) {
     const [buffers, setBuffers] = useState<readonly ScriptBuffer[]>([])
     const [activePath, setActivePath] = useState<string>()
     const [files, setFiles] = useState<readonly WorkspaceEntry[]>([])
@@ -98,10 +106,19 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
     const report = useCallback(
         (error: unknown, action: string) => {
             const failure = toScriptError(error)
+            // A stale save has a surface of its own — the buffer's own "out of date" bar, with the
+            // two answers to it. Reporting it to the frame as well says the same thing twice in two
+            // places, and the frame's copy outlives the conflict.
+            if (failure.code === 'file_conflict') return
             onError(`${action}: ${failure.message}`)
         },
         [onError]
     )
+
+    /** Says the workspace is working again, so a failure still on screen can be taken down. */
+    const resolved = useCallback(() => {
+        onResolved?.()
+    }, [onResolved])
 
     const refreshFiles = useCallback(async () => {
         if (!isTauri()) return
@@ -250,6 +267,7 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
                         conflict: undefined
                     }))
                 )
+                resolved()
             } catch (error) {
                 const failure = toScriptError(error)
                 // The file changed since this buffer read it. Nothing is written, and the buffer
@@ -262,7 +280,7 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
                 report(error, `${path} could not be saved`)
             }
         },
-        [buffers, flushChange, report]
+        [buffers, flushChange, report, resolved]
     )
 
     /** Discards the buffer and takes what is on disk, clearing any conflict. */
@@ -294,11 +312,12 @@ export function useScriptBuffers({onError}: ScriptBufferOptions) {
                         conflict: undefined
                     }))
                 )
+                resolved()
             } catch (error) {
                 report(error, `${path} could not be overwritten`)
             }
         },
-        [buffers, flushChange, report]
+        [buffers, flushChange, report, resolved]
     )
 
     const toggleBreakpoint = useCallback((path: string, line: number) => {
