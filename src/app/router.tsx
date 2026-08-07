@@ -133,7 +133,15 @@ function Application() {
         void refreshTasks()
     }, [refreshTasks])
     const mergeDisplayedTask = useCallback(async () => {
-        if (!displayedTask?.worktree) return
+        // Saying nothing is the one thing this must not do. The button is offered by the same
+        // record this reads, so the two disagreeing means the list went stale under the window —
+        // and returning quietly left a control that did nothing at all when pressed, with no
+        // failure anywhere to explain it.
+        if (!displayedTask?.worktree) {
+            throw new Error(
+                'This task has no worktree to merge. Reopen it from the sidebar and try again.'
+            )
+        }
         await invoke('merge_task_worktree', {taskId: displayedTask.id})
         await refreshTasks()
     }, [displayedTask, refreshTasks])

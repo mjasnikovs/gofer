@@ -1848,6 +1848,29 @@ describe('the live workspace', () => {
         })
     })
 
+    describe('merging the task back', () => {
+        it('merges the worktree the agent worked in into the project', async () => {
+            await clickButton('Merge task')
+            // The button is the state: a task whose branch has landed is not offered again.
+            await expectGone(['Merge task'], {limitMs: 120_000})
+        })
+
+        it('leaves the level in the project the sweep was pointed at', () => {
+            expect(git('rev-parse', 'HEAD')).not.toBe(seedCommit)
+            expect(git('ls-tree', '--name-only', '-r', 'HEAD')).toContain(LEVEL_SCENE)
+        })
+
+        it('keeps Gofer’s own scaffolding out of the project it merged into', () => {
+            // The addon is staged into the worktree while a session runs — its files are kept out
+            // of Git by an exclude entry, and the two lines it adds to `project.godot` have to be
+            // kept out of the merge as well. They belong to Gofer, not to the user's game.
+            const project = readFileSync(join(workspace, 'project.godot'), 'utf8')
+            expect(project).not.toContain('addons/gofer')
+            expect(project).not.toContain('GoferRuntime')
+            expect(existsSync(join(workspace, 'addons/gofer'))).toBe(false)
+        })
+    })
+
     /**
      * One window, two tasks, one editor.
      *
@@ -1858,7 +1881,13 @@ describe('the live workspace', () => {
      * that answers is a scene the user is not looking at.
      */
     describe('a session that belongs to another task', () => {
-        /** The route the level was built on, returned to before the story continues. */
+        /**
+         * The route the level was built on, returned to before the story continues.
+         *
+         * This scenario sits after the merge on purpose: it makes a second task, and a sweep that
+         * changes which task is current in the middle of the level's own story leaves the steps
+         * after it merging something else. It cost two failures before it was moved here.
+         */
         let builtOn = ''
 
         it('does not answer with another task’s scene', async () => {
@@ -1895,29 +1924,6 @@ describe('the live workspace', () => {
             } catch (error: unknown) {
                 console.log(`could not return to ${builtOn}: ${String(error)}`)
             }
-        })
-    })
-
-    describe('merging the task back', () => {
-        it('merges the worktree the agent worked in into the project', async () => {
-            await clickButton('Merge task')
-            // The button is the state: a task whose branch has landed is not offered again.
-            await expectGone(['Merge task'], {limitMs: 120_000})
-        })
-
-        it('leaves the level in the project the sweep was pointed at', () => {
-            expect(git('rev-parse', 'HEAD')).not.toBe(seedCommit)
-            expect(git('ls-tree', '--name-only', '-r', 'HEAD')).toContain(LEVEL_SCENE)
-        })
-
-        it('keeps Gofer’s own scaffolding out of the project it merged into', () => {
-            // The addon is staged into the worktree while a session runs — its files are kept out
-            // of Git by an exclude entry, and the two lines it adds to `project.godot` have to be
-            // kept out of the merge as well. They belong to Gofer, not to the user's game.
-            const project = readFileSync(join(workspace, 'project.godot'), 'utf8')
-            expect(project).not.toContain('addons/gofer')
-            expect(project).not.toContain('GoferRuntime')
-            expect(existsSync(join(workspace, 'addons/gofer'))).toBe(false)
         })
     })
 
