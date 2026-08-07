@@ -58,7 +58,13 @@ const INJECTED_DEVICE: i64 = 7777;
 /// the screenshots have a visible, inspectable consequence of every event. It listens in `_input`
 /// rather than `_unhandled_input`: a Control under the cursor is allowed to consume mouse events,
 /// and the test has no business depending on the label's mouse filter.
-const PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\n\nvar presses := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\n# Only the test's own input counts. Anything the desktop delivers to this window carries a device\n# the engine assigned, never this one, so a stray keystroke cannot change the assertions.\nfunc _input(event: InputEvent) -> void:\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
+///
+/// It also counts how often an injected event fired an Input Map *action*, which is a different
+/// question from whether the event arrived. An event that arrives and matches no action leaves a
+/// game standing still with nothing to say about it, and that is exactly what injected input did:
+/// `project.set_input_action` binds on the physical key and the helper built events with only
+/// `keycode`, so no action Gofer registered could ever be driven by input Gofer injected.
+const PROBE_SCRIPT: &str = "extends Node2D\n\nconst INJECTED_DEVICE := 7777\nconst PROBE_ACTION := \"acceptance_probe_action\"\n\nvar presses := 0\nvar actions := 0\nvar last_source := \"none\"\n\n@onready var label: Label = $Label\n\nfunc _ready() -> void:\n\t_refresh()\n\n# Only the test's own input counts. Anything the desktop delivers to this window carries a device\n# the engine assigned, never this one, so a stray keystroke cannot change the assertions.\nfunc _input(event: InputEvent) -> void:\n\tif InputMap.has_action(PROBE_ACTION) and event.is_action_pressed(PROBE_ACTION):\n\t\tactions += 1\n\tif event.device != INJECTED_DEVICE:\n\t\treturn\n\tif event is InputEventKey and event.pressed and not event.echo:\n\t\t_record(\"key\")\n\telif event is InputEventMouseButton and event.pressed:\n\t\t_record(\"mouse\")\n\telif event is InputEventJoypadButton and event.pressed:\n\t\t_record(\"gamepad\")\n\nfunc _record(source: String) -> void:\n\tpresses += 1\n\tlast_source = source\n\t_refresh()\n\nfunc _refresh() -> void:\n\tlabel.text = \"presses: %d (%s)\" % [presses, last_source]\n";
 
 /// The fixture scene with the probe script attached. Written into the copied worktree: the
 /// checked-in fixture deliberately stays free of scripts so the Node journeys see a project that
@@ -365,10 +371,34 @@ fn label_text(session: &Session) -> String {
         .to_owned()
 }
 
+/// Reads one of the probe's own counters, which is a script variable on the running node.
+fn probe_count(session: &Session, property: &str) -> i64 {
+    let inspected = session.call(
+        "runtime.inspect_node",
+        json!({"path": "/root/RuntimeProbe", "properties": [property]}),
+    );
+    inspected["properties"][property]["value"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{property} must cross the wire as a number: {inspected}"))
+}
+
 #[test]
 fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     let session = Session::start();
     let events = session.rpc.subscribe_events();
+
+    // Registered before the game starts, because the game reads the Input Map from the project.
+    // This is the addon's own writer, so the binding is the physical-key one every action Gofer
+    // registers gets — which is the whole point of asking whether injected input can fire it.
+    // F13 rather than a key a person has: this event is injected *unstamped*, because a device
+    // marker is what keeps an action from matching at all — the Input Map binds the keyboard's own
+    // device, and an event carrying 7777 matches no keyboard binding. Unstamped is also how an
+    // agent injects, so it is the path worth proving. A key no keyboard carries is what keeps a
+    // developer typing during the suite out of the count.
+    session.call(
+        "project.set_input_action",
+        json!({"name": "acceptance_probe_action", "events": [{"kind": "key", "key": "F13"}]}),
+    );
 
     // Nothing runs yet: inspection fails retryably and the state says so.
     let state = session.call("runtime.get_state", json!({}));
@@ -439,6 +469,23 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     assert_eq!(key["applied"], 2, "press and release are both applied");
     assert_frame(&key["frame"]);
     assert_eq!(label_text(&session), "presses: 1 (key)");
+    // The event arriving is not the same as the game being driven. An injected key has to match
+    // the action the Input Map binds to it, or a level built with these tools cannot be played by
+    // them: the press lands, nothing answers it, and no error is raised anywhere.
+    let bound = session.call(
+        "runtime.input",
+        json!({"events": [
+            {"kind": "key", "key": "F13", "pressed": true},
+            {"kind": "key", "key": "F13", "pressed": false},
+        ]}),
+    );
+    assert_eq!(bound["applied"], 2);
+    assert_eq!(
+        probe_count(&session, "actions"),
+        1,
+        "an injected key must fire the Input Map action bound to that key, or a level built with \
+         these tools cannot be played by them"
+    );
 
     // Input this test did not stamp belongs to whoever is using the desktop the game window opened
     // on. An unstamped event takes the same path into `_input` that a real keystroke does — the

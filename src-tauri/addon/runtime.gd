@@ -242,7 +242,13 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 if code == KEY_NONE:
                     return _decode_failed("Unknown key '%s'" % key_name)
                 var key_event := InputEventKey.new()
+                # Both, because an event from a real keyboard carries both and the Input Map may
+                # be bound on either. `project.set_input_action` writes its bindings on the
+                # *physical* key, so a key injected with only `keycode` matched none of the actions
+                # Gofer itself registered: the event was delivered, matched nothing, and the game
+                # simply did not move — with no error anywhere to say why.
                 key_event.keycode = code
+                key_event.physical_keycode = code
                 key_event.pressed = bool((entry as Dictionary).get("pressed", true))
                 events.append(key_event)
             "mouse_button":

@@ -266,8 +266,10 @@ pub const CATALOG: &[ToolDomain] = &[
             operation(
                 "set_input_action",
                 "Writes an input action: {name, events, deadzone?}. `name` is the action's own \
-                 name, like move_left, never a settings path. Each event is tagged, as \
-                 {\"type\": \"key\", \"keycode\": \"A\"}.",
+                 name, like move_left, never a settings path. Each event names its kind and its \
+                 key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions \
+                 answers with. The other kinds are mouse_button and joypad_button, each taking a \
+                 `button` index.",
             ),
             operation(
                 "remove_input_action",
@@ -441,7 +443,13 @@ pub const CATALOG: &[ToolDomain] = &[
             ),
             operation("get_tree", "Returns the running game's scene tree."),
             operation("inspect_node", "Inspects a running node: {path}."),
-            operation("input", "Injects input and captures the result: {events}."),
+            operation(
+                "input",
+                "Injects input and captures the result: {events}. Each event names its kind and \
+                 its key, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the \
+                 release as a second event, or the key stays down. This drives the Input Map, so \
+                 it is how you check that a level you built can actually be played.",
+            ),
             operation(
                 "capture",
                 "Captures a PNG frame: {source?: \"game\" | \"editor\"}.",
@@ -888,6 +896,42 @@ mod tests {
                 "the addon must guard {command} with a revision, as the protocol says it does"
             );
         }
+    }
+
+    /// The catalog has to name an input event the way the addon reads one.
+    ///
+    /// It documented `{"type": "key", "keycode": "A"}` while the addon reads `kind` and `key`, so a
+    /// model that believed its own tool description was answered "Input event kind '' is not
+    /// supported" and had to discover the real shape by reading an action back. Nothing else keeps
+    /// the sentence and the decoder together, because the sentence is prose.
+    #[test]
+    fn the_input_event_shape_the_catalog_documents_is_the_one_the_addon_reads() {
+        const ADDON: &str = include_str!("../addon/plugin.gd");
+        let summary = CATALOG
+            .iter()
+            .find(|domain| domain.name == "godot_project")
+            .and_then(|domain| {
+                domain
+                    .operations
+                    .iter()
+                    .find(|operation| operation.op == "set_input_action")
+            })
+            .expect("godot_project set_input_action is in the catalog")
+            .summary;
+        for field in ["kind", "key"] {
+            assert!(
+                ADDON.contains(&format!("entry.get(\"{field}\"")),
+                "the addon reads {field} from an input event"
+            );
+            assert!(
+                summary.contains(&format!("\"{field}\"")),
+                "set_input_action must document the {field} field the addon reads: {summary}"
+            );
+        }
+        assert!(
+            !summary.contains("keycode"),
+            "the addon has no `keycode` field on an input event: {summary}"
+        );
     }
 
     /// Every mutation the addon guards with a revision has to say so where the model reads it.

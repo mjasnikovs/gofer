@@ -170,6 +170,14 @@ window is a real, focusable window, and without a marked device an assertion abo
 really an assertion about nobody touching the keyboard. Omitting it keeps the previous behaviour, so
 the field is additive and needs no new `protocolVersion`.
 
+Naming a `device` costs the event its Input Map actions. Godot matches a binding's device against
+the event's, and a keyboard binding carries `DEVICE_ID_KEYBOARD` (16), so an event stamped with a
+marker outside the engine's numbering reaches `_input` and matches no action at all. Injected input
+that has to drive a game therefore omits `device`; the marker is for counting raw events, not for
+playing. A `key` event carries both `keycode` and `physical_keycode`, because
+`project.set_input_action` binds on the physical key and a binding is matched on whichever the event
+has.
+
 A successful `runtime.run` or `runtime.restart` response carries the game's first rendered frame,
 and a successful `runtime.input` response carries a frame captured after the events were dispatched
 and rendered — capture is manual (`runtime.capture`) and automatic after successful run/input
