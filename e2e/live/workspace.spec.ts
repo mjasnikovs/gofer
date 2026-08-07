@@ -1503,6 +1503,106 @@ describe('the live workspace', () => {
             )
         })
 
+        /**
+         * The half of a game that is not scenery.
+         *
+         * Everything above is nodes and shapes. A coin the player can pick up is wired: a signal
+         * connected to a method, and a group the running game can ask for every coin at once. Both
+         * live in the scene rather than in a script, and both are dropped on save unless the addon
+         * writes them the way the editor does — so the assertion is made against the saved `.tscn`,
+         * not against the answer or the script.
+         */
+        it('gives the level coins the player can collect', async () => {
+            await askUntil(
+                'Add coins to that level: at least three Area2D nodes named Coin, floating above '
+                    + 'the ground where a player would jump for them, each with a collision shape '
+                    + 'and something visible. Write res://scripts/coin.gd with a method that '
+                    + 'prints "coin collected" and frees the coin, and attach it to each one. Then '
+                    + 'wire each coin up in the scene itself: connect its body_entered signal to '
+                    + 'that method with your godot_node connect_signal tool, targeting the coin, '
+                    + 'and put every coin in the group "coins" with godot_node add_to_group. Save '
+                    + 'the scene.',
+                async () => {
+                    if (!existsSync(join(bound, 'scripts/coin.gd'))) return false
+                    const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
+                    // A connection the save did not keep is the failure this step exists to catch:
+                    // the editor shows it, the game never fires it.
+                    if (!scene.includes('[connection signal="body_entered"')) return false
+                    if (!scene.includes('groups=["coins"]')) return false
+                    await openLevelInEditor()
+                    return explorerShows(['Coin'])
+                },
+                'the level needs at least three Area2D coins carrying res://scripts/coin.gd, each '
+                    + 'connected with godot_node connect_signal and put in the group "coins" with '
+                    + 'godot_node add_to_group, and the scene saved afterwards.'
+            )
+        })
+
+        /**
+         * The wiring read back through the window a person uses, rather than off the disk.
+         *
+         * `node.inspect` is the only place the desktop reports what is connected to what, and it
+         * reported nothing at all until the addon learned these commands.
+         */
+        it('shows the coin’s wiring in the inspector', async () => {
+            await openLevelInEditor()
+            await clickSelector(
+                '//*[@aria-label="Explorer"]//*[starts-with(normalize-space(text()),"Coin")]',
+                'a coin in the scene tree'
+            )
+            await openInspector()
+            await clickTab('Node')
+            await expectText(['coins', 'body_entered →'], {limitMs: 60_000})
+            await closeInspector()
+        })
+
+        it('follows the player with a camera and shows the score', async () => {
+            await askUntil(
+                'Two last things. Give the Player a Camera2D child so the view follows it down '
+                    + 'the level. Then add a CanvasLayer named HUD holding a Label that shows how '
+                    + 'many coins have been collected, and make the coin script keep the count and '
+                    + 'update that Label. Save the scene.',
+                async () => {
+                    const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
+                    if (!scene.includes('Camera2D') || !scene.includes('CanvasLayer')) return false
+                    await openLevelInEditor()
+                    return explorerShows(['HUD'])
+                },
+                'the Player still needs a Camera2D child, and the level a CanvasLayer named HUD '
+                    + 'with a Label the coin script updates.'
+            )
+        })
+
+        /**
+         * The way a game is actually built: one scene, placed more than once.
+         *
+         * Everything above this is a level made of one-off nodes, which is the only kind Gofer
+         * could author while `node.create` reached `ClassDB` and nothing else. What is asserted is
+         * that the placements are *instances* — a copy writes the enemy's own children into the
+         * level, and then an edit to the enemy reaches none of them.
+         */
+        it('builds an enemy once and places instances of it', async () => {
+            await askUntil(
+                'Now the part a real project does: build the enemy once as its own scene, and '
+                    + 'place it more than once. Create res://scenes/goomba.tscn with a '
+                    + 'CharacterBody2D root named Goomba, a collision shape and something visible, '
+                    + 'and write res://scripts/goomba.gd so it walks back and forth along the '
+                    + 'ground under gravity. Save that scene. Then open the level again and put at '
+                    + 'least three of them on the ground with your godot_node instantiate tool — '
+                    + 'instances of that scene, never rebuilt node by node. Save the level.',
+                async () => {
+                    if (!existsSync(join(bound, 'scenes/goomba.tscn'))) return false
+                    if (!existsSync(join(bound, 'scripts/goomba.gd'))) return false
+                    const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
+                    if ((scene.match(/instance=ExtResource\(/gu)?.length ?? 0) < 3) return false
+                    await openLevelInEditor()
+                    return explorerShows(['Goomba'])
+                },
+                'the level needs at least three instances of res://scenes/goomba.tscn, placed with '
+                    + 'godot_node instantiate rather than rebuilt, and the level saved afterwards.'
+            )
+        })
+
         it('makes the level the scene the project runs', async () => {
             await askUntil(
                 `Make ${LEVEL_SCENE_RESOURCE} the project’s main scene, so running the project `
@@ -1542,8 +1642,10 @@ describe('the live workspace', () => {
             // that actually runs is named by nothing here. The session's own log holds errors from
             // the broken script this sweep saved on purpose much earlier, so the search is narrowed
             // to the file the agent wrote.
-            await fillLabelledInput('Filter output', 'mario.gd')
-            await expectText(['No output'], {limitMs: 60_000})
+            for (const script of ['mario.gd', 'coin.gd', 'goomba.gd']) {
+                await fillLabelledInput('Filter output', script)
+                await expectText(['No output'], {limitMs: 60_000})
+            }
             await fillLabelledInput('Filter output', '')
             await clickControl('All')
         })

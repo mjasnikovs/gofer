@@ -108,9 +108,9 @@ The edited scene carries a revision that increases on every accepted mutation. A
 must carry `expectedRevision`, and a mutating response carries the resulting `revision`. When the
 expected revision is stale the addon answers `revision_conflict` and changes nothing. The mutating
 commands are `session.undo`, `session.redo`, `scene.create`, `scene.save`, `scene.save_as`,
-`scene.reload`, `node.create`, `node.duplicate`, `node.rename`, `node.reparent`, `node.delete`,
-`node.set_property`, `node.add_to_group`, `node.remove_from_group`, `node.connect_signal`, and
-`node.disconnect_signal`.
+`scene.reload`, `node.create`, `node.instantiate`, `node.duplicate`, `node.rename`, `node.reparent`,
+`node.delete`, `node.set_property`, `node.add_to_group`, `node.remove_from_group`,
+`node.connect_signal`, and `node.disconnect_signal`.
 
 ### Limits
 

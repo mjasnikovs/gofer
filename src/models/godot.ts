@@ -114,11 +114,32 @@ export type GodotSceneTree = Readonly<{
     truncated?: boolean | undefined
 }>
 
+/**
+ * One connection the edited scene keeps, from a node's signal to a method on another node.
+ *
+ * Only the scene's own wiring is reported. The editor is itself connected to every node it is
+ * showing, and those connections belong to the dock drawing the tree rather than to the game.
+ */
+export type GodotNodeConnection = Readonly<{
+    signal: string
+    /** The node carrying the method, as the scene names it. */
+    target: string
+    method: string
+    /** Extra arguments passed after the signal's own, tagged the way every protocol value is. */
+    binds?: readonly GodotValue[] | undefined
+    deferred?: boolean | undefined
+    oneShot?: boolean | undefined
+    persistent?: boolean | undefined
+}>
+
 export type GodotNodeDetails = Readonly<{
     name: string
     type: string
     path: string
     groups?: readonly string[] | undefined
+    /** Every signal the node can emit. The running game's half of an inspection carries none. */
+    signals?: readonly string[] | undefined
+    connections?: readonly GodotNodeConnection[] | undefined
     properties?: Readonly<Record<string, GodotValue>> | undefined
 }>
 

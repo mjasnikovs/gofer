@@ -276,7 +276,19 @@ function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptio
                                 name: 'Player',
                                 type: 'CharacterBody2D',
                                 path: 'Main/Player',
-                                groups: ['players']
+                                groups: ['players'],
+                                signals: ['body_entered', 'ready'],
+                                connections: [
+                                    {
+                                        signal: 'body_entered',
+                                        target: '/Main',
+                                        method: '_on_player_body_entered',
+                                        binds: [],
+                                        deferred: false,
+                                        oneShot: false,
+                                        persistent: true
+                                    }
+                                ]
                             }
                         }
                     case 'project.search_settings':
@@ -481,6 +493,11 @@ describe('InspectorWorkspace', () => {
         })
         expect(within(inspector).getByText('CharacterBody2D')).toBeInTheDocument()
         expect(within(inspector).getByText('players')).toBeInTheDocument()
+        // What is wired to what, not merely what the node could emit: a scene's connections live in
+        // the scene rather than in a script, and the panel is the only place they can be read.
+        expect(
+            within(inspector).getByText('body_entered → /Main._on_player_body_entered')
+        ).toBeInTheDocument()
         // The reading is labelled as the edited scene, never confused with the running one.
         expect(within(inspector).getByText('Edited')).toBeInTheDocument()
     })

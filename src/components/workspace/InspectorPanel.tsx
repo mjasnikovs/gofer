@@ -13,7 +13,12 @@ import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon
 import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {formatGodotValue} from '../../utils/godot-format'
 import {isSessionReadable} from '../../models/godot'
-import type {GodotNodeDetails, GodotSessionState, GodotSettingsPage} from '../../models/godot'
+import type {
+    GodotNodeConnection,
+    GodotNodeDetails,
+    GodotSessionState,
+    GodotSettingsPage
+} from '../../models/godot'
 import type {GodotCall, GodotSelection} from '../../models/workspace'
 import {PanelState} from './PanelState'
 
@@ -58,6 +63,27 @@ function useDebounced(value: string) {
         }
     }, [value])
     return settled
+}
+
+/**
+ * One connection as a sentence: the signal, the node that hears it, and the method it calls.
+ *
+ * The arrow is the whole point — a list of signal names says what a node *can* emit, and what the
+ * panel is asked for is what is actually wired to what. Deferred and one-shot are named because
+ * they change when the method runs, and a connection that fires once is a different thing.
+ */
+function connectionLabel(connection: GodotNodeConnection) {
+    const notes = [
+        connection.deferred === true ? 'deferred' : '',
+        connection.oneShot === true ? 'one-shot' : ''
+    ].filter(Boolean)
+    const suffix = notes.length > 0 ? ` (${notes.join(', ')})` : ''
+    return `${connection.signal} → ${connection.target}.${connection.method}${suffix}`
+}
+
+/** Two connections differ by their bound arguments alone, so those belong in the key. */
+function connectionKey(connection: GodotNodeConnection) {
+    return `${connection.signal}|${connection.target}|${connection.method}|${JSON.stringify(connection.binds ?? [])}`
 }
 
 function settingRows(page: GodotSettingsPage | undefined): SettingRow[] {
@@ -254,6 +280,26 @@ export function InspectorPanel({
                                             </HStack>
                                         :   <Text color='secondary'>None</Text>}
                                     </VStack>
+                                    {node.data.connections ?
+                                        <VStack gap={1}>
+                                            <Text
+                                                type='supporting'
+                                                color='secondary'
+                                            >
+                                                Connections
+                                            </Text>
+                                            {node.data.connections.length > 0 ?
+                                                node.data.connections.map(connection => (
+                                                    <Text
+                                                        key={connectionKey(connection)}
+                                                        type='supporting'
+                                                    >
+                                                        {connectionLabel(connection)}
+                                                    </Text>
+                                                ))
+                                            :   <Text color='secondary'>None</Text>}
+                                        </VStack>
+                                    :   null}
                                 </VStack>
                             :   null}
                         </PanelState>

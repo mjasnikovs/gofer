@@ -22,7 +22,7 @@ pub const DOMAINS: [&str; 12] = [
     "logs", "files", "docs",
 ];
 
-pub const MUTATING_COMMANDS: [&str; 16] = [
+pub const MUTATING_COMMANDS: [&str; 17] = [
     "session.undo",
     "session.redo",
     "scene.create",
@@ -30,6 +30,7 @@ pub const MUTATING_COMMANDS: [&str; 16] = [
     "scene.save_as",
     "scene.reload",
     "node.create",
+    "node.instantiate",
     "node.duplicate",
     "node.rename",
     "node.reparent",

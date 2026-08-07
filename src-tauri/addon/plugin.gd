@@ -116,11 +116,16 @@ const MUTATING_COMMANDS: Array[String] = [
     "scene.save_as",
     "scene.reload",
     "node.create",
+    "node.instantiate",
     "node.duplicate",
     "node.rename",
     "node.reparent",
     "node.delete",
     "node.set_property",
+    "node.add_to_group",
+    "node.remove_from_group",
+    "node.connect_signal",
+    "node.disconnect_signal",
 ]
 
 ## The editor half of the debugger channel. Godot calls `_setup_session` as debugger sessions
@@ -397,6 +402,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _scene_tree()
         "node.create":
             return _node_create(params)
+        "node.instantiate":
+            return _node_instantiate(params)
         "node.duplicate":
             return _node_duplicate(params)
         "node.rename":
@@ -407,6 +414,14 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _node_delete(params)
         "node.set_property":
             return _node_set_property(params)
+        "node.add_to_group":
+            return _node_add_to_group(params)
+        "node.remove_from_group":
+            return _node_remove_from_group(params)
+        "node.connect_signal":
+            return _node_connect_signal(params)
+        "node.disconnect_signal":
+            return _node_disconnect_signal(params)
         "node.inspect":
             return _node_inspect(params)
         "resource.rescan":
@@ -1632,6 +1647,126 @@ func _node_create(params: Dictionary) -> Dictionary:
     _bump_revision()
     return {"node": _node_path(node)}
 
+## Places an instance of a saved scene under a node, the way the editor's "Instantiate Child Scene"
+## does.
+##
+## This is how a Godot project is actually built: one coin scene placed thirty times, not thirty
+## hand-made coins. `node.create` can only reach `ClassDB`, so without this every repeated thing in
+## a level had to be rebuilt node by node — and a change to one of them reached none of the others.
+func _node_instantiate(params: Dictionary) -> Dictionary:
+    var scene: String = params.get("scene", "")
+    var parent_path: String = params.get("parent", "")
+    var path: String = params.get("path", "")
+    var node_name: String = params.get("name", "")
+    var index: int = params.get("index", -1)
+
+    var scene_check := _require_current_scene(scene)
+    if not scene_check.is_empty():
+        return scene_check
+    if parent_path.is_empty() or path.is_empty():
+        return {
+            "_gofer_error": {
+                "code": "invalid_params",
+                "message": "node.instantiate requires parent and path",
+                "retryable": false,
+                "readiness": "ready",
+                "details": {}
+            }
+        }
+
+    var parent := _find_node(parent_path)
+    if parent == null:
+        return _node_not_found_error(parent_path)
+
+    var cycle := _instance_cycle(path)
+    if not cycle.is_empty():
+        return {
+            "_gofer_error": {
+                "code": "recursive_instance",
+                "message": cycle,
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"path": path, "scene": _current_scene_path}
+            }
+        }
+
+    var resource := ResourceLoader.load(path, "PackedScene")
+    if resource == null or not (resource is PackedScene):
+        return {
+            "_gofer_error": {
+                "code": "invalid_scene",
+                "message": "%s is not a scene that can be loaded" % path,
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"path": path}
+            }
+        }
+    var packed := resource as PackedScene
+    if not packed.can_instantiate():
+        return {
+            "_gofer_error": {
+                "code": "invalid_scene",
+                "message": "%s cannot be instantiated; one of its nodes names a type this editor does not have" % path,
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"path": path}
+            }
+        }
+
+    # `GEN_EDIT_STATE_INSTANCE` is what makes this an instance rather than a copy: the scene keeps a
+    # reference to the file, so the children collapse into one `instance=ExtResource(…)` line and an
+    # edit to the source reaches every placement of it.
+    var node: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE)
+    if node == null:
+        return {
+            "_gofer_error": {
+                "code": "invalid_scene",
+                "message": "%s produced no node" % path,
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"path": path}
+            }
+        }
+    if not node_name.is_empty():
+        node.name = node_name
+
+    var root := _edited_root()
+    var undo := _begin_action("Instantiate %s" % path.get_file())
+    undo.add_do_method(self, "_do_attach", parent, node, root, index)
+    undo.add_undo_method(self, "_do_detach", parent, node)
+    undo.add_do_reference(node)
+    undo.commit_action()
+
+    _bump_revision()
+    return {"node": _node_path(node), "path": path}
+
+## Why a scene may not be instantiated here, or "" when it may.
+##
+## A scene that reaches itself cannot be loaded again once it is saved — the editor recurses until
+## it runs out of stack — and the failure lands on whoever opens the file next, not on the call that
+## caused it. Dependencies are followed, because A holding B holding A is the same trap.
+func _instance_cycle(path: String) -> String:
+    if _current_scene_path.is_empty():
+        return ""
+    if path == _current_scene_path:
+        return "A scene cannot be instantiated inside itself"
+    var seen := {}
+    var pending: Array[String] = [path]
+    while not pending.is_empty():
+        var next: String = pending.pop_back()
+        if seen.has(next):
+            continue
+        seen[next] = true
+        for dependency in ResourceLoader.get_dependencies(next):
+            # A dependency may be written as "type::uid::path"; the path is the last field.
+            var parts := String(dependency).split("::")
+            var resolved: String = parts[parts.size() - 1]
+            if resolved == _current_scene_path:
+                return "%s depends on %s, so instantiating it here would make the scene contain itself" % [next, _current_scene_path]
+            if resolved.ends_with(".tscn") or resolved.ends_with(".scn"):
+                pending.append(resolved)
+    return ""
+
 func _node_duplicate(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
     var node_path_str: String = params.get("node", "")
@@ -1843,6 +1978,289 @@ func _node_set_property(params: Dictionary) -> Dictionary:
     _bump_revision()
     return {"node": _node_path(node), "property": property}
 
+## Puts a node in a group, the way the editor's Node dock does.
+##
+## The group is always persistent: a group added without that flag is dropped when the scene is
+## packed, so a caller that asked for one and saved would get a scene that no longer has it.
+func _node_add_to_group(params: Dictionary) -> Dictionary:
+    var found := _group_target(params, "node.add_to_group")
+    if found.has("_gofer_error"):
+        return found
+    var node: Node = found["node"]
+    var group: String = found["group"]
+    if node.is_in_group(group):
+        return {"node": _node_path(node), "groups": Array(node.get_groups())}
+
+    var undo := _begin_action("Add %s to %s" % [node.name, group])
+    undo.add_do_method(node, "add_to_group", group, true)
+    undo.add_undo_method(node, "remove_from_group", group)
+    undo.commit_action()
+
+    _bump_revision()
+    return {"node": _node_path(node), "groups": Array(node.get_groups())}
+
+func _node_remove_from_group(params: Dictionary) -> Dictionary:
+    var found := _group_target(params, "node.remove_from_group")
+    if found.has("_gofer_error"):
+        return found
+    var node: Node = found["node"]
+    var group: String = found["group"]
+    if not node.is_in_group(group):
+        return {
+            "_gofer_error": {
+                "code": "group_not_found",
+                "message": "Node %s is not in the group %s" % [_node_path(node), group],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"group": group}
+            }
+        }
+
+    var undo := _begin_action("Remove %s from %s" % [node.name, group])
+    undo.add_do_method(node, "remove_from_group", group)
+    undo.add_undo_method(node, "add_to_group", group, true)
+    undo.commit_action()
+
+    _bump_revision()
+    return {"node": _node_path(node), "groups": Array(node.get_groups())}
+
+## The node and group both group commands take, or the error that says which one was wrong.
+func _group_target(params: Dictionary, command: String) -> Dictionary:
+    var scene: String = params.get("scene", "")
+    var node_path_str: String = params.get("node", "")
+    var group: String = params.get("group", "")
+
+    var scene_check := _require_current_scene(scene)
+    if not scene_check.is_empty():
+        return scene_check
+    if node_path_str.is_empty() or group.is_empty():
+        return {
+            "_gofer_error": {
+                "code": "invalid_params",
+                "message": "%s requires node and group" % command,
+                "retryable": false,
+                "readiness": "ready",
+                "details": {}
+            }
+        }
+    var node := _find_node(node_path_str)
+    if node == null:
+        return _node_not_found_error(node_path_str)
+    return {"node": node, "group": group}
+
+## Connects one node's signal to a method on another, as an editor connection the scene keeps.
+##
+## `Object.connect` accepts a method the target does not have and reports the mistake only when the
+## signal first fires — in a running game, as a crash with no author. The method is therefore
+## checked here, which is also what the editor's own connect dialog does before it offers to write
+## the handler for you.
+func _node_connect_signal(params: Dictionary) -> Dictionary:
+    var resolved := _connection_target(params, "node.connect_signal")
+    if resolved.has("_gofer_error"):
+        return resolved
+    var node: Node = resolved["node"]
+    var target: Node = resolved["target"]
+    var signal_name: String = resolved["signal"]
+    var method: String = resolved["method"]
+    if not target.has_method(method):
+        return {
+            "_gofer_error": {
+                "code": "method_not_found",
+                "message": "%s has no method %s to receive %s" % [_node_path(target), method, signal_name],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"target": _node_path(target), "method": method}
+            }
+        }
+
+    var bound := _decode_items(params.get("binds", []))
+    if not bound["ok"]:
+        return {
+            "_gofer_error": {
+                "code": "unsupported_value",
+                "message": bound["message"],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"signal": signal_name}
+            }
+        }
+    var callable := Callable(target, method).bindv(bound["value"])
+    if node.is_connected(signal_name, callable):
+        return {
+            "_gofer_error": {
+                "code": "already_connected",
+                "message": "%s.%s is already connected to %s.%s" % [_node_path(node), signal_name, _node_path(target), method],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"signal": signal_name, "target": _node_path(target), "method": method}
+            }
+        }
+
+    # `Object.CONNECT_PERSIST` is what makes a connection part of the scene rather than a passing
+    # thought: without it the connection works in the editor and is dropped when the scene is
+    # packed, which is the same failure as a collision shape with no shape in it — the editor looks
+    # right and the game does nothing. Every connection made here therefore carries it.
+    var flags := Object.CONNECT_PERSIST
+    if bool(params.get("deferred", false)):
+        flags |= Object.CONNECT_DEFERRED
+    if bool(params.get("oneShot", false)):
+        flags |= Object.CONNECT_ONE_SHOT
+
+    var undo := _begin_action("Connect %s.%s" % [node.name, signal_name])
+    undo.add_do_method(node, "connect", signal_name, callable, flags)
+    undo.add_undo_method(node, "disconnect", signal_name, callable)
+    undo.commit_action()
+
+    _bump_revision()
+    return _connection_summary(node, signal_name, callable, flags)
+
+func _node_disconnect_signal(params: Dictionary) -> Dictionary:
+    var resolved := _connection_target(params, "node.disconnect_signal")
+    if resolved.has("_gofer_error"):
+        return resolved
+    var node: Node = resolved["node"]
+    var target: Node = resolved["target"]
+    var signal_name: String = resolved["signal"]
+    var method: String = resolved["method"]
+
+    # The bound arguments are part of a callable's identity, so a connection made with them can only
+    # be found by naming them again — which is why they are read back by `node.inspect`.
+    var bound := _decode_items(params.get("binds", []))
+    if not bound["ok"]:
+        return {
+            "_gofer_error": {
+                "code": "unsupported_value",
+                "message": bound["message"],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"signal": signal_name}
+            }
+        }
+    var callable := Callable(target, method).bindv(bound["value"])
+    if not node.is_connected(signal_name, callable):
+        return {
+            "_gofer_error": {
+                "code": "not_connected",
+                "message": "%s.%s is not connected to %s.%s" % [_node_path(node), signal_name, _node_path(target), method],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"signal": signal_name, "target": _node_path(target), "method": method}
+            }
+        }
+    var flags := _connection_flags(node, signal_name, callable)
+
+    var undo := _begin_action("Disconnect %s.%s" % [node.name, signal_name])
+    undo.add_do_method(node, "disconnect", signal_name, callable)
+    undo.add_undo_method(node, "connect", signal_name, callable, flags)
+    undo.commit_action()
+
+    _bump_revision()
+    return {"node": _node_path(node), "signal": signal_name, "connected": false}
+
+## The node, target, signal and method both connection commands take.
+##
+## `target` may be omitted, and then means the scene root — the node that carries the scene's script
+## and receives its connections in every ordinary Godot scene.
+func _connection_target(params: Dictionary, command: String) -> Dictionary:
+    var scene: String = params.get("scene", "")
+    var node_path_str: String = params.get("node", "")
+    var signal_name: String = params.get("signal", "")
+    var method: String = params.get("method", "")
+
+    var scene_check := _require_current_scene(scene)
+    if not scene_check.is_empty():
+        return scene_check
+    if node_path_str.is_empty() or signal_name.is_empty() or method.is_empty():
+        return {
+            "_gofer_error": {
+                "code": "invalid_params",
+                "message": "%s requires node, signal, and method" % command,
+                "retryable": false,
+                "readiness": "ready",
+                "details": {}
+            }
+        }
+    var node := _find_node(node_path_str)
+    if node == null:
+        return _node_not_found_error(node_path_str)
+    if not node.has_signal(signal_name):
+        return {
+            "_gofer_error": {
+                "code": "signal_not_found",
+                "message": "Node %s has no signal %s" % [node_path_str, signal_name],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"signal": signal_name}
+            }
+        }
+    var target_path: String = params.get("target", "")
+    var target := _edited_root() if target_path.is_empty() else _find_node(target_path)
+    if target == null:
+        return _node_not_found_error(target_path)
+    return {"node": node, "target": target, "signal": signal_name, "method": method}
+
+## The flags a live connection carries, so undoing a disconnection restores the same one.
+func _connection_flags(node: Node, signal_name: String, callable: Callable) -> int:
+    for connection in node.get_signal_connection_list(signal_name):
+        if (connection.get("callable", Callable()) as Callable) == callable:
+            return int(connection.get("flags", Object.CONNECT_PERSIST))
+    return Object.CONNECT_PERSIST
+
+func _connection_summary(node: Node, signal_name: String, callable: Callable, flags: int) -> Dictionary:
+    var target := callable.get_object() as Node
+    return {
+        "node": _node_path(node),
+        "signal": signal_name,
+        "target": _scene_relative_path(target),
+        "method": String(callable.get_method()),
+        "binds": Protocol.encode_items(callable.get_bound_arguments()),
+        "deferred": (flags & Object.CONNECT_DEFERRED) != 0,
+        "oneShot": (flags & Object.CONNECT_ONE_SHOT) != 0,
+        "persistent": (flags & Object.CONNECT_PERSIST) != 0
+    }
+
+## A connection's target as the scene names it, or as the tree does when it is not in the scene.
+##
+## `_node_path` answers by trimming the edited root's path off the front, which says nothing useful
+## about a node that is not under it — and a live connection can point anywhere.
+func _scene_relative_path(node: Node) -> String:
+    if node == null:
+        return ""
+    var root := _edited_root()
+    if root == null or not (node == root or root.is_ancestor_of(node)):
+        return String(node.get_path())
+    return _node_path(node)
+
+## The signals a node can emit, named the way `node.connect_signal` takes them.
+##
+## A caller that cannot see this list has to guess a signal name, and `signal_not_found` is all the
+## help a guess gets — so the names come back with the node rather than from the documentation.
+func _node_signals(node: Node) -> Array:
+    var names: Array = []
+    for info in node.get_signal_list():
+        names.append(String(info.get("name", "")))
+    names.sort()
+    return names
+
+## The scene's own connections out of a node, in the shape `node.connect_signal` accepts back.
+##
+## Only the persistent ones. The editor is itself connected to every node it is showing — the scene
+## tree dock listens for `script_changed`, `visibility_changed` and four more on each of them — and
+## those are the editor's private business, live only while the dock exists, and pointed at objects
+## that are not in the scene at all. Reporting them buried the one connection a caller made under
+## six it did not, and named a target that has no path in the edited scene.
+func _node_connections(node: Node) -> Array:
+    var connections: Array = []
+    for info in node.get_signal_list():
+        var signal_name := String(info.get("name", ""))
+        for connection in node.get_signal_connection_list(signal_name):
+            var flags := int(connection.get("flags", 0))
+            if (flags & Object.CONNECT_PERSIST) == 0:
+                continue
+            var callable := connection.get("callable", Callable()) as Callable
+            connections.append(_connection_summary(node, signal_name, callable, flags))
+    return connections
+
 func _node_inspect(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
     var node_path_str: String = params.get("node", "")
@@ -1869,6 +2287,8 @@ func _node_inspect(params: Dictionary) -> Dictionary:
         "type": node.get_class(),
         "path": _node_path(node),
         "groups": Array(node.get_groups()),
+        "signals": _node_signals(node),
+        "connections": _node_connections(node),
     }
 
 ## Checks that a request names the scene the editor is actually editing.

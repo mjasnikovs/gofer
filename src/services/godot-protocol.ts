@@ -36,6 +36,7 @@ export const MUTATING_COMMANDS: readonly string[] = [
     'scene.save_as',
     'scene.reload',
     'node.create',
+    'node.instantiate',
     'node.duplicate',
     'node.rename',
     'node.reparent',

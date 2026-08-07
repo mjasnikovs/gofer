@@ -175,11 +175,22 @@ pub const CATALOG: &[ToolDomain] = &[
                       mutate, then read it again for the next one. Paths are the scene's own, like \
                       /Level1 or /Level1/Ground.",
         operations: &[
-            operation("inspect", "Inspects a node: {node}."),
+            operation(
+                "inspect",
+                "Inspects a node: {node}. Answers with its type, its groups, every signal it can \
+                 emit, and the connections it already has.",
+            ),
             operation(
                 "create",
                 "Creates a node: {parent, type, name, index?, expectedRevision}. `parent` is the \
                  parent's path — the root's own path, like /Level1, for a direct child.",
+            ),
+            operation(
+                "instantiate",
+                "Places an instance of a saved scene under a node: {parent, path, name?, index?, \
+                 expectedRevision}. This is how a level repeats a thing — build the coin once as \
+                 its own scene, then instantiate it wherever a coin goes, and one edit reaches \
+                 every placement. `node.create` cannot do this: it only builds engine classes.",
             ),
             operation(
                 "duplicate",
@@ -202,6 +213,29 @@ pub const CATALOG: &[ToolDomain] = &[
                  bool, int, color and rect2 (four numbers each), vector2i/3/3i/4/4i, quaternion, \
                  plane, transform2d, basis, transform3d, array (of tagged values) and dictionary \
                  (of {key, value} pairs of them).",
+            ),
+            operation(
+                "add_to_group",
+                "Puts a node in a group the saved scene keeps: {node, group, expectedRevision}. \
+                 Groups are how a running game finds every coin or enemy at once, with \
+                 get_tree().get_nodes_in_group(\"…\").",
+            ),
+            operation(
+                "remove_from_group",
+                "Takes a node out of a group: {node, group, expectedRevision}.",
+            ),
+            operation(
+                "connect_signal",
+                "Connects a node's signal to a method, as an editor connection the scene keeps: \
+                 {node, signal, method, target?, binds?, deferred?, oneShot?, expectedRevision}. \
+                 `target` is the node carrying the method and defaults to the scene root; the \
+                 method has to exist there already, so write the script first. `binds` are extra \
+                 tagged values passed after the signal's own arguments. This is how a scene wires \
+                 itself up without a `connect` call in _ready.",
+            ),
+            operation(
+                "disconnect_signal",
+                "Removes a connection: {node, signal, method, target?, binds?, expectedRevision}.",
             ),
         ],
     },
@@ -834,28 +868,45 @@ mod tests {
         }
     }
 
+    /// Every command the protocol calls mutating has to exist in the addon that answers it.
+    ///
+    /// This is the direction the catalog test above cannot cover: a command can be written into the
+    /// frozen contract, listed by both clients as needing `expectedRevision`, and still reach an
+    /// addon with no handler for it. Four node commands lived that way — the spec promised
+    /// `node.connect_signal` while the addon answered `unknown_command`, so a scene could never be
+    /// wired up in the editor at all.
+    #[test]
+    fn every_mutating_command_the_protocol_declares_exists_in_the_addon() {
+        const ADDON: &str = include_str!("../addon/plugin.gd");
+        for command in crate::protocol_v2::MUTATING_COMMANDS {
+            assert!(
+                ADDON.contains(&format!("\"{command}\":")),
+                "the protocol declares {command} mutating but the addon has no handler for it"
+            );
+            assert!(
+                ADDON.contains(&format!("    \"{command}\",")),
+                "the addon must guard {command} with a revision, as the protocol says it does"
+            );
+        }
+    }
+
     /// Every mutation the addon guards with a revision has to say so where the model reads it.
     ///
     /// Without this the catalog documented the parameter nowhere an operation names its arguments,
     /// and a live agent spent a whole turn being refused with `revision_conflict` on every
-    /// authoring call it made.
+    /// authoring call it made. The list is the protocol's own, so an operation added to the
+    /// contract cannot reach the model without its revision documented.
     #[test]
     fn mutating_operations_document_the_revision_they_require() {
-        let mutating = [
-            ("godot_node", "create"),
-            ("godot_node", "duplicate"),
-            ("godot_node", "rename"),
-            ("godot_node", "reparent"),
-            ("godot_node", "delete"),
-            ("godot_node", "set_property"),
-            ("godot_scene", "create"),
-            ("godot_scene", "save"),
-            ("godot_scene", "save_as"),
-            ("godot_scene", "reload"),
-            ("godot_session", "undo"),
-            ("godot_session", "redo"),
-        ];
-        for (tool, op) in mutating {
+        let mutating = crate::protocol_v2::MUTATING_COMMANDS.map(|command| {
+            let (domain, op) = command
+                .split_once('.')
+                .unwrap_or_else(|| panic!("{command} names a domain and an operation"));
+            (format!("godot_{domain}"), op)
+        });
+        for (tool, op) in &mutating {
+            let tool = tool.as_str();
+            let op = *op;
             let domain = CATALOG
                 .iter()
                 .find(|domain| domain.name == tool)

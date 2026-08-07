@@ -186,6 +186,9 @@ fn launch(worktree: &Path, port: u16, token: &str) -> Editor {
     Editor { child, output }
 }
 
+/// The commands that put a different scene in the editor, and so restart the revision at zero.
+const SCENE_SWITCHES: [&str; 2] = ["scene.create", "scene.open"];
+
 struct Session {
     rpc: RpcSession,
     editor: Editor,
@@ -314,12 +317,23 @@ impl Session {
         let revision = response
             .revision
             .unwrap_or_else(|| panic!("{command} answered without a revision"));
+        // A scene switch rebases rather than advances: the addon answers it with revision 0 and
+        // every mutation after it counts from there, because a different scene is a different
+        // baseline. Only work done *inside* one scene has to move forward.
         assert!(
-            revision >= expected,
+            revision >= expected || SCENE_SWITCHES.contains(&command),
             "{command} moved the revision backwards: {expected} -> {revision}"
         );
         self.revision = revision;
         response.result
+    }
+
+    /// Opens a scene and adopts the revision baseline the switch answers with.
+    fn open_scene(&mut self, path: &str) {
+        let result = self.call("scene.open", json!({"path": path}));
+        self.revision = result["revision"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("scene.open answered without a revision: {result}"));
     }
 
     fn error(&self, command: &str, params: Value, expected_revision: Option<u64>) -> String {
@@ -608,6 +622,370 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         child_names(&session.call("scene.get_tree", json!({}))),
         vec!["Sprite".to_owned()],
         "a refused command must leave the scene alone"
+    );
+}
+
+/// The other half of authoring a scene: the groups and signal connections it is wired with.
+///
+/// Nodes and properties describe what a level looks like. What makes it a game is a coin that tells
+/// somebody it was touched and a group the running code can ask for every coin at once — and both of
+/// those are stored in the scene, not in a script. The protocol has declared these four commands
+/// mutating since v2 while the addon answered `unknown_command` for all of them, so an agent could
+/// only ever wire a scene up from `_ready`, which is not where the editor keeps its wiring.
+///
+/// Persistence is the whole assertion. `add_to_group` without the persistent flag and `connect`
+/// without `CONNECT_PERSIST` both work perfectly in the editor and are dropped when the scene is
+/// packed, so this reads the saved file rather than the live tree.
+#[test]
+fn the_addon_wires_a_scene_with_groups_and_signals() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    // The handler has to exist before the connection names it, exactly as it does for a person: the
+    // editor's own connect dialog offers to write one and refuses to connect to nothing.
+    std::fs::write(
+        worktree.join("wiring.gd"),
+        "extends Node2D\n\n\nfunc _on_coin_body_entered(_body: Node2D) -> void:\n\tpass\n",
+    )
+    .expect("write the handler script");
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    let scene = "res://wiring.tscn";
+    session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
+    session.mutate(
+        "node.set_property",
+        json!({
+            "node": "/wiring",
+            "property": "script",
+            "value": {"type": "resource", "value": {"path": "res://wiring.gd"}}
+        }),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/wiring", "name": "Coin", "type": "Area2D"}),
+    );
+
+    session.mutate(
+        "node.add_to_group",
+        json!({"node": "/wiring/Coin", "group": "coins"}),
+    );
+    // No `target`: it defaults to the scene root, which is where a scene's script lives.
+    let connected = session.mutate(
+        "node.connect_signal",
+        json!({
+            "node": "/wiring/Coin",
+            "signal": "body_entered",
+            "method": "_on_coin_body_entered"
+        }),
+    );
+    assert_eq!(connected["target"], "/wiring");
+    assert_eq!(
+        connected["persistent"], true,
+        "an editor connection the scene does not keep is not an editor connection"
+    );
+
+    // Inspect is where a caller reads its own work back, so it has to report both.
+    let inspected = session.call("node.inspect", json!({"node": "/wiring/Coin"}));
+    assert_eq!(inspected["groups"], json!(["coins"]));
+    assert!(
+        inspected["signals"]
+            .as_array()
+            .expect("signals array")
+            .contains(&json!("body_entered")),
+        "inspect must name the signals a node can emit: {inspected}"
+    );
+    let connections = inspected["connections"]
+        .as_array()
+        .expect("connections array");
+    assert_eq!(connections.len(), 1, "{inspected}");
+    assert_eq!(connections[0]["signal"], "body_entered");
+    assert_eq!(connections[0]["method"], "_on_coin_body_entered");
+
+    session.mutate("scene.save", json!({}));
+    let saved = std::fs::read_to_string(session.worktree.join("wiring.tscn"))
+        .expect("the saved scene must exist on disk");
+    assert!(
+        saved.contains("groups=[\"coins\"]"),
+        "the saved scene must keep the group: {saved}"
+    );
+    assert!(
+        saved.contains(
+            "[connection signal=\"body_entered\" from=\"Coin\" to=\".\" \
+             method=\"_on_coin_body_entered\"]"
+        ),
+        "the saved scene must keep the connection: {saved}"
+    );
+
+    // Both are ordinary editor actions, so both undo.
+    session.mutate("session.undo", json!({}));
+    session.mutate("session.undo", json!({}));
+    let undone = session.call("node.inspect", json!({"node": "/wiring/Coin"}));
+    assert!(
+        undone["connections"]
+            .as_array()
+            .expect("connections array")
+            .is_empty(),
+        "undo must take the connection back: {undone}"
+    );
+    assert_eq!(undone["groups"], json!([]), "undo must take the group back");
+
+    session.mutate("session.redo", json!({}));
+    session.mutate("session.redo", json!({}));
+
+    // Removing them is the same transaction in reverse, and both refuse what is not there.
+    session.mutate(
+        "node.disconnect_signal",
+        json!({
+            "node": "/wiring/Coin",
+            "signal": "body_entered",
+            "method": "_on_coin_body_entered"
+        }),
+    );
+    session.mutate(
+        "node.remove_from_group",
+        json!({"node": "/wiring/Coin", "group": "coins"}),
+    );
+    let bare = session.call("node.inspect", json!({"node": "/wiring/Coin"}));
+    assert_eq!(bare["groups"], json!([]));
+    assert!(
+        bare["connections"]
+            .as_array()
+            .expect("connections array")
+            .is_empty()
+    );
+}
+
+/// A level built the way Godot projects are built: one scene, placed more than once.
+///
+/// `node.create` reaches `ClassDB` and nothing else, so before this the only way to repeat a thing
+/// in a level was to rebuild it node by node — seven bricks meant twenty-one nodes, and changing
+/// what a brick is reached none of them. What proves this is an instance rather than a copy is the
+/// saved file: the children collapse into a single `instance=ExtResource(…)` line.
+#[test]
+fn the_addon_places_instances_of_a_saved_scene() {
+    let mut session = Session::start();
+
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://brick.tscn", "rootType": "StaticBody2D"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/brick", "name": "CollisionShape2D", "type": "CollisionShape2D"}),
+    );
+    session.mutate("scene.save", json!({}));
+
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://level.tscn", "rootType": "Node2D"}),
+    );
+    for name in ["Brick1", "Brick2"] {
+        let placed = session.mutate(
+            "node.instantiate",
+            json!({"parent": "/level", "path": "res://brick.tscn", "name": name}),
+        );
+        assert_eq!(placed["node"], format!("/level/{name}"));
+    }
+    assert_eq!(
+        child_names(&session.call("scene.get_tree", json!({}))),
+        vec!["Brick1".to_owned(), "Brick2".to_owned()]
+    );
+
+    session.mutate("scene.save", json!({}));
+    let saved = std::fs::read_to_string(session.worktree.join("level.tscn"))
+        .expect("the saved level must exist on disk");
+    assert!(
+        saved.contains("[ext_resource type=\"PackedScene\"") && saved.contains("res://brick.tscn"),
+        "the level must reference the scene it instantiated: {saved}"
+    );
+    assert_eq!(
+        saved.matches("instance=ExtResource(").count(),
+        2,
+        "both placements must be instances: {saved}"
+    );
+    // A copy would write the brick's own children into this file. An instance does not, which is
+    // exactly what makes one edit to brick.tscn reach every placement of it.
+    assert!(
+        !saved.contains("parent=\"Brick1\""),
+        "an instance must not write the source scene's children into the level: {saved}"
+    );
+
+    session.mutate("session.undo", json!({}));
+    assert_eq!(
+        child_names(&session.call("scene.get_tree", json!({}))),
+        vec!["Brick1".to_owned()],
+        "undo must take the placement back"
+    );
+}
+
+/// What instancing refuses, starting with the one that cannot be undone by reopening the file.
+#[test]
+fn the_addon_refuses_an_instance_that_would_contain_itself() {
+    let mut session = Session::start();
+
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://inner.tscn", "rootType": "Node2D"}),
+    );
+    session.mutate("scene.save", json!({}));
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://outer.tscn", "rootType": "Node2D"}),
+    );
+    session.mutate(
+        "node.instantiate",
+        json!({"parent": "/outer", "path": "res://inner.tscn", "name": "Inner"}),
+    );
+    session.mutate("scene.save", json!({}));
+    let current = session.revision;
+
+    // Straight into itself. Saved, this file could never be opened again: the loader recurses until
+    // it runs out of stack, and the failure lands on whoever opens it next.
+    assert!(
+        session
+            .error(
+                "node.instantiate",
+                json!({"parent": "/outer", "path": "res://outer.tscn"}),
+                Some(current)
+            )
+            .starts_with("recursive_instance"),
+        "a scene must not be instantiated inside itself"
+    );
+
+    // The same trap one step further out: inner holds nothing, but outer holds inner, so putting
+    // outer inside inner would close the loop.
+    session.open_scene("res://inner.tscn");
+    let inner_revision = session.revision;
+    assert!(
+        session
+            .error(
+                "node.instantiate",
+                json!({"parent": "/inner", "path": "res://outer.tscn"}),
+                Some(inner_revision)
+            )
+            .starts_with("recursive_instance"),
+        "a scene that reaches the edited one through its own dependencies must be refused"
+    );
+
+    assert!(
+        session
+            .error(
+                "node.instantiate",
+                json!({"parent": "/inner", "path": "res://nothing.tscn"}),
+                Some(inner_revision)
+            )
+            .starts_with("invalid_scene"),
+        "a path that is not a loadable scene must be refused"
+    );
+    assert!(
+        session
+            .error(
+                "node.instantiate",
+                json!({"parent": "/inner/Missing", "path": "res://outer.tscn"}),
+                Some(inner_revision)
+            )
+            .starts_with("node_not_found"),
+        "an unknown parent must be refused"
+    );
+
+    assert_eq!(
+        session.revision, inner_revision,
+        "a refused command must not bump the revision"
+    );
+}
+
+/// What the wiring commands refuse, which is what stops a scene that looks right from doing nothing.
+#[test]
+fn the_addon_refuses_wiring_that_would_never_fire() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    std::fs::write(
+        worktree.join("wiring.gd"),
+        "extends Node2D\n\n\nfunc _on_coin_body_entered(_body: Node2D) -> void:\n\tpass\n",
+    )
+    .expect("write the handler script");
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    let scene = "res://refused_wiring.tscn";
+    session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
+    session.mutate(
+        "node.set_property",
+        json!({
+            "node": "/refused_wiring",
+            "property": "script",
+            "value": {"type": "resource", "value": {"path": "res://wiring.gd"}}
+        }),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/refused_wiring", "name": "Coin", "type": "Area2D"}),
+    );
+    let current = session.revision;
+    let coin = "/refused_wiring/Coin";
+
+    assert!(
+        session
+            .error(
+                "node.connect_signal",
+                json!({"node": coin, "signal": "nonsense", "method": "_on_coin_body_entered"}),
+                Some(current)
+            )
+            .starts_with("signal_not_found"),
+        "a signal the node cannot emit must be refused"
+    );
+    // `Object.connect` takes a method the target does not have and says so only when the signal
+    // first fires — in the running game, as an error with no author.
+    assert!(
+        session
+            .error(
+                "node.connect_signal",
+                json!({"node": coin, "signal": "body_entered", "method": "_on_nothing"}),
+                Some(current)
+            )
+            .starts_with("method_not_found"),
+        "a method the target does not have must be refused"
+    );
+    assert!(
+        session
+            .error(
+                "node.disconnect_signal",
+                json!({"node": coin, "signal": "body_entered", "method": "_on_coin_body_entered"}),
+                Some(current)
+            )
+            .starts_with("not_connected"),
+        "disconnecting what was never connected must be refused"
+    );
+    assert!(
+        session
+            .error(
+                "node.remove_from_group",
+                json!({"node": coin, "group": "coins"}),
+                Some(current)
+            )
+            .starts_with("group_not_found"),
+        "removing a group the node is not in must be refused"
+    );
+
+    session.mutate(
+        "node.connect_signal",
+        json!({"node": coin, "signal": "body_entered", "method": "_on_coin_body_entered"}),
+    );
+    let repeated = session.revision;
+    assert!(
+        session
+            .error(
+                "node.connect_signal",
+                json!({"node": coin, "signal": "body_entered", "method": "_on_coin_body_entered"}),
+                Some(repeated)
+            )
+            .starts_with("already_connected"),
+        "connecting the same pair twice must be refused"
+    );
+
+    assert_eq!(
+        session.revision, repeated,
+        "a refused command must not bump the revision"
     );
 }
 
