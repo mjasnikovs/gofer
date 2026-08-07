@@ -266,7 +266,18 @@ async function installDesktop(page: Page, state: VisualState) {
                         throw new Error('Missing fixture request ID')
                     const requestId = request.requestId
                     if (typeof requestId !== 'number') throw new Error('Invalid fixture request ID')
+                    /*
+                     * A turn shaped the way the agent's turns are shaped: it says what it is about
+                     * to do, does it, says what it found, does the next thing. The order is the
+                     * point — a fixture that calls every tool first and speaks once at the end
+                     * cannot tell a conversation that reads in order from one that does not.
+                     */
                     const events = [
+                        {
+                            type: 'thinking-delta',
+                            delta: 'The suite has to pass before the script is worth reading.'
+                        },
+                        {type: 'text-delta', delta: "I'll run the suite first.\n"},
                         {
                             type: 'tool-start',
                             id: 'tool-1',
@@ -285,6 +296,25 @@ async function installDesktop(page: Page, state: VisualState) {
                             output: 'All tests passed',
                             isError: false,
                             endedAt: 1_800_000_001_000
+                        },
+                        {
+                            type: 'text-delta',
+                            delta: '## Suite is green\n\nAll tests passed, so the change is safe.'
+                        },
+                        {type: 'text-delta', delta: ' Now the player script:\n'},
+                        {
+                            type: 'tool-start',
+                            id: 'tool-2',
+                            name: 'godot_script',
+                            target: 'ls -la assets/tiles/ assets/mario/ assets/goomba/ assets/sprites/ assets/bg/',
+                            startedAt: 1_800_000_001_000
+                        },
+                        {
+                            type: 'tool-end',
+                            id: 'tool-2',
+                            output: 'extends CharacterBody2D',
+                            isError: false,
+                            endedAt: 1_800_000_002_000
                         },
                         {type: 'text-delta', delta: 'Finished the requested change.'},
                         {
@@ -369,6 +399,39 @@ test('streaming conversation with tool activity', async ({page}) => {
     await page.getByRole('textbox').press('Enter')
     await expect(page.getByText('Finished the requested change.')).toBeVisible()
     await expect(page.getByText('bash')).toBeVisible()
+    /*
+     * The turn reads top to bottom in the order it happened. Before this, every call in a turn was
+     * collapsed into one badge above the reply, and a turn of eighty-eight calls said "88" over a
+     * single paragraph of everything the agent had ever said — which is neither followable while it
+     * runs nor readable after.
+     */
+    /*
+     * A conversation is a column: it never scrolls sideways. One tool call with a long command in
+     * its target used to drag the whole list wider than the panel, so every message in the chat sat
+     * behind a horizontal scrollbar. The row's own ellipsis handles the long target once the column
+     * stops growing to fit it.
+     */
+    const overflow = await page.getByRole('log').evaluate(log => {
+        const viewport = log.parentElement
+        return {scroll: viewport?.scrollWidth ?? 0, client: viewport?.clientWidth ?? 0}
+    })
+    expect(overflow.scroll, 'the conversation scrolls sideways').toBeLessThanOrEqual(
+        overflow.client
+    )
+
+    const turn = await page.getByRole('log').innerText()
+    const steps = [
+        "I'll run the suite first.",
+        'npm test',
+        'Suite is green',
+        'ls -la assets/tiles/',
+        'Finished the requested change.'
+    ]
+    const positions = steps.map(step => turn.indexOf(step))
+    expect(positions, `every step is on screen, in:\n${turn}`).not.toContain(-1)
+    expect(positions, 'the turn does not read in the order it happened').toEqual(
+        [...positions].sort((first, second) => first - second)
+    )
     /*
      * The composer's footer, in the narrower of the two layouts it renders in. Held on one line it
      * did not fit the chat column and the reasoning control's chevron was cut in half by the

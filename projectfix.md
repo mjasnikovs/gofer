@@ -52,10 +52,10 @@ intended. It is the height the chat column is given when the bottom panel expand
 laying out a footer taller than the space left for it, and the overflow is drawn under a neighbour
 rather than clipped at a border or pushed out.
 
-The readout is how a user sees a conversation approaching the context wall — see `nexxtask.md`,
-where compaction now summarises before that wall is reached. It is no longer the only warning
-standing between a conversation and a dead turn, but it is still the only place the size of one is
-shown. Half of it is not readable.
+The readout is how a user sees a conversation approaching the context wall. Compaction summarises
+before that wall is reached now, so it is no longer the only warning standing between a conversation
+and a dead turn, but it is still the only place the size of one is shown. Half of it is not
+readable.
 
 **Done means.** The composer footer is whole in every state, or the bottom panel starts below it.
 The three baselines are committed with the defect in them and need re-recording after.

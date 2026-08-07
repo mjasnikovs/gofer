@@ -7,7 +7,14 @@ import {sendAiMessage} from '../../services/ai-stream'
 import {commandErrorMessage, toCommandError} from '../../utils/command-error'
 import type {TaskSummary} from '../../models/app'
 import type {AiStreamPayload, ChatAttachment, DraftAttachment, Message} from '../../models/chat'
-import {compactionActivity, messageUsage} from '../../utils/chat-format'
+import {messageUsage} from '../../utils/chat-format'
+import {
+    applyStreamEvent,
+    settleRunningTools,
+    settleStreaming,
+    withFallbackText,
+    withoutActivity
+} from '../../models/chat-timeline'
 import {attachmentData} from '../../services/chat-storage'
 import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
@@ -42,39 +49,6 @@ const CHAT_CONTENT_WIDTH = 960
  * reach what overflows above it. `safe` falls back to start alignment exactly then.
  */
 const SAFE_CENTRE = {justifyContent: 'safe center'} as const
-
-/**
- * A turn that ends early takes its unfinished tool calls with it. The backend stops streaming the
- * moment it is cancelled, so no `tool-end` is ever coming for a call still in flight: left alone it
- * would spin forever and read as an agent that is still working.
- */
-/**
- * Drops the label a long step was showing while it had nothing else to show.
- *
- * Whatever ended the turn ended the step with it, so a label left behind would describe work that
- * is no longer happening — which is the exact impression the label exists to prevent.
- */
-function withoutActivity(message: Message): Message {
-    if (message.activity === undefined) return message
-    const {activity, ...rest} = message
-    void activity
-    return rest
-}
-
-function settleRunningTools(message: Message, reason: string): Message {
-    if (!message.tools?.some(tool => tool.status === 'running' || tool.status === 'pending')) {
-        return message
-    }
-    const endedAt = Date.now()
-    return {
-        ...message,
-        tools: message.tools.map(tool =>
-            tool.status === 'running' || tool.status === 'pending' ?
-                {...tool, status: 'error' as const, output: tool.output ?? reason, endedAt}
-            :   tool
-        )
-    }
-}
 
 export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspaceProps) {
     const [draft, setDraft] = useState('')
@@ -154,6 +128,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                 text: '',
                 timestamp: Date.now(),
                 tools: [],
+                parts: [],
                 status: 'streaming'
             }
             const requestId = nextRequestId.current++
@@ -169,91 +144,9 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             const receive = (payload: AiStreamPayload) => {
                 if (payload.requestId !== requestId) return
                 const event = payload.event
-                if (event.type === 'text-delta') {
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...message,
-                        text: message.text + event.delta
-                    }))
-                }
-                if (event.type === 'thinking-delta') {
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...message,
-                        thinking: (message.thinking ?? '') + event.delta
-                    }))
-                }
-                if (event.type === 'tool-start') {
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...message,
-                        tools: [
-                            ...(message.tools ?? []),
-                            {
-                                id: event.id,
-                                name: event.name,
-                                status: 'running',
-                                startedAt: event.startedAt,
-                                ...(event.target && {target: event.target})
-                            }
-                        ]
-                    }))
-                }
-                if (event.type === 'tool-update' || event.type === 'tool-end') {
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...message,
-                        tools: (message.tools ?? []).map(tool =>
-                            tool.id === event.id ?
-                                {
-                                    ...tool,
-                                    output: event.output,
-                                    ...(event.type === 'tool-end' && {
-                                        status:
-                                            event.isError ?
-                                                ('error' as const)
-                                            :   ('complete' as const),
-                                        endedAt: event.endedAt
-                                    })
-                                }
-                            :   tool
-                        )
-                    }))
-                }
-                if (event.type === 'usage') {
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...message,
-                        usage: event.usage,
-                        model: event.model
-                    }))
-                }
-                if (event.type === 'compaction-start') {
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...message,
-                        activity: compactionActivity(event.tokens, event.contextWindow)
-                    }))
-                }
-                // Cleared rather than left to the first token, because a turn that answers with a
-                // tool call produces no token to clear it, and the label would outlive the work.
-                if (event.type === 'compaction-end') {
-                    updateAssistant(assistantMessage.id, withoutActivity)
-                }
-                if (event.type === 'done') {
-                    setAgentMessages(event.agentMessages)
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...message,
-                        text: event.text || message.text,
-                        usage: event.usage,
-                        model: event.model,
-                        status: 'complete',
-                        ...((event.thinking || message.thinking) && {
-                            thinking: event.thinking || message.thinking
-                        })
-                    }))
-                }
-                if (event.type === 'aborted') {
-                    updateAssistant(assistantMessage.id, message => ({
-                        ...settleRunningTools(message, 'Stopped before it finished.'),
-                        text: message.text || 'Generation stopped.',
-                        status: 'aborted'
-                    }))
-                }
+                // The transcript is the one thing the message cannot carry, so it stays here.
+                if (event.type === 'done') setAgentMessages(event.agentMessages)
+                updateAssistant(assistantMessage.id, message => applyStreamEvent(message, event))
             }
 
             const run = async () => {
@@ -275,25 +168,33 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                 } catch (error) {
                     const failure = toCommandError(error)
                     setStreamError(failure.message)
+                    // A turn refused because one was already running never reached the model, so the
+                    // bubble says that rather than claiming an answer was attempted. That
+                    // distinction is the whole point of the backend answering with a code instead
+                    // of a sentence.
+                    const reason =
+                        failure.code === 'ai_request_in_progress' ?
+                            'Gofer is still working on the previous message.'
+                        :   'The AI response could not be completed.'
                     updateAssistant(assistantMessage.id, entry => ({
-                        ...settleRunningTools(entry, 'The turn ended before this call finished.'),
-                        // A turn refused because one was already running never reached the model,
-                        // so the bubble says that rather than claiming an answer was attempted.
-                        // That distinction is the whole point of the backend answering with a code
-                        // instead of a sentence.
-                        text:
-                            entry.text
-                            || (failure.code === 'ai_request_in_progress' ?
-                                'Gofer is still working on the previous message.'
-                            :   'The AI response could not be completed.'),
+                        ...withFallbackText(
+                            settleRunningTools(entry, 'The turn ended before this call finished.'),
+                            reason
+                        ),
                         status: 'error'
                     }))
                 } finally {
                     // The stream is over however it ended, so nothing it started can still be
-                    // running — a `tool-end` the backend never sent is one it never will.
+                    // running — a `tool-end` the backend never sent is one it never will, and the
+                    // same goes for the `done` that would otherwise have ended the turn.
                     updateAssistant(assistantMessage.id, entry =>
                         withoutActivity(
-                            settleRunningTools(entry, 'The turn ended before this call finished.')
+                            settleStreaming(
+                                settleRunningTools(
+                                    entry,
+                                    'The turn ended before this call finished.'
+                                )
+                            )
                         )
                     )
                     if (activeRequestId.current === requestId) activeRequestId.current = undefined

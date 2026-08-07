@@ -1,5 +1,17 @@
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 
+/**
+ * One step of an assistant turn, in the order it happened.
+ *
+ * A turn narrates, calls a tool, narrates again. `text`, `thinking` and `tools` are the whole-turn
+ * totals that the request history and the stored chat need, and they cannot say which came first —
+ * only this list can, and it is what the conversation is drawn from.
+ */
+export type MessagePart =
+    | Readonly<{kind: 'text'; text: string}>
+    | Readonly<{kind: 'thinking'; text: string}>
+    | Readonly<{kind: 'tool'; toolId: string}>
+
 export type Message = Readonly<{
     id: number
     sender: 'user' | 'assistant'
@@ -7,6 +19,8 @@ export type Message = Readonly<{
     timestamp: number
     thinking?: string
     tools?: readonly ToolActivity[]
+    /** Absent on chats stored before the turn recorded its order; see `messageParts`. */
+    parts?: readonly MessagePart[]
     usage?: TokenUsage
     model?: string
     status?: 'streaming' | 'complete' | 'error' | 'aborted'

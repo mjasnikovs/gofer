@@ -7,7 +7,7 @@ import {Navigation} from '../components/application/Navigation'
 import {SettingsPage} from '../components/settings/SettingsPage'
 import {Workspace} from '../components/workspace/Workspace'
 import type {TaskSummary} from '../models/app'
-import type {StoredChat} from '../models/chat'
+import type {StoredChat, TokenUsage} from '../models/chat'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean
@@ -30,6 +30,15 @@ vi.mock('../services/desktop', () => ({
 }))
 
 /** The channel `send_ai_message` now streams its deltas down, as the fixture receives it. */
+const emptyUsage: TokenUsage = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {total: 0}
+}
+
 function streamOf(args: unknown): AiStream {
     const stream = (args as {stream?: AiStream} | undefined)?.stream
     if (!stream) throw new Error('send_ai_message was invoked without its stream channel')
@@ -457,9 +466,25 @@ describe('Workspace', () => {
         tauri.invoke.mockImplementation(async (command, args) => {
             if (command === 'list_workspace_files') return []
             if (command === 'send_ai_message') {
-                streamOf(args).onmessage({
+                const stream = streamOf(args)
+                stream.onmessage({
                     requestId: 1,
                     event: {type: 'text-delta', delta: 'Hello from local AI'}
+                })
+                // Ends with no text of its own, so what is on screen can only be the delta. The
+                // backend's `done` carries the turn's last step, not the turn, and a bubble that
+                // took its text from there would be one that dropped everything said earlier.
+                stream.onmessage({
+                    requestId: 1,
+                    event: {
+                        type: 'done',
+                        text: '',
+                        thinking: '',
+                        stopReason: 'stop',
+                        usage: emptyUsage,
+                        model: 'local',
+                        agentMessages: []
+                    }
                 })
             }
             return undefined
@@ -517,6 +542,193 @@ describe('Workspace', () => {
 
         expect(await screen.findByText('Carried on')).toBeInTheDocument()
         expect(screen.queryByText(/Summarising the conversation/)).not.toBeInTheDocument()
+    })
+
+    /**
+     * A turn goes quiet between its steps: it finishes a sentence, then spends a long time deciding
+     * what to call next. On screen that looked exactly like a turn that had ended — the last thing
+     * drawn was a finished paragraph, under a finished tool call, over a token count. The only sign
+     * of life was a placeholder in the composer, at the far edge of the screen from where the eye
+     * is. Whatever else the conversation shows, a running turn shows that it is running.
+     */
+    it('shows the turn is still working after it stops writing', async () => {
+        let stream: AiStream | undefined
+        let endTurn: (() => void) | undefined
+        tauri.invoke.mockImplementation(async (command, args) => {
+            if (command === 'list_workspace_files') return []
+            if (command === 'send_ai_message') {
+                stream = streamOf(args)
+                for (const event of [
+                    {
+                        type: 'tool-start',
+                        id: 'tool-1',
+                        name: 'godot_session',
+                        target: 'start',
+                        startedAt: 1
+                    },
+                    {
+                        type: 'tool-end',
+                        id: 'tool-1',
+                        output: 'ready',
+                        isError: false,
+                        endedAt: 131
+                    },
+                    {type: 'text-delta', delta: 'Let me create the tileset art first.'},
+                    // Usage arrives once per step, not once per turn: the backend emits it on every
+                    // `turn_end`, and a turn that calls tools has one of those per call.
+                    {type: 'usage', usage: emptyUsage, model: 'local'}
+                ]) {
+                    stream.onmessage({requestId: 1, event})
+                }
+                // Held open, because a turn that has returned is not one that is still working.
+                await new Promise<void>(resolve => {
+                    endTurn = resolve
+                })
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+
+        // The tool row rather than the sentence: streaming Markdown holds its last chunk back until
+        // the next delta settles it, so the newest sentence is deliberately not on screen yet.
+        expect(await screen.findByText('godot_session')).toBeInTheDocument()
+        expect(
+            await screen.findByRole('status', {name: 'Working'}),
+            'a turn between steps looks finished'
+        ).toBeInTheDocument()
+
+        stream?.onmessage({
+            requestId: 1,
+            event: {
+                type: 'done',
+                text: '',
+                thinking: '',
+                stopReason: 'stop',
+                usage: emptyUsage,
+                model: 'local',
+                agentMessages: []
+            }
+        })
+        endTurn?.()
+
+        await waitFor(() => {
+            expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
+        })
+    })
+
+    /**
+     * A running call already spins, on its own row, next to the name of the thing it is doing. A
+     * second indicator under it says the same thing twice and puts the vaguer of the two ("Working")
+     * closest to the eye. One turn shows one indicator, and while a call is running it is the call's.
+     */
+    it('lets a running call be its own indicator', async () => {
+        tauri.invoke.mockImplementation(async (command, args) => {
+            if (command === 'list_workspace_files') return []
+            if (command === 'send_ai_message') {
+                streamOf(args).onmessage({
+                    requestId: 1,
+                    event: {
+                        type: 'tool-start',
+                        id: 'tool-1',
+                        name: 'godot_scene',
+                        target: 'create',
+                        startedAt: 1
+                    }
+                })
+                await new Promise<void>(() => undefined)
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+
+        expect(await screen.findByText('godot_scene')).toBeInTheDocument()
+        expect(
+            screen.queryByRole('status', {name: 'Working'}),
+            'a running call is indicated twice'
+        ).not.toBeInTheDocument()
+    })
+
+    /**
+     * `done` is not guaranteed: the backend can return from a turn without emitting it. The
+     * indicator has to come down when the stream is over, or it stays up for the session.
+     */
+    it('stops indicating work when the stream ends without saying it is done', async () => {
+        tauri.invoke.mockImplementation(async (command, args) => {
+            if (command === 'list_workspace_files') return []
+            if (command === 'send_ai_message') {
+                streamOf(args).onmessage({
+                    requestId: 1,
+                    event: {type: 'tool-start', id: 'tool-1', name: 'bash', startedAt: 1}
+                })
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+
+        expect(await screen.findByText('bash')).toBeInTheDocument()
+        await waitFor(() => {
+            expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
+        })
+    })
+
+    /**
+     * The token footer is the turn's closing line, and a closing line under a turn that has not
+     * closed says the wrong thing twice: it reports a total that is still climbing, and it tells
+     * the reader the message is over.
+     */
+    it('holds the token footer back until the turn is over', async () => {
+        let stream: AiStream | undefined
+        let endTurn: (() => void) | undefined
+        tauri.invoke.mockImplementation(async (command, args) => {
+            if (command === 'list_workspace_files') return []
+            if (command === 'send_ai_message') {
+                stream = streamOf(args)
+                stream.onmessage({requestId: 1, event: {type: 'text-delta', delta: 'Starting.'}})
+                stream.onmessage({
+                    requestId: 1,
+                    event: {
+                        type: 'usage',
+                        usage: {...emptyUsage, input: 156, output: 114, reasoning: 0},
+                        model: 'local'
+                    }
+                })
+                await new Promise<void>(resolve => {
+                    endTurn = resolve
+                })
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+
+        expect(await screen.findByText('Starting.')).toBeInTheDocument()
+        expect(
+            screen.queryByText(/156 in/),
+            'the running turn is already showing its closing line'
+        ).not.toBeInTheDocument()
+
+        stream?.onmessage({
+            requestId: 1,
+            event: {
+                type: 'done',
+                text: '',
+                thinking: '',
+                stopReason: 'stop',
+                usage: {...emptyUsage, input: 156, output: 114, reasoning: 0},
+                model: 'local',
+                agentMessages: []
+            }
+        })
+        endTurn?.()
+
+        expect(await screen.findByText(/156 in/)).toBeInTheDocument()
     })
 
     it('renders agent tool activity and token usage', async () => {
