@@ -140,6 +140,83 @@ async function sessionWorktree() {
     return worktree
 }
 
+/** One tagged value, as every Godot value crosses the wire. */
+type TaggedValue = Readonly<{type: string; value: unknown}>
+
+type RuntimeInspection = Readonly<{
+    path: string
+    name: string
+    type: string
+    properties?: Readonly<Record<string, TaggedValue>> | undefined
+}>
+
+type RuntimeTreeNode = Readonly<{
+    name: string
+    type: string
+    path: string
+    children?: readonly RuntimeTreeNode[] | undefined
+}>
+
+type RuntimeTree = Readonly<{root: RuntimeTreeNode | null; truncated?: boolean | undefined}>
+
+type InputActionEvent = Readonly<{kind: string; key?: string | undefined}>
+
+type InputAction = Readonly<{
+    name: string
+    builtIn: boolean
+    events: readonly InputActionEvent[]
+}>
+
+type InputActions = Readonly<{actions: readonly InputAction[]}>
+
+/** Correlates the sweep's own editor requests, which share the session the panels use. */
+let nextRequestId = 0
+
+/**
+ * Sends one command to the editor session the way the renderer's own panels do.
+ *
+ * Used only where the question cannot be asked of the interface: the running game's node positions
+ * are behind no control, and the sweep has to read them itself to say whether the level plays.
+ */
+async function godotCall<Answer>(command: string, params: Readonly<Record<string, unknown>>) {
+    nextRequestId += 1
+    const response = await invokeCommand<{result: Answer}>('call_godot', {
+        request: {
+            id: `sweep-${String(nextRequestId)}`,
+            command,
+            params,
+            timeoutMs: 60_000
+        }
+    })
+    return response.result
+}
+
+/** Where the running game keeps a node, which is not where the edited scene keeps it. */
+async function runningNodePath(name: string) {
+    const tree = await godotCall<RuntimeTree>('runtime.get_tree', {})
+    const search = (node: RuntimeTreeNode | null | undefined): string => {
+        if (!node) return ''
+        if (node.name === name) return node.path
+        for (const child of node.children ?? []) {
+            const found = search(child)
+            if (found !== '') return found
+        }
+        return ''
+    }
+    const path = search(tree.root)
+    if (path === '') throw new Error(`the running game has no node named ${name}`)
+    return path
+}
+
+/** The key an action is bound to, read back from the Input Map rather than assumed. */
+async function boundKey(action: string) {
+    const {actions} = await godotCall<InputActions>('project.list_input_actions', {})
+    const found = actions.find(entry => entry.name === action)
+    const key = found?.events.find(event => event.kind === 'key')?.key
+    if (!key) throw new Error(`${action} is bound to no key: ${JSON.stringify(found)}`)
+    return key
+}
+
 /** How many nodes the edited scene tree is showing. */
 async function sceneNodeCount() {
     return browser.execute(
@@ -1633,6 +1710,59 @@ describe('the live workspace', () => {
         it('shows the level’s own nodes in the running game', async () => {
             await clickTab('Runtime')
             await expectInExplorer(['Level1', 'Player'], 120_000)
+        })
+
+        /**
+         * The level is a game, not a picture of one.
+         *
+         * Every assertion above this reads a file or a tree: the nodes exist, the shapes are real,
+         * the wiring is saved. None of them says the thing can be *played*. This one holds the
+         * agent's own movement key down and watches the player the agent wrote move under the
+         * script the agent wrote, driven by the Input Map the agent registered — the whole chain,
+         * end to end, with the harness reading the position rather than the model reporting it.
+         */
+        it('plays the level: the player moves when its own key is held', async () => {
+            const player = await runningNodePath('Player')
+            // The key is read back from the Input Map the agent wrote rather than assumed: which
+            // key it chose is its business, and reading it also says `list_input_actions` reports
+            // what `set_input_action` stored.
+            const moveRight = await boundKey('move_right')
+            const positionOf = async () => {
+                const inspected = await godotCall<RuntimeInspection>('runtime.inspect_node', {
+                    path: player,
+                    properties: ['position']
+                })
+                const value = inspected.properties?.['position']?.value
+                if (!Array.isArray(value))
+                    throw new Error(`the player reported no position: ${JSON.stringify(inspected)}`)
+                return Number(value[0])
+            }
+
+            const before = await positionOf()
+            // No `device`: a marked event reaches _input and matches no action at all, because an
+            // Input Map binding carries the keyboard's own device. Unmarked is how a player plays.
+            await godotCall('runtime.input', {
+                events: [{kind: 'key', key: moveRight, pressed: true}]
+            })
+            try {
+                // The key stays down between calls, so the game keeps moving while this waits on
+                // the only thing that can end it: the player's own position.
+                const deadline = Date.now() + 30_000
+                for (;;) {
+                    const now = await positionOf()
+                    if (now > before + 16) return
+                    if (Date.now() >= deadline)
+                        throw new Error(
+                            `holding ${moveRight} moved the player from ${String(before)} to `
+                                + `${String(now)}; `
+                                + 'the level cannot be played with the input actions it registered'
+                        )
+                }
+            } finally {
+                await godotCall('runtime.input', {
+                    events: [{kind: 'key', key: moveRight, pressed: false}]
+                })
+            }
         })
 
         it('reports no error from the script the agent wrote', async () => {
