@@ -16,6 +16,8 @@
 //! threads still reading it.
 
 use std::cell::Cell;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -92,21 +94,34 @@ pub fn recv_until<T>(receiver: &Receiver<T>, deadline: Instant) -> Result<T, Wai
     }
 }
 
+/// Serializes every test that sets the process-wide cancelled turn.
+///
+/// An id of its own per test is not enough, because [`cancel_turn`] *replaces* the id rather than
+/// accumulating: a second test cancelling its own turn un-cancels the first one, and a wait that
+/// was watching for its cancellation then serves out its whole deadline instead. That is a test
+/// racing a test, not a fault in the waits — but it is indistinguishable from one in the output.
+#[cfg(test)]
+pub(crate) static CANCEL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
 
-    /// Every test in this module shares one process-wide cancelled turn, so each uses an id of its
-    /// own and no test asserts on a turn another one set.
     #[test]
     fn a_thread_outside_a_tool_call_is_never_cancelled() {
+        let _serialized = CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
         cancel_turn(101);
         assert!(!is_cancelled(), "no tool call is running on this thread");
     }
 
     #[test]
     fn only_the_cancelled_turn_stops() {
+        let _serialized = CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
         let _turn = ToolTurn::enter(102);
         cancel_turn(103);
         assert!(
@@ -119,6 +134,9 @@ mod tests {
 
     #[test]
     fn leaving_the_tool_call_clears_the_thread() {
+        let _serialized = CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
         cancel_turn(104);
         {
             let _turn = ToolTurn::enter(104);
@@ -132,6 +150,9 @@ mod tests {
 
     #[test]
     fn a_wait_ends_early_when_the_turn_is_cancelled() {
+        let _serialized = CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
         let _turn = ToolTurn::enter(105);
         cancel_turn(105);
         let (_sender, receiver) = channel::<u8>();

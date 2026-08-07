@@ -140,6 +140,14 @@ async function sessionWorktree() {
     return worktree
 }
 
+/** What the language server last published about one file. */
+type ScriptDiagnosticsAnswer = Readonly<{
+    op: 'diagnostics'
+    path: string
+    published: boolean
+    diagnostics: readonly Readonly<{message: string; severity?: number | undefined}>[]
+}>
+
 /** One tagged value, as every Godot value crosses the wire. */
 type TaggedValue = Readonly<{type: string; value: unknown}>
 
@@ -1700,6 +1708,44 @@ describe('the live workspace', () => {
             await closeInspector()
         })
 
+        /**
+         * Every script the agent wrote, as the language server reads it.
+         *
+         * A GDScript that does not parse stops the scene using it from loading, and the game then
+         * never starts — which arrives as `runtime_timeout` three steps later, saying nothing about
+         * the script. That is how a `PoolVector2Array()` — the Godot 3 name — reached a level and
+         * cost a whole sweep. The server has the answer the moment the file is written, so it is
+         * asked before anything is run.
+         */
+        it('has no script the language server cannot parse', async () => {
+            const scripts = readdirSync(join(bound, 'scripts'))
+                .filter(name => name.endsWith('.gd'))
+                .map(name => `scripts/${name}`)
+                .concat(
+                    readdirSync(join(bound, 'scenes'))
+                        .filter(name => name.endsWith('.gd'))
+                        .map(name => `scenes/${name}`)
+                )
+            expect(scripts.length).toBeGreaterThan(0)
+            const broken: string[] = []
+            for (const path of scripts) {
+                // Opening is what makes the server read the file; a path it never saw publishes
+                // nothing and would pass by saying nothing at all.
+                await invokeCommand('open_script_document', {request: {path}})
+                const answer = await invokeCommand<ScriptDiagnosticsAnswer>(
+                    'call_script_language',
+                    {
+                        request: {op: 'diagnostics', path, timeoutMs: 20_000}
+                    }
+                )
+                // 1 is Error in the language-server protocol; a warning is the model's style, not
+                // a level that will not load.
+                for (const diagnostic of answer.diagnostics)
+                    if (diagnostic.severity === 1) broken.push(`${path}: ${diagnostic.message}`)
+            }
+            expect(broken).toEqual([])
+        })
+
         it('runs the level the agent built and draws a frame of it', async () => {
             await clickTab('Game')
             await clickButton('Run')
@@ -1784,6 +1830,50 @@ describe('the live workspace', () => {
             await clickTab('Game')
             await clickControl('Stop')
             await expectText(['No frame captured'], {limitMs: 60_000})
+        })
+    })
+
+    /**
+     * One window, two tasks, one editor.
+     *
+     * A Godot session is pinned to the worktree it started in, and the active task is whatever the
+     * sidebar last pointed at — nothing keeps the two together. Switching tasks with a session
+     * running therefore leaves the panels reading one task's editor while every file tool, the
+     * agent's included, writes into another's checkout. Nothing says so on screen, and the scene
+     * that answers is a scene the user is not looking at.
+     */
+    describe('a session that belongs to another task', () => {
+        /** The route the level was built on, returned to before the story continues. */
+        let builtOn = ''
+
+        it('does not answer with another task’s scene', async () => {
+            builtOn = await currentRoute()
+            await clickText('New task')
+            await browser.waitUntil(async () => (await currentRoute()) !== builtOn, {
+                timeout: 60_000,
+                interval: 200,
+                timeoutMsg: 'the window never moved to the new task'
+            })
+
+            // Asked of the backend rather than the screen, because what is wrong is not a
+            // rendering: the editor answers for a checkout this task has nothing to do with, and
+            // the agent's own file tools follow the task while its Godot tools follow the session.
+            // Refusing is a correct answer here; naming Level1 is not.
+            const answered = await godotCall<RuntimeTree>('scene.get_tree', {})
+                .then(tree => tree.root?.name ?? '(no scene)')
+                .catch((error: unknown) => `refused: ${String(error)}`)
+            expect(answered).not.toBe('Level1')
+        })
+
+        after(async () => {
+            // The story continues on the task the level was built in.
+            if (builtOn === '') return
+            await clickSelector(`a[href="${builtOn}"]`, 'the task the level was built in')
+            await browser.waitUntil(async () => (await currentRoute()) === builtOn, {
+                timeout: 60_000,
+                interval: 200,
+                timeoutMsg: `the window never returned to ${builtOn}`
+            })
         })
     })
 

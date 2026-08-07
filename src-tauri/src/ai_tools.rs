@@ -323,7 +323,10 @@ pub const CATALOG: &[ToolDomain] = &[
             ),
             operation(
                 "delete",
-                "Deletes a file or directory: {path, expectedHash?}.",
+                "Deletes a file or directory: {path, expectedHash?}. `expectedHash` is the hash \
+                 string a godot_script open or save reported for that same file, and refuses the \
+                 delete if the file changed since. There is no other way to obtain one, so omit it \
+                 unless you are holding one — a made-up value is refused.",
             ),
         ],
     },

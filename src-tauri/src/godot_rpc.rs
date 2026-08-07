@@ -1090,8 +1090,13 @@ mod tests {
         reader.read_line(&mut line).expect("the handshake answer");
 
         // The turn is stopped before the call is made, so the wait gives up on its first look.
+        // The cancelled turn is one process-wide value, so this holds the lock that keeps it from
+        // being replaced by another test's cancellation while this one is watching for its own.
+        let _serialized = crate::cancel::CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
         let turn = 4242;
-        let _scope = crate::cancel::ToolTurn::enter(turn);
+        let scope = crate::cancel::ToolTurn::enter(turn);
         crate::cancel::cancel_turn(turn);
 
         let failure = session
@@ -1128,7 +1133,8 @@ mod tests {
         )
         .unwrap();
 
-        crate::cancel::cancel_turn(0);
+        // Leaving the tool call is what frees this thread, rather than clearing the shared id.
+        drop(scope);
         let alive = session.call(CallRequest {
             id: "request-after".to_owned(),
             command: "scene.list".to_owned(),
