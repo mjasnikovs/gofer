@@ -142,13 +142,19 @@ pub const CATALOG: &[ToolDomain] = &[
     },
     ToolDomain {
         name: "godot_scene",
-        description: "The edited scene in the editor — never the running game's scene tree.",
+        description: "The edited scene in the editor — never the running game's scene tree. The \
+                      mutations here need expectedRevision like the node ones do, and the revision \
+                      is whatever the last get_tree — or godot_session get_state — reported, so \
+                      start with one of those rather than guessing.",
         operations: &[
             operation("list", "Lists the scene files in the project."),
             operation("open", "Opens a scene: {path}."),
             operation(
                 "create",
-                "Creates a scene and opens it: {path, rootType, rootName?, expectedRevision}.",
+                "Creates a scene and opens it: {path, rootType, rootName?, expectedRevision}. The \
+                 revision is the one the scene being *replaced* is at — creating a scene discards \
+                 whatever is unsaved in the open one, which is what the revision is guarding — so \
+                 read godot_scene get_tree first even though the new scene does not exist yet.",
             ),
             operation(
                 "get_tree",
