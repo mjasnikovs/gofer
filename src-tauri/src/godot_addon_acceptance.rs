@@ -755,6 +755,47 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
     );
 }
 
+/// The addon answers `session.cancel`, which the protocol has specified since version 2.
+///
+/// Gofer sends it when a caller walks away — `godot_rpc::a_stopped_turn_tells_the_addon_to_give_up`
+/// covers that half on the wire. This half is that the command exists in the editor at all: it was
+/// in the frozen spec, with a golden fixture, and the addon answered `unknown_command` for it.
+///
+/// What is *not* proven here is a long park being retracted. A parked scene switch is the case
+/// worth cancelling, and Godot 4.7 could not be made to hold one: it opens a scene with a missing
+/// parent by dropping the orphan, and one with an unknown root class by substituting a placeholder.
+#[test]
+fn the_addon_answers_a_cancellation() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://cancelled.tscn", "rootType": "Node2D"}),
+    );
+
+    // Nothing is parked, so there is nothing to retract — and that is an answer, not an error: the
+    // caller gave up and the reply crossed it on the way.
+    let unknown = session.call("session.cancel", json!({"requestId": "never-sent"}));
+    assert_eq!(unknown["requestId"], "never-sent");
+    assert_eq!(unknown["cancelled"], false);
+
+    assert!(
+        session
+            .error("session.cancel", json!({}), None)
+            .starts_with("invalid_params"),
+        "a cancellation naming no request must be refused"
+    );
+
+    // Cancelling nothing changes nothing: the session is still editing what it was.
+    assert_eq!(
+        session.call("session.get_state", json!({}))["state"],
+        "ready"
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/cancelled", "name": "After", "type": "Node2D"}),
+    );
+}
+
 /// A level built the way Godot projects are built: one scene, placed more than once.
 ///
 /// `node.create` reaches `ClassDB` and nothing else, so before this the only way to repeat a thing

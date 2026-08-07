@@ -26,6 +26,10 @@ pub(crate) const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 /// The id Gofer reuses for every heartbeat request. The addon answers it like any other request, so
 /// the correlation table never holds an entry for it and its reply is recognized by this id alone.
 const HEARTBEAT_ID: &str = "heartbeat";
+/// What a `session.cancel` request is called, so its own answer is recognized as nobody's.
+const CANCEL_ID_PREFIX: &str = "cancel-";
+/// A cancellation is fire-and-forget, so this only bounds how long the addon may hold it.
+const CANCEL_TIMEOUT_MS: u64 = 5_000;
 const CONNECT_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
 const MAX_RECONNECT_ATTEMPTS: usize = 3;
@@ -188,6 +192,7 @@ impl RpcSession {
                 .pending
                 .insert(request.id.clone(), PendingRequest { sender: tx });
         }
+        let request_id = request.id.clone();
         self.request_tx
             .send(request)
             .map_err(|_| RpcError::new("session_closed", "The RPC session has stopped"))?;
@@ -199,12 +204,32 @@ impl RpcSession {
         // because a request was abandoned.
         match crate::cancel::recv_until(&rx, Instant::now() + timeout) {
             Ok(response) => response,
-            Err(crate::cancel::WaitEnd::Cancelled) => Err(RpcError::new(
-                "cancelled",
-                "The request was stopped with its agent turn",
-            )),
+            Err(crate::cancel::WaitEnd::Cancelled) => {
+                self.tell_the_addon_to_give_up(&request_id);
+                Err(RpcError::new(
+                    "cancelled",
+                    "The request was stopped with its agent turn",
+                ))
+            }
             Err(_) => Err(RpcError::new("request_timeout", "The request timed out").retryable()),
         }
+    }
+
+    /// Tells the addon that nobody is waiting for a request any more.
+    ///
+    /// Walking away is not enough on the editor's side. A scene switch it has parked holds the
+    /// session at `importing` until it obeys or its half-minute deadline passes, and every mutation
+    /// is refused `not_ready` meanwhile — so a stopped agent turn stalled the whole session,
+    /// including whatever the user reached for next. This is sent and forgotten: it registers no
+    /// pending entry, and the reader knows the answer to it is nobody's.
+    fn tell_the_addon_to_give_up(&self, request_id: &str) {
+        let _ = self.request_tx.send(CallRequest {
+            id: format!("{CANCEL_ID_PREFIX}{request_id}"),
+            command: "session.cancel".to_owned(),
+            params: json!({"requestId": request_id}),
+            expected_revision: None,
+            timeout_ms: Some(CANCEL_TIMEOUT_MS),
+        });
     }
 
     /// Current lifecycle readiness reported by the addon.
@@ -518,7 +543,9 @@ fn read_envelopes(
                 break;
             }
         };
-        if is_heartbeat(&envelope) {
+        // Uncorrelated traffic is dropped rather than dispatched, and counts as liveness on the way
+        // past: an answer from the addon proves it is alive whichever request it belongs to.
+        if is_uncorrelated(&envelope) {
             *last_heartbeat.lock().expect("heartbeat lock") = Instant::now();
             continue;
         }
@@ -548,12 +575,18 @@ fn same_project(expected: &str, reported: &str) -> bool {
     normalize(expected) == normalize(reported)
 }
 
-/// Recognizes the liveness traffic that carries no correlated request: the addon's reply to a
-/// heartbeat request, and an unsolicited heartbeat event.
-fn is_heartbeat(envelope: &Value) -> bool {
+/// Recognizes the traffic that carries no correlated request: the addon's reply to a heartbeat
+/// request, an unsolicited heartbeat event, and its reply to a cancellation nobody is waiting for.
+///
+/// Without this an answer with no pending entry reads as a stale reply and closes the session —
+/// which would make giving up on one request cost the whole editor.
+fn is_uncorrelated(envelope: &Value) -> bool {
     let kind = envelope.get("kind").and_then(Value::as_str).unwrap_or("");
     match kind {
-        "response" | "error" => envelope.get("id").and_then(Value::as_str) == Some(HEARTBEAT_ID),
+        "response" | "error" => envelope
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == HEARTBEAT_ID || id.starts_with(CANCEL_ID_PREFIX)),
         "event" => envelope.get("event").and_then(Value::as_str) == Some("session.heartbeat"),
         _ => false,
     }
@@ -1028,6 +1061,87 @@ mod tests {
         let response: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(response["kind"], "error");
         assert_eq!(response["error"]["code"], "payload_too_large");
+        session.stop();
+    }
+
+    /// Giving up on a request tells the addon to give up too, and its answer costs nothing.
+    ///
+    /// Walking away is only half of it: the addon parks a scene switch or a runtime call until the
+    /// editor or the game answers, and nothing there knows the caller is gone. The reply to the
+    /// cancellation is the delicate part — it correlates to no pending request, and an
+    /// uncorrelated reply is otherwise a `stale_reply` that closes the whole session.
+    #[test]
+    fn a_stopped_turn_tells_the_addon_to_give_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let token = "a1".repeat(32);
+        let project_path = "/tmp/gofer/project".to_owned();
+        let session = RpcSession::start(listener, token.clone(), project_path.clone());
+
+        let mut addon = addon_client(address);
+        writeln!(
+            addon,
+            "{}",
+            serde_json::to_string(&handshake(&token, &project_path)).unwrap()
+        )
+        .unwrap();
+        let mut reader = BufReader::new(addon.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("the handshake answer");
+
+        // The turn is stopped before the call is made, so the wait gives up on its first look.
+        let turn = 4242;
+        let _scope = crate::cancel::ToolTurn::enter(turn);
+        crate::cancel::cancel_turn(turn);
+
+        let failure = session
+            .call(CallRequest {
+                id: "request-parked".to_owned(),
+                command: "scene.open".to_owned(),
+                params: json!({"path": "res://slow.tscn"}),
+                expected_revision: None,
+                timeout_ms: Some(60_000),
+            })
+            .expect_err("a stopped turn must not wait out its timeout");
+        assert_eq!(failure.code, "cancelled");
+
+        // The addon sees the request, then the retraction naming it.
+        let mut sent = String::new();
+        reader.read_line(&mut sent).expect("the parked request");
+        assert!(sent.contains("\"command\":\"scene.open\""), "{sent}");
+        sent.clear();
+        reader.read_line(&mut sent).expect("the cancellation");
+        let cancellation: Value = serde_json::from_str(&sent).expect("valid JSON");
+        assert_eq!(cancellation["command"], "session.cancel");
+        assert_eq!(cancellation["params"]["requestId"], "request-parked");
+
+        // Answering it must not cost the session, because nobody is holding that id.
+        writeln!(
+            addon,
+            "{}",
+            json!({
+                "protocolVersion": 2,
+                "kind": "response",
+                "id": cancellation["id"],
+                "result": {"requestId": "request-parked", "cancelled": true}
+            })
+        )
+        .unwrap();
+
+        crate::cancel::cancel_turn(0);
+        let alive = session.call(CallRequest {
+            id: "request-after".to_owned(),
+            command: "scene.list".to_owned(),
+            params: json!({}),
+            expected_revision: None,
+            timeout_ms: Some(2_000),
+        });
+        sent.clear();
+        reader.read_line(&mut sent).expect("the request after it");
+        assert!(
+            sent.contains("\"command\":\"scene.list\""),
+            "the session must still be usable after a cancellation was answered: {sent} / {alive:?}"
+        );
         session.stop();
     }
 

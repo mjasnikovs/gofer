@@ -346,6 +346,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
     match command:
         "session.get_state":
             return _session_state()
+        "session.cancel":
+            return _session_cancel(params)
         "session.undo":
             return _undo()
         "session.redo":
@@ -785,6 +787,52 @@ func _session_state() -> Dictionary:
         "canUndo": _undo_depth > 0,
         "canRedo": _redo_depth > 0,
     }
+
+## Gives up on a request that is still parked, and answers it.
+##
+## Two kinds of request outlive the frame they arrived on: a scene switch waiting for the editor to
+## obey, and a runtime call waiting for the game to reply. Both are answered by a deadline sweep, so
+## a caller that has already walked away — the user pressed Stop — leaves the addon holding them for
+## up to half a minute. A parked scene switch is the one that hurts: it holds readiness at
+## `importing`, and every mutation is refused `not_ready` while it does, so stopping a turn stalled
+## the whole session including whatever the user did next by hand.
+func _session_cancel(params: Dictionary) -> Dictionary:
+    var request_id: String = params.get("requestId", "")
+    if request_id.is_empty():
+        return {
+            "_gofer_error": {
+                "code": "invalid_params",
+                "message": "session.cancel requires requestId",
+                "retryable": false,
+                "readiness": _readiness,
+                "details": {}
+            }
+        }
+
+    var cancelled := false
+    var kept_scenes: Array[Dictionary] = []
+    for pending in _scene_pending:
+        if String(pending["id"]) == request_id:
+            cancelled = true
+            _respond_error(request_id, "cancelled", "The request was cancelled by its caller", false)
+        else:
+            kept_scenes.append(pending)
+    _scene_pending = kept_scenes
+    # Readiness belonged to the switch, so it is given back with it — but only once none is left.
+    if cancelled and _scene_pending.is_empty():
+        _set_readiness("ready")
+
+    var kept_runtime: Array[Dictionary] = []
+    for pending in _runtime_pending:
+        if String(pending["id"]) == request_id:
+            cancelled = true
+            _respond_error(request_id, "cancelled", "The request was cancelled by its caller", false)
+        else:
+            kept_runtime.append(pending)
+    _runtime_pending = kept_runtime
+
+    # A request that already answered is not an error: the caller gave up and the reply crossed it.
+    return {"requestId": request_id, "cancelled": cancelled}
 
 func _undo() -> Dictionary:
     if _undo_depth <= 0:
