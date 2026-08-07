@@ -580,6 +580,14 @@ export async function clickSelector(selector: string, description: string, limit
             lastFailure = `${String(candidates.length)} matched, none displayed`
             for (const candidate of candidates) {
                 if (!(await candidate.isDisplayed())) continue
+                // A control the design system is refusing stays focusable and says so with ARIA
+                // rather than the attribute, so WebDriver clicks it and nothing happens — the step
+                // then fails several assertions later, about something else. Waiting for it to be
+                // offered is what a person does, and the failure names the refusal.
+                if ((await candidate.getAttribute('aria-disabled')) === 'true') {
+                    lastFailure = 'it was there but disabled'
+                    continue
+                }
                 await candidate.click()
                 return
             }

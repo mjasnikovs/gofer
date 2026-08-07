@@ -177,31 +177,41 @@ async function stoppedFrameScript(): Promise<StoppedFrame> {
 }
 
 /**
- * Blocks until the conversation itself holds this, rather than the part of it on screen.
+ * Blocks until the answer now being written holds this, rather than the part of it on screen.
  *
  * An answer of any length scrolls its own beginning out of the window, and the window's text is
  * only what can be seen — so what the model said has to be read from the transcript.
+ *
+ * Only what the transcript grows by is searched. The question is in it too, and a question that
+ * names the word a wrong answer would use — "reply SEEN, or BLIND if you received no image" — would
+ * otherwise fail the moment it was asked, blaming the model for the sweep's own wording.
  */
 async function expectInConversation(
     wanted: readonly string[],
     limitMs: number,
     forbidden: readonly string[] = []
 ) {
+    // What the transcript holds *more* of than it did when the question was asked. Counting rather
+    // than slicing at the length it had: a message that finishes gains a usage footer, so the text
+    // before the question grows too and a fixed offset ends up in the middle of a word.
+    const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1
+    const asked = await conversationText()
     const deadline = Date.now() + limitMs
     let shown = ''
     for (;;) {
         shown = await conversationText()
-        const said = forbidden.find(needle => shown.includes(needle))
+        const isNew = (needle: string) => occurrences(shown, needle) > occurrences(asked, needle)
+        const said = forbidden.find(isNew)
         if (said !== undefined)
             throw new Error(
                 `the conversation answered ${JSON.stringify(said)}: ${shown.slice(-400)}`
             )
-        if (wanted.every(needle => shown.includes(needle))) return
+        if (wanted.every(isNew)) return
         if (Date.now() >= deadline) break
         await browser.pause(500)
     }
     throw new Error(
-        `the conversation never held ${JSON.stringify(wanted)}; it ends: ${shown.slice(-600)}`
+        `the answer never held ${JSON.stringify(wanted)}; the conversation ends: ${shown.slice(-600)}`
     )
 }
 
@@ -295,14 +305,18 @@ async function closeInspector() {
  */
 async function askUntil(prompt: string, isDone: () => Promise<boolean>, missing: string) {
     await sendChat(prompt, AGENT_LIMIT_MS)
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        // The answer has to be finished before it can be judged. Asking the worktree the moment
+        // the message was sent judged an agent that had not started yet: every step then spent one
+        // whole turn being told it had not done work it was still doing.
+        await untilComposerIsFree(AGENT_LIMIT_MS)
         if (await isDone()) return
+        if (attempt === 2) break
         await sendChat(
             `That is not finished: ${missing} Carry on with your Godot tools until it is.`,
             AGENT_LIMIT_MS
         )
     }
-    if (await isDone()) return
     throw new Error(
         `the agent never delivered: ${missing}\nThe explorer reads: ${await regionText('Explorer')}`
     )
@@ -363,15 +377,23 @@ async function pressBreakpointGutter() {
  * a composer that silently took nothing would otherwise send an empty message and leave the wait
  * below blaming the model for a keystroke that never landed.
  */
+/**
+ * Blocks until the composer will take another message, which is how a turn says it is over.
+ *
+ * An answer still streaming makes the composer refuse the next message outright, and the refusal is
+ * silent: the placeholder is the only thing that says which state it is in.
+ *
+ * A panel reading nothing is allowed here: the agent may stop and restart the editor session during
+ * its own turn, and while it is down every panel says so. That is a state of the workspace, not a
+ * fault in the composer this wait is about.
+ */
+async function untilComposerIsFree(limitMs: number) {
+    await expectText(['Ask anything'], {allow: ['could not be read'], limitMs})
+}
+
 async function sendChat(prompt: string, limitMs = 240_000) {
     await releaseModifiers()
-    // An answer still streaming makes the composer refuse the next message outright, and the
-    // refusal is silent: the placeholder is the only thing that says which state it is in.
-    //
-    // A panel reading nothing is allowed here: the agent may stop and restart the editor session
-    // during its own turn, and while it is down every panel says so. That is a state of the
-    // workspace, not a fault in the composer this wait is about.
-    await expectText(['Ask anything'], {allow: ['could not be read'], limitMs})
+    await untilComposerIsFree(limitMs)
     const composer = browser.$('[role="textbox"]')
     await composer.waitForDisplayed({timeout: 15_000})
     for (let attempt = 0; attempt < 3; attempt++) {
