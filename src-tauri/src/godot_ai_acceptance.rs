@@ -7,9 +7,14 @@
 //! itself, because a local LLM cannot be a test fixture.
 //!
 //! The done-criteria of the step is the turn: the agent edits a scene and saves it, fixes a
-//! diagnostic the language server reported, runs to a breakpoint and inspects a local, and
-//! captures the running game. The frame is proven twice: the router hands the worker a PNG, and
-//! the request body of the following model turn carries it as an image the model can actually see.
+//! diagnostic the language server reported, runs to a breakpoint and inspects a local, captures
+//! the running game, reads the project's settings, lists the worktree and cuts an atlas into a
+//! tileset. The frame is proven twice: the router hands the worker a PNG, and the request body of
+//! the following model turn carries it as an image the model can actually see.
+//!
+//! One catalog domain is deliberately absent. `godot_docs_search` retrieves through the gofer-rag
+//! sidecar against downloaded embedding models, and a suite that has to fetch a model before it
+//! can start is not one anybody runs; its own tests stand in `rag.rs`.
 //!
 //! Gated behind the `godot-acceptance` feature so the fast gate needs no engine.
 
@@ -28,6 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use tauri::Manager;
 use tempfile::TempDir;
 
 const ARTIFACTS: &str = include_str!("../../protocol/godot-artifacts.json");
@@ -49,6 +55,12 @@ const FIXED_SCRIPT: &str = "extends Node\n\nfunc explode() -> void:\n\tpass\n";
 const SCENE_PATH: &str = "res://main.tscn";
 const BROKEN_PATH: &str = "scripts/broken.gd";
 const PROBE_PATH: &str = "scripts/main_probe.gd";
+
+/// The live fixture's own art: a real 8x2 atlas of 16x16 tiles, which is what makes
+/// `create_tileset` answer with a grid rather than refuse a texture it cannot cut.
+const ATLAS: &[u8] = include_bytes!("../../fixtures/live-project/assets/tiles.png");
+const ATLAS_PATH: &str = "res://tiles.png";
+const TILESET_PATH: &str = "res://tiles/world.tres";
 
 /// Base64 always opens with these characters when the payload is the eight-byte PNG signature.
 const PNG_BASE64_PREFIX: &str = "iVBORw0KGgo";
@@ -146,6 +158,10 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
     std::fs::write(scripts.join("main_probe.gd"), PROBE_SCRIPT).expect("write the probe script");
     std::fs::write(scripts.join("broken.gd"), BROKEN_SCRIPT).expect("write the broken script");
     std::fs::write(worktree.join("main.tscn"), PROBE_SCENE).expect("write the probe scene");
+    // Written before the editor starts so its first import scan picks the texture up; the turn
+    // still asks for a rescan, because that is the operation a real agent has to reach for after
+    // it puts an asset in the worktree itself.
+    std::fs::write(worktree.join("tiles.png"), ATLAS).expect("write the atlas");
     crate::paths::canonical(&worktree).expect("canonical worktree")
 }
 
@@ -379,9 +395,37 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             "godot_logs",
             json!({"op": "read", "params": {"limit": 200}}),
         ),
-        _ => {
-            ModelTurn::Text("Marker added, diagnostic fixed, breakpoint inspected, frame captured.")
-        }
+        // The three domains the turn used to skip. `godot_project` is not a pass-through — the
+        // router rewrites its three editor-settings operations into the addon's `editor.` domain —
+        // and `godot_resource`'s list, move and delete are answered by the desktop out of the
+        // workspace rather than by the addon at all. Both were only ever checked by a test that
+        // reads strings.
+        18 => tool("godot_resource", json!({"op": "rescan", "params": {}})),
+        19 => tool("godot_project", json!({"op": "get_settings", "params": {}})),
+        20 => tool(
+            "godot_project",
+            json!({"op": "search_editor_settings", "params": {"query": "font_size"}}),
+        ),
+        21 => tool(
+            "godot_resource",
+            json!({"op": "list", "params": {"hashes": true}}),
+        ),
+        22 => tool(
+            "godot_resource",
+            json!({"op": "create_tileset", "params": {
+                "path": TILESET_PATH,
+                "texture": ATLAS_PATH,
+                "tileSize": 16,
+                "solid": [[0, 0], [1, 0], [4, 0], [5, 0]],
+            }}),
+        ),
+        23 => tool(
+            "godot_resource",
+            json!({"op": "describe_tileset", "params": {"path": TILESET_PATH}}),
+        ),
+        _ => ModelTurn::Text(
+            "Marker added, diagnostic fixed, breakpoint inspected, frame captured, tileset built.",
+        ),
     }
 }
 
@@ -518,6 +562,13 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     let transcript = Arc::new(Mutex::new(Transcript::default()));
     let base_url = start_model(Arc::clone(&transcript));
     let app = mock_app();
+    // `godot_resource`'s own operations are answered out of the workspace rather than by the
+    // addon, and the workspace comes from project storage. It lives outside the worktree so that
+    // listing the worktree lists the project and nothing of Gofer's.
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
 
     // The turn's stream. Nothing reads it here — the assertions are about what the tools did, not
     // what the renderer was told — but the worker writes to it, so it has to exist.
@@ -568,7 +619,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     };
     assert_eq!(
         results.len(),
-        18,
+        24,
         "{}",
         quote("every tool call is answered")
     );
@@ -689,5 +740,70 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
             .contains("Godot Engine")),
         "{}",
         quote("the editor's own banner must be in the captured output")
+    );
+
+    // The project domain, and with it the router's own rewrite: `search_editor_settings` is not a
+    // `project.` command at all, it is the addon's `editor.search_settings`, and the mapping lives
+    // in `project_command` where nothing but a string comparison used to look at it.
+    assert_eq!(
+        results[19]["projectName"],
+        "Gofer Protocol Fixture",
+        "{}",
+        quote("the project domain must answer with this project's own settings")
+    );
+    assert!(
+        results[20]["settings"]
+            .as_array()
+            .is_some_and(|settings| !settings.is_empty()),
+        "{}",
+        quote("the editor-settings search must reach the addon's editor domain")
+    );
+
+    // The resource domain, which the desktop answers out of the workspace: the listing carries the
+    // hash a delete of a non-script file is held to, and it is the file's real hash.
+    let listed = results[21]["files"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{}", quote("the listing must carry files")));
+    let scene = listed
+        .iter()
+        .find(|file| file["path"] == "main.tscn")
+        .unwrap_or_else(|| panic!("{}", quote("the worktree's own scene must be listed")));
+    assert_eq!(
+        scene["hash"].as_str(),
+        Some(
+            crate::files::hash_text(
+                &std::fs::read_to_string(session.worktree.join("main.tscn")).expect("read scene")
+            )
+            .as_str()
+        ),
+        "{}",
+        quote("a listed hash must be the hash of what is on disk")
+    );
+
+    // The tileset pair, through the router this time rather than straight at the addon.
+    assert_eq!(
+        results[22]["grid"],
+        json!([8, 2]),
+        "{}",
+        quote("the atlas is eight tiles by two")
+    );
+    assert_eq!(
+        results[22]["physicsLayers"],
+        1,
+        "{}",
+        quote("solid tiles need a physics layer")
+    );
+    let tiles = results[23]["sources"][0]["tiles"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{}", quote("the saved tileset must describe its tiles")));
+    assert_eq!(tiles.len(), 16, "{}", quote("every atlas tile is defined"));
+    assert_eq!(
+        tiles
+            .iter()
+            .filter(|tile| tile["solid"] == json!(true))
+            .count(),
+        4,
+        "{}",
+        quote("only the four named tiles collide")
     );
 }

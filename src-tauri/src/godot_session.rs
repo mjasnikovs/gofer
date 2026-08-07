@@ -520,10 +520,31 @@ pub fn poll_editor_exit() -> bool {
 
 /// Returns a clone of the current session summary, if any.
 pub fn current_info() -> Option<SessionInfo> {
+    #[cfg(test)]
+    if let Some(info) = TEST_SESSION_INFO.lock().ok().and_then(|slot| slot.clone()) {
+        return Some(info);
+    }
     ACTIVE_SESSION
         .lock()
         .ok()
         .and_then(|session| session.as_ref().map(session_info))
+}
+
+/// The session summary a unit test planted, standing in for a running editor.
+///
+/// Only a real `start` writes [`ACTIVE_SESSION`], and it wants a child process and a listening
+/// socket. Every guard that asks nothing more than "is there a session" — `require_session_task`
+/// above all — was therefore reachable in the live sweep and nowhere else. This is what makes it
+/// reachable in a test, and it mirrors [`bind_test_rpc`]: a slot [`current_info`] reads first,
+/// absent from every non-test build.
+#[cfg(test)]
+static TEST_SESSION_INFO: Mutex<Option<SessionInfo>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn bind_test_session_info(info: Option<SessionInfo>) {
+    if let Ok(mut slot) = TEST_SESSION_INFO.lock() {
+        *slot = info;
+    }
 }
 
 /// Updates the lifecycle state of the active session.

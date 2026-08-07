@@ -810,6 +810,79 @@ mod tests {
         }
     }
 
+    /// Clears the planted session on the way out, however the test left.
+    ///
+    /// The slot is process-wide, so a test that returned early with it still set would hand the
+    /// next test a session that is not there.
+    struct PlantedSession;
+
+    impl PlantedSession {
+        fn new(worktree: &Path, task_id: &str) -> Self {
+            godot_session::bind_test_session_info(Some(session_info("session-guard", worktree)));
+            remember_session_task(Some(task_id.to_owned()));
+            Self
+        }
+    }
+
+    impl Drop for PlantedSession {
+        fn drop(&mut self) {
+            godot_session::bind_test_session_info(None);
+            remember_session_task(None);
+        }
+    }
+
+    /// A call is refused when the session belongs to a task the window has moved away from, and
+    /// answered when it does not.
+    ///
+    /// The refusal was found in a live sweep, where the agent asked for the scene tree after the
+    /// user switched tasks and was told about `Level1` — a scene from a checkout its task had
+    /// nothing to do with. It read exactly like an answer about the task in front of it.
+    #[test]
+    fn a_call_is_refused_only_when_the_session_belongs_to_another_task() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = TempDir::new().expect("temporary directory");
+        let worktree = directory.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("create worktree");
+        let storage = ProjectStorage::open(&directory.path().join("data"), &worktree)
+            .expect("open project storage");
+        // Opening the storage leaves one task active, which is the task the session will own.
+        let first = storage
+            .active_task()
+            .expect("read the active task")
+            .expect("opening the storage leaves a task active");
+        let app = tauri::test::mock_builder()
+            .build(crate::app_context())
+            .expect("build mock Tauri app");
+        app.manage(crate::storage::StorageSlot::new(Ok(storage.clone())));
+
+        // No session at all: there is nothing to be wrong about, and the guard says nothing.
+        godot_session::bind_test_session_info(None);
+        remember_session_task(Some("some-other-task".to_owned()));
+        require_session_task(app.handle()).expect("no session means nothing to refuse");
+        remember_session_task(None);
+
+        let _planted = PlantedSession::new(&worktree, &first);
+        require_session_task(app.handle())
+            .expect("the session's own task must be able to call into it");
+
+        // Switching tasks is what makes the same session the wrong one to answer from.
+        let second = storage
+            .create_task()
+            .expect("create a second task")
+            .task_id
+            .expect("the new task has an id");
+        assert_ne!(second, first, "the second task must be a different task");
+        let refused =
+            require_session_task(app.handle()).expect_err("another task's session must not answer");
+        assert_eq!(refused.code, "session_other_task");
+
+        // And moving back is enough to make it answerable again — nothing has to be restarted.
+        storage.activate_task(&first).expect("switch back");
+        require_session_task(app.handle()).expect("the session's own task answers again");
+    }
+
     /// Storage that cannot record the run must not stop the editor from being usable: the failure
     /// is reported where the user is already looking for what the editor is doing.
     #[test]

@@ -189,12 +189,12 @@ fn launch(worktree: &Path, port: u16, token: &str) -> Editor {
 /// The commands that put a different scene in the editor, and so restart the revision at zero.
 const SCENE_SWITCHES: [&str; 2] = ["scene.create", "scene.open"];
 
-struct Session {
+pub(crate) struct Session {
     rpc: RpcSession,
     editor: Editor,
     _directory: Option<TempDir>,
     stager: AddonStager,
-    worktree: PathBuf,
+    pub(crate) worktree: PathBuf,
     revision: u64,
 }
 
@@ -208,7 +208,7 @@ impl Drop for Session {
 impl Session {
     /// Stages the addon into a fresh worktree, launches the editor, and waits for the addon to
     /// report that it is ready.
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let directory = TempDir::new().expect("temporary directory");
         let worktree = fixture_worktree(&directory);
         let ledger = directory.path().join("ledger.json");
@@ -284,7 +284,7 @@ impl Session {
             .map_err(|error| format!("{}: {}", error.code, error.message))
     }
 
-    fn try_call(
+    pub(crate) fn try_call(
         &self,
         command: &str,
         params: Value,
@@ -293,14 +293,14 @@ impl Session {
         self.request(command, params, expected_revision, CALL_TIMEOUT_MS)
     }
 
-    fn call(&self, command: &str, params: Value) -> Value {
+    pub(crate) fn call(&self, command: &str, params: Value) -> Value {
         self.try_call(command, params, None)
             .unwrap_or_else(|error| panic!("{command} failed: {error}"))
     }
 
     /// Sends a mutating command carrying the revision the session last observed, and adopts the
     /// revision the addon reports back.
-    fn mutate(&mut self, command: &str, params: Value) -> Value {
+    pub(crate) fn mutate(&mut self, command: &str, params: Value) -> Value {
         let expected = self.revision;
         let response = self
             .rpc
@@ -328,8 +328,29 @@ impl Session {
         response.result
     }
 
+    /// Sends a mutating command the same way, but hands back the refusal instead of panicking, so
+    /// a sweep over many node types can report every class that failed rather than only the first.
+    /// The revision only moves on success; a refused mutation leaves the scene where it was.
+    pub(crate) fn try_mutate(&mut self, command: &str, params: Value) -> Result<Value, String> {
+        let expected = self.revision;
+        let response = self
+            .rpc
+            .call(CallRequest {
+                id: format!("acceptance-try-{expected}-{command}"),
+                command: command.to_owned(),
+                params,
+                expected_revision: Some(expected),
+                timeout_ms: Some(CALL_TIMEOUT_MS),
+            })
+            .map_err(|error| format!("{}: {}", error.code, error.message))?;
+        if let Some(revision) = response.revision {
+            self.revision = revision;
+        }
+        Ok(response.result)
+    }
+
     /// Opens a scene and adopts the revision baseline the switch answers with.
-    fn open_scene(&mut self, path: &str) {
+    pub(crate) fn open_scene(&mut self, path: &str) {
         let result = self.call("scene.open", json!({"path": path}));
         self.revision = result["revision"]
             .as_u64()
@@ -956,9 +977,8 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
 /// covers that half on the wire. This half is that the command exists in the editor at all: it was
 /// in the frozen spec, with a golden fixture, and the addon answered `unknown_command` for it.
 ///
-/// What is *not* proven here is a long park being retracted. A parked scene switch is the case
-/// worth cancelling, and Godot 4.7 could not be made to hold one: it opens a scene with a missing
-/// parent by dropping the orphan, and one with an unknown root class by substituting a placeholder.
+/// Retracting a request the addon is really holding is
+/// [`the_addon_gives_up_a_request_it_is_still_holding`].
 #[test]
 fn the_addon_answers_a_cancellation() {
     let mut session = Session::start();
@@ -988,6 +1008,77 @@ fn the_addon_answers_a_cancellation() {
     session.mutate(
         "node.create",
         json!({"parent": "/cancelled", "name": "After", "type": "Node2D"}),
+    );
+}
+
+/// A request the addon is really holding is retracted, and answers its caller.
+///
+/// This is the case `session.cancel` exists for, and the one that was uncovered: a scene switch
+/// could not be made to park — Godot 4.7 opens a scene with a missing parent by dropping the
+/// orphan, and one whose root names an unknown class by substituting a placeholder, so both
+/// answered at once. A launch does park. `runtime.run` hands the editor a main scene that is not
+/// there, no game ever announces itself, and the request sits in `_runtime_pending` for the whole
+/// thirty-second launch budget — which is exactly the half minute a user who pressed Stop would
+/// otherwise wait.
+#[test]
+fn the_addon_gives_up_a_request_it_is_still_holding() {
+    const PARKED: &str = "acceptance-parked-launch";
+
+    let session = Session::start();
+    session.call(
+        "project.set_setting",
+        json!({
+            "name": "application/run/main_scene",
+            "value": {"type": "string", "value": "res://not-here.tscn"}
+        }),
+    );
+
+    // The launch is issued from its own thread because it does not answer until it is cancelled,
+    // and the cancellation has to be sent while it is waiting.
+    let rpc = session.rpc.clone();
+    let launch = thread::spawn(move || {
+        rpc.call(CallRequest {
+            id: PARKED.to_owned(),
+            command: "runtime.run".to_owned(),
+            params: json!({}),
+            expected_revision: None,
+            // Longer than the addon's own launch budget, so a park that is never retracted fails
+            // this test as a timeout of the addon's making rather than of the transport's.
+            timeout_ms: Some(60_000),
+        })
+    });
+
+    // The addon has to be holding it before it can give it up, and nothing announces that it is.
+    // So the cancellation is retried until it takes: `cancelled: false` means the request has not
+    // arrived yet, which is the same answer it gives for a request that never existed.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut answer = json!({});
+    while Instant::now() < deadline {
+        answer = session.call("session.cancel", json!({"requestId": PARKED}));
+        if answer["cancelled"] == json!(true) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        answer["cancelled"],
+        json!(true),
+        "the parked launch must be retracted: {answer}\n--- editor output ---\n{}",
+        session.editor.output()
+    );
+
+    // The caller is answered rather than left to its own timeout — that is the point of the
+    // command, and it is the difference between stopping a turn and waiting out the launch.
+    let error = launch
+        .join()
+        .expect("the parked call returns")
+        .expect_err("a cancelled request must fail rather than answer");
+    assert_eq!(error.code, "cancelled", "{}", error.message);
+
+    // And the session is usable straight afterwards: readiness came back with the request.
+    assert_eq!(
+        session.call("session.get_state", json!({}))["state"],
+        "ready"
     );
 }
 

@@ -123,6 +123,13 @@ static func encode(value: Variant) -> Dictionary:
                 entries.append({"key": encode(key), "value": encode(value[key])})
             return {"type": "dictionary", "value": entries}
         TYPE_OBJECT:
+            # An object property that holds nothing is not `TYPE_NIL`: `Sprite2D.texture` on a fresh
+            # node is a Variant of type Object carrying a null pointer, and it lands here rather
+            # than in the branch above. Without this guard `get_class` was called on nothing, which
+            # is 341 properties across 120 of the 131 node types — every unset `material`,
+            # `shape`, `icon`, and `theme`.
+            if not is_instance_valid(value):
+                return {"type": "null", "value": null}
             if value is Resource and not (value as Resource).resource_path.is_empty():
                 return {
                     "type": "resource",

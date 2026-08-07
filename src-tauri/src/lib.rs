@@ -29,6 +29,9 @@ mod health;
 // Drives the staged addon inside a real editor. Gated so the default gate needs no Godot binary.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_addon_acceptance;
+// Sweeps the whole 2D/UI node catalogue through that same editor, same gate.
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_nodes_acceptance;
 // Drives the native language server inside a real editor, under the same gate.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_lsp_acceptance;

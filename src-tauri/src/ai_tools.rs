@@ -183,8 +183,11 @@ pub const CATALOG: &[ToolDomain] = &[
         operations: &[
             operation(
                 "inspect",
-                "Inspects a node: {node}. Answers with its type, its groups, every signal it can \
-                 emit, and the connections it already has.",
+                "Inspects a node: {node}. Answers with its type, every property with its current \
+                 value, its groups, every signal it can emit, and the connections it already has. \
+                 Read a property here before setting it rather than guessing what it holds; \
+                 `stored` is false for properties the scene recomputes, like a Control's position \
+                 and size and every theme_override_*, and those are set the same way as any other.",
             ),
             operation(
                 "create",
@@ -328,7 +331,10 @@ pub const CATALOG: &[ToolDomain] = &[
         operations: &[
             operation(
                 "list",
-                "Lists every file in the task worktree with its size.",
+                "Lists every file in the task worktree with its size: {hashes?}. `hashes: true` \
+                 adds a content hash per file — the token `delete` takes as `expectedHash` — and \
+                 reads every file to do it, so ask for it when you are about to delete something \
+                 rather than to look around.",
             ),
             operation(
                 "rescan",
@@ -347,6 +353,16 @@ pub const CATALOG: &[ToolDomain] = &[
                  one opens as a resource with no tiles in it.",
             ),
             operation(
+                "create_shape",
+                "Saves a 2D collision shape as a resource: {path, shapeType, size?, radius?, \
+                 height?, points?}. `path` is the .tres to write. `shapeType` is one of \
+                 RectangleShape2D (size as [width, height]), CircleShape2D (radius), \
+                 CapsuleShape2D (radius and height), SegmentShape2D (points as [ax, ay, bx, by]), \
+                 or WorldBoundaryShape2D (nothing). Set the node's `shape` property to the path \
+                 afterwards — a CollisionShape2D without one collides with nothing, and a shape \
+                 can only be assigned from a file that already exists.",
+            ),
+            operation(
                 "describe_tileset",
                 "Reports what a saved TileSet holds: {path}. Answers with its tile size, its \
                  sources, and every tile they define with whether it is solid — which is where the \
@@ -359,9 +375,10 @@ pub const CATALOG: &[ToolDomain] = &[
             operation(
                 "delete",
                 "Deletes a file or directory: {path, expectedHash?}. `expectedHash` is the hash \
-                 string a godot_script open or save reported for that same file, and refuses the \
-                 delete if the file changed since. There is no other way to obtain one, so omit it \
-                 unless you are holding one — a made-up value is refused.",
+                 string reported for that same file by a godot_script open or save, or by \
+                 `list` with `hashes: true` for anything that is not a script, and it refuses the \
+                 delete if the file changed since. Those are the only two ways to obtain one, so \
+                 omit it unless you are holding one — a made-up value is refused.",
             ),
         ],
     },
@@ -634,9 +651,26 @@ fn resource_domain<R: Runtime>(
     match op {
         "list" => {
             let workspace = crate::active_workspace(app)?;
+            // Hashing is asked for rather than always done: a worktree holds game assets, and
+            // hashing every texture and every sound to answer "what files are there" would read
+            // the whole project on a call the agent makes to orient itself.
+            let with_hashes = params
+                .get("hashes")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let files: Vec<Value> = files::scan(workspace.root())
                 .into_iter()
-                .map(|(path, stamp)| json!({"path": path, "bytes": stamp.bytes}))
+                .map(|(path, stamp)| {
+                    let hash = if with_hashes {
+                        workspace.hash_of(&path).ok().flatten()
+                    } else {
+                        None
+                    };
+                    match hash {
+                        Some(hash) => json!({"path": path, "bytes": stamp.bytes, "hash": hash}),
+                        None => json!({"path": path, "bytes": stamp.bytes}),
+                    }
+                })
                 .collect();
             Ok(json!({"files": files}))
         }
@@ -1238,6 +1272,78 @@ mod tests {
         )
         .expect_err("an unattended backend cannot approve a delete");
         assert_eq!(failure.code, "approval_unavailable");
+    }
+
+    /// A file that is not a script can be deleted against a hash, the way a script always could.
+    ///
+    /// `delete` has always taken an `expectedHash`, and the only thing that produced one was a
+    /// `godot_script` open or save — which works on `.gd` files. So the guard was unusable for
+    /// exactly the files a wrong delete costs most: a scene, a tileset, a resource. A live agent
+    /// tried to use it anyway and invented a number, which was refused, which is what put the
+    /// asymmetry on the record.
+    #[test]
+    fn listing_reports_hashes_that_a_delete_of_a_non_script_file_can_be_held_to() {
+        let directory = TempDir::new().expect("temporary application data");
+        let workspace_path = directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).expect("create workspace");
+        let storage =
+            crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace_path)
+                .expect("open project storage");
+        let app = unattended_app();
+        app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+        let scene = "[gd_scene format=3]\n\n[node name=\"Level\" type=\"Node2D\"]\n";
+        let workspace = crate::active_workspace(app.handle()).expect("the task worktree");
+        workspace
+            .write("levels/level.tscn", scene, None)
+            .expect("write the scene");
+
+        // Looking around is the cheap call it has always been: no hash unless one is asked for.
+        let listed = dispatch(app.handle(), call("godot_resource", "list", json!({})))
+            .expect("list the worktree");
+        let plain = &listed["files"][0];
+        assert_eq!(plain["path"], "levels/level.tscn");
+        assert!(
+            plain["hash"].is_null(),
+            "an unasked-for hash is not read: {plain}"
+        );
+
+        let listed = dispatch(
+            app.handle(),
+            call("godot_resource", "list", json!({"hashes": true})),
+        )
+        .expect("list the worktree with hashes");
+        let hashed = &listed["files"][0];
+        assert_eq!(
+            hashed["hash"].as_str(),
+            Some(files::hash_text(scene).as_str()),
+            "the listed hash must be the one the delete is checked against"
+        );
+
+        // And it is: the same token refuses the delete once the file has moved on, and lets it
+        // through while the file is what was listed.
+        let hash = hashed["hash"].as_str().expect("a listed hash").to_owned();
+        workspace
+            .write(
+                "levels/level.tscn",
+                &format!("{scene}\n[node name=\"Player\"]\n"),
+                Some(&hash),
+            )
+            .expect("someone edits the scene");
+        assert_eq!(
+            workspace
+                .delete("levels/level.tscn", Some(&hash))
+                .expect_err("a scene that changed since it was listed must not be deleted")
+                .code,
+            "file_conflict"
+        );
+        let current = workspace
+            .hash_of("levels/level.tscn")
+            .expect("read the current hash")
+            .expect("the scene is still there");
+        workspace
+            .delete("levels/level.tscn", Some(&current))
+            .expect("the current hash deletes it");
     }
 
     #[test]

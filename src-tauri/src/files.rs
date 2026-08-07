@@ -390,6 +390,17 @@ impl Workspace {
         fs::remove_file(&path).map_err(|error| FileError::io(relative, &error))
     }
 
+    /// The content hash of one file, or `None` when there is no file there.
+    ///
+    /// The same token [`Self::delete`] and [`Self::write`] check against, for callers holding a
+    /// path rather than something they read. Reading a `.gd` script was the only way to obtain
+    /// one, which left `expected_hash` unusable for every other kind of file — a scene or a
+    /// resource could only be deleted unconditionally.
+    pub fn hash_of(&self, relative: &str) -> Result<Option<String>, FileError> {
+        let path = self.resolve(relative)?;
+        self.current_hash(relative, &path)
+    }
+
     fn current_hash(&self, relative: &str, path: &Path) -> Result<Option<String>, FileError> {
         match fs::read(path) {
             Ok(bytes) => Ok(Some(hash_bytes(&bytes))),

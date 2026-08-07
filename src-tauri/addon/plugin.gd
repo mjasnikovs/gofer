@@ -102,6 +102,35 @@ const MAX_REPORTED_TILES := 512
 ## for is drawn at.
 const DEFAULT_TILE_SIZE := 16
 
+## Types `node.create` refuses, and why, so the refusal explains itself.
+##
+## `MissingNode` is the engine's own placeholder for a class a scene named and the editor could not
+## find: it remembers the original type and writes it back out, so a scene opened without its plugin
+## costs nothing. Created on purpose it has nothing to remember, saves with no `type=` at all, and
+## the loader reads a typeless node as one inherited from a base scene — finds no base scene, and
+## drops it. The caller would be handed a node that saves cleanly and is gone on the next open.
+const UNCREATABLE_TYPES := {
+    "MissingNode":
+    (
+        "MissingNode is the engine's placeholder for a type it could not find, not a node to "
+        + "author. One created on purpose saves with no type and is dropped the next time the "
+        + "scene is opened."
+    ),
+}
+
+## The 2D shapes `resource.create_shape` can build, and the dimension each one takes.
+##
+## A `CollisionShape2D` with no shape is an empty node, and a shape can only be assigned from a file
+## that exists — so without this the physics half of the node catalogue could be created and never
+## filled in.
+const SHAPE_TYPES := {
+    "RectangleShape2D": "size",
+    "CircleShape2D": "radius",
+    "CapsuleShape2D": "radius and height",
+    "SegmentShape2D": "points",
+    "WorldBoundaryShape2D": "nothing",
+}
+
 ## The element type of each packed array, keyed by the type of the packed array itself. The wire
 ## carries every array as a plain `array`, so this is what a setting declared as a packed array is
 ## rebuilt from.
@@ -445,6 +474,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _resource_rescan(params)
         "resource.create_tileset":
             return _resource_create_tileset(params)
+        "resource.create_shape":
+            return _resource_create_shape(params)
         "resource.describe_tileset":
             return _resource_describe_tileset(params)
         "session.heartbeat":
@@ -1589,6 +1620,110 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
         "replaced": replaced,
     }
 
+## Saves a 2D collision shape as a resource a node can be given.
+##
+## A resource property is filled by naming a file that already exists — `node.set_property` resolves
+## it with `load` — so a shape that was never saved cannot be assigned at all. Every collision node
+## in the catalogue was therefore creatable and unusable: `CollisionShape2D` had no way to reach a
+## `RectangleShape2D`. This is the shape half of what `resource.create_tileset` does for tiles.
+func _resource_create_shape(params: Dictionary) -> Dictionary:
+    var path := _as_resource_path(params.get("path", ""))
+    var shape_type := str(params.get("shapeType", ""))
+    if path.is_empty() or shape_type.is_empty():
+        return _config_error(
+            "invalid_params", "resource.create_shape requires path and shapeType"
+        )
+    if not path.ends_with(".tres"):
+        return _config_error(
+            "invalid_params",
+            "A shape is saved as a .tres resource, and %s is not one" % path,
+            {"path": path}
+        )
+    if not SHAPE_TYPES.has(shape_type):
+        var offered: Array = SHAPE_TYPES.keys()
+        offered.sort()
+        return _config_error(
+            "unsupported_shape",
+            "%s is not a 2D collision shape. Available: %s" % [shape_type, ", ".join(offered)],
+            {"shapeType": shape_type, "available": offered}
+        )
+
+    var built := _build_shape(shape_type, params)
+    if built.has("_gofer_error"):
+        return built
+    var shape: Shape2D = built["value"]
+
+    # A directory that does not exist yet is not a mistake worth an error, for the same reason a
+    # tileset's is not: `res://shapes/hitbox.tres` is where a caller would put one.
+    var folder := path.get_base_dir()
+    if not DirAccess.dir_exists_absolute(folder):
+        var made := DirAccess.make_dir_recursive_absolute(folder)
+        if made != OK:
+            return _config_error(
+                "save_failed",
+                "Directory %s could not be created: %s" % [folder, error_string(made)],
+                {"path": path}
+            )
+    var replaced := ResourceLoader.exists(path)
+    var error := ResourceSaver.save(shape, path)
+    if error != OK:
+        return _config_error(
+            "save_failed",
+            "Shape %s could not be saved: %s" % [path, error_string(error)],
+            {"path": path, "error": error}
+        )
+    EditorInterface.get_resource_filesystem().update_file(path)
+    return {
+        "path": path,
+        "shapeType": shape_type,
+        "replaced": replaced,
+    }
+
+## Builds one shape from the dimensions its type takes, or the error naming what was missing.
+func _build_shape(shape_type: String, params: Dictionary) -> Dictionary:
+    match shape_type:
+        "RectangleShape2D":
+            var size := _numbers(params.get("size", null), 2)
+            if size.is_empty():
+                return _config_error(
+                    "invalid_params", "A RectangleShape2D takes size as two numbers"
+                )
+            var rectangle := RectangleShape2D.new()
+            rectangle.size = Vector2(size[0], size[1])
+            return {"value": rectangle}
+        "CircleShape2D":
+            var radius: Variant = params.get("radius", null)
+            if not typeof(radius) in [TYPE_INT, TYPE_FLOAT]:
+                return _config_error("invalid_params", "A CircleShape2D takes radius as a number")
+            var circle := CircleShape2D.new()
+            circle.radius = float(radius)
+            return {"value": circle}
+        "CapsuleShape2D":
+            var radius: Variant = params.get("radius", null)
+            var height: Variant = params.get("height", null)
+            if not typeof(radius) in [TYPE_INT, TYPE_FLOAT] \
+                    or not typeof(height) in [TYPE_INT, TYPE_FLOAT]:
+                return _config_error(
+                    "invalid_params", "A CapsuleShape2D takes radius and height as numbers"
+                )
+            var capsule := CapsuleShape2D.new()
+            capsule.radius = float(radius)
+            capsule.height = float(height)
+            return {"value": capsule}
+        "SegmentShape2D":
+            var points := _numbers(params.get("points", null), 4)
+            if points.is_empty():
+                return _config_error(
+                    "invalid_params",
+                    "A SegmentShape2D takes points as four numbers: ax, ay, bx, by"
+                )
+            var segment := SegmentShape2D.new()
+            segment.a = Vector2(points[0], points[1])
+            segment.b = Vector2(points[2], points[3])
+            return {"value": segment}
+    # A world boundary is the infinite floor a 2D level rests on and takes no dimensions.
+    return {"value": WorldBoundaryShape2D.new()}
+
 ## Reports what a saved TileSet holds, so a caller painting with it can name tiles that exist.
 func _resource_describe_tileset(params: Dictionary) -> Dictionary:
     var path := _as_resource_path(params.get("path", ""))
@@ -1972,6 +2107,17 @@ func _node_create(params: Dictionary) -> Dictionary:
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
+            }
+        }
+
+    if UNCREATABLE_TYPES.has(node_type):
+        return {
+            "_gofer_error": {
+                "code": "invalid_node_type",
+                "message": UNCREATABLE_TYPES[node_type],
+                "retryable": false,
+                "readiness": "ready",
+                "details": {"type": node_type}
             }
         }
 
@@ -2871,10 +3017,44 @@ func _node_inspect(params: Dictionary) -> Dictionary:
         "name": node.name,
         "type": node.get_class(),
         "path": _node_path(node),
+        "properties": _node_properties(node),
         "groups": _authored_groups(node),
         "signals": _node_signals(node),
         "connections": _node_connections(node),
     }
+
+## Every property the editor would show for a node, tagged for the wire.
+##
+## Both halves of the inspector are reported, not only what the scene stores. `Control.position`,
+## `Control.size` and all 431 `theme_override_*` names carry no storage flag — a scene saves anchors
+## and offsets instead — so a list filtered to stored properties would hide exactly what laying out
+## and styling a UI needs, while `Object.set` writes them perfectly well. `stored` says which half
+## each one came from.
+##
+## Categories, groups and subgroups are inspector headings rather than values, and `script` is the
+## node's own script rather than a property of it; none of them are reported.
+func _node_properties(node: Node) -> Array:
+    var properties: Array = []
+    for info in node.get_property_list():
+        var usage := int(info.get("usage", 0))
+        if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
+            continue
+        if not (usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)):
+            continue
+        var property_name := str(info.get("name", ""))
+        if property_name.is_empty() or property_name == "script":
+            continue
+        properties.append(
+            {
+                "name": property_name,
+                "value": Protocol.encode(node.get(property_name)),
+                "type": type_string(int(info.get("type", TYPE_NIL))),
+                "className": str(info.get("class_name", "")),
+                "stored": bool(usage & PROPERTY_USAGE_STORAGE),
+                "writable": not bool(usage & PROPERTY_USAGE_READ_ONLY),
+            }
+        )
+    return properties
 
 ## Checks that a request names the scene the editor is actually editing.
 ##
