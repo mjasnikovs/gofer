@@ -11,21 +11,32 @@ and where the remaining work actually lives.
 
 ## Closed since the last writing
 
-**3 — A conversation that outgrows the context window dies quietly — DECIDED.** Gofer does not
-compact, and that is the answer rather than an unbuilt feature. Every turn resends the whole
-conversation, `scripts/ai-provider.mjs:255` raises `finish_reason: length` as an error naming both
-numbers instead of recording a one-token answer, and the composer carries a running meter of how
-close the conversation is: `ContextUsage` in `WorkspaceComposer.tsx`, green to 80% of the window,
-amber to 90%, red past it. The previous list called that meter unbuilt; it was already there.
+**3 — A conversation that outgrows the context window dies quietly — BUILT.** This was written up
+here as decided against, on the grounds that the meter in the composer warns in time and a task
+carries its own conversation. Reading how Pi handles the same wall reversed it: Pi does not avoid
+the wall, it summarises before reaching it, and the two libraries Gofer already depends on ship
+every piece of that. Not compacting was not a decision so much as an unread option.
 
-What was missing was any cover for it, so `src/utils/chat-format.test.ts` now pins the three things
-that make it a warning rather than decoration: the readout is the last turn's total, not the
-session's; the bar leaves green well before the wall the live sweep hit at 116,449 of 120,064; and a
-window nothing reported does not read as a full one.
+`scripts/ai-provider.mjs` now measures the stored conversation before each turn and, past the line,
+summarises everything but the recent tail and starts the turn from `[summary, ...tail]`. The cut
+comes from `prepareCompaction`, which never cuts at a tool result and so cannot orphan one. The
+`convertToLlm` the Agent defaults to drops the summary message silently, so the harness one is
+passed explicitly — a turn that loses the summary is shorter, cheaper, and has forgotten everything,
+which no assertion on length would catch. A summary already in the conversation goes back in as a
+compaction entry rather than a message, which is what lets the next one update it.
 
-One thing undercuts this, and it is written up as item 2 of `projectfix.md`: with the bottom panel
-open, that readout is sliced in half by the panel's tab strip in three committed baselines. A
-decision not to compact rests on the bar being readable.
+The line is a setting, `compactionPercent`, default 86 — Pi's own 16,384-token reserve on a 120,064
+window is 86.4%, and Rust refuses anything outside 50–100. 100 turns it off. Recent conversation
+kept is Pi's 20,000 tokens.
+
+Summarising is one or two model requests before a single token of the answer exists, which on a
+local model is a wait that reads as a hang, so the turn emits `compaction-start` and
+`compaction-end` and the spinner that already said "Generating response" names the step and the two
+numbers instead. It is cleared when the turn ends by any route, not only on the end event.
+
+`outOfRoom` stays as the floor under all of it. The meter in the composer stays too, and item 2 of
+`projectfix.md` — half of it hidden behind the bottom panel's tab strip — is still open, though it
+is now a readout of something being managed rather than the only warning before a wall.
 
 **4 — `session.cancel` retracting a long-parked request — COVERED.**
 `godot_addon_acceptance::the_addon_gives_up_a_request_it_is_still_holding` parks a real request in a

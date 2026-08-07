@@ -1,5 +1,10 @@
 import {describe, expect, it} from 'vitest'
-import {contextProgressVariant, formatContextUsage, messageUsage} from './chat-format'
+import {
+    compactionActivity,
+    contextProgressVariant,
+    formatContextUsage,
+    messageUsage
+} from './chat-format'
 import type {Message, TokenUsage} from '../models/chat'
 
 const WINDOW = 120_064
@@ -59,5 +64,17 @@ describe('context usage', () => {
         expect(formatContextUsage(116_449, WINDOW)).toBe('116K / 120K')
         expect(formatContextUsage(4_200, WINDOW)).toBe('4.2K / 120K')
         expect(formatContextUsage(120, WINDOW)).toBe('0.12K / 120K')
+    })
+})
+
+describe('compaction activity', () => {
+    /**
+     * The label carries the two numbers because they are what tells the user the wait is bounded.
+     * Without them it is a spinner with a sentence on it, which is what it already was.
+     */
+    it('names the wait and how much conversation it is working through', () => {
+        expect(compactionActivity(105_000, 120_064)).toBe(
+            'Summarising the conversation to make room (105K / 120K)'
+        )
     })
 })

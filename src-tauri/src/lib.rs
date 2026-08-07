@@ -134,6 +134,8 @@ struct AiSettings {
     max_retries: u32,
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
+    #[serde(default = "default_compaction_percent")]
+    compaction_percent: u32,
     #[serde(default)]
     system_prompt: String,
 }
@@ -370,6 +372,14 @@ fn default_timeout_ms() -> u64 {
     120_000
 }
 
+/// How full the context may get before the worker summarises the old part of it away.
+///
+/// Pi draws the same line as a 16,384-token reserve on a 120,064-token window, which is 86.4% full.
+/// 100 turns compaction off.
+fn default_compaction_percent() -> u32 {
+    86
+}
+
 impl Default for GoferSettings {
     fn default() -> Self {
         Self {
@@ -396,6 +406,7 @@ impl Default for AiSettings {
             thinking_level: default_thinking_level(),
             max_retries: default_max_retries(),
             timeout_ms: default_timeout_ms(),
+            compaction_percent: default_compaction_percent(),
             system_prompt: String::new(),
         }
     }
@@ -1709,6 +1720,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             thinking_level: default_thinking_level(),
             max_retries: default_max_retries(),
             timeout_ms: default_timeout_ms(),
+            compaction_percent: default_compaction_percent(),
             system_prompt: String::new(),
         },
     })
@@ -1774,6 +1786,11 @@ fn validate_settings(mut settings: GoferSettings) -> Result<GoferSettings, Strin
     }
     if settings.ai.max_retries > 10 {
         return Err("Maximum retries cannot exceed 10".to_owned());
+    }
+    // The floor is not taste: what is left above the line is the room the summary request and the
+    // answer after it both have to fit in, and a line drawn too high leaves neither enough to work.
+    if !(50..=100).contains(&settings.ai.compaction_percent) {
+        return Err("Compaction threshold must be between 50 and 100 percent".to_owned());
     }
     if !(1_000..=3_600_000).contains(&settings.ai.timeout_ms) {
         return Err("Request timeout must be between 1,000 and 3,600,000 milliseconds".to_owned());
@@ -3462,6 +3479,18 @@ mod tests {
             {
                 let mut value = settings("http://localhost", "model");
                 value.ai.thinking_level = "impossible".to_owned();
+                value
+            },
+            // A line drawn this low summarises a conversation that has barely started; drawn above
+            // 100 it never fires at all, which the 100 case already expresses honestly.
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.compaction_percent = 49;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.compaction_percent = 101;
                 value
             },
             settings("https://example.com/v1#fragment", "model"),

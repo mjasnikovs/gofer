@@ -178,7 +178,7 @@ const ConversationMessage = memo(
                         : isAssistant ?
                             <Spinner
                                 size='sm'
-                                label='Generating response'
+                                label={message.activity ?? 'Generating response'}
                             />
                         :   null}
                     </VStack>

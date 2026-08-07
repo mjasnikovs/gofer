@@ -26,6 +26,16 @@ export function formatContextUsage(value: number, max: number) {
     return `${formatContextTokens(value)} / ${formatContextTokens(max)}`
 }
 
+/**
+ * What the spinner says while the conversation is being summarised.
+ *
+ * The two numbers are the reason the wait exists, and they are the difference between a spinner
+ * that looks stuck and one that is visibly working through a known amount.
+ */
+export function compactionActivity(tokens: number, contextWindow: number) {
+    return `Summarising the conversation to make room (${formatContextUsage(tokens, contextWindow)})`
+}
+
 export function contextProgressVariant(value: number, max: number) {
     const usage = max > 0 ? value / max : 0
     if (usage <= 0.8) return 'success'

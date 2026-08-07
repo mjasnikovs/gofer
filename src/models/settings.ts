@@ -15,6 +15,11 @@ export type AiSettings = Readonly<{
     thinkingLevel: ThinkingLevel
     maxRetries: number
     timeoutMs: number
+    /**
+     * How full the context may get before the old part of it is summarised away. 100 turns
+     * compaction off. 86 draws the same line Pi does with its 16,384-token reserve.
+     */
+    compactionPercent: number
     systemPrompt: string
 }>
 
@@ -104,6 +109,7 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
                 thinkingLevel: 'off',
                 maxRetries: 2,
                 timeoutMs: 120_000,
+                compactionPercent: 86,
                 systemPrompt: ''
             },
             settings.ai

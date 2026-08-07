@@ -7,7 +7,7 @@ import {sendAiMessage} from '../../services/ai-stream'
 import {commandErrorMessage, toCommandError} from '../../utils/command-error'
 import type {TaskSummary} from '../../models/app'
 import type {AiStreamPayload, ChatAttachment, DraftAttachment, Message} from '../../models/chat'
-import {messageUsage} from '../../utils/chat-format'
+import {compactionActivity, messageUsage} from '../../utils/chat-format'
 import {attachmentData} from '../../services/chat-storage'
 import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
@@ -48,6 +48,19 @@ const SAFE_CENTRE = {justifyContent: 'safe center'} as const
  * moment it is cancelled, so no `tool-end` is ever coming for a call still in flight: left alone it
  * would spin forever and read as an agent that is still working.
  */
+/**
+ * Drops the label a long step was showing while it had nothing else to show.
+ *
+ * Whatever ended the turn ended the step with it, so a label left behind would describe work that
+ * is no longer happening — which is the exact impression the label exists to prevent.
+ */
+function withoutActivity(message: Message): Message {
+    if (message.activity === undefined) return message
+    const {activity, ...rest} = message
+    void activity
+    return rest
+}
+
 function settleRunningTools(message: Message, reason: string): Message {
     if (!message.tools?.some(tool => tool.status === 'running' || tool.status === 'pending')) {
         return message
@@ -210,6 +223,17 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                         model: event.model
                     }))
                 }
+                if (event.type === 'compaction-start') {
+                    updateAssistant(assistantMessage.id, message => ({
+                        ...message,
+                        activity: compactionActivity(event.tokens, event.contextWindow)
+                    }))
+                }
+                // Cleared rather than left to the first token, because a turn that answers with a
+                // tool call produces no token to clear it, and the label would outlive the work.
+                if (event.type === 'compaction-end') {
+                    updateAssistant(assistantMessage.id, withoutActivity)
+                }
                 if (event.type === 'done') {
                     setAgentMessages(event.agentMessages)
                     updateAssistant(assistantMessage.id, message => ({
@@ -268,7 +292,9 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     // The stream is over however it ended, so nothing it started can still be
                     // running — a `tool-end` the backend never sent is one it never will.
                     updateAssistant(assistantMessage.id, entry =>
-                        settleRunningTools(entry, 'The turn ended before this call finished.')
+                        withoutActivity(
+                            settleRunningTools(entry, 'The turn ended before this call finished.')
+                        )
                     )
                     if (activeRequestId.current === requestId) activeRequestId.current = undefined
                     setIsStreaming(false)

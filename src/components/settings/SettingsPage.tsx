@@ -425,6 +425,18 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                     }}
                                                 />
                                                 <TextInput
+                                                    label='Compact conversations at (% of context)'
+                                                    value={String(draft.ai.compactionPercent)}
+                                                    isRequired
+                                                    description='Older messages are summarised once a conversation fills this much of the window. 100 keeps every message and lets long conversations run out of room.'
+                                                    onChange={compactionPercent => {
+                                                        updateAi({
+                                                            compactionPercent:
+                                                                Number(compactionPercent)
+                                                        })
+                                                    }}
+                                                />
+                                                <TextInput
                                                     label='Request timeout (milliseconds)'
                                                     value={String(draft.ai.timeoutMs)}
                                                     isRequired

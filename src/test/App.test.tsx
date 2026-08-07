@@ -479,6 +479,46 @@ describe('Workspace', () => {
         })
     })
 
+    /**
+     * Summarising runs before the answer exists, and on a local model it is a wait long enough to
+     * read as a hung app. The spinner is the only thing on screen at that point, so it has to say
+     * what the wait is for — and stop saying it the moment the work moves on.
+     */
+    it('names the summarising step while it waits, and stops naming it after', async () => {
+        let stream: AiStream | undefined
+        let endTurn: (() => void) | undefined
+        tauri.invoke.mockImplementation(async (command, args) => {
+            if (command === 'list_workspace_files') return []
+            if (command === 'send_ai_message') {
+                stream = streamOf(args)
+                stream.onmessage({
+                    requestId: 1,
+                    event: {type: 'compaction-start', tokens: 105_000, contextWindow: 120_064}
+                })
+                // The turn is held open, because that is the state being tested: the summary is a
+                // wait inside a turn, and a turn that returns cannot be waiting on anything.
+                await new Promise<void>(resolve => {
+                    endTurn = resolve
+                })
+            }
+            return undefined
+        })
+        render(<Workspace />)
+
+        await userEvent.type(screen.getByRole('textbox'), 'Keep going{enter}')
+
+        expect(
+            await screen.findByText('Summarising the conversation to make room (105K / 120K)')
+        ).toBeInTheDocument()
+
+        stream?.onmessage({requestId: 1, event: {type: 'compaction-end'}})
+        stream?.onmessage({requestId: 1, event: {type: 'text-delta', delta: 'Carried on'}})
+        endTurn?.()
+
+        expect(await screen.findByText('Carried on')).toBeInTheDocument()
+        expect(screen.queryByText(/Summarising the conversation/)).not.toBeInTheDocument()
+    })
+
     it('renders agent tool activity and token usage', async () => {
         tauri.invoke.mockImplementation(async (command, args) => {
             if (command === 'list_workspace_files') return []

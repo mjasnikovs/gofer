@@ -10,6 +10,11 @@ export type Message = Readonly<{
     usage?: TokenUsage
     model?: string
     status?: 'streaming' | 'complete' | 'error' | 'aborted'
+    /**
+     * What the turn is doing while it has nothing to show yet. Named in place of the generic
+     * spinner label, so a long silent step reads as work rather than as a hang.
+     */
+    activity?: string
     attachments?: readonly ChatAttachment[]
 }>
 
@@ -53,6 +58,8 @@ export type AiStreamEvent =
     | Readonly<{type: 'tool-update'; id: string; output: string}>
     | Readonly<{type: 'tool-end'; id: string; output: string; isError: boolean; endedAt: number}>
     | Readonly<{type: 'usage'; usage: TokenUsage; model: string}>
+    | Readonly<{type: 'compaction-start'; tokens: number; contextWindow: number}>
+    | Readonly<{type: 'compaction-end'}>
     | Readonly<{
           type: 'done'
           text: string

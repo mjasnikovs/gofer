@@ -1065,3 +1065,105 @@ test('the confined shell does destructive work in the worktree without asking an
     assert.equal(end.isError, false)
     assert.equal(events.find(event => event.type === 'tool-start').target, 'rm stale.tmp')
 })
+
+const NO_USAGE = {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}
+}
+
+/**
+ * A stored conversation long enough to cross the compaction line.
+ *
+ * Every turn reports no usage, so the size the worker measures comes from the text itself rather
+ * than from a server's token accounting — which is what makes the line the test crosses a number
+ * the test controls.
+ */
+function longConversation(pairs, characters) {
+    const messages = []
+    for (let index = 0; index < pairs; index += 1) {
+        messages.push({role: 'user', content: 'u'.repeat(characters), timestamp: index * 2 + 1})
+        messages.push({
+            role: 'assistant',
+            content: [{type: 'text', text: 'a'.repeat(characters)}],
+            api: 'openai-completions',
+            provider: 'local',
+            model: settings.model,
+            usage: NO_USAGE,
+            stopReason: 'stop',
+            timestamp: index * 2 + 2
+        })
+    }
+    return messages
+}
+
+test('a conversation past the compaction line is summarised before the turn', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{text: 'SUMMARY OF THE EARLY WORK'}])
+    const url = await baseUrl(context, mock.server)
+    const history = longConversation(60, 3_500)
+    const events = []
+
+    const completion = await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
+        agentMessages: history,
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    // The summary comes first, and costs a second request when the cut lands mid-turn: the history
+    // and the half-finished turn above it are summarised separately. Then comes the turn itself.
+    assert.ok(mock.bodies.length >= 2, 'the summary is a request of its own')
+    assert.match(JSON.stringify(mock.bodies[0].messages), /summarization assistant/)
+
+    const sent = mock.bodies.at(-1).messages
+    assert.ok(sent.length < history.length, 'the turn is shorter than the conversation it replaced')
+    const summary = sent.find(message =>
+        JSON.stringify(message).includes('SUMMARY OF THE EARLY WORK')
+    )
+    // The Agent's default message conversion drops this message. Losing it would leave a turn that
+    // is shorter, cheaper, and has forgotten everything — which no assertion on length would catch.
+    assert.ok(summary, 'the summary reaches the model')
+    assert.equal(summary.role, 'user')
+
+    // Stored is what was sent, so the next turn starts from the compacted conversation rather than
+    // summarising the same history again.
+    assert.ok(completion.agentMessages.length < history.length)
+    assert.equal(completion.agentMessages[0].role, 'compactionSummary')
+
+    // Summarising happens before a single token of the answer exists, so the only thing that keeps
+    // the wait from reading as a hang is that it is announced and then withdrawn.
+    const start = events.find(event => event.type === 'compaction-start')
+    assert.ok(start, 'the wait is announced')
+    assert.equal(start.contextWindow, 120_064)
+    assert.ok(start.tokens > start.contextWindow * 0.86)
+    assert.ok(
+        events.indexOf(start) < events.findIndex(event => event.type === 'compaction-end'),
+        'and withdrawn once the summary exists'
+    )
+})
+
+test('compaction set to 100 percent sends the conversation whole', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{text: 'Carried on'}])
+    const url = await baseUrl(context, mock.server)
+    const history = longConversation(60, 3_500)
+
+    await runAgent({
+        settings: {...settings, baseUrl: url, compactionPercent: 100},
+        messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
+        agentMessages: history,
+        workspacePath: workspace.path,
+        emit: () => undefined
+    })
+
+    assert.equal(mock.bodies.length, 1)
+    // The system prompt and the new prompt on either side of an untouched conversation.
+    assert.equal(mock.bodies[0].messages.length, history.length + 2)
+})

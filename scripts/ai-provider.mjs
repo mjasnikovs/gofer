@@ -1,10 +1,18 @@
 import {
     Agent,
+    InMemorySessionStorage,
     NodeExecutionEnv,
+    Session,
+    compact,
+    convertToLlm,
     createBashTool,
+    createCompactionSummaryMessage,
     createEditTool,
     createReadTool,
-    createWriteTool
+    createWriteTool,
+    estimateContextTokens,
+    prepareCompaction,
+    shouldCompact
 } from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider} from '@earendil-works/pi-ai'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
@@ -13,6 +21,16 @@ import {confineTool} from './workspace-confinement.mjs'
 
 const PROVIDER_ID = 'local'
 const DEFAULT_CONTEXT_WINDOW = 120_064
+/**
+ * How full the context may get before the old part of it is summarised away.
+ *
+ * Pi states the same line as a token reserve — 16,384 of a 120,064-token window — which is 86.4%
+ * full. A percentage is the number that survives a change of model, so that is what Gofer stores
+ * and what the reserve is derived back from; 86 puts the line within ~400 tokens of Pi's.
+ */
+const DEFAULT_COMPACTION_PERCENT = 86
+/** Recent conversation kept verbatim behind the summary. Pi's default, unchanged. */
+const KEEP_RECENT_TOKENS = 20_000
 const DEFAULT_SYSTEM_PROMPT = `You are Gofer, a capable local coding agent. Work autonomously toward the user's goal.
 You can inspect and modify files and run shell commands with the provided tools. Use tools when they help; never claim an action succeeded unless its result confirms it. Keep the user informed with a concise final response.`
 /**
@@ -60,6 +78,65 @@ function zeroUsage() {
         totalTokens: 0,
         cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}
     }
+}
+
+/**
+ * Where the compaction line sits, and how much conversation survives it.
+ *
+ * `reserveTokens` is the room left above the line: the summary request and the answer that follows
+ * compaction both have to fit in it, which is why the percentage cannot be pushed to 100. At 100 it
+ * means the user turned compaction off, and the conversation is sent whole until it no longer fits.
+ */
+function compactionSettings(percent, contextWindow) {
+    const line = Math.floor((contextWindow * percent) / 100)
+    return {
+        enabled: percent < 100,
+        reserveTokens: Math.max(1, contextWindow - line),
+        keepRecentTokens: KEEP_RECENT_TOKENS
+    }
+}
+
+/**
+ * The conversation as session entries, the only shape the compaction helpers read.
+ *
+ * A summary an earlier compaction left behind goes back in as the compaction entry it came from
+ * rather than as a message. That is what lets the next compaction update it — summarise only what
+ * happened since — instead of summarising the summary along with everything after it.
+ */
+async function compactionSession(messages) {
+    const session = new Session(new InMemorySessionStorage())
+    for (const message of messages) {
+        if (message.role === 'compactionSummary') {
+            await session.appendCompaction(message.summary, undefined, message.tokensBefore ?? 0)
+            continue
+        }
+        await session.appendMessage(message)
+    }
+    return session
+}
+
+/**
+ * Summarise the part of a conversation that no longer leaves room for an answer, and return what to
+ * send in its place: the summary, then the recent messages.
+ *
+ * The cut point comes from the library rather than from a slice of our own, because the only safe
+ * cut is one that never leaves a tool result without the assistant message that asked for it.
+ */
+async function compactMessages(messages, models, model, settings, thinkingLevel, signal) {
+    const session = await compactionSession(messages)
+    const preparation = prepareCompaction(await session.getBranch(), settings)
+    if (!preparation.ok) throw new Error(`Compaction failed: ${preparation.error.message}`)
+    if (!preparation.value) return messages
+    const result = await compact(preparation.value, models, model, undefined, signal, thinkingLevel)
+    if (!result.ok) throw new Error(`Compaction failed: ${result.error.message}`)
+    return [
+        createCompactionSummaryMessage(
+            result.value.summary,
+            result.value.tokensBefore,
+            new Date().toISOString()
+        ),
+        ...(result.value.retainedTail ?? [])
+    ]
 }
 
 function modelFor(settings) {
@@ -182,14 +259,43 @@ export async function runAgent({
         throw new Error('The agent request does not contain a user prompt or image')
     }
 
+    // Checked before the turn starts rather than after the last one ended, so a conversation that
+    // was already over the line when it was stored — or that grew past it in a build with no
+    // compaction at all — is compacted the first time it is picked up again.
+    const compaction = compactionSettings(
+        settings.compactionPercent ?? DEFAULT_COMPACTION_PERCENT,
+        model.contextWindow
+    )
+    const contextTokens = estimateContextTokens(previousMessages).tokens
+    let contextMessages = previousMessages
+    if (shouldCompact(contextTokens, model.contextWindow, compaction)) {
+        // Summarising is one or two model requests of its own, and the turn has nothing to show
+        // while they run. It is announced because a minute spent summarising and a minute spent
+        // stuck look exactly the same from the outside.
+        emit({type: 'compaction-start', tokens: contextTokens, contextWindow: model.contextWindow})
+        contextMessages = await compactMessages(
+            previousMessages,
+            models,
+            model,
+            compaction,
+            settings.thinkingLevel || 'off',
+            signal
+        )
+        emit({type: 'compaction-end'})
+    }
+
     const agent = new Agent({
         initialState: {
             systemPrompt: `${settings.systemPrompt || DEFAULT_SYSTEM_PROMPT}${tools.some(tool => tool.name.startsWith('godot_')) ? `\n\n${GODOT_TOOL_PROMPT}` : ''}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}`,
             model,
             thinkingLevel: settings.thinkingLevel || 'off',
             tools,
-            messages: previousMessages
+            messages: contextMessages
         },
+        // The Agent's own default drops every message that is not user, assistant or tool result,
+        // which silently includes the compaction summary. Without this the summary is written, is
+        // stored, is counted — and never reaches the model.
+        convertToLlm,
         streamFn: (nextModel, context, options) =>
             models.streamSimple(nextModel, context, {
                 ...options,
