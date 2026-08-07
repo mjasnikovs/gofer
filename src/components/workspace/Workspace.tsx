@@ -86,9 +86,10 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         useAiConnection({onError: reportError, onConnected: clearError})
     const {approvals, respond: respondToApproval} = useToolApprovals({onError: reportError})
 
+    const hasConversation = messages.length > 0
     const chatScroll = useChatStreamScroll({
         scrollRef: messageScrollRef,
-        enabled: messages.length > 0
+        enabled: hasConversation
     })
 
     const conversation = useRef(messages)
@@ -99,6 +100,30 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     useEffect(() => {
         chatScroll.scrollIfLocked()
     }, [messages, chatScroll.scrollIfLocked])
+
+    /*
+     * The column also follows growth that arrives without a new message.
+     *
+     * The effect above fires on `messages`, which is every streamed token but not every change in
+     * height: the running indicator appearing under the last paragraph, a lazily loaded block of
+     * tool output, an image finishing its decode. Each of those grew the column after the last
+     * token, so the bottom row sat half under the composer until the next token pushed it — and
+     * the indicator, which is the last row by definition, sat there the whole time it ran.
+     *
+     * The observer watches the list rather than the viewport: the viewport's own size is fixed by
+     * the frame, so it never reports the growth that matters.
+     */
+    useEffect(() => {
+        const content = messageScrollRef.current?.firstElementChild
+        if (!content) return undefined
+        const observer = new ResizeObserver(() => {
+            chatScroll.scrollIfLocked()
+        })
+        observer.observe(content)
+        return () => {
+            observer.disconnect()
+        }
+    }, [chatScroll.scrollIfLocked, hasConversation])
 
     const updateAssistant = useCallback(
         (id: number, update: (message: Message) => Message) => {

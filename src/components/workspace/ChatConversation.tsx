@@ -222,10 +222,33 @@ function AssistantTimeline({message}: {message: Message}) {
              */}
             {isStreaming && !isCallRunning ?
                 <ChatMessageBubble variant='ghost'>
-                    <Spinner
-                        size='sm'
-                        label={message.activity ?? 'Working'}
-                    />
+                    {/*
+                     * A string `label` on `Spinner` renders bold body text *under* the dot
+                     * (`Spinner.tsx`), which drew a heading-sized "Working" in the middle of the
+                     * column — more emphasis than the tool rows it sits between. The row is
+                     * assembled by hand instead: dot and word side by side, in the supporting
+                     * role, so it reads as a caption on the turn rather than as content.
+                     *
+                     * The spinner keeps `role='status'` and carries the accessible name; the
+                     * visible word is hidden from assistive tech so the same string is not
+                     * announced twice (WCAG 4.1.2).
+                     */}
+                    <HStack
+                        gap={1.5}
+                        vAlign='center'
+                    >
+                        <Spinner
+                            size='sm'
+                            shade='subtle'
+                            aria-label={message.activity ?? 'Working'}
+                        />
+                        <Text
+                            aria-hidden
+                            type='supporting'
+                        >
+                            {message.activity ?? 'Working'}
+                        </Text>
+                    </HStack>
                 </ChatMessageBubble>
             :   null}
         </>
