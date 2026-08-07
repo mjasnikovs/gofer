@@ -95,8 +95,17 @@ async function validateToolPath(workspacePath, path) {
 function validateBashCommand(command) {
     if (typeof command !== 'string' || command.length === 0 || command.includes('\0'))
         throw new Error('Shell commands must be non-empty strings')
+    // Every absolute path is refused, including one that points inside the worktree: a shell
+    // command is a string, and no amount of parsing tells `/tmp/…/worktree/a.gd` from a path that
+    // only starts that way. The refusal has to say that, because the one that said "must stay
+    // inside the workspace" was answering an agent that had just typed its own worktree's absolute
+    // path — true about the rule, and false about what it had done.
     if (/(^|[\s"'=])(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|\/)/u.test(command))
-        throw new Error('Shell command paths must stay inside the workspace')
+        throw new Error(
+            'Shell commands take paths relative to the workspace, and this one names an absolute '
+                + 'path or one that climbs out. The shell already runs in the workspace root, so '
+                + 'name the file the way the project does — scripts/mario.gd, not its full path.'
+        )
     if (/(?:^|[;&|]\s*)cd(?:\s|$)/u.test(command))
         throw new Error('Shell commands cannot change the workspace directory')
     if (EDITOR_OWNED_IN_SHELL.test(command))

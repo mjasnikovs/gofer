@@ -235,6 +235,61 @@ test('rejects requests without a user prompt or image before network dispatch', 
     )
 })
 
+/**
+ * A conversation that has outgrown the model's context window does not fail: the server answers a
+ * token or two and says it stopped for length. Recorded as an answer, that is a complete assistant
+ * message reading "I", and the work carries on against a conversation that can never reply again.
+ */
+test('reports a turn that ran out of context rather than recording it as an answer', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const server = createServer((request, response) => {
+        request.resume()
+        request.on('end', () => {
+            response.writeHead(200, {'content-type': 'text/event-stream'})
+            response.write(
+                `data: ${JSON.stringify({
+                    id: 'chatcmpl-full',
+                    object: 'chat.completion.chunk',
+                    created: 1,
+                    model: settings.model,
+                    choices: [{index: 0, delta: {role: 'assistant', content: 'I'}}]
+                })}\n\n`
+            )
+            response.write(
+                `data: ${JSON.stringify({
+                    id: 'chatcmpl-full',
+                    object: 'chat.completion.chunk',
+                    created: 1,
+                    model: settings.model,
+                    choices: [{index: 0, delta: {}, finish_reason: 'length'}],
+                    usage: {prompt_tokens: 116_449, completion_tokens: 1, total_tokens: 116_450}
+                })}\n\n`
+            )
+            response.end('data: [DONE]\n\n')
+        })
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    context.after(() => server.close())
+    const address = server.address()
+
+    await assert.rejects(
+        runAgent({
+            settings: {
+                ...settings,
+                baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
+                contextWindow: 120_064,
+                maxRetries: 0
+            },
+            messages: [{sender: 'user', text: 'Carry on', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        }),
+        // The two numbers that explain it, and the way out.
+        /116,449 of the model's 120,064-token context window.*Start a new task/su
+    )
+})
+
 test('rejects malformed and interrupted provider streams', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)

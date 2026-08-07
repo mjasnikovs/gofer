@@ -2,6 +2,17 @@ import {useCallback, useEffect, useState} from 'react'
 import {toGodotError} from '../services/godot-session'
 import type {GodotError} from '../models/godot'
 
+/**
+ * The failures that mean "there is no editor to ask", which is not a failed read.
+ *
+ * A panel's read is in flight when the user presses Stop, and it lands after the editor is gone.
+ * The answer is true — the session was stopped — but painting it turned the user's own deliberate
+ * stop into a red banner saying the scene tree could not be read, over a workspace that is simply
+ * offline and already says so. So these are dropped: the panel falls back to the empty state it
+ * has for having no session.
+ */
+const SESSION_IS_GONE = new Set(['session_stopped', 'session_not_active', 'transport_closed'])
+
 export type GodotQuery<Result> = Readonly<{
     data: Result | undefined
     error: GodotError | undefined
@@ -53,7 +64,11 @@ export function useGodotQuery<Result>(
                 if (!cancelled) setSettled({id: requestId, data})
             })
             .catch((failure: unknown) => {
-                if (!cancelled) setSettled({id: requestId, error: toGodotError(failure)})
+                if (cancelled) return
+                const error = toGodotError(failure)
+                setSettled(
+                    SESSION_IS_GONE.has(error.code) ? {id: requestId} : {id: requestId, error}
+                )
             })
         return () => {
             cancelled = true

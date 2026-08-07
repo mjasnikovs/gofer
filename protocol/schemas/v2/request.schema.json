@@ -30,6 +30,7 @@
                             "scene.save_as",
                             "scene.reload",
                             "node.create",
+                            "node.instantiate",
                             "node.duplicate",
                             "node.rename",
                             "node.reparent",
@@ -38,7 +39,8 @@
                             "node.add_to_group",
                             "node.remove_from_group",
                             "node.connect_signal",
-                            "node.disconnect_signal"
+                            "node.disconnect_signal",
+                            "node.set_cells"
                         ]
                     }
                 }

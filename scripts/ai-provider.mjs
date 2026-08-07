@@ -23,11 +23,33 @@ You can inspect and modify files and run shell commands with the provided tools.
 const GODOT_TOOL_PROMPT = `A Gofer-managed Godot editor is available through the godot_* tools. Start with godot_session status, and start the session if it is offline.
 The edited scene (godot_scene, godot_node) and the running game (godot_runtime) are separate: editing one never changes the other. Scene mutations take expectedRevision from the last read that reported one, and are undoable in the editor until godot_scene save writes them.
 Scenes and project.godot belong to the editor, which holds them open: build and change them with godot_scene, godot_node and godot_project, never by writing the file as text. The write and edit tools refuse those files for that reason, and so does a shell command that names one; scripts and every other file are yours to write.
-A property that holds a resource — a CollisionShape2D's shape, a Sprite2D's texture — is set with {"type": "resource", "value": {"path": "res://..."}}, and a path written as a string is refused. There is no tool that creates a resource, so write the small ones yourself as .tres files and point at them: a shape is \`[gd_resource type="RectangleShape2D" format=3]\`, a blank line, \`[resource]\`, then \`size = Vector2(64, 16)\`.
-A scene is wired with godot_node connect_signal and add_to_group, and the saved scene keeps both — that is where a Godot project puts its wiring, rather than in a \`connect\` call in _ready. Write the script and attach it first, because a connection names a method that has to exist already. godot_node inspect reads a node's groups, the signals it can emit, and the connections it already has.
+A property that holds a resource — a CollisionShape2D's shape, a Sprite2D's texture — is set with {"type": "resource", "value": {"path": "res://..."}}, and a path written as a string is refused. Small resources have no tool of their own, so write those yourself as .tres files and point at them: a shape is \`[gd_resource type="RectangleShape2D" format=3]\`, a blank line, \`[resource]\`, then \`size = Vector2(64, 16)\`.
+A 2D level is built out of tiles, not out of one node per block: godot_resource create_tileset cuts an image the project holds into a TileSet and says which tiles collide, and godot_node set_cells paints a TileMapLayer with it by the rectangle. Do it that way whenever the project has art to build from — a hundred ColorRects is not a level, and a TileSet written as text opens with no tiles in it.
+A scene is wired with godot_node connect_signal and add_to_group, and the saved scene keeps both — that is where a Godot project puts its wiring, rather than in a \`connect\` call in _ready. Do not do both: a signal the scene already connects and the script connects again is an error every time the node loads, in the running game where nothing points at the cause. Write the script and attach it first, because a connection names a method that has to exist already. godot_node inspect reads a node's groups, the signals it can emit, and the connections it already has.
 Write GDScript with godot_script save rather than the write tool: it tells the language server, and then godot_script diagnostics on that path says whether what you wrote parses. Do that for every .gd file you write or change. A script that does not parse stops the scene using it from loading and the game never starts, and the only thing that says so is an error in the log long after the fact — the language server says it immediately. It is also the difference between Godot 4 and the Godot 3 names a model tends to reach for: PackedVector2Array, not PoolVector2Array.
 After godot_debug launch, wait with await_stop before reading the stack, scopes, or variables. Read godot_logs when something fails without explanation.
 A few operations ask the user first — deleting or moving a file, enabling a plugin, and writing a machine-wide editor setting. The call waits for their answer, and approval_denied means they said no: do not retry it, ask what to do instead.`
+
+/**
+ * Says that the conversation left the model no room to answer.
+ *
+ * A turn that ran out of room is not an answer, and it does not look like a failure either: the
+ * model emits a token or two and stops, and every layer above records a complete assistant message
+ * whose text is the single word "I". The work carries on against a conversation that can no longer
+ * hold a reply, and nothing on screen says why the answers went empty. So it is raised as the error
+ * it is, naming the two numbers that explain it and the one thing that fixes it.
+ */
+function outOfRoom(message, model) {
+    const used = message.usage?.input ?? 0
+    const wrote = message.usage?.output ?? 0
+    return (
+        `This conversation no longer leaves room for an answer: the request filled `
+        + `${used.toLocaleString()} of the model's ${model.contextWindow.toLocaleString()}-token `
+        + `context window, so it stopped after ${wrote.toLocaleString()} token`
+        + `${wrote === 1 ? '' : 's'}. Start a new task for the rest of this work — a task carries `
+        + `its own conversation — or point the connection at a model with a larger context window.`
+    )
+}
 
 function zeroUsage() {
     return {
@@ -230,6 +252,7 @@ export async function runAgent({
         if (finalMessage.stopReason === 'error') {
             throw new Error(finalMessage.errorMessage || 'The model returned an error')
         }
+        if (finalMessage.stopReason === 'length') throw new Error(outOfRoom(finalMessage, model))
         const completion = {
             type: 'done',
             text: textContent(finalMessage.content),

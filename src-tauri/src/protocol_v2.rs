@@ -22,7 +22,7 @@ pub const DOMAINS: [&str; 12] = [
     "logs", "files", "docs",
 ];
 
-pub const MUTATING_COMMANDS: [&str; 17] = [
+pub const MUTATING_COMMANDS: [&str; 18] = [
     "session.undo",
     "session.redo",
     "scene.create",
@@ -40,6 +40,7 @@ pub const MUTATING_COMMANDS: [&str; 17] = [
     "node.remove_from_group",
     "node.connect_signal",
     "node.disconnect_signal",
+    "node.set_cells",
 ];
 
 struct NumericValue {

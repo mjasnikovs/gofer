@@ -198,7 +198,14 @@ pub fn start_session<R: Runtime>(
         )
     })?;
 
-    if let Some(running) = godot_session::current_info() {
+    // A session whose editor is gone must not answer for this start. Answering with it is what
+    // "starting a session that is already running answers with the one that is running" used to do
+    // to a dead one: the call returned the failed session, reported success, and started nothing,
+    // so the button the user pressed to get their editor back did nothing at all.
+    noticed_editor_exit(app);
+    if let Some(running) = godot_session::current_info()
+        && !godot_session::editor_has_exited()
+    {
         // The running session reports the path it resolved; the task table holds the one it was
         // given, and on a machine with a symlinked temporary directory those are different strings
         // for one directory.
@@ -255,7 +262,7 @@ pub fn start_session<R: Runtime>(
 /// It is reported into the session buffer instead, which is where the user is already looking for
 /// what the editor is doing.
 fn start_run_logging(storage: &ProjectStorage, info: &SessionInfo, worktree: &Path) {
-    stop_run_logging("aborted");
+    stop_run_logging(RunOutcome::Aborted);
     let run = match storage.start_godot_run_in(
         &StartGodotRunRequest {
             task_id: None,
@@ -364,8 +371,30 @@ fn flush_logs(storage: &ProjectStorage, run_id: &str, cursor: &mut u64) {
     }
 }
 
+/// How a run ended, in the three words the run table accepts.
+///
+/// A `&str` here was one typo away from a run that never closed: the store refuses a status it does
+/// not know, the refusal is not worth failing a shutdown over, and so the row sat at `running`
+/// forever for an editor that had exited. Spelling it as a type is what makes that unwritable.
+#[derive(Clone, Copy)]
+enum RunOutcome {
+    Completed,
+    Failed,
+    Aborted,
+}
+
+impl RunOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
 /// Stops the drain, waits for its final flush, and closes the run row.
-fn stop_run_logging(status: &str) {
+fn stop_run_logging(outcome: RunOutcome) {
     let logger = RUN_LOGGER.lock().ok().and_then(|mut slot| slot.take());
     let Some(mut logger) = logger else { return };
     logger.stop.store(true, Ordering::Release);
@@ -374,7 +403,7 @@ fn stop_run_logging(status: &str) {
     }
     let _ = logger.storage.finish_godot_run(&FinishGodotRunRequest {
         run_id: logger.run_id.clone(),
-        status: status.to_owned(),
+        status: outcome.as_str().to_owned(),
         exit_code: None,
     });
 }
@@ -391,9 +420,9 @@ pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> 
     // The run is closed after the editor is stopped so the drain's last pass sees the output the
     // shutdown itself produced.
     stop_run_logging(if result.is_ok() {
-        "completed"
+        RunOutcome::Completed
     } else {
-        "failed"
+        RunOutcome::Failed
     });
     if let Some(worktree) = worktree {
         // Unstaging must read the same ledger staging wrote, or the addon is left in the worktree.
@@ -423,8 +452,34 @@ pub fn release_worktree<R: Runtime>(app: &AppHandle<R>, worktree: &Path) {
 }
 
 /// Returns the active session summary, if any.
-pub fn get_session() -> Result<Option<GodotSessionResponse>, SessionError> {
+///
+/// An editor that exited on its own is noticed here, because this is what the window polls. Before
+/// that, closing the Godot window left Gofer presenting the session it last had: the badge read
+/// ready, the panels offered Run, every call failed with a transport error that named nothing, and
+/// the stored run row stayed `running` for a process that was gone.
+pub fn get_session<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<GodotSessionResponse>, SessionError> {
+    noticed_editor_exit(app);
     Ok(godot_session::current_info().map(|info| to_response(&info)))
+}
+
+/// Marks a session whose editor has exited, and does the bookkeeping a stop would have done.
+///
+/// Called from the event tick, which is what notices in time, and from `get_session`, which is what
+/// notices when nothing is subscribed. Answers whether this call was the one that found it, so the
+/// caller can stop looking.
+fn noticed_editor_exit<R: Runtime>(app: &AppHandle<R>) -> bool {
+    if !godot_session::poll_editor_exit() {
+        return false;
+    }
+    // The editor is already gone, so there is nothing to kill and nothing to unstage safely from
+    // under it — only the bookkeeping a stop would have done.
+    crate::script::disconnect();
+    crate::debug::disconnect();
+    stop_run_logging(RunOutcome::Failed);
+    emit_state_changed(app, SessionState::Error);
+    true
 }
 
 /// Sends one tagged RPC call to the connected addon.
@@ -537,7 +592,16 @@ pub fn subscribe_godot_events<R: Runtime>(
                         data: envelope.data,
                     });
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                // A quiet moment is when an editor that is no longer there can be noticed. Nothing
+                // else asks: the renderer fetches the session once when it opens and then listens,
+                // so an editor that crashed or that the user closed left a ready badge over a dead
+                // process until something was clicked. There is no event for it — the editor is
+                // gone — so the tick that was already waiting is what looks.
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if noticed_editor_exit(&app) {
+                        break;
+                    }
+                }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -688,7 +752,7 @@ mod tests {
         );
 
         start_run_logging(&storage, &session_info("session-1", &worktree), &worktree);
-        stop_run_logging("completed");
+        stop_run_logging(RunOutcome::Completed);
 
         let hits = storage
             .search_godot_logs(&SearchGodotLogsRequest {
@@ -703,7 +767,47 @@ mod tests {
 
         // Stopping twice is what a crashed editor followed by a normal stop looks like: the
         // second stop finds no logger and answers rather than closing someone else's run.
-        stop_run_logging("completed");
+        stop_run_logging(RunOutcome::Completed);
+    }
+
+    /// The run table takes three words and refuses everything else, and the refusal is swallowed
+    /// where a run is closed — closing it is bookkeeping, not something worth failing a shutdown
+    /// over. So a status it does not know is silent: the row stays `running` for an editor that
+    /// exited, and the only place it shows up is the user's run history, later.
+    #[test]
+    fn every_run_outcome_is_a_status_the_run_table_accepts() {
+        let directory = TempDir::new().expect("temporary directory");
+        let worktree = directory.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("create worktree");
+        let storage = ProjectStorage::open(&directory.path().join("data"), &worktree)
+            .expect("open project storage");
+
+        for outcome in [
+            RunOutcome::Completed,
+            RunOutcome::Failed,
+            RunOutcome::Aborted,
+        ] {
+            let run = storage
+                .start_godot_run_in(
+                    &StartGodotRunRequest {
+                        task_id: None,
+                        session_id: None,
+                        godot_version: None,
+                        metadata: json!({}),
+                    },
+                    &worktree,
+                )
+                .expect("open a run to close");
+            storage
+                .finish_godot_run(&FinishGodotRunRequest {
+                    run_id: run.id,
+                    status: outcome.as_str().to_owned(),
+                    exit_code: None,
+                })
+                .unwrap_or_else(|error| {
+                    panic!("closing a run as {} must work: {error}", outcome.as_str())
+                });
+        }
     }
 
     /// Storage that cannot record the run must not stop the editor from being usable: the failure
@@ -722,7 +826,7 @@ mod tests {
 
         godot_session::clear_logs();
         start_run_logging(&storage, &session_info("session-2", &worktree), &worktree);
-        stop_run_logging("failed");
+        stop_run_logging(RunOutcome::Failed);
 
         let page = godot_session::read_logs(&LogQuery::default()).expect("read session logs");
         assert!(

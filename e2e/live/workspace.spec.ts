@@ -72,6 +72,23 @@ const UNREACHABLE_URL = 'http://127.0.0.1:9/v1'
 /** The scene the agent is asked to build, named as the worktree holds it and as Godot names it. */
 const LEVEL_SCENE = 'scenes/level_1.tscn'
 const LEVEL_SCENE_RESOURCE = `res://${LEVEL_SCENE}`
+/** The art the fixture project ships: an 8x2 atlas of 16x16 tiles, described to the agent below. */
+const ATLAS = 'res://assets/tiles.png'
+/** Where the agent is asked to put the tileset it cuts from that atlas. */
+const TILESET = 'res://tiles/world.tres'
+/** The layer the level is painted on, named in the prompt so its cells can be read back. */
+const TERRAIN = '/Level1/Terrain'
+/**
+ * What each tile in the atlas is, in the words the prompt uses.
+ *
+ * The agent cannot see the image — no tool reads a PNG — so the layout is told to it the way a
+ * person handing over an asset would. Which tiles collide is left to the agent.
+ */
+const ATLAS_LEGEND =
+    '(0,0) ground, (1,0) brick, (2,0) question block, (3,0) spent block, (4,0) and (5,0) the '
+    + 'left and right halves of a pipe’s mouth, (6,0) and (7,0) the left and right halves of its '
+    + 'shaft, (0,1) flag pole, (1,1) the ball on top of it, (2,1) the flag, (3,1) castle brick, '
+    + '(4,1) and (5,1) the halves of a bush, (6,1) and (7,1) the halves of a cloud'
 /**
  * How long one agent turn may take.
  *
@@ -93,6 +110,8 @@ let bound = ''
 let baseUrl = ''
 /** The last frame the Game tab captured, reused as the image the chat sends to the model. */
 let capturedFrame = ''
+/** Where the session output had got to when the agent's level was launched. */
+let beforeTheRun = 0
 /** The commit the workspace started on, so a sweep that merges a task can undo it afterwards. */
 const seedCommit = execFileSync('git', ['-C', workspace, 'rev-parse', 'HEAD'], {
     encoding: 'utf8'
@@ -177,6 +196,42 @@ type InputAction = Readonly<{
 
 type InputActions = Readonly<{actions: readonly InputAction[]}>
 
+/** What one node is wired to, as `node.inspect` reports it. */
+type InspectedNode = Readonly<{
+    name: string
+    type: string
+    path: string
+    groups: readonly string[]
+    signals: readonly string[]
+    connections: readonly Readonly<{signal: string; method: string; target?: string | undefined}>[]
+}>
+
+/** One page of the live session's own output, as `read_godot_logs` answers it. */
+type GodotLogPage = Readonly<{
+    entries: readonly Readonly<{sequence: number; severity: string; message: string}>[]
+    cursor: number
+    dropped: number
+}>
+
+/** What one TileMapLayer holds, as `node.get_cells` reports it. */
+type PaintedCells = Readonly<{
+    node: string
+    cells: number
+    usedRect: readonly number[]
+    tileSet: string
+    tiles: readonly Readonly<{atlas: readonly number[]; count: number}>[]
+}>
+
+/** What a saved TileSet holds, as `resource.describe_tileset` reports it. */
+type DescribedTileset = Readonly<{
+    tileSize: readonly number[]
+    sources: readonly Readonly<{
+        texture?: string | undefined
+        regionSize?: readonly number[] | undefined
+        tiles: readonly Readonly<{atlas: readonly number[]; solid: boolean}>[]
+    }>[]
+}>
+
 /** Correlates the sweep's own editor requests, which share the session the panels use. */
 let nextRequestId = 0
 
@@ -223,13 +278,6 @@ async function boundKey(action: string) {
     const key = found?.events.find(event => event.kind === 'key')?.key
     if (!key) throw new Error(`${action} is bound to no key: ${JSON.stringify(found)}`)
     return key
-}
-
-/** How many nodes the edited scene tree is showing. */
-async function sceneNodeCount() {
-    return browser.execute(
-        () => document.querySelectorAll('[aria-label="Explorer"] [role="treeitem"]').length
-    )
 }
 
 interface StoppedFrame {
@@ -326,6 +374,30 @@ async function expectInExplorer(wanted: readonly string[], limitMs = 60_000) {
         await browser.pause(250)
     }
     throw new Error(`the explorer never showed ${JSON.stringify(wanted)}; it reads: ${shown}`)
+}
+
+/**
+ * Blocks until the Game panel names the size of the frame it is showing, and answers with it.
+ *
+ * Not an exact size: the game is a real window on a real desktop, and the tiling window manager
+ * that owns this machine's geometry hands it whatever slot is free — a level launched with the
+ * editor and Gofer already on screen came up 451 wide against a project that asks for 640. Godot
+ * resizes the viewport with the window, so the captured frame is that size and nothing in Gofer
+ * decided it. What the panel owes the user is the size of the picture it is showing, so that is
+ * what is asked for.
+ */
+async function frameSize(limitMs = 60_000) {
+    const deadline = Date.now() + limitMs
+    for (;;) {
+        const shown = await pageText()
+        const named = /Game · (\d+)×(\d+)/u.exec(shown)
+        if (named) return {width: Number(named[1]), height: Number(named[2])}
+        if (Date.now() >= deadline)
+            throw new Error(
+                `the game panel never named a frame size; it shows: ${shown.slice(0, 600)}`
+            )
+        await browser.pause(500)
+    }
 }
 
 /** The base64 of whatever picture the Game tab is showing, which is a real PNG of this project. */
@@ -1220,26 +1292,24 @@ describe('the live workspace', () => {
             await clickButton('Run')
             // The run answers with the frame the game has already drawn, which is the proof.
             await expectSelector('img[alt*="running game"]', 120_000)
-            await expectText(['Game · 640×360'], {limitMs: 30_000})
+            const frame = await frameSize(30_000)
+            expect(frame.width).toBeGreaterThan(0)
+            expect(frame.height).toBeGreaterThan(0)
         })
 
         it('captures a frame of the running game on demand', async () => {
             await clickControl('Capture game')
             // A capture that fails replaces the picture with the reason it failed; one that
             // answers leaves a frame of the game's own size on screen.
-            await expectText(['Game · 640×360'], {
-                absent: ['The game frame could not be read'],
-                limitMs: 60_000
-            })
+            await expectGone(['The game frame could not be read'])
+            expect((await frameSize()).height).toBeGreaterThan(0)
             await expectSelector('img[alt*="running game"]', 10_000)
         })
 
         it('restarts the game', async () => {
             await clickControl('Restart')
-            await expectText(['Game · 640×360'], {
-                absent: ['The game frame could not be read'],
-                limitMs: 120_000
-            })
+            await expectGone(['The game frame could not be read'], {limitMs: 120_000})
+            expect((await frameSize(120_000)).height).toBeGreaterThan(0)
             // The controls come back the moment the restart has finished with the editor.
             await expectEnabled('Stop', 120_000)
         })
@@ -1493,38 +1563,66 @@ describe('the live workspace', () => {
      * survived into the worktree and into the running game — not what the answer claimed.
      */
     describe('building the first level of Mario', () => {
-        it('creates the level scene and its ground', async () => {
+        it('cuts the project’s atlas into a tileset and paints the ground with it', async () => {
             await askUntil(
-                'You are building a side-scrolling platformer in this Godot project. Create the '
-                    + `scene ${LEVEL_SCENE_RESOURCE} with a Node2D root named Level1, and give it `
-                    + 'the ground of Super Mario Bros World 1-1: a StaticBody2D named Ground with '
-                    + 'a collision shape wide enough for the whole level and something visible '
-                    + 'drawn along it. Build the scene with your godot_scene and godot_node tools '
-                    + 'and save it with godot_scene save — never by writing .tscn text yourself, '
-                    + 'because a hand-written scene file the editor cannot open is a failure. '
-                    + 'Finish by opening the scene with godot_scene open to prove it loads.',
+                'You are building a side-scrolling platformer in this Godot project. It ships '
+                    + `16x16 pixel art at ${ATLAS}: eight tiles across and two down, which are `
+                    + `${ATLAS_LEGEND}. `
+                    + `Cut that atlas into a tileset at ${TILESET} with your godot_resource `
+                    + 'create_tileset tool, making the tiles a player has to stand on or bump into '
+                    + 'solid and leaving the scenery alone. '
+                    + `Then create the scene ${LEVEL_SCENE_RESOURCE} with a Node2D root named `
+                    + 'Level1, add a TileMapLayer named Terrain under it, set its tile_set property '
+                    + 'to that tileset, and paint the ground of Super Mario Bros World 1-1 with '
+                    + 'your godot_node set_cells tool: two rows of ground running the length of the '
+                    + 'level, with a couple of gaps to fall down. Save the scene with godot_scene '
+                    + 'save — never by writing .tscn or .tres text yourself.',
                 async () => {
                     if (!existsSync(join(bound, LEVEL_SCENE))) return false
-                    // A collision shape with no shape in it is scenery, not ground: the player
-                    // falls through it, and the level is a picture of a game rather than one. The
-                    // scene names its shapes the way Godot's own writer does or not at all.
-                    if (
-                        !/shape = (?:Sub|Ext)Resource\(/u.test(
-                            readFileSync(join(bound, LEVEL_SCENE), 'utf8')
-                        )
-                    )
+                    const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
+                    // Cells live in a packed blob and the tileset is an external resource, so
+                    // these two lines are what a painted level looks like on disk. A layer with a
+                    // tileset and no cells is an empty level that opens perfectly well.
+                    if (!scene.includes('tile_map_data = PackedByteArray(')) return false
+                    if (!scene.includes('tile_set = ExtResource(')) return false
+                    // A tileset whose tiles carry no collision is a picture of ground: the player
+                    // falls straight through it, and nothing about the scene file says so.
+                    const described = await godotCall<DescribedTileset>(
+                        'resource.describe_tileset',
+                        {path: TILESET}
+                    ).catch(() => null)
+                    if (!described?.sources.some(source => source.tiles.some(tile => tile.solid)))
                         return false
                     // Whether the agent left the level open in the editor or not, opening it is
                     // what a person does next — and it is the only way the tree read below is the
                     // level's own.
                     await openLevelInEditor()
-                    return explorerShows(['Level1', 'Ground'])
+                    return explorerShows(['Level1', 'Terrain'])
                 },
-                `${LEVEL_SCENE_RESOURCE} must exist and hold a Node2D root named Level1 with a `
-                    + 'StaticBody2D named Ground under it, and the Ground’s CollisionShape2D needs '
-                    + 'a real shape resource — a shape property that is not one leaves the player '
-                    + 'falling through the ground.'
+                `${LEVEL_SCENE_RESOURCE} must hold a Node2D root named Level1 with a TileMapLayer `
+                    + `named Terrain under it, that layer’s tile_set must be ${TILESET} built with `
+                    + 'godot_resource create_tileset, some of that tileset’s tiles must be solid, '
+                    + 'and the ground must be painted onto the layer with godot_node set_cells.'
             )
+        })
+
+        /**
+         * The tileset read back through the command that reports it, rather than off the disk.
+         *
+         * A `.tres` is a text file with a texture path in it, which says nothing about whether the
+         * editor could cut it into tiles: what matters is the tile size, the atlas it points at,
+         * and which tiles carry collision.
+         */
+        it('reports the tileset it built from the project’s own art', async () => {
+            const described = await godotCall<DescribedTileset>('resource.describe_tileset', {
+                path: TILESET
+            })
+            expect(described.tileSize).toEqual([16, 16])
+            const source = described.sources[0]
+            expect(source?.texture).toBe(ATLAS)
+            expect(source?.regionSize).toEqual([16, 16])
+            expect(source?.tiles.length).toBeGreaterThanOrEqual(8)
+            expect(source?.tiles.some(tile => tile.solid)).toBe(true)
         })
 
         it('gives the level a player that walks and jumps', async () => {
@@ -1557,34 +1655,35 @@ describe('the live workspace', () => {
 
         it('fills the level in with the things World 1-1 is made of', async () => {
             await askUntil(
-                'Finish World 1-1 in that scene, again with your godot_node tools: brick and '
-                    + 'question blocks floating above the ground, at least two pipes standing on '
-                    + 'it, and a goal flag at the far right end of the level. Name the nodes after '
-                    + 'what they are — Pipe, Brick, Flag. Save the scene with godot_scene save and '
-                    + 'confirm it still opens.',
+                'Finish World 1-1 on that same Terrain layer, with your godot_node set_cells tool '
+                    + 'and the tiles the tileset already has: brick and question blocks floating '
+                    + 'above the ground, at least two pipes standing on it — each pipe is its two '
+                    + 'mouth tiles with its two shaft tiles under them, as many rows tall as you '
+                    + 'want it — and the flag pole at the far right end of the level, with the ball '
+                    + 'on top and the flag beside it. Put a bush and a cloud in as scenery. Save '
+                    + 'the scene with godot_scene save and confirm it still opens.',
                 async () => {
-                    const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8').toLowerCase()
-                    if (
-                        !scene.includes('pipe')
-                        || !scene.includes('flag')
-                        || !(scene.includes('block') || scene.includes('brick'))
-                    )
-                        return false
                     await openLevelInEditor()
-                    await clickButton('Refresh')
-                    // A level with ground, a player, blocks, pipes and a flag is not a four-node
-                    // scene. The tree arrives with the fetch behind the tab, so the count is
-                    // watched rather than sampled.
-                    const deadline = Date.now() + 30_000
-                    for (;;) {
-                        if ((await sceneNodeCount()) >= 8) return true
-                        if (Date.now() >= deadline) return false
-                        await browser.pause(500)
-                    }
+                    const painted = await godotCall<PaintedCells>('node.get_cells', {
+                        node: TERRAIN
+                    }).catch(() => null)
+                    if (!painted) return false
+                    // Asked of the layer rather than of the file: cells are a packed blob, so the
+                    // scene text can say nothing about which tiles a level is made of. The tally
+                    // is per tile, so it says whether the pipes and the flag are actually there.
+                    const used = new Set(painted.tiles.map(tile => tile.atlas.join(',')))
+                    const has = (...tiles: string[]) => tiles.some(tile => used.has(tile))
+                    if (!has('4,0', '5,0', '6,0', '7,0')) return false
+                    if (!has('1,0', '2,0')) return false
+                    if (!has('0,1', '1,1', '2,1')) return false
+                    // A level is longer than a screen: World 1-1 is a couple of hundred tiles
+                    // wide, and a dozen cells is a test pattern rather than a level.
+                    return painted.cells >= 120 && (painted.usedRect[2] ?? 0) >= 40
                 },
-                'the level still needs brick or question blocks, at least two pipes, and a goal '
-                    + 'flag, saved into the scene. Call godot_scene save as you go: the scene is '
-                    + 'reopened from disk to check it, so nodes you built but never saved are gone.'
+                'the Terrain layer still needs pipe tiles, brick or question blocks, and the flag '
+                    + 'at the end, painted with godot_node set_cells and saved into the scene. '
+                    + 'Call godot_scene save as you go: the scene is reopened from disk to check '
+                    + 'it, so cells you painted but never saved are gone.'
             )
         })
 
@@ -1594,8 +1693,13 @@ describe('the live workspace', () => {
          * Everything above is nodes and shapes. A coin the player can pick up is wired: a signal
          * connected to a method, and a group the running game can ask for every coin at once. Both
          * live in the scene rather than in a script, and both are dropped on save unless the addon
-         * writes them the way the editor does — so the assertion is made against the saved `.tscn`,
-         * not against the answer or the script.
+         * writes them the way the editor does — so the assertion is made against what the editor
+         * reports, not against the answer or the script.
+         *
+         * Which file keeps the connection is deliberately not asserted. An agent that builds the
+         * coin once as its own scene, connects it there and instances it three times has done the
+         * better thing, and a check that greps the level for `[connection …]` calls that a failure:
+         * it happened, and cost three turns of being told to redo work that was already right.
          */
         it('gives the level coins the player can collect', async () => {
             await askUntil(
@@ -1609,17 +1713,23 @@ describe('the live workspace', () => {
                     + 'the scene.',
                 async () => {
                     if (!existsSync(join(bound, 'scripts/coin.gd'))) return false
-                    const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
-                    // A connection the save did not keep is the failure this step exists to catch:
-                    // the editor shows it, the game never fires it.
-                    if (!scene.includes('[connection signal="body_entered"')) return false
-                    if (!scene.includes('groups=["coins"]')) return false
                     await openLevelInEditor()
-                    return explorerShows(['Coin'])
+                    if (!(await explorerShows(['Coin']))) return false
+                    // Asked of the editor, which is the only thing that can see a connection made
+                    // in an instanced scene as well as one made in this one. A connection the save
+                    // did not keep is the failure this step exists to catch: the editor shows it
+                    // while it is in memory, and the game never fires it.
+                    const coin = await godotCall<InspectedNode>('node.inspect', {
+                        node: `/Level1/Coin`
+                    }).catch(() => null)
+                    if (!coin) return false
+                    if (!coin.groups.includes('coins')) return false
+                    return coin.connections.some(entry => entry.signal === 'body_entered')
                 },
-                'the level needs at least three Area2D coins carrying res://scripts/coin.gd, each '
-                    + 'connected with godot_node connect_signal and put in the group "coins" with '
-                    + 'godot_node add_to_group, and the scene saved afterwards.'
+                'the level needs at least three Area2D coins carrying res://scripts/coin.gd, the '
+                    + 'first of them named Coin, each with its body_entered connected to that '
+                    + 'script’s method and each in the group "coins", and the scene saved '
+                    + 'afterwards. Connecting inside a coin scene you instance is fine.'
             )
         })
 
@@ -1762,10 +1872,19 @@ describe('the live workspace', () => {
         })
 
         it('runs the level the agent built and draws a frame of it', async () => {
+            // Where the session output has got to before the game starts. Everything the agent
+            // printed while it was building — including the parse errors of a script it wrote
+            // wrong and then fixed — is behind this cursor, and the question worth asking is what
+            // the level prints while it plays.
+            beforeTheRun = (
+                await invokeCommand<GodotLogPage>('read_godot_logs', {
+                    query: {minSeverity: 'error', limit: 1000}
+                })
+            ).cursor
             await clickTab('Game')
             await clickButton('Run')
             await expectSelector('img[alt*="running game"]', 180_000)
-            await expectText(['Game · 640×360'], {limitMs: 60_000})
+            expect((await frameSize()).height).toBeGreaterThan(0)
         })
 
         it('shows the level’s own nodes in the running game', async () => {
@@ -1796,10 +1915,18 @@ describe('the live workspace', () => {
                 const value = inspected.properties?.['position']?.value
                 if (!Array.isArray(value))
                     throw new Error(`the player reported no position: ${JSON.stringify(inspected)}`)
-                return Number(value[0])
+                return {x: Number(value[0]), y: Number(value[1])}
             }
 
-            const before = await positionOf()
+            // The ground is tiles now, and a tile carries collision only if the tileset gave it
+            // some. A player standing on a tileset built without it falls out of the world under
+            // gravity, and every other assertion — the cells, the scene, the frame — still passes.
+            const landed = await positionOf()
+            await browser.pause(2_000)
+            const settled = await positionOf()
+            expect(settled.y).toBeLessThan(landed.y + 64)
+
+            const before = (await positionOf()).x
             // No `device`: a marked event reaches _input and matches no action at all, because an
             // Input Map binding carries the keyboard's own device. Unmarked is how a player plays.
             await godotCall('runtime.input', {
@@ -1810,7 +1937,7 @@ describe('the live workspace', () => {
                 // the only thing that can end it: the player's own position.
                 const deadline = Date.now() + 30_000
                 for (;;) {
-                    const now = await positionOf()
+                    const now = (await positionOf()).x
                     if (now > before + 16) return
                     if (Date.now() >= deadline)
                         throw new Error(
@@ -1826,19 +1953,26 @@ describe('the live workspace', () => {
             }
         })
 
+        /**
+         * The level plays without a script failing in it.
+         *
+         * Asked of the whole session, this is not that question: the log holds the broken script
+         * the sweep saved on purpose much earlier, and it holds whatever the agent got wrong on
+         * its way to a level that works — a parse error it was told about and fixed a minute
+         * later is not a defect, and demanding the log never mention the file is demanding the
+         * agent write it right first time. So it is asked of the run: nothing after the cursor
+         * taken when the game started may name a script the agent wrote.
+         */
         it('reports no error from the script the agent wrote', async () => {
-            await clickTab('Output')
-            await clickControl('Errors')
-            // Godot prints a script error for every frame a script fails on, so a player script
-            // that actually runs is named by nothing here. The session's own log holds errors from
-            // the broken script this sweep saved on purpose much earlier, so the search is narrowed
-            // to the file the agent wrote.
-            for (const script of ['mario.gd', 'coin.gd', 'goomba.gd']) {
-                await fillLabelledInput('Filter output', script)
-                await expectText(['No output'], {limitMs: 60_000})
-            }
-            await fillLabelledInput('Filter output', '')
-            await clickControl('All')
+            const page = await invokeCommand<GodotLogPage>('read_godot_logs', {
+                query: {after: beforeTheRun, minSeverity: 'error', limit: 1000}
+            })
+            const named = page.entries
+                .map(entry => entry.message)
+                .filter(message =>
+                    ['mario.gd', 'coin.gd', 'goomba.gd'].some(script => message.includes(script))
+                )
+            expect(named).toEqual([])
         })
 
         it('stops the level again', async () => {
@@ -1924,6 +2058,57 @@ describe('the live workspace', () => {
             } catch (error: unknown) {
                 console.log(`could not return to ${builtOn}: ${String(error)}`)
             }
+        })
+    })
+
+    /**
+     * The editor going away without being asked.
+     *
+     * A person closes the Godot window, or it crashes. Nothing in Gofer used to notice: the badge
+     * went on reading ready, the panels went on offering Run, every call behind them failed with a
+     * transport error that named nothing, and the stored run row stayed `running` for a process
+     * that was gone. Only the child process knows, so only killing a real one can prove it.
+     */
+    describe('an editor that exits on its own', () => {
+        it('stops presenting a session whose editor is gone', async () => {
+            // The editor bound to this task, found the way `pgrep -af '^godot --editor'` finds it:
+            // by the worktree it was launched with.
+            const running = execFileSync('pgrep', ['-f', `godot --editor.*${bound}`], {
+                encoding: 'utf8'
+            })
+                .split('\n')
+                .filter(Boolean)
+            expect(running.length).toBeGreaterThan(0)
+            for (const pid of running) execFileSync('kill', ['-9', pid])
+
+            // The window has to say so on its own, without the sweep clicking anything: what it
+            // polls is the session, and the session is what has to notice.
+            await expectText(['No editor session'], {limitMs: 60_000})
+        })
+
+        it('closes the run it was recording rather than leaving it open', () => {
+            // `GOFER_APP_DATA_DIR` is already the `data` directory the projects sit under.
+            const projects = join(process.env.GOFER_APP_DATA_DIR ?? '', 'projects')
+            const database = join(projects, readdirSync(projects)[0] ?? '', 'project.sqlite')
+            const rows = execFileSync(
+                'sqlite3',
+                [database, 'select status from godot_runs order by rowid'],
+                {encoding: 'utf8'}
+            )
+                .split('\n')
+                .filter(Boolean)
+            // A run still saying `running` for an editor that is gone is the half of this the user
+            // never sees on screen and finds in their history later.
+            expect(rows.filter(status => status === 'running')).toEqual([])
+        })
+
+        it('starts a fresh editor over the dead one', async () => {
+            // The session the dead editor left behind must not stand in the way of the next one.
+            await forgetSessionStates()
+            await clickTab('Scene')
+            await clickButton('Start editor session')
+            await expectSessionState('ready', 180_000)
+            bound = await sessionWorktree()
         })
     })
 

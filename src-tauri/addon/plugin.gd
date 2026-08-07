@@ -92,6 +92,16 @@ const MAX_ICON_EDGE := 64
 ## A script class chain is walked this far towards an engine class before the icon lookup gives up.
 const MAX_ICON_BASE_DEPTH := 32
 
+## The atlas a tileset command will cut up, and the cells one paint may write, both capped so a
+## mistyped tile size or a runaway rectangle cannot spend minutes inside the editor's main loop.
+const MAX_TILESET_TILES := 4096
+const MAX_PAINTED_CELLS := 20000
+## How many tiles or cells a report lists before it says it stopped.
+const MAX_REPORTED_TILES := 512
+## The tile size a tileset is cut to when the caller names none: the size the 2D pixel art this is
+## for is drawn at.
+const DEFAULT_TILE_SIZE := 16
+
 ## The element type of each packed array, keyed by the type of the packed array itself. The wire
 ## carries every array as a plain `array`, so this is what a setting declared as a packed array is
 ## rebuilt from.
@@ -126,6 +136,7 @@ const MUTATING_COMMANDS: Array[String] = [
     "node.remove_from_group",
     "node.connect_signal",
     "node.disconnect_signal",
+    "node.set_cells",
 ]
 
 ## The editor half of the debugger channel. Godot calls `_setup_session` as debugger sessions
@@ -424,10 +435,18 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _node_connect_signal(params)
         "node.disconnect_signal":
             return _node_disconnect_signal(params)
+        "node.set_cells":
+            return _node_set_cells(params)
+        "node.get_cells":
+            return _node_get_cells(params)
         "node.inspect":
             return _node_inspect(params)
         "resource.rescan":
             return _resource_rescan(params)
+        "resource.create_tileset":
+            return _resource_create_tileset(params)
+        "resource.describe_tileset":
+            return _resource_describe_tileset(params)
         "session.heartbeat":
             return {}
     return _unknown_command_error(command)
@@ -457,7 +476,7 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "revision_conflict",
-                "message": "Mutating commands require expectedRevision",
+                "message": "This command changes the edited scene, so it needs expectedRevision. The scene is at revision %d now, and every read of it reports the revision it answered from." % _scene_revision,
                 "retryable": true,
                 "readiness": "ready",
                 "details": {"currentRevision": _scene_revision}
@@ -467,7 +486,7 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "revision_conflict",
-                "message": "The edited scene changed since revision %d" % int(expected_revision),
+                "message": "The edited scene is at revision %d, not the %d this command expected: it changed after the read that answer came from — your own last mutation counts. Read the scene again and pass the revision that read reports; nothing was changed by this call." % [_scene_revision, int(expected_revision)],
                 "retryable": true,
                 "readiness": "ready",
                 "details": {"expectedRevision": int(expected_revision), "currentRevision": _scene_revision}
@@ -1421,6 +1440,264 @@ func _resource_rescan(params: Dictionary) -> Dictionary:
     filesystem.update_file(path)
     return {"scanned": true, "path": path}
 
+## Cuts a texture into a TileSet and saves it, which is the one resource a 2D game cannot be built
+## without and the one a caller cannot write as text.
+##
+## A TileSet is not a small `.tres` a model can type: an atlas source carries a per-tile record for
+## every tile it defines, and the collision a tile contributes is a polygon on a physics layer that
+## has to exist first. Every level built before this command was ColorRects and hand-written shapes,
+## one node per block, because this was the missing step — and a tileset written by hand is exactly
+## the file the editor opens as an empty resource with no tiles in it.
+func _resource_create_tileset(params: Dictionary) -> Dictionary:
+    var path := _as_resource_path(params.get("path", ""))
+    var texture_path := _as_resource_path(params.get("texture", ""))
+    if path.is_empty() or texture_path.is_empty():
+        return _config_error(
+            "invalid_params",
+            "resource.create_tileset requires path and texture",
+        )
+    if not path.ends_with(".tres"):
+        return _config_error(
+            "invalid_params",
+            "A TileSet is saved as a .tres resource, and %s is not one" % path,
+            {"path": path}
+        )
+    if not ResourceLoader.exists(texture_path):
+        return _config_error(
+            "texture_not_found",
+            "Texture %s does not exist. A tileset is cut from an image the project already holds."
+            % texture_path,
+            {"texture": texture_path}
+        )
+    var texture := load(texture_path)
+    if texture == null or not (texture is Texture2D):
+        return _config_error(
+            "unsupported_texture",
+            "%s is not a Texture2D, so it cannot be cut into tiles" % texture_path,
+            {"texture": texture_path}
+        )
+
+    var size_result := _tile_size_param(params)
+    if size_result.has("_gofer_error"):
+        return size_result
+    var tile_size: Vector2i = size_result["value"]
+    var image_size: Vector2i = (texture as Texture2D).get_size()
+    var grid := Vector2i(image_size.x / tile_size.x, image_size.y / tile_size.y)
+    if grid.x < 1 or grid.y < 1:
+        return _config_error(
+            "tile_size_too_large",
+            (
+                "%s is %dx%d, which does not hold one %dx%d tile"
+                % [texture_path, image_size.x, image_size.y, tile_size.x, tile_size.y]
+            ),
+            {"texture": [image_size.x, image_size.y], "tileSize": [tile_size.x, tile_size.y]}
+        )
+
+    var wanted := _atlas_coords_param(params, "tiles", grid)
+    if wanted.has("_gofer_error"):
+        return wanted
+    var tiles: Array = wanted["value"]
+    if tiles.is_empty():
+        for row in range(grid.y):
+            for column in range(grid.x):
+                tiles.append(Vector2i(column, row))
+    if tiles.size() > MAX_TILESET_TILES:
+        return _config_error(
+            "too_many_tiles",
+            "A tileset takes at most %d tiles, and this one asks for %d"
+            % [MAX_TILESET_TILES, tiles.size()],
+            {"limit": MAX_TILESET_TILES}
+        )
+    var solid_param: Variant = params.get("solid", null)
+    var solid: Array = []
+    if typeof(solid_param) == TYPE_STRING and str(solid_param) == "all":
+        solid = tiles.duplicate()
+    elif solid_param != null:
+        var chosen := _atlas_coords_param(params, "solid", grid)
+        if chosen.has("_gofer_error"):
+            return chosen
+        solid = chosen["value"]
+    for coords in solid:
+        if not tiles.has(coords):
+            return _config_error(
+                "tile_not_defined",
+                (
+                    "Tile (%d, %d) is listed as solid but is not one of the tiles being created"
+                    % [coords.x, coords.y]
+                ),
+                {"tile": [coords.x, coords.y]}
+            )
+
+    var tile_set := TileSet.new()
+    tile_set.tile_size = tile_size
+    if not solid.is_empty():
+        # `add_physics_layer` answers nothing in 4.7, so the layer it appended is the last one.
+        tile_set.add_physics_layer()
+    var source := TileSetAtlasSource.new()
+    source.texture = texture
+    source.texture_region_size = tile_size
+    var source_id := tile_set.add_source(source)
+    for coords in tiles:
+        source.create_tile(coords)
+    var half := Vector2(tile_size) / 2.0
+    for coords in solid:
+        var data := source.get_tile_data(coords, 0)
+        data.add_collision_polygon(0)
+        data.set_collision_polygon_points(
+            0,
+            0,
+            PackedVector2Array(
+                [
+                    Vector2(-half.x, -half.y),
+                    Vector2(half.x, -half.y),
+                    Vector2(half.x, half.y),
+                    Vector2(-half.x, half.y)
+                ]
+            )
+        )
+
+    var replaced := ResourceLoader.exists(path)
+    # A directory that does not exist yet is not a mistake worth an error: `res://tiles/world.tres`
+    # is where a caller would put one, and `ResourceSaver` would only answer that it could not open
+    # the file.
+    var folder := path.get_base_dir()
+    if not DirAccess.dir_exists_absolute(folder):
+        var made := DirAccess.make_dir_recursive_absolute(folder)
+        if made != OK:
+            return _config_error(
+                "save_failed",
+                "Directory %s could not be created: %s" % [folder, error_string(made)],
+                {"path": path}
+            )
+    var error := ResourceSaver.save(tile_set, path)
+    if error != OK:
+        return _config_error(
+            "save_failed",
+            "TileSet %s could not be saved: %s" % [path, error_string(error)],
+            {"path": path, "error": error}
+        )
+    EditorInterface.get_resource_filesystem().update_file(path)
+    return {
+        "path": path,
+        "texture": texture_path,
+        "tileSize": [tile_size.x, tile_size.y],
+        "grid": [grid.x, grid.y],
+        "source": source_id,
+        "tiles": _coords_list(tiles),
+        "solid": _coords_list(solid),
+        "physicsLayers": tile_set.get_physics_layers_count(),
+        "replaced": replaced,
+    }
+
+## Reports what a saved TileSet holds, so a caller painting with it can name tiles that exist.
+func _resource_describe_tileset(params: Dictionary) -> Dictionary:
+    var path := _as_resource_path(params.get("path", ""))
+    if path.is_empty():
+        return _config_error("invalid_params", "resource.describe_tileset requires path")
+    if not ResourceLoader.exists(path):
+        return _config_error(
+            "resource_not_found", "TileSet %s does not exist" % path, {"path": path}
+        )
+    var resource := load(path)
+    if resource == null or not (resource is TileSet):
+        return _config_error(
+            "unsupported_resource", "%s is not a TileSet" % path, {"path": path}
+        )
+    var tile_set: TileSet = resource
+    var sources: Array = []
+    for index in range(tile_set.get_source_count()):
+        var source_id := tile_set.get_source_id(index)
+        var source := tile_set.get_source(source_id)
+        var report := {"id": source_id, "type": source.get_class(), "tiles": [], "truncated": false}
+        if source is TileSetAtlasSource:
+            var atlas: TileSetAtlasSource = source
+            report["texture"] = atlas.texture.resource_path if atlas.texture != null else ""
+            report["regionSize"] = [atlas.texture_region_size.x, atlas.texture_region_size.y]
+            for tile_index in range(atlas.get_tiles_count()):
+                if tile_index >= MAX_REPORTED_TILES:
+                    report["truncated"] = true
+                    break
+                var coords := atlas.get_tile_id(tile_index)
+                var data := atlas.get_tile_data(coords, 0)
+                var solid := false
+                for layer in range(tile_set.get_physics_layers_count()):
+                    if data.get_collision_polygons_count(layer) > 0:
+                        solid = true
+                        break
+                report["tiles"].append({"atlas": [coords.x, coords.y], "solid": solid})
+            report["count"] = atlas.get_tiles_count()
+        sources.append(report)
+    return {
+        "path": path,
+        "tileSize": [tile_set.tile_size.x, tile_set.tile_size.y],
+        "physicsLayers": tile_set.get_physics_layers_count(),
+        "sources": sources,
+    }
+
+## The tile size a tileset command was given, defaulted and checked.
+func _tile_size_param(params: Dictionary) -> Dictionary:
+    var raw: Variant = params.get("tileSize", null)
+    var size := Vector2i(DEFAULT_TILE_SIZE, DEFAULT_TILE_SIZE)
+    if raw != null:
+        if typeof(raw) == TYPE_INT or typeof(raw) == TYPE_FLOAT:
+            size = Vector2i(int(raw), int(raw))
+        elif typeof(raw) == TYPE_ARRAY and (raw as Array).size() == 2:
+            size = Vector2i(int((raw as Array)[0]), int((raw as Array)[1]))
+        else:
+            return _config_error(
+                "invalid_params",
+                "tileSize is one number or two, as 16 or [16, 16]",
+            )
+    if size.x < 1 or size.y < 1:
+        return _config_error(
+            "invalid_params", "tileSize must be positive, and this one is %s" % str(size)
+        )
+    return {"value": size}
+
+## A list of atlas coordinates a command was given, each checked against the atlas it names.
+func _atlas_coords_param(params: Dictionary, key: String, grid: Vector2i) -> Dictionary:
+    var raw: Variant = params.get(key, null)
+    var coords: Array = []
+    if raw == null:
+        return {"value": coords}
+    if typeof(raw) != TYPE_ARRAY:
+        return _config_error(
+            "invalid_params", "%s is a list of [column, row] pairs" % key, {"parameter": key}
+        )
+    for entry in raw as Array:
+        if typeof(entry) != TYPE_ARRAY or (entry as Array).size() != 2:
+            return _config_error(
+                "invalid_params",
+                "Each %s entry is a [column, row] pair, and %s is not one" % [key, str(entry)],
+                {"parameter": key}
+            )
+        var pair := Vector2i(int((entry as Array)[0]), int((entry as Array)[1]))
+        if pair.x < 0 or pair.y < 0 or pair.x >= grid.x or pair.y >= grid.y:
+            return _config_error(
+                "tile_out_of_atlas",
+                (
+                    "Tile (%d, %d) is outside the atlas, which is %d columns by %d rows"
+                    % [pair.x, pair.y, grid.x, grid.y]
+                ),
+                {"tile": [pair.x, pair.y], "grid": [grid.x, grid.y]}
+            )
+        coords.append(pair)
+    return {"value": coords}
+
+## Vector2i coordinates as the wire carries them.
+func _coords_list(coords: Array) -> Array:
+    var list: Array = []
+    for entry in coords:
+        list.append([entry.x, entry.y])
+    return list
+
+## A path named either way, as Godot names it.
+func _as_resource_path(value: Variant) -> String:
+    var path := str(value).strip_edges()
+    if path.is_empty() or path.begins_with("res://"):
+        return path
+    return "res://" + path.trim_prefix("./").trim_prefix("/")
+
 func _scene_list() -> Dictionary:
     return {"scenes": Array(EditorInterface.get_open_scenes())}
 
@@ -2067,7 +2344,7 @@ func _node_add_to_group(params: Dictionary) -> Dictionary:
     var node: Node = found["node"]
     var group: String = found["group"]
     if node.is_in_group(group):
-        return {"node": _node_path(node), "groups": Array(node.get_groups())}
+        return {"node": _node_path(node), "groups": _authored_groups(node)}
 
     var undo := _begin_action("Add %s to %s" % [node.name, group])
     undo.add_do_method(node, "add_to_group", group, true)
@@ -2075,7 +2352,7 @@ func _node_add_to_group(params: Dictionary) -> Dictionary:
     undo.commit_action()
 
     _bump_revision()
-    return {"node": _node_path(node), "groups": Array(node.get_groups())}
+    return {"node": _node_path(node), "groups": _authored_groups(node)}
 
 func _node_remove_from_group(params: Dictionary) -> Dictionary:
     var found := _group_target(params, "node.remove_from_group")
@@ -2100,7 +2377,237 @@ func _node_remove_from_group(params: Dictionary) -> Dictionary:
     undo.commit_action()
 
     _bump_revision()
-    return {"node": _node_path(node), "groups": Array(node.get_groups())}
+    return {"node": _node_path(node), "groups": _authored_groups(node)}
+
+## Paints tiles onto a TileMapLayer in the edited scene.
+##
+## A layer's cells are not a property: they live in `tile_map_data`, a packed blob the scene writes
+## as base64, so there is no way to place a tile with `node.set_property` and no way to write one by
+## hand. Rectangles are taken as rectangles — a ground row is one entry rather than two hundred —
+## because a level's worth of single cells is what makes a model give up and lay ColorRects instead.
+func _node_set_cells(params: Dictionary) -> Dictionary:
+    var resolved := _cell_target(params, "node.set_cells")
+    if resolved.has("_gofer_error"):
+        return resolved
+    var layer: TileMapLayer = resolved["layer"]
+    var tile_set: TileSet = layer.tile_set
+    if tile_set == null:
+        return _config_error(
+            "tileset_missing",
+            (
+                "TileMapLayer %s has no tile_set. Create one with resource.create_tileset, then set "
+                + "this node's tile_set property to it, and the cells will have tiles to name."
+            ) % _node_path(layer),
+            {"node": _node_path(layer)}
+        )
+
+    var raw: Variant = params.get("cells", null)
+    if typeof(raw) != TYPE_ARRAY or (raw as Array).is_empty():
+        return _config_error(
+            "invalid_params",
+            (
+                "node.set_cells requires cells: a list of {x, y, width?, height?, atlas?, source?} "
+                + "entries. width and height default to 1, and an entry with no atlas erases the "
+                + "cells it covers."
+            )
+        )
+
+    var default_source := tile_set.get_source_id(0) if tile_set.get_source_count() > 0 else -1
+    var plan: Array = []
+    for entry in raw as Array:
+        if typeof(entry) != TYPE_DICTIONARY:
+            return _config_error(
+                "invalid_params",
+                "Each cells entry is an object, and %s is not one" % str(entry)
+            )
+        var cell: Dictionary = entry
+        if not (cell.has("x") and cell.has("y")):
+            return _config_error("invalid_params", "Each cells entry requires x and y")
+        var origin := Vector2i(int(cell.get("x", 0)), int(cell.get("y", 0)))
+        var width := int(cell.get("width", 1))
+        var height := int(cell.get("height", 1))
+        if width < 1 or height < 1:
+            return _config_error(
+                "invalid_params",
+                "A cells entry covers at least one cell, and %dx%d covers none" % [width, height]
+            )
+        var source_id := -1
+        var atlas := Vector2i(-1, -1)
+        var alternative := -1
+        if cell.has("atlas") and cell["atlas"] != null:
+            var named: Variant = cell["atlas"]
+            if typeof(named) != TYPE_ARRAY or (named as Array).size() != 2:
+                return _config_error(
+                    "invalid_params",
+                    "A cells entry's atlas is a [column, row] pair, and %s is not one" % str(named)
+                )
+            atlas = Vector2i(int((named as Array)[0]), int((named as Array)[1]))
+            source_id = int(cell.get("source", default_source))
+            alternative = int(cell.get("alternative", 0))
+            var check := _require_tile(tile_set, source_id, atlas)
+            if check.has("_gofer_error"):
+                return check
+        plan.append([origin, width, height, source_id, atlas, alternative])
+
+    var cells: Array = []
+    var painted := 0
+    var erased := 0
+    for step in plan:
+        var origin: Vector2i = step[0]
+        for offset_y in range(step[2]):
+            for offset_x in range(step[1]):
+                cells.append(
+                    [Vector2i(origin.x + offset_x, origin.y + offset_y), step[3], step[4], step[5]]
+                )
+                if step[3] < 0:
+                    erased += 1
+                else:
+                    painted += 1
+                if cells.size() > MAX_PAINTED_CELLS:
+                    return _config_error(
+                        "too_many_cells",
+                        (
+                            "One paint writes at most %d cells, and these entries cover more"
+                            % MAX_PAINTED_CELLS
+                        ),
+                        {"limit": MAX_PAINTED_CELLS}
+                    )
+
+    var previous: Array = []
+    for cell in cells:
+        var coords: Vector2i = cell[0]
+        previous.append(
+            [
+                coords,
+                layer.get_cell_source_id(coords),
+                layer.get_cell_atlas_coords(coords),
+                layer.get_cell_alternative_tile(coords)
+            ]
+        )
+
+    var undo := _begin_action("Paint %d cells on %s" % [cells.size(), layer.name])
+    undo.add_do_method(self, "_do_paint_cells", layer, cells)
+    undo.add_undo_method(self, "_do_paint_cells", layer, previous)
+    undo.commit_action()
+
+    _bump_revision()
+    return _cells_summary(layer).merged({"painted": painted, "erased": erased})
+
+## Reports the cells a TileMapLayer holds, which is the only way to read back what a paint wrote.
+func _node_get_cells(params: Dictionary) -> Dictionary:
+    var resolved := _cell_target(params, "node.get_cells")
+    if resolved.has("_gofer_error"):
+        return resolved
+    var layer: TileMapLayer = resolved["layer"]
+    var limit := int(params.get("limit", MAX_REPORTED_TILES))
+    limit = clampi(limit, 1, MAX_REPORTED_TILES)
+    var listed: Array = []
+    var used := layer.get_used_cells()
+    # Which tiles were painted, counted. A level is longer than any list a response can carry, and
+    # the tally is what says a layer holds pipes and a flag rather than only the ground row that
+    # happens to come first.
+    var tally: Dictionary = {}
+    for coords in used:
+        var atlas := layer.get_cell_atlas_coords(coords)
+        var key := "%d,%d" % [atlas.x, atlas.y]
+        tally[key] = int(tally.get(key, 0)) + 1
+        if listed.size() >= limit:
+            continue
+        listed.append(
+            {
+                "x": coords.x,
+                "y": coords.y,
+                "source": layer.get_cell_source_id(coords),
+                "atlas": [atlas.x, atlas.y],
+                "alternative": layer.get_cell_alternative_tile(coords),
+            }
+        )
+    var tiles: Array = []
+    for key in tally:
+        var pair: PackedStringArray = str(key).split(",")
+        tiles.append({"atlas": [int(pair[0]), int(pair[1])], "count": tally[key]})
+    return _cells_summary(layer).merged(
+        {"cellsListed": listed, "tiles": tiles, "truncated": used.size() > listed.size()}
+    )
+
+## What both cell commands answer with: where the layer's tiles are and what draws them.
+func _cells_summary(layer: TileMapLayer) -> Dictionary:
+    var rect := layer.get_used_rect()
+    var tile_set: TileSet = layer.tile_set
+    return {
+        "node": _node_path(layer),
+        "cells": layer.get_used_cells().size(),
+        "usedRect": [rect.position.x, rect.position.y, rect.size.x, rect.size.y],
+        "tileSet": tile_set.resource_path if tile_set != null else "",
+    }
+
+## The TileMapLayer a cell command names, or the error that says why it is not one.
+func _cell_target(params: Dictionary, command: String) -> Dictionary:
+    var scene: String = params.get("scene", "")
+    var node_path_str: String = params.get("node", "")
+
+    var scene_check := _require_current_scene(scene)
+    if not scene_check.is_empty():
+        return scene_check
+    if node_path_str.is_empty():
+        return _config_error("invalid_params", "%s requires node" % command)
+    var node := _find_node(node_path_str)
+    if node == null:
+        return _node_not_found_error(node_path_str)
+    if not (node is TileMapLayer):
+        return _config_error(
+            "wrong_node_type",
+            (
+                "%s is a %s, and cells belong to a TileMapLayer. Create one with node.create and "
+                + "give it a tile_set."
+            ) % [_node_path(node), node.get_class()],
+            {"node": _node_path(node), "type": node.get_class()}
+        )
+    return {"layer": node}
+
+## Checks that a tile a paint names is one the tileset actually defines.
+##
+## `set_cell` takes an atlas coordinate no tile occupies without complaint and draws nothing there,
+## so a whole level can be painted out of tiles that do not exist and look like an empty layer.
+func _require_tile(tile_set: TileSet, source_id: int, atlas: Vector2i) -> Dictionary:
+    if not tile_set.has_source(source_id):
+        var available: Array = []
+        for index in range(tile_set.get_source_count()):
+            available.append(tile_set.get_source_id(index))
+        return _config_error(
+            "source_not_found",
+            "The tileset has no source %d; it has %s" % [source_id, str(available)],
+            {"source": source_id, "sources": available}
+        )
+    var source := tile_set.get_source(source_id)
+    if not source.has_tile(atlas):
+        return _config_error(
+            "tile_not_defined",
+            (
+                "The tileset's source %d defines no tile at (%d, %d). resource.describe_tileset "
+                + "lists the tiles it does define."
+            ) % [source_id, atlas.x, atlas.y],
+            {"source": source_id, "tile": [atlas.x, atlas.y]}
+        )
+    return {}
+
+## Writes a list of [coords, source, atlas, alternative] cells, which is both halves of the undo.
+func _do_paint_cells(layer: TileMapLayer, cells: Array) -> void:
+    for cell in cells:
+        layer.set_cell(cell[0], cell[1], cell[2], cell[3])
+
+## The groups a person put a node in, which is not everything `get_groups` answers.
+##
+## The engine keeps its own groups on a node and marks them with a leading underscore: a CanvasItem
+## in the editor's viewport is in `_root_canvas…`, named after an object id that changes every
+## session. Reporting those alongside "coins" makes a caller's own wiring hard to find, and a model
+## reading a group it never added has no way to know it is not one of its own.
+func _authored_groups(node: Node) -> Array:
+    var authored: Array = []
+    for group in node.get_groups():
+        if not str(group).begins_with("_"):
+            authored.append(str(group))
+    return authored
 
 ## The node and group both group commands take, or the error that says which one was wrong.
 func _group_target(params: Dictionary, command: String) -> Dictionary:
@@ -2364,7 +2871,7 @@ func _node_inspect(params: Dictionary) -> Dictionary:
         "name": node.name,
         "type": node.get_class(),
         "path": _node_path(node),
-        "groups": Array(node.get_groups()),
+        "groups": _authored_groups(node),
         "signals": _node_signals(node),
         "connections": _node_connections(node),
     }

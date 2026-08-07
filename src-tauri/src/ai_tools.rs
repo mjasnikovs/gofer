@@ -243,6 +243,23 @@ pub const CATALOG: &[ToolDomain] = &[
                 "disconnect_signal",
                 "Removes a connection: {node, signal, method, target?, binds?, expectedRevision}.",
             ),
+            operation(
+                "set_cells",
+                "Paints tiles onto a TileMapLayer: {node, cells, expectedRevision}. This is how a \
+                 2D level is built — one TileMapLayer carrying a tileset, rather than a node per \
+                 block. Each entry is {x, y, width?, height?, atlas, source?}: `x`/`y` are cell \
+                 coordinates, not pixels, `width`/`height` default to 1 so a rectangle is one \
+                 entry — a whole ground row is {\"x\": 0, \"y\": 12, \"width\": 200, \"height\": 2, \
+                 \"atlas\": [0, 0]} — and `atlas` is the [column, row] of the tile in the tileset, \
+                 which resource.describe_tileset lists. An entry with no `atlas` erases the cells \
+                 it covers. The node needs its `tile_set` property set first, with \
+                 node.set_property and a resource value.",
+            ),
+            operation(
+                "get_cells",
+                "Reads back what a TileMapLayer holds: {node, limit?}. Answers with how many cells \
+                 are painted, the rectangle they span, and the tile each one draws.",
+            ),
         ],
     },
     ToolDomain {
@@ -318,6 +335,24 @@ pub const CATALOG: &[ToolDomain] = &[
                 "Tells the editor filesystem about one changed file: {path}.",
             ),
             operation(
+                "create_tileset",
+                "Cuts a texture into a TileSet and saves it: {path, texture, tileSize?, tiles?, \
+                 solid?}. `path` is the .tres to write, `texture` an image the project already \
+                 holds, and `tileSize` one number or two — 16 or [16, 16] — defaulting to 16. \
+                 `tiles` is the [column, row] list to define and defaults to every tile the texture \
+                 holds; `solid` is the subset that gets collision, either a list or \"all\", and a \
+                 tile with no collision is scenery the player falls through. Answers with the \
+                 atlas grid it found. Build a tileset with this rather than writing one as text: a \
+                 TileSet carries a record per tile and a polygon per solid one, and a hand-written \
+                 one opens as a resource with no tiles in it.",
+            ),
+            operation(
+                "describe_tileset",
+                "Reports what a saved TileSet holds: {path}. Answers with its tile size, its \
+                 sources, and every tile they define with whether it is solid — which is where the \
+                 [column, row] pairs godot_node set_cells takes come from.",
+            ),
+            operation(
                 "move",
                 "Moves a file or directory inside the worktree: {from, to}.",
             ),
@@ -369,7 +404,11 @@ pub const CATALOG: &[ToolDomain] = &[
             operation("highlights", "Document highlights: {path, position}."),
             operation(
                 "diagnostics",
-                "Diagnostics the server published for a file: {path, timeoutMs?}.",
+                "Diagnostics the server published for a file: {path, timeoutMs?}. Answers \
+                 `published: false` when the server has not said anything about that file yet, \
+                 which is not the same as the file being clean — ask again rather than take an \
+                 empty list for an answer. An empty list with `published: true` is a file that \
+                 parses.",
             ),
             operation("document_symbols", "Symbols of one document: {path}."),
             operation("workspace_symbols", "Symbols across the worktree: {query}."),
@@ -575,7 +614,7 @@ fn session_domain<R: Runtime>(
     params: Value,
 ) -> Result<Value, ToolFailure> {
     match op {
-        "status" => Ok(json!({"session": godot_session_api::get_session()?})),
+        "status" => Ok(json!({"session": godot_session_api::get_session(app)?})),
         "start" => Ok(json!({
             "session": godot_session_api::start_session(app, StartGodotSessionRequest {})?
         })),
@@ -615,7 +654,9 @@ fn resource_domain<R: Runtime>(
                 .delete(&request.path, request.expected_hash.as_deref())?;
             Ok(json!({"path": request.path, "deleted": true}))
         }
-        _ => Ok(rpc(app, "resource.rescan", params)?),
+        // Everything else is the editor's: the catalog is what says which operations exist, so the
+        // name is forwarded rather than matched a second time here.
+        _ => Ok(rpc(app, &format!("resource.{op}"), params)?),
     }
 }
 
@@ -703,7 +744,28 @@ fn script_domain<R: Runtime>(
     match op {
         "open" => {
             require_script_path(&params)?;
-            Ok(to_value(script::open_document(from_params(params)?)?))
+            // Opening a script that has not been written yet is the commonest thing an agent does
+            // wrong here, because the catalog tells it to open a script before querying one. The
+            // workspace's own answer — "scripts/mario.gd does not exist" — is true and leaves it
+            // nowhere; every live sweep watched the same turn spent on it, followed by an `update`
+            // against the document the failed open never created.
+            script::open_document(from_params(params)?)
+                .map(to_value)
+                .map_err(|error| {
+                    if error.code == "not_found" {
+                        ToolFailure::new(
+                            "not_found",
+                            format!(
+                                "{} There is nothing to open yet: write the script with \
+                                 godot_script save, which creates the file, tells the language \
+                                 server about it, and leaves it open.",
+                                error.message
+                            ),
+                        )
+                    } else {
+                        ToolFailure::from(error)
+                    }
+                })
         }
         "update" => {
             require_script_path(&params)?;
@@ -903,6 +965,7 @@ mod tests {
                 "godot_scene" => "scene",
                 "godot_node" => "node",
                 "godot_project" => "project",
+                "godot_resource" => "resource",
                 _ => continue,
             };
             for operation in domain.operations {
@@ -913,10 +976,16 @@ mod tests {
                 } else {
                     format!("{prefix}.{}", operation.op)
                 };
-                // `session.start`, `stop` and `status` are the desktop's own, not the addon's.
+                // `session.start`, `stop` and `status` are the desktop's own, and so are the three
+                // file operations `resource_domain` answers out of the workspace itself.
                 if matches!(
                     command.as_str(),
-                    "session.start" | "session.stop" | "session.status"
+                    "session.start"
+                        | "session.stop"
+                        | "session.status"
+                        | "resource.list"
+                        | "resource.move"
+                        | "resource.delete"
                 ) {
                     continue;
                 }
@@ -950,6 +1019,34 @@ mod tests {
                 "the addon must guard {command} with a revision, as the protocol says it does"
             );
         }
+    }
+
+    /// The schema and the code have to call the same commands mutating.
+    ///
+    /// The schema carries its own copy of the list, and it silently lost one: `node.instantiate`
+    /// was added to the contract, to the addon and to both clients, and the schema went on
+    /// describing a request for it as valid without `expectedRevision`. Nothing noticed, because
+    /// the schema is only read by the fixture tests and no fixture exercised that command.
+    #[test]
+    fn the_schema_names_the_same_mutating_commands_the_code_does() {
+        const SCHEMA: &str = include_str!("../../protocol/schemas/v2/request.schema.json");
+        let schema: Value = serde_json::from_str(SCHEMA).expect("the request schema is JSON");
+        let listed = schema["allOf"]
+            .as_array()
+            .and_then(|entries| {
+                entries.iter().find_map(|entry| {
+                    entry["if"]["properties"]["command"]["enum"]
+                        .as_array()
+                        .cloned()
+                })
+            })
+            .expect("the schema requires expectedRevision of some commands");
+        let listed: Vec<&str> = listed.iter().filter_map(Value::as_str).collect();
+        assert_eq!(
+            listed,
+            crate::protocol_v2::MUTATING_COMMANDS.to_vec(),
+            "the schema's mutating commands must be the ones the code guards, in the same order"
+        );
     }
 
     /// A script named the way the editor names it reaches the file the worktree holds.

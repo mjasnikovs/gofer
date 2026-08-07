@@ -497,6 +497,62 @@ describe('InspectorWorkspace', () => {
         expect(server.calls).toContain('scene.get_tree')
     })
 
+    /**
+     * The editor a person closes, or that crashes, takes its event stream with it. The next editor
+     * has its own, and the subscription is what carries every lifecycle event the workspace waits
+     * on — so a workspace that does not subscribe again sits on "Loading the scene tree…" over a
+     * healthy editor that came up seconds ago and never says why.
+     */
+    it('subscribes again to the editor that replaces one that died', async () => {
+        backend()
+        const user = userEvent.setup()
+        renderWorkspace()
+        await startSession(user)
+
+        const subscriptions = () =>
+            tauri.invoke.mock.calls.filter(call => call[0] === 'subscribe_godot_events').length
+        expect(subscriptions()).toBe(1)
+
+        // What the backend emits when it notices the editor process is gone.
+        const announce = tauri.listen.mock.calls.find(
+            call => call[0] === 'godot-session-event'
+        )?.[1] as ((received: {payload: {type: string; state: string}}) => void) | undefined
+        act(() => {
+            announce?.({payload: {type: 'stateChanged', state: 'error'}})
+        })
+
+        await user.click(await startSessionButton())
+        await waitFor(() => {
+            expect(subscriptions()).toBe(2)
+        })
+    })
+
+    /**
+     * Stopping the session is something the user did, not something that went wrong.
+     *
+     * The panels have reads in flight when the editor goes away, and those land afterwards saying
+     * — truthfully — that the session was stopped. Painted, that is a red banner claiming the scene
+     * tree could not be read, over a workspace that is simply offline and already says so.
+     */
+    it('does not report a failed read when the session it was reading is gone', async () => {
+        const server = backend()
+        const user = userEvent.setup()
+        renderWorkspace()
+        await startSession(user)
+
+        server.session.started = false
+        await user.click(
+            within(screen.getByRole('navigation', {name: 'Explorer'})).getByRole('button', {
+                name: 'Refresh'
+            })
+        )
+
+        await waitFor(() => {
+            expect(screen.queryByText('Player')).not.toBeInTheDocument()
+        })
+        expect(screen.queryByText('The scene tree could not be read')).not.toBeInTheDocument()
+    })
+
     it('fills the inspector from the node chosen in the edited scene', async () => {
         backend()
         const user = userEvent.setup()

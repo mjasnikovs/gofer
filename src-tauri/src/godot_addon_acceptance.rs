@@ -665,10 +665,11 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
         json!({"parent": "/wiring", "name": "Coin", "type": "Area2D"}),
     );
 
-    session.mutate(
+    let grouped = session.mutate(
         "node.add_to_group",
         json!({"node": "/wiring/Coin", "group": "coins"}),
     );
+    assert_eq!(grouped["groups"], json!(["coins"]), "{grouped}");
     // No `target`: it defaults to the scene root, which is where a scene's script lives.
     let connected = session.mutate(
         "node.connect_signal",
@@ -684,7 +685,10 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
         "an editor connection the scene does not keep is not an editor connection"
     );
 
-    // Inspect is where a caller reads its own work back, so it has to report both.
+    // Inspect is where a caller reads its own work back, so it has to report both — and only the
+    // groups a caller put the node in. The engine keeps its own on a CanvasItem, named after an
+    // object id (`_root_canvas1653562408967`), and a live agent was answered with one beside the
+    // group it had just added.
     let inspected = session.call("node.inspect", json!({"node": "/wiring/Coin"}));
     assert_eq!(inspected["groups"], json!(["coins"]));
     assert!(
@@ -752,6 +756,197 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
             .as_array()
             .expect("connections array")
             .is_empty()
+    );
+}
+
+/// A level built the way a 2D game is built: one tileset, one layer, painted by the rectangle.
+///
+/// Everything the addon could author before this was a node per block — a live agent asked for the
+/// ground of World 1-1 answered with a ColorRect and a hand-written `.tres` shape, because a
+/// TileSet has no text form a caller can write and a layer's cells are a packed blob rather than a
+/// property. Both halves are proven here against a real editor: that the saved tileset holds tiles
+/// with collision, and that the saved scene carries the cells, since a cell painted into a layer
+/// the scene does not keep is a level that is empty the next time it opens.
+#[test]
+fn the_addon_builds_a_tile_level_from_an_atlas() {
+    /// The live fixture's own art, which is a real 8x2 atlas of 16x16 tiles.
+    const ATLAS: &[u8] = include_bytes!("../../fixtures/live-project/assets/tiles.png");
+
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    std::fs::write(worktree.join("tiles.png"), ATLAS).expect("write the atlas");
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
+    // The atlas arrived after the editor started, so the import scan has to be told about it or
+    // `load` answers nothing for a file that is plainly there.
+    session.call("resource.rescan", json!({}));
+
+    // Ground, brick and the pipe's mouth collide; the cloud is scenery a player passes through.
+    let built = session.call(
+        "resource.create_tileset",
+        json!({
+            "path": "res://tiles/world.tres",
+            "texture": "res://tiles.png",
+            "tileSize": 16,
+            "solid": [[0, 0], [1, 0], [4, 0], [5, 0]]
+        }),
+    );
+    assert_eq!(
+        built["grid"],
+        json!([8, 2]),
+        "the atlas is eight by two: {built}"
+    );
+    assert_eq!(built["tiles"].as_array().expect("tiles").len(), 16);
+    assert_eq!(
+        built["physicsLayers"], 1,
+        "solid tiles need a physics layer"
+    );
+    assert_eq!(built["replaced"], false);
+
+    // What the caller reads back before painting, which is where the tile coordinates come from.
+    let described = session.call(
+        "resource.describe_tileset",
+        json!({"path": "res://tiles/world.tres"}),
+    );
+    assert_eq!(described["tileSize"], json!([16, 16]));
+    let tiles = described["sources"][0]["tiles"]
+        .as_array()
+        .expect("the tileset's tiles");
+    assert_eq!(tiles.len(), 16, "{described}");
+    let solid: Vec<&Value> = tiles
+        .iter()
+        .filter(|tile| tile["solid"] == json!(true))
+        .collect();
+    assert_eq!(
+        solid.len(),
+        4,
+        "only the four named tiles collide: {described}"
+    );
+
+    let scene = "res://level.tscn";
+    session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
+    session.mutate(
+        "node.create",
+        json!({"parent": "/level", "name": "Terrain", "type": "TileMapLayer"}),
+    );
+
+    // A layer with no tileset cannot be painted, and the refusal has to say what to do about it.
+    let bare = session.error(
+        "node.set_cells",
+        json!({"node": "/level/Terrain", "cells": [{"x": 0, "y": 0, "atlas": [0, 0]}]}),
+        Some(session.revision),
+    );
+    assert!(
+        bare.starts_with("tileset_missing") && bare.contains("create_tileset"),
+        "the refusal must name the way out: {bare}"
+    );
+
+    session.mutate(
+        "node.set_property",
+        json!({
+            "node": "/level/Terrain",
+            "property": "tile_set",
+            "value": {"type": "resource", "value": {"path": "res://tiles/world.tres"}}
+        }),
+    );
+
+    // A tile the tileset does not define draws nothing at all, so it is refused rather than
+    // painted: `set_cell` takes any coordinate and leaves an empty layer that looks painted.
+    let missing = session.error(
+        "node.set_cells",
+        json!({"node": "/level/Terrain", "cells": [{"x": 0, "y": 0, "atlas": [40, 40]}]}),
+        Some(session.revision),
+    );
+    assert!(
+        missing.starts_with("tile_not_defined") && missing.contains("describe_tileset"),
+        "a tile outside the atlas must be refused by name: {missing}"
+    );
+
+    // The ground of a level is one rectangle, not two hundred cells.
+    let painted = session.mutate(
+        "node.set_cells",
+        json!({
+            "node": "/level/Terrain",
+            "cells": [
+                {"x": 0, "y": 12, "width": 40, "height": 2, "atlas": [0, 0]},
+                {"x": 20, "y": 8, "width": 3, "atlas": [1, 0]},
+                {"x": 30, "y": 10, "atlas": [4, 0]},
+                {"x": 31, "y": 10, "atlas": [5, 0]}
+            ]
+        }),
+    );
+    assert_eq!(painted["painted"], 85, "{painted}");
+    assert_eq!(painted["cells"], 85);
+    assert_eq!(painted["usedRect"], json!([0, 8, 40, 6]), "{painted}");
+    assert_eq!(painted["tileSet"], "res://tiles/world.tres");
+
+    // Read back through the command a caller checks its own work with.
+    let read = session.call(
+        "node.get_cells",
+        json!({"node": "/level/Terrain", "limit": 4}),
+    );
+    assert_eq!(read["cells"], 85);
+    assert_eq!(read["cellsListed"].as_array().expect("cells").len(), 4);
+    assert_eq!(read["truncated"], true);
+    // The tally covers every cell even when the list is cut short, which is the only way to say
+    // what a level-sized layer is made of.
+    let mut painted_tiles: Vec<(Value, u64)> = read["tiles"]
+        .as_array()
+        .expect("the tile tally")
+        .iter()
+        .map(|tile| {
+            (
+                tile["atlas"].clone(),
+                tile["count"].as_u64().expect("count"),
+            )
+        })
+        .collect();
+    painted_tiles.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    assert_eq!(painted_tiles[0], (json!([0, 0]), 80), "{read}");
+    assert_eq!(
+        painted_tiles.len(),
+        4,
+        "four different tiles were painted: {read}"
+    );
+
+    // An entry with no atlas erases, which is how a level gets the gap Mario falls down.
+    let erased = session.mutate(
+        "node.set_cells",
+        json!({
+            "node": "/level/Terrain",
+            "cells": [{"x": 10, "y": 12, "width": 2, "height": 2}]
+        }),
+    );
+    assert_eq!(erased["erased"], 4, "{erased}");
+    assert_eq!(erased["cells"], 81);
+
+    // Painting is an editor action like any other, so it takes back.
+    session.mutate("session.undo", json!({}));
+    assert_eq!(
+        session.call("node.get_cells", json!({"node": "/level/Terrain"}))["cells"],
+        85,
+        "undo must put the erased cells back"
+    );
+
+    session.mutate("scene.save", json!({}));
+    let saved = std::fs::read_to_string(session.worktree.join("level.tscn"))
+        .expect("the saved scene must exist on disk");
+    assert!(
+        saved.contains("tile_map_data = PackedByteArray("),
+        "the saved scene must carry the painted cells: {saved}"
+    );
+    assert!(
+        saved.contains("[ext_resource type=\"TileSet\"")
+            && saved.contains("path=\"res://tiles/world.tres\"")
+            && saved.contains("tile_set = ExtResource("),
+        "the saved scene must reference the tileset rather than embed one: {saved}"
+    );
+
+    // A cell command only means anything on a layer, and says so rather than doing nothing.
+    let wrong = session.error("node.get_cells", json!({"node": "/level"}), None);
+    assert!(
+        wrong.starts_with("wrong_node_type") && wrong.contains("TileMapLayer"),
+        "a node that is not a layer must be refused by name: {wrong}"
     );
 }
 

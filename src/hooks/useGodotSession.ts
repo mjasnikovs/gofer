@@ -98,6 +98,12 @@ export function useGodotSession({onError}: GodotSessionOptions) {
             const started = await startGodotSession()
             setSession(started)
             setState(started.state)
+            // Every start subscribes again, because a subscription belongs to the editor it was
+            // made for. The stream of the editor that came before is closed with it, and the
+            // worker behind it has already stopped; leaving the old one in place meant nothing
+            // drained the new editor's events, so nothing ever moved the session past `starting`
+            // and the window sat on "Loading the scene tree…" over a perfectly healthy editor.
+            subscribed.current = false
             subscribe()
         } catch (error) {
             setState('error')

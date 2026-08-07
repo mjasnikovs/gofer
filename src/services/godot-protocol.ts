@@ -45,7 +45,8 @@ export const MUTATING_COMMANDS: readonly string[] = [
     'node.add_to_group',
     'node.remove_from_group',
     'node.connect_signal',
-    'node.disconnect_signal'
+    'node.disconnect_signal',
+    'node.set_cells'
 ]
 
 export const ENVELOPE_KINDS = ['handshake', 'request', 'response', 'event', 'error'] as const

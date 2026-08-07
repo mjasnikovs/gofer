@@ -834,9 +834,10 @@ async fn stop_godot_session<R: Runtime>(
 
 /// Returns the active Godot editor session, if any.
 #[tauri::command]
-async fn get_godot_session()
--> Result<Option<godot_session_api::GodotSessionResponse>, godot_session::SessionError> {
-    tauri::async_runtime::spawn_blocking(godot_session_api::get_session)
+async fn get_godot_session<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<godot_session_api::GodotSessionResponse>, godot_session::SessionError> {
+    tauri::async_runtime::spawn_blocking(move || godot_session_api::get_session(&app))
         .await
         .map_err(|error| {
             godot_session::SessionError::new(

@@ -105,9 +105,22 @@ impl FileError {
         failure
     }
 
+    /// A write refused because the file is not the one the caller last read.
+    ///
+    /// The way out has to be in the sentence. "changed since it was read" is true and leads
+    /// nowhere: a live agent hit it three times on the same script, each time with the same stale
+    /// hash, and then wrote the file with the raw `write` tool instead — around the language
+    /// server, which is the one thing this domain exists to keep in the loop.
     fn conflict(path: &str, expected: Option<&str>, actual: Option<&str>) -> Self {
-        Self::new("file_conflict", format!("{path} changed since it was read"))
-            .with_details(json!({"path": path, "expectedHash": expected, "actualHash": actual}))
+        Self::new(
+            "file_conflict",
+            format!(
+                "{path} changed since it was read, so the hash you passed is not the one on disk. \
+                 Read it again — that answers with what it holds now and with its current hash — \
+                 and save over that."
+            ),
+        )
+        .with_details(json!({"path": path, "expectedHash": expected, "actualHash": actual}))
     }
 }
 

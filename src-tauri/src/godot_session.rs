@@ -303,9 +303,20 @@ fn start_with(
     let _guard = StartGuard;
 
     {
-        let active = ACTIVE_SESSION
+        let mut active = ACTIVE_SESSION
             .lock()
             .map_err(|_| SessionError::new("lock_poisoned", "The session lock is poisoned"))?;
+        // A session whose editor has already exited is not one to refuse a new start over: the
+        // window it belonged to is gone, and starting another is exactly what the user does next.
+        // It stays in the slot until then so the state they read says the editor failed rather
+        // than that there was never a session at all.
+        if active
+            .as_mut()
+            .is_some_and(|session| session.child.lock().is_ok_and(has_exited))
+            && let Some(dead) = active.take()
+        {
+            dead.rpc.stop();
+        }
         if active.is_some() {
             return Err(SessionError::new(
                 "session_already_active",
@@ -458,6 +469,55 @@ pub fn current_state() -> SessionState {
         .unwrap_or(SessionState::Offline)
 }
 
+/// Whether the editor process has exited on its own, and marks the session as failed if it has.
+///
+/// Nothing else notices. The transport does — [`godot_rpc::RpcSession::readiness`] answers
+/// `Unavailable` once the connection closes, so calls fail with a real error — but the stored state
+/// is whatever it last was, and a badge that reads "ready" over an editor that crashed or that the
+/// user closed is a lie the panels repeat until something is clicked. The child process is the only
+/// thing that knows, so it is what is asked.
+///
+/// A session already in [`SessionState::Error`] answers `false`: the transition happens once, so a
+/// caller polling this does not close the same run row over and over.
+/// Whether a child process has ended, asked of the lock guard both callers already hold.
+fn has_exited(mut child: std::sync::MutexGuard<'_, Box<dyn ChildProcess>>) -> bool {
+    matches!(child.try_wait(), Ok(Some(_)))
+}
+
+/// Whether the active session's editor process is gone.
+///
+/// Unlike [`poll_editor_exit`] this answers the same way however many times it is asked, and
+/// whatever state the session is in: it is the question "is there still an editor there", which a
+/// caller about to refuse a new start over the old one has to ask.
+pub fn editor_has_exited() -> bool {
+    ACTIVE_SESSION
+        .lock()
+        .ok()
+        .and_then(|active| {
+            active
+                .as_ref()
+                .map(|session| session.child.lock().is_ok_and(has_exited))
+        })
+        .unwrap_or(false)
+}
+
+pub fn poll_editor_exit() -> bool {
+    let Ok(mut active) = ACTIVE_SESSION.lock() else {
+        return false;
+    };
+    let Some(session) = active.as_mut() else {
+        return false;
+    };
+    if session.state == SessionState::Error || session.state == SessionState::Stopping {
+        return false;
+    }
+    let exited = session.child.lock().is_ok_and(has_exited);
+    if exited {
+        session.state = SessionState::Error;
+    }
+    exited
+}
+
 /// Returns a clone of the current session summary, if any.
 pub fn current_info() -> Option<SessionInfo> {
     ACTIVE_SESSION
@@ -589,17 +649,24 @@ pub fn stop() -> Result<(), SessionError> {
         .take()
         .ok_or_else(|| SessionError::new("session_not_active", "No Godot session is active"))?;
     active.rpc.stop();
-    active
+    let mut child = active
         .child
         .lock()
-        .map_err(|_| SessionError::new("lock_poisoned", "The child process lock is poisoned"))?
-        .kill()
-        .map_err(|error| {
-            SessionError::new(
+        .map_err(|_| SessionError::new("lock_poisoned", "The child process lock is poisoned"))?;
+    match child.kill() {
+        Ok(()) => Ok(()),
+        // An editor that already exited cannot be killed, and on Linux saying so is an error: once
+        // `poll_editor_exit` has reaped a crashed or closed editor, `kill` answers "can't kill an
+        // exited process". Stopping a session whose editor is already gone is exactly what a user
+        // does next, and it has to clean up rather than refuse.
+        Err(error) => match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            _ => Err(SessionError::new(
                 "godot_kill_failed",
                 format!("Could not stop the Godot session: {error}"),
-            )
-        })
+            )),
+        },
+    }
 }
 
 // coverage-critical-start: version
@@ -937,6 +1004,8 @@ mod tests {
     struct FakeSpawner {
         version_output: String,
         child: Mutex<Option<FakeChild>>,
+        /// Flipped by a test that wants the editor to die the way a crash or a closed window does.
+        exited: Arc<AtomicBool>,
         arguments: Arc<Mutex<Vec<OsString>>>,
         env_vars: Arc<Mutex<Vec<(OsString, OsString)>>>,
         fail_spawn: bool,
@@ -944,6 +1013,7 @@ mod tests {
 
     impl FakeSpawner {
         fn new(version: &str) -> Self {
+            let exited = Arc::new(AtomicBool::new(false));
             Self {
                 version_output: version.to_owned(),
                 child: Mutex::new(Some(FakeChild {
@@ -955,7 +1025,9 @@ mod tests {
                         description: "exit status: 0".to_owned(),
                     },
                     killed: Arc::new(AtomicBool::new(false)),
+                    exited: Arc::clone(&exited),
                 })),
+                exited,
                 arguments: Arc::new(Mutex::new(Vec::new())),
                 env_vars: Arc::new(Mutex::new(Vec::new())),
                 fail_spawn: false,
@@ -1011,6 +1083,10 @@ mod tests {
         stderr: Option<ProcessReader>,
         status: ProcessStatus,
         killed: Arc<AtomicBool>,
+        /// Whether the process has ended, which is what `try_wait` is asked. A real editor answers
+        /// `None` while it is up, so a fake that always answers `Some` would make every session
+        /// look dead the moment anything looked.
+        exited: Arc<AtomicBool>,
     }
 
     impl ChildProcess for FakeChild {
@@ -1027,7 +1103,10 @@ mod tests {
         }
 
         fn try_wait(&mut self) -> io::Result<Option<ProcessStatus>> {
-            Ok(Some(self.status.clone()))
+            Ok(self
+                .exited
+                .load(Ordering::Acquire)
+                .then(|| self.status.clone()))
         }
 
         fn wait(&mut self) -> io::Result<ProcessStatus> {
@@ -1036,6 +1115,7 @@ mod tests {
 
         fn kill(&mut self) -> io::Result<()> {
             self.killed.store(true, Ordering::Release);
+            self.exited.store(true, Ordering::Release);
             Ok(())
         }
     }
@@ -1202,6 +1282,105 @@ mod tests {
 
         stop().expect("stop session");
         unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
+    }
+
+    /// An editor that exits on its own stops being reported as a live session.
+    ///
+    /// Reproduced by accident during a live sweep: the user closed the Godot window, and Gofer went
+    /// on presenting the session it last had — a ready badge over a process that was gone, with
+    /// every call behind it failing. Nothing polled the child, so nothing ever found out.
+    #[test]
+    fn an_editor_that_exits_on_its_own_is_reported_as_failed() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        let (_directory, worktree) = workspace();
+        let spawner = FakeSpawner::new("4.7.1.stable");
+
+        start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+            },
+            &spawner,
+        )
+        .expect("start session");
+        // A session whose editor is up says nothing, however often it is asked.
+        assert!(!poll_editor_exit());
+        assert_eq!(current_state(), SessionState::Starting);
+
+        spawner.exited.store(true, Ordering::Release);
+        assert!(poll_editor_exit(), "the exit must be noticed");
+        assert_eq!(current_state(), SessionState::Error);
+        // Once only: the caller polling this closes a run row on the transition, and closing it
+        // again on every later poll would rewrite history that has already been written.
+        assert!(!poll_editor_exit());
+        assert_eq!(current_state(), SessionState::Error);
+
+        // Stopping a session whose editor already exited is what a user does next, and killing a
+        // process that has ended is an error on Linux — so the stop has to see that for what it is.
+        stop().expect("stopping a dead session must clean up rather than refuse");
+    }
+
+    /// A dead session does not stand in the way of the next one.
+    ///
+    /// The slot keeps the failed session so the window can say the editor died rather than that
+    /// there was never one. That is only right up to the moment the user starts another, which
+    /// `session_already_active` would otherwise refuse for as long as the app is open.
+    #[test]
+    fn a_session_whose_editor_died_is_replaced_by_the_next_start() {
+        let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
+        let (_directory, worktree) = workspace();
+        let first = FakeSpawner::new("4.7.1.stable");
+        start_with(
+            LaunchRequest {
+                worktree: worktree.clone(),
+                binary: None,
+            },
+            &first,
+        )
+        .expect("start the first session");
+
+        // A live session is still refused, which is the guard this must not remove.
+        let second = FakeSpawner::new("4.7.1.stable");
+        let refused = start_with(
+            LaunchRequest {
+                worktree: worktree.clone(),
+                binary: None,
+            },
+            &second,
+        )
+        .expect_err("a running session must not be replaced");
+        assert_eq!(refused.code, "session_already_active");
+
+        assert!(
+            !editor_has_exited(),
+            "a live editor must not be reported as gone"
+        );
+
+        first.exited.store(true, Ordering::Release);
+        // The desktop layer asks this before it refuses a start over the session already in the
+        // slot, and it has to keep answering the same way however often it is asked.
+        assert!(
+            editor_has_exited(),
+            "a dead editor must be reported as gone"
+        );
+        assert!(poll_editor_exit(), "the first poll finds the exit");
+        assert!(
+            editor_has_exited(),
+            "and the answer does not change after it"
+        );
+
+        let replacement = FakeSpawner::new("4.7.1.stable");
+        start_with(
+            LaunchRequest {
+                worktree,
+                binary: None,
+            },
+            &replacement,
+        )
+        .expect("a dead session must give way to a new one");
+        assert_eq!(current_state(), SessionState::Starting);
+
+        stop().expect("stop session");
     }
 
     #[test]

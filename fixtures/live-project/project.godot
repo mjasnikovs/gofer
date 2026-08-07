@@ -21,3 +21,6 @@ window/size/no_focus=true
 [rendering]
 
 renderer/rendering_method="gl_compatibility"
+; The art in assets/ is 16x16 pixel art, and the default filter smears it the moment a tile is drawn
+; at anything but its own size.
+textures/canvas_textures/default_texture_filter=0
