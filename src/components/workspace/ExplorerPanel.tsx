@@ -24,9 +24,8 @@ import type {GodotCall, GodotSelection} from '../../models/workspace'
 import {isSessionReadable} from '../../models/godot'
 import type {GodotNode, GodotSceneTree, GodotSessionState} from '../../models/godot'
 import type {WorkspaceEntry} from '../../models/script'
+import type {ExplorerTab} from '../../models/ui-state'
 import {PanelState} from './PanelState'
-
-export type ExplorerTab = 'scene' | 'runtime' | 'files'
 
 type ExplorerPanelProps = Readonly<{
     tab: ExplorerTab

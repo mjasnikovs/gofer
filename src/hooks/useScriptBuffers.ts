@@ -58,8 +58,17 @@ export type RenamePreview = Readonly<{
     files: readonly PlannedScriptFile[]
 }>
 
+/** The script tabs a project was left with, as they were stored. */
+export type ScriptRestore = Readonly<{
+    openScripts: readonly string[]
+    activeScript?: string | undefined
+    breakpoints: Readonly<Record<string, readonly number[]>>
+}>
+
 type ScriptBufferOptions = Readonly<{
     onError: (message: string) => void
+    /** What to reopen at mount. Read once: it is where the project was left, not where it is. */
+    restore?: ScriptRestore | undefined
     /**
      * Called when a buffer operation succeeds, so a failure already on screen can be taken down.
      *
@@ -92,9 +101,9 @@ function replaceBuffer(
  * Rust assigns it — on open, on every debounced change, and on save — so a UI edit and an AI edit
  * of the same file cannot leave two versions of the truth behind.
  */
-export function useScriptBuffers({onError, onResolved}: ScriptBufferOptions) {
+export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOptions) {
     const [buffers, setBuffers] = useState<readonly ScriptBuffer[]>([])
-    const [activePath, setActivePath] = useState<string>()
+    const [activePath, setActivePath] = useState<string | undefined>(restore?.activeScript)
     const [files, setFiles] = useState<readonly WorkspaceEntry[]>([])
     const [diagnostics, setDiagnostics] = useState<Readonly<Record<string, ScriptDiagnostic[]>>>({})
     const changeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
@@ -102,6 +111,8 @@ export function useScriptBuffers({onError, onResolved}: ScriptBufferOptions) {
     // The external-change handler runs outside React's render, so it reads the buffers from a ref
     // rather than deciding inside a state updater, which StrictMode would run twice.
     const buffersRef = useRef<readonly ScriptBuffer[]>([])
+    // The breakpoints of files not open yet, waiting for the tab that carries them to come back.
+    const restored = useRef<Readonly<Record<string, readonly number[]>>>(restore?.breakpoints ?? {})
 
     const report = useCallback(
         (error: unknown, action: string) => {
@@ -167,8 +178,8 @@ export function useScriptBuffers({onError, onResolved}: ScriptBufferOptions) {
     }, [])
 
     const openBuffer = useCallback(
-        async (path: string, activate = true) => {
-            if (!isTauri()) return
+        async (path: string, activate = true, quiet = false) => {
+            if (!isTauri()) return false
             try {
                 const document = await openScriptDocument(path)
                 followDiagnostics()
@@ -181,7 +192,7 @@ export function useScriptBuffers({onError, onResolved}: ScriptBufferOptions) {
                         hash: document.hash,
                         version: document.version,
                         dirty: false,
-                        breakpoints: existing?.breakpoints ?? [],
+                        breakpoints: existing?.breakpoints ?? restored.current[path] ?? [],
                         conflict: undefined
                     }
                     return existing ?
@@ -192,8 +203,13 @@ export function useScriptBuffers({onError, onResolved}: ScriptBufferOptions) {
                 // What the server already thinks of this file, rather than only what it says
                 // next: a script opened with an error in it should show that error now.
                 pullDiagnostics(path)
+                return true
             } catch (error) {
-                report(error, `${path} could not be opened`)
+                // A tab being reopened from the last session names a file that may have been
+                // renamed, moved, or deleted since. That is not a failure the user provoked, so
+                // the tab is simply not there rather than the workspace opening on an error.
+                if (!quiet) report(error, `${path} could not be opened`)
+                return false
             }
         },
         [followDiagnostics, pullDiagnostics, report]
@@ -449,6 +465,39 @@ export function useScriptBuffers({onError, onResolved}: ScriptBufferOptions) {
     useEffect(() => {
         buffersRef.current = buffers
     }, [buffers])
+
+    /*
+     * Reopens the tabs the project was left with.
+     *
+     * In order, and one at a time: the tab strip is the order the files were opened in, and the
+     * language server is told about each document as it opens. The active tab is chosen last,
+     * because the file it names may be one of the ones that no longer opens.
+     */
+    useEffect(() => {
+        const reopening = restore?.openScripts ?? []
+        if (reopening.length === 0 || !isTauri()) return
+        let cancelled = false
+        const reopen = async () => {
+            const opened: string[] = []
+            for (const path of reopening) {
+                if (cancelled) return
+                if (await openBuffer(path, false, true)) opened.push(path)
+            }
+            if (cancelled) return
+            setActivePath(current =>
+                current !== undefined && opened.includes(current) ?
+                    current
+                :   opened[opened.length - 1]
+            )
+        }
+        void reopen()
+        return () => {
+            cancelled = true
+        }
+        // Mount only: `restore` says where the project was left, and reopening it later would
+        // fight the user for which tabs are open.
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- see above
+    }, [])
 
     // The first listing is fetched on mount; later ones ride the watcher's change batches.
     useEffect(() => {

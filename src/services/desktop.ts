@@ -149,6 +149,8 @@ type DesktopCommandMap = Readonly<{
     query_godot_docs: CommandSpec<{request: DocsQuery}, DocsResponse>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
     read_godot_logs: CommandSpec<{query: GodotLogQuery}, GodotLogPage>
+    // Remembered interface state, as the JSON the renderer wrote. Absent when nothing is stored.
+    read_project_state: CommandSpec<{key: string}, string | null>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
     respond_tool_approval: CommandSpec<{request: ToolApprovalRequest}, void>
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>
@@ -177,6 +179,8 @@ type DesktopCommandMap = Readonly<{
     update_script_document: CommandSpec<{request: UpdateScriptRequest}, ScriptStamp>
     // The backend streams settled batches of external changes down this channel.
     watch_workspace_files: CommandSpec<{changes: Channel<readonly WorkspaceFileChange[]>}, void>
+    // No `value` forgets the key, which is how a task's draft goes when the draft is emptied.
+    write_project_state: CommandSpec<{key: string; value?: string}, void>
     write_workspace_file: CommandSpec<{request: WriteWorkspaceFileRequest}, WorkspaceFileStamp>
 }>
 

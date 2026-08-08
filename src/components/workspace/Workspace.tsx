@@ -16,6 +16,7 @@ import {
     withoutActivity
 } from '../../models/chat-timeline'
 import {attachmentData} from '../../services/chat-storage'
+import {draftKey, readProjectState, writeProjectState} from '../../services/ui-state'
 import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
 import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
@@ -96,6 +97,33 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     useEffect(() => {
         conversation.current = messages
     }, [messages])
+
+    /*
+     * The unsent message is kept with the task it was being written for.
+     *
+     * `draftTask` is what makes the pair safe: the read is asynchronous, so without it the empty
+     * composer that exists while the read is in flight would be written back over the draft it is
+     * waiting for, and switching tasks would save one task's half-written message onto another.
+     */
+    const draftTask = useRef<string>(undefined)
+    useEffect(() => {
+        if (taskId === undefined) return undefined
+        let cancelled = false
+        draftTask.current = undefined
+        void readProjectState(draftKey(taskId)).then(stored => {
+            if (cancelled) return
+            draftTask.current = taskId
+            setDraft(typeof stored === 'string' ? stored : '')
+        })
+        return () => {
+            cancelled = true
+        }
+    }, [taskId])
+
+    useEffect(() => {
+        if (taskId === undefined || draftTask.current !== taskId) return
+        writeProjectState(draftKey(taskId), draft === '' ? undefined : draft)
+    }, [draft, taskId])
 
     useEffect(() => {
         chatScroll.scrollIfLocked()

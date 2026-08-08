@@ -6,6 +6,7 @@ import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {Divider} from '@astryxdesign/core/Divider'
 import {Layout, LayoutContent, LayoutPanel} from '@astryxdesign/core/Layout'
 import {ResizeHandle, useResizable} from '@astryxdesign/core/Resizable'
+import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
@@ -16,22 +17,44 @@ import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {useGodotSession} from '../../hooks/useGodotSession'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
 import {toGodotError} from '../../services/godot-session'
+import {
+    readProjectState,
+    SCRIPT_VIEWS_KEY,
+    WORKSPACE_LAYOUT_KEY,
+    writeProjectState
+} from '../../services/ui-state'
 import {isSessionReadable} from '../../models/godot'
 import type {
     DebugSourceBreakpoints,
+    GodotLogSeverity,
     GodotProjectSettings,
     GodotSessionState,
     GodotSessionStatus
 } from '../../models/godot'
 import type {GodotSelection} from '../../models/workspace'
+import {
+    EXPLORER_MAX,
+    EXPLORER_MIN,
+    INSPECTOR_MAX,
+    INSPECTOR_MIN,
+    toScriptViews,
+    toWorkspaceLayout
+} from '../../models/ui-state'
+import type {
+    BottomTab,
+    CenterTab,
+    ChosenNode,
+    ExplorerTab,
+    InspectorTab,
+    LogScope,
+    ScriptViews,
+    WorkspaceLayout
+} from '../../models/ui-state'
 import {BottomPanel} from './BottomPanel'
-import type {BottomTab} from './BottomPanel'
 import {DocsView} from './DocsView'
 import {ExplorerPanel} from './ExplorerPanel'
-import type {ExplorerTab} from './ExplorerPanel'
 import {GameView} from './GameView'
 import {InspectorPanel} from './InspectorPanel'
-import type {InspectorTab} from './InspectorPanel'
 import {ScriptWorkspace} from './ScriptWorkspace'
 import type {ScriptReveal} from './ScriptWorkspace'
 
@@ -41,10 +64,13 @@ type InspectorWorkspaceProps = Readonly<{
     onError: (message: string) => void
 }>
 
-type CenterTab = 'chat' | 'scripts' | 'game' | 'docs'
-
-/** A chosen node and the edited scene it was chosen in, which is what makes its path meaningful. */
-type ChosenNode = Readonly<{selection: GodotSelection; scene: string}>
+type InspectorFrameProps = InspectorWorkspaceProps
+    & Readonly<{
+        /** How this project was left, already checked against what this version understands. */
+        layout: WorkspaceLayout
+        /** Monaco's cursor and scroll for each script that was open. */
+        views: ScriptViews
+    }>
 
 /*
  * Responsive contract:
@@ -54,12 +80,6 @@ type ChosenNode = Readonly<{selection: GodotSelection; scene: string}>
  *   the bottom panel is 240px and collapses to its own tab strip at every width
  */
 const NARROW_QUERY = '(max-width: 1024px)'
-const EXPLORER_WIDTH = 260
-const EXPLORER_MIN = 200
-const EXPLORER_MAX = 420
-const INSPECTOR_WIDTH = 380
-const INSPECTOR_MIN = 320
-const INSPECTOR_MAX = 480
 const BOTTOM_HEIGHT = 240
 
 /** The editor names a scene by its resource path; the explorer names a file by its worktree path. */
@@ -106,17 +126,73 @@ function useNarrowViewport() {
  * calls, which is what keeps a click and an agent turn from disagreeing.
  */
 export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
-    const [centerTab, setCenterTab] = useState<CenterTab>('chat')
-    const [explorerTab, setExplorerTab] = useState<ExplorerTab>('scene')
-    const [inspectorTab, setInspectorTab] = useState<InspectorTab>('node')
-    const [bottomTab, setBottomTab] = useState<BottomTab>('problems')
-    const [isBottomCollapsed, setIsBottomCollapsed] = useState(false)
+    const [restored, setRestored] =
+        useState<Readonly<{layout: WorkspaceLayout; views: ScriptViews}>>()
+
+    useEffect(() => {
+        let cancelled = false
+        const load = async () => {
+            const layout = toWorkspaceLayout(await readProjectState(WORKSPACE_LAYOUT_KEY))
+            const views = toScriptViews(
+                await readProjectState(SCRIPT_VIEWS_KEY),
+                layout.openScripts
+            )
+            if (!cancelled) setRestored({layout, views})
+        }
+        void load()
+        return () => {
+            cancelled = true
+        }
+    }, [])
+
+    // The frame mounts once, with the layout already in hand. Mounting on the defaults and moving
+    // afterwards would open the wrong tab, refetch through the wrong panel, and write the defaults
+    // back over the project's own layout before the read that would have prevented it returned.
+    if (!restored) {
+        return (
+            <HStack
+                gap={2}
+                padding={3}
+                align='center'
+                role='status'
+            >
+                <Spinner size='sm' />
+                <Text
+                    type='supporting'
+                    color='secondary'
+                >
+                    Opening the workspace…
+                </Text>
+            </HStack>
+        )
+    }
+    return (
+        <InspectorFrame
+            chat={chat}
+            layout={restored.layout}
+            views={restored.views}
+            onError={onError}
+        />
+    )
+}
+
+function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
+    const [centerTab, setCenterTab] = useState<CenterTab>(layout.centerTab)
+    const [explorerTab, setExplorerTab] = useState<ExplorerTab>(layout.explorerTab)
+    const [inspectorTab, setInspectorTab] = useState<InspectorTab>(layout.inspectorTab)
+    const [bottomTab, setBottomTab] = useState<BottomTab>(layout.bottomTab)
+    const [isBottomCollapsed, setIsBottomCollapsed] = useState(layout.isBottomCollapsed)
+    const [logSeverity, setLogSeverity] = useState<GodotLogSeverity>(layout.logSeverity)
+    const [logScope, setLogScope] = useState<LogScope>(layout.logScope)
     const [isInspectorOpen, setIsInspectorOpen] = useState(false)
-    const [chosen, setChosen] = useState<ChosenNode>()
+    const [chosen, setChosen] = useState<ChosenNode | undefined>(layout.selection)
     const [fileFilter, setFileFilter] = useState('')
     const [reveal, setReveal] = useState<ScriptReveal>()
     const [failure, setFailure] = useState<string>()
     const inspectorButton = useRef<HTMLButtonElement>(null)
+    // Cursors and scroll are mutable on purpose: they change with every keystroke, and a render
+    // per keystroke is a price the layout does not have to pay to be remembered.
+    const scriptViews = useRef<Record<string, unknown>>({...views})
 
     /**
      * Reports a failure where the person who caused it is looking.
@@ -139,7 +215,15 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
     const clearFailure = useCallback(() => {
         setFailure(undefined)
     }, [])
-    const scripts = useScriptBuffers({onError: report, onResolved: clearFailure})
+    const scripts = useScriptBuffers({
+        onError: report,
+        onResolved: clearFailure,
+        restore: {
+            openScripts: layout.openScripts,
+            breakpoints: layout.breakpoints,
+            ...(layout.activeScript !== undefined && {activeScript: layout.activeScript})
+        }
+    })
     const {
         call,
         ensureReady,
@@ -153,17 +237,20 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
         stop
     } = useGodotSession({onError: report})
 
+    /*
+     * No `autoSaveId`: the hook's own persistence is one width in `localStorage` for the whole
+     * machine, so every project shared it. The width is stored with the project instead, which is
+     * what makes it a property of the work rather than of the window it was last dragged in.
+     */
     const explorer = useResizable({
-        defaultSize: EXPLORER_WIDTH,
+        defaultSize: layout.explorerWidth,
         minSizePx: EXPLORER_MIN,
-        maxSizePx: EXPLORER_MAX,
-        autoSaveId: 'gofer-explorer'
+        maxSizePx: EXPLORER_MAX
     })
     const inspector = useResizable({
-        defaultSize: INSPECTOR_WIDTH,
+        defaultSize: layout.inspectorWidth,
         minSizePx: INSPECTOR_MIN,
-        maxSizePx: INSPECTOR_MAX,
-        autoSaveId: 'gofer-inspector'
+        maxSizePx: INSPECTOR_MAX
     })
 
     const isOffline = state === 'offline' || state === 'error'
@@ -187,6 +274,63 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
     )
 
     const debug = useDebugSession({breakpoints, onError: report})
+
+    const openScripts = useMemo(() => scripts.buffers.map(buffer => buffer.path), [scripts.buffers])
+
+    /*
+     * Records how the workspace is being left, on every change that is a choice.
+     *
+     * One effect for the whole layout rather than one per control: the writes are coalesced
+     * anyway, and a single snapshot cannot store a tab from before a drag alongside a width from
+     * after it. What is deliberately absent is every filter box — a stored search would reopen the
+     * project with files hidden and no sign of why.
+     */
+    useEffect(() => {
+        writeProjectState(WORKSPACE_LAYOUT_KEY, {
+            centerTab,
+            explorerTab,
+            inspectorTab,
+            bottomTab,
+            isBottomCollapsed,
+            explorerWidth: explorer.size,
+            inspectorWidth: inspector.size,
+            logSeverity,
+            logScope,
+            openScripts,
+            ...(scripts.activePath !== undefined && {activeScript: scripts.activePath}),
+            breakpoints: Object.fromEntries(breakpoints.map(source => [source.path, source.lines])),
+            ...(chosen && {selection: chosen})
+        })
+    }, [
+        bottomTab,
+        breakpoints,
+        centerTab,
+        chosen,
+        explorer.size,
+        explorerTab,
+        inspector.size,
+        inspectorTab,
+        isBottomCollapsed,
+        logScope,
+        logSeverity,
+        openScripts,
+        scripts.activePath
+    ])
+
+    /** Records where the cursor was left in one script. */
+    const rememberScriptView = useCallback((path: string, view: unknown) => {
+        scriptViews.current[path] = view
+        writeProjectState(SCRIPT_VIEWS_KEY, scriptViews.current)
+    }, [])
+
+    // A closed tab's cursor is not worth keeping: it would grow the record for the life of the
+    // project and be restored into a file the user is no longer editing.
+    useEffect(() => {
+        const kept = toScriptViews(scriptViews.current, openScripts)
+        if (Object.keys(kept).length === Object.keys(scriptViews.current).length) return
+        scriptViews.current = {...kept}
+        writeProjectState(SCRIPT_VIEWS_KEY, kept)
+    }, [openScripts])
 
     /**
      * The Run control: ensure the managed editor session, then launch the game through Godot's own
@@ -480,6 +624,8 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                             : centerTab === 'scripts' ?
                                 <ScriptWorkspace
                                     scripts={scripts}
+                                    views={views}
+                                    onViewChange={rememberScriptView}
                                     onError={onError}
                                     {...(reveal && {reveal})}
                                 />
@@ -502,6 +648,10 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                                 onToggle={() => {
                                     setIsBottomCollapsed(previous => !previous)
                                 }}
+                                logSeverity={logSeverity}
+                                onLogSeverityChange={setLogSeverity}
+                                logScope={logScope}
+                                onLogScopeChange={setLogScope}
                                 call={call}
                                 state={state}
                                 diagnostics={scripts.diagnostics}
@@ -514,7 +664,7 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
                     <Dialog
                         isOpen={isNarrow && isInspectorOpen}
                         purpose='form'
-                        width={INSPECTOR_WIDTH}
+                        width={inspector.size}
                         onOpenChange={closeInspector}
                     >
                         <DialogHeader

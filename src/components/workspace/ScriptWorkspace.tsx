@@ -17,6 +17,7 @@ import type {
     ScriptBuffers
 } from '../../hooks/useScriptBuffers'
 import type {ScriptPosition} from '../../models/script'
+import type {ScriptViews} from '../../models/ui-state'
 import {MonacoDiff} from './MonacoDiff'
 import {ScriptEditor} from './ScriptEditor'
 
@@ -29,6 +30,9 @@ export type ScriptReveal = Readonly<{
 type ScriptWorkspaceProps = Readonly<{
     /** Owned by the frame, so the Problems list and the AI agent see the same buffers. */
     scripts: ScriptBuffers
+    /** Where each script's cursor and scroll were left, from the last time the project was open. */
+    views: ScriptViews
+    onViewChange: (path: string, view: unknown) => void
     reveal?: ScriptReveal | undefined
     onError: (message: string) => void
 }>
@@ -59,7 +63,13 @@ function tabLabel(buffer: ScriptBuffer) {
  * formatter and rename both show what they would write before anything is written; and a file that
  * changed underneath a dirty buffer raises a conflict rather than being overwritten.
  */
-export function ScriptWorkspace({scripts, reveal, onError}: ScriptWorkspaceProps) {
+export function ScriptWorkspace({
+    scripts,
+    views,
+    onViewChange,
+    reveal,
+    onError
+}: ScriptWorkspaceProps) {
     const {
         activeBuffer,
         activePath,
@@ -255,6 +265,8 @@ export function ScriptWorkspace({scripts, reveal, onError}: ScriptWorkspaceProps
                     buffer={activeBuffer}
                     diagnostics={activeDiagnostics}
                     openPaths={openPaths}
+                    views={views}
+                    onViewChange={onViewChange}
                     onChange={changeBuffer}
                     onError={onError}
                     onOpenPath={open}

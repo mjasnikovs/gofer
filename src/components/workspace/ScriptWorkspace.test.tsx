@@ -170,6 +170,8 @@ function Harness({onError, reveal}: HarnessProps) {
             </button>
             <ScriptWorkspace
                 scripts={scripts}
+                views={{}}
+                onViewChange={() => undefined}
                 onError={onError}
                 {...(reveal && {reveal})}
             />

@@ -80,6 +80,8 @@ type Backend = Readonly<{
     debugCalls: string[]
     /** Every path handed to `scene.open`, in order. */
     sceneOpens: string[]
+    /** Interface state the frame recorded, newest last. */
+    writes: {key: string; value?: unknown}[]
     /** What the editor is editing, as `scene.open` changes it. */
     edited: {scene: string}
 }>
@@ -89,6 +91,8 @@ type BackendOptions = Readonly<{
     openScene?: string
     /** Whether a debugger launch succeeds. */
     canLaunch?: boolean
+    /** How the project was left, as the interface state the frame reads before it mounts. */
+    stored?: Readonly<Record<string, unknown>>
 }>
 
 const MAIN_SCENE = 'res://scenes/main.tscn'
@@ -103,16 +107,32 @@ const SESSION = {
     worktree: '/tmp/task'
 }
 
-function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptions = {}): Backend {
+function backend({
+    openScene = 'res://main.tscn',
+    canLaunch = true,
+    stored = {}
+}: BackendOptions = {}): Backend {
     const session = {started: false}
     const calls: string[] = []
     const iconRequests: string[][] = []
     const debugCalls: string[] = []
     const sceneOpens: string[] = []
+    const writes: {key: string; value?: unknown}[] = []
     const edited = {scene: openScene}
     tauri.invoke.mockImplementation(async (command, args) => {
         const request = (args as {request?: CallRequest} | undefined)?.request ?? {}
+        const state = args as {key?: string; value?: string} | undefined
         switch (command) {
+            case 'read_project_state': {
+                const value = stored[state?.key ?? '']
+                return value === undefined ? null : JSON.stringify(value)
+            }
+            case 'write_project_state':
+                writes.push({
+                    key: state?.key ?? '',
+                    ...(state?.value !== undefined && {value: JSON.parse(state.value)})
+                })
+                return undefined
             case 'list_workspace_files':
                 return [
                     {path: 'scripts/player.gd', bytes: SCRIPT.length},
@@ -337,7 +357,7 @@ function backend({openScene = 'res://main.tscn', canLaunch = true}: BackendOptio
                 return undefined
         }
     })
-    return {session, calls, iconRequests, debugCalls, sceneOpens, edited}
+    return {session, calls, iconRequests, debugCalls, sceneOpens, writes, edited}
 }
 
 /**
@@ -401,18 +421,26 @@ function narrowViewport(isNarrow: boolean) {
     })
 }
 
-function renderWorkspace(onError: (message: string) => void = vi.fn()) {
-    return render(
+/**
+ * Renders the frame and waits for it.
+ *
+ * The frame reads how this project was left before it mounts, so every test starts after that
+ * read: the workspace a user sees is never the default one, and neither is the one under test.
+ */
+async function renderWorkspace(onError: (message: string) => void = vi.fn()) {
+    const rendered = render(
         <InspectorWorkspace
             chat={<p>Chat column</p>}
             onError={onError}
         />
     )
+    await screen.findByRole('navigation', {name: 'Explorer'})
+    return rendered
 }
 
 /** The same frame, with somewhere for a panel to put what the user asked to talk about. */
-function renderWithChatReferences(added: ChatReference[]) {
-    return render(
+async function renderWithChatReferences(added: ChatReference[]) {
+    const rendered = render(
         <ChatReferenceContext.Provider
             value={{
                 add: reference => {
@@ -426,6 +454,8 @@ function renderWithChatReferences(added: ChatReference[]) {
             />
         </ChatReferenceContext.Provider>
     )
+    await screen.findByRole('navigation', {name: 'Explorer'})
+    return rendered
 }
 
 /** The explorer's own offer to start one. The inspector beside it makes the same offer. */
@@ -464,9 +494,9 @@ afterEach(() => {
 })
 
 describe('InspectorWorkspace', () => {
-    it('frames the explorer, centre, inspector, and bottom regions', () => {
+    it('frames the explorer, centre, inspector, and bottom regions', async () => {
         backend()
-        renderWorkspace()
+        await renderWorkspace()
 
         for (const label of ['Scene', 'Runtime', 'Files'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
@@ -482,7 +512,7 @@ describe('InspectorWorkspace', () => {
     it('offers to start the session while the workspace has no editor', async () => {
         const server = backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         expect(
             await within(screen.getByRole('navigation', {name: 'Explorer'})).findByText(
@@ -506,7 +536,7 @@ describe('InspectorWorkspace', () => {
     it('subscribes again to the editor that replaces one that died', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         const subscriptions = () =>
@@ -537,7 +567,7 @@ describe('InspectorWorkspace', () => {
     it('does not report a failed read when the session it was reading is gone', async () => {
         const server = backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         server.session.started = false
@@ -556,7 +586,7 @@ describe('InspectorWorkspace', () => {
     it('fills the inspector from the node chosen in the edited scene', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         await user.click(screen.getByText('Player'))
@@ -579,7 +609,7 @@ describe('InspectorWorkspace', () => {
     it('draws each node with the icon the editor draws it with', async () => {
         const server = backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         const player = await screen.findByAltText('CharacterBody2D')
@@ -599,7 +629,7 @@ describe('InspectorWorkspace', () => {
         backend()
         const added: ChatReference[] = []
         const user = userEvent.setup()
-        renderWithChatReferences(added)
+        await renderWithChatReferences(added)
         await startSession(user)
 
         await user.click(screen.getByRole('button', {name: 'Mention Player in the message'}))
@@ -610,7 +640,7 @@ describe('InspectorWorkspace', () => {
     it('reports a game that is not running as a fact rather than a fault', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         await user.click(screen.getByRole('button', {name: 'Runtime'}))
@@ -626,7 +656,7 @@ describe('InspectorWorkspace', () => {
     it('opens a worktree file into the script editor and hides generated sidecars', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         await user.click(screen.getByRole('button', {name: 'Files'}))
 
@@ -645,7 +675,7 @@ describe('InspectorWorkspace', () => {
     it('opens a scene in the editor rather than as text in Monaco', async () => {
         const server = backend({openScene: ''})
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSessionWithoutScene(user)
 
         await user.click(screen.getByRole('button', {name: 'Files'}))
@@ -672,7 +702,7 @@ describe('InspectorWorkspace', () => {
     it('drops the chosen node when the editor moves to another scene', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         await user.click(screen.getByText('Player'))
@@ -699,7 +729,7 @@ describe('InspectorWorkspace', () => {
     it('offers the scene the project runs when the editor is editing none', async () => {
         const server = backend({openScene: ''})
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSessionWithoutScene(user)
 
         await user.click(await screen.findByRole('button', {name: 'Open main scene'}))
@@ -714,7 +744,7 @@ describe('InspectorWorkspace', () => {
         backend({canLaunch: false})
         const onError = vi.fn()
         const user = userEvent.setup()
-        renderWorkspace(onError)
+        await renderWorkspace(onError)
 
         await user.click(await screen.findByRole('button', {name: 'Run project'}))
 
@@ -730,7 +760,7 @@ describe('InspectorWorkspace', () => {
     it('jumps from a problem to the line that produced it', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await waitFor(() => {
             expect(
                 tauri.invoke.mock.calls.some(call => call[0] === 'subscribe_script_diagnostics')
@@ -749,7 +779,7 @@ describe('InspectorWorkspace', () => {
     it('searches the project and editor settings separately', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         await user.click(screen.getByRole('button', {name: 'Project'}))
@@ -770,7 +800,7 @@ describe('InspectorWorkspace', () => {
     it('shows the captured frame a run answers with', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         await user.click(screen.getByRole('button', {name: 'Game'}))
@@ -785,7 +815,7 @@ describe('InspectorWorkspace', () => {
     it('follows the editor output with its severities', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
         await startSession(user)
 
         await user.click(screen.getByRole('button', {name: 'Output'}))
@@ -797,7 +827,7 @@ describe('InspectorWorkspace', () => {
     it('runs the project by ensuring an editor session, then launching under the debugger', async () => {
         const server = backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         // No session is running: Run is one action, because the debug adapter belongs to the
         // editor and there is nothing to launch the game with until the editor is up.
@@ -822,7 +852,7 @@ describe('InspectorWorkspace', () => {
     it('searches recorded output from sessions that have already stopped', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         await user.click(screen.getByRole('button', {name: 'Output'}))
         await user.click(screen.getByRole('radio', {name: 'History'}))
@@ -840,7 +870,7 @@ describe('InspectorWorkspace', () => {
     it('cites documentation by chapter, because retrieval exposes no URL', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         await user.click(screen.getByRole('button', {name: 'Docs'}))
         expect(
@@ -863,7 +893,7 @@ describe('InspectorWorkspace', () => {
     it('collapses the bottom panel without losing the way back', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         const hide = screen.getByRole('button', {name: 'Hide panel'})
         expect(hide).toHaveAttribute('aria-expanded', 'true')
@@ -887,7 +917,7 @@ describe('InspectorWorkspace', () => {
     it('reaches and activates the centre tabs from the keyboard', async () => {
         backend()
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         const docs = screen.getByRole('button', {name: 'Docs'})
         docs.focus()
@@ -903,7 +933,7 @@ describe('InspectorWorkspace', () => {
         backend()
         narrowViewport(true)
         const user = userEvent.setup()
-        renderWorkspace()
+        await renderWorkspace()
 
         const opener = await screen.findByRole('button', {name: 'Inspector'})
         expect(opener).toHaveAttribute('aria-expanded', 'false')
@@ -923,10 +953,105 @@ describe('InspectorWorkspace', () => {
         expect(opener).toHaveFocus()
     })
 
+    /*
+     * How a project was left is a property of the project.
+     *
+     * The frame reads it before it mounts, so what a user comes back to is the workspace they
+     * closed: the same centre tab, the same explorer tab, the same scripts open at the same lines,
+     * with the bottom panel as they left it.
+     */
+    it('reopens the project where it was left', async () => {
+        backend({
+            stored: {
+                'ui.workspace': {
+                    centerTab: 'scripts',
+                    explorerTab: 'files',
+                    bottomTab: 'output',
+                    isBottomCollapsed: true,
+                    explorerWidth: 320,
+                    openScripts: ['scripts/player.gd'],
+                    activeScript: 'scripts/player.gd',
+                    breakpoints: {'scripts/player.gd': [3]}
+                },
+                'ui.scriptViews': {'scripts/player.gd': {cursorLine: 3}}
+            }
+        })
+
+        await renderWorkspace()
+
+        // The script is open, in the centre tab it was open in, at the line it was left on.
+        await waitFor(() => {
+            expect(
+                document.querySelector('[data-tab-value="scripts/player.gd"]')
+            ).toHaveTextContent('player.gd')
+        })
+        expect(editor.state?.activeText()).toBe(SCRIPT)
+        expect(editor.state?.restored).toContainEqual({cursorLine: 3})
+        // Its breakpoint came back with it, which is what makes the next Run stop there.
+        await waitFor(() => {
+            expect(editor.state?.decorations).toHaveLength(1)
+        })
+        expect(editor.state?.decorations[0]?.range).toMatchObject({startLineNumber: 3})
+        // The explorer opened on Files rather than on the scene tree it defaults to.
+        expect(
+            within(screen.getByRole('navigation', {name: 'Explorer'})).getByRole('button', {
+                name: 'Files'
+            })
+        ).toHaveAttribute('aria-current', 'page')
+    })
+
+    /** A tab from a file that has since been deleted is simply not there, not an error banner. */
+    it('says nothing about a remembered script that no longer opens', async () => {
+        const onError = vi.fn()
+        backend({stored: {'ui.workspace': {openScripts: ['scripts/deleted.gd']}}})
+
+        await renderWorkspace(onError)
+
+        await waitFor(() => {
+            expect(screen.getByRole('button', {name: 'Chat'})).toBeInTheDocument()
+        })
+        expect(onError).not.toHaveBeenCalled()
+        expect(screen.queryByText(/could not be opened/)).not.toBeInTheDocument()
+    })
+
+    it('records the tab the user moved to', async () => {
+        const server = backend()
+        const user = userEvent.setup()
+        await renderWorkspace()
+
+        await user.click(screen.getByRole('button', {name: 'Game'}))
+
+        await waitFor(() => {
+            expect(
+                server.writes.filter(write => write.key === 'ui.workspace').at(-1)?.value
+            ).toMatchObject({centerTab: 'game'})
+        })
+    })
+
+    it('records the node the user chose, with the scene it was chosen in', async () => {
+        const server = backend()
+        const user = userEvent.setup()
+        await renderWorkspace()
+        await startSession(user)
+
+        await user.click(screen.getByText('Player'))
+
+        await waitFor(() => {
+            expect(
+                server.writes.filter(write => write.key === 'ui.workspace').at(-1)?.value
+            ).toMatchObject({
+                selection: {
+                    scene: 'res://main.tscn',
+                    selection: {origin: 'edited', path: 'Main/Player'}
+                }
+            })
+        })
+    })
+
     it('has no automatically detectable accessibility violations', async () => {
         backend()
         const user = userEvent.setup()
-        const {container} = renderWorkspace()
+        const {container} = await renderWorkspace()
         await startSession(user)
 
         const result = await axe.run(container)

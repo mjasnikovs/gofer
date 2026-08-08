@@ -20,6 +20,11 @@ const MEMORY_EMBEDDING_MODEL: &str = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
 const MAX_STORED_CHAT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STORED_CHAT_MESSAGES: usize = 10_000;
 const MAX_STORED_MESSAGE_BYTES: usize = 1024 * 1024;
+/// Interface state is small by nature — tabs, sizes, paths, cursors — so this is a ceiling on
+/// mistakes rather than a budget anything real is meant to spend.
+const MAX_UI_STATE_BYTES: usize = 1024 * 1024;
+/// Everything the renderer may write into `project_state`, and nothing else.
+const UI_STATE_PREFIX: &str = "ui.";
 static SQLITE_VEC_REGISTRATION: Once = Once::new();
 
 const CATALOG_SCHEMA: &str = r#"
@@ -783,6 +788,13 @@ impl ProjectStorage {
             transaction
                 .execute("DELETE FROM tasks WHERE id = ?1", [task_id])
                 .map_err(database_error)?;
+            // The unsent message belonged to this conversation, so it goes with it.
+            transaction
+                .execute(
+                    "DELETE FROM project_state WHERE key = ?1",
+                    [draft_ui_key(task_id)],
+                )
+                .map_err(database_error)?;
             // The deleted task cannot stay the active one. The most recently worked-on task left
             // takes over, so the user lands on work they recognize rather than an empty new task.
             if active_task_id(&transaction)?.as_deref() == Some(task_id) {
@@ -840,6 +852,49 @@ impl ProjectStorage {
     /// the user. [`Self::active_task_workspace`] is the one that may rebuild a worktree.
     pub fn active_task(&self) -> Result<Option<String>, String> {
         active_task_id(&self.connection()?)
+    }
+
+    /// Reads one piece of remembered interface state, or `None` when the project has none.
+    pub fn read_ui_state(&self, key: &str) -> Result<Option<String>, String> {
+        validate_ui_key(key)?;
+        self.connection()?
+            .query_row(
+                "SELECT value FROM project_state WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    /// Records one piece of interface state, or forgets it when the renderer sends no value.
+    ///
+    /// The key is confined to the `ui.` prefix so that the renderer can never write over
+    /// `active_task_id`, which lives in the same table and decides which worktree the agent and the
+    /// editor session run in.
+    pub fn write_ui_state(&self, key: &str, value: Option<&str>) -> Result<(), String> {
+        validate_ui_key(key)?;
+        let (_write_guard, connection) = self.write_connection()?;
+        match value {
+            Some(value) => {
+                if value.len() > MAX_UI_STATE_BYTES {
+                    return Err("The interface state is too large to store".to_owned());
+                }
+                connection
+                    .execute(
+                        "INSERT INTO project_state (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        params![key, value],
+                    )
+                    .map_err(database_error)?;
+            }
+            None => {
+                connection
+                    .execute("DELETE FROM project_state WHERE key = ?1", [key])
+                    .map_err(database_error)?;
+            }
+        }
+        Ok(())
     }
 
     /// The task's worktree, restored first when Git no longer holds it.
@@ -1902,6 +1957,19 @@ fn migrate(connection: &Connection, schema: &str, version: u32) -> Result<(), St
     Ok(())
 }
 
+fn validate_ui_key(key: &str) -> Result<(), String> {
+    if !key.starts_with(UI_STATE_PREFIX) || key.len() > 128 {
+        return Err("The interface state key is not one Gofer stores".to_owned());
+    }
+    Ok(())
+}
+
+/// The key a task's unsent message is kept under. Per task, because the draft belongs to the
+/// conversation the user was writing it in.
+pub fn draft_ui_key(task_id: &str) -> String {
+    format!("{UI_STATE_PREFIX}draft.{task_id}")
+}
+
 fn active_task_id(connection: &Connection) -> Result<Option<String>, String> {
     connection
         .query_row(
@@ -2652,6 +2720,80 @@ mod tests {
         assert_eq!(replacement.task_id, first.task_id);
         assert!(tasks[0].is_current);
         assert_eq!(replacement.messages[0].text, "First task");
+    }
+
+    /// The interface state is the project's, and only the interface's: a renderer that asked for
+    /// `active_task_id` would be asking which worktree the agent writes in.
+    #[test]
+    fn interface_state_round_trips_and_refuses_keys_it_does_not_own() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+
+        assert_eq!(storage.read_ui_state("ui.workspace").expect("read"), None);
+        storage
+            .write_ui_state("ui.workspace", Some(r#"{"centerTab":"scripts"}"#))
+            .expect("write");
+        assert_eq!(
+            storage.read_ui_state("ui.workspace").expect("read"),
+            Some(r#"{"centerTab":"scripts"}"#.to_owned())
+        );
+
+        storage
+            .write_ui_state("ui.workspace", Some(r#"{"centerTab":"game"}"#))
+            .expect("overwrite");
+        assert_eq!(
+            storage.read_ui_state("ui.workspace").expect("read"),
+            Some(r#"{"centerTab":"game"}"#.to_owned())
+        );
+
+        storage
+            .write_ui_state("ui.workspace", None)
+            .expect("forget");
+        assert_eq!(storage.read_ui_state("ui.workspace").expect("read"), None);
+
+        assert!(storage.read_ui_state("active_task_id").is_err());
+        assert!(storage.write_ui_state("active_task_id", Some("x")).is_err());
+        assert!(
+            storage
+                .write_ui_state("ui.workspace", Some(&"x".repeat(MAX_UI_STATE_BYTES + 1)))
+                .is_err()
+        );
+    }
+
+    /// The unsent message belongs to the conversation, so deleting the conversation takes it.
+    #[test]
+    fn deleting_a_task_forgets_its_composer_draft() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        let kept = storage
+            .load_chat()
+            .expect("first task")
+            .task_id
+            .expect("ID");
+        let doomed = storage
+            .create_task()
+            .expect("create task")
+            .task_id
+            .expect("task ID");
+        storage
+            .write_ui_state(&draft_ui_key(&kept), Some("kept draft"))
+            .expect("write the kept draft");
+        storage
+            .write_ui_state(&draft_ui_key(&doomed), Some("doomed draft"))
+            .expect("write the doomed draft");
+
+        storage.delete_task(&doomed, |_| ()).expect("delete task");
+
+        assert_eq!(
+            storage.read_ui_state(&draft_ui_key(&doomed)).expect("read"),
+            None
+        );
+        assert_eq!(
+            storage.read_ui_state(&draft_ui_key(&kept)).expect("read"),
+            Some("kept draft".to_owned())
+        );
     }
 
     /// The workspace is never left without a task: deleting the last one leaves the user in a new,

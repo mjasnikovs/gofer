@@ -33,6 +33,7 @@ commands.allow = [
     "query_godot_docs",
     "read_chat_attachment",
     "read_godot_logs",
+    "read_project_state",
     "read_workspace_file",
     "respond_tool_approval",
     "run_storage_maintenance",
@@ -52,5 +53,6 @@ commands.allow = [
     "unwatch_workspace_files",
     "update_script_document",
     "watch_workspace_files",
+    "write_project_state",
     "write_workspace_file",
 ]

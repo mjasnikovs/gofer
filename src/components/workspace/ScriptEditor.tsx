@@ -14,6 +14,7 @@ import {
 import {callScriptLanguage} from '../../services/script-session'
 import {commandErrorMessage} from '../../utils/command-error'
 import type {ScriptDiagnostic, ScriptPosition} from '../../models/script'
+import type {ScriptViews} from '../../models/ui-state'
 import type {ScriptBuffer} from '../../hooks/useScriptBuffers'
 import {GDSCRIPT_LANGUAGE_ID} from '../../services/monaco-gdscript'
 
@@ -27,6 +28,9 @@ type ScriptEditorProps = Readonly<{
     reveal?: Readonly<{path: string; line: number; at: number}> | undefined
     /** Every open tab, so models for closed files are disposed instead of leaking. */
     openPaths: readonly string[]
+    /** Where each script's cursor and scroll were left when the project was last open. */
+    views: ScriptViews
+    onViewChange: (path: string, view: unknown) => void
     onChange: (path: string, text: string) => void
     onSave: (path: string) => void
     onRename: (path: string, position: ScriptPosition) => void
@@ -37,6 +41,8 @@ type ScriptEditorProps = Readonly<{
 
 const EDITOR_HOST_STYLE = {minHeight: 0, width: '100%'} as const
 const MARKER_OWNER = 'gofer-lsp'
+/** How long the cursor has to stay put before where it is counts as where it was left. */
+const VIEW_SETTLE_MS = 400
 
 const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
     theme: GOFER_EDITOR_THEME,
@@ -63,6 +69,8 @@ export function ScriptEditor({
     diagnostics,
     reveal,
     openPaths,
+    views,
+    onViewChange,
     onChange,
     onSave,
     onRename,
@@ -73,17 +81,38 @@ export function ScriptEditor({
     const hostRef = useRef<HTMLElement | null>(null)
     const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | undefined>(undefined)
     const modelsRef = useRef(new Map<string, Monaco.editor.ITextModel>())
-    const viewStatesRef = useRef(new Map<string, Monaco.editor.ICodeEditorViewState | null>())
+    // Seeded from the project, so a script reopens at the line it was left on rather than at the
+    // top. Monaco's view state is opaque JSON, which is exactly what was stored.
+    const viewStatesRef = useRef(
+        new Map<string, Monaco.editor.ICodeEditorViewState | null>(
+            Object.entries(views) as [string, Monaco.editor.ICodeEditorViewState][]
+        )
+    )
+    const viewTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
     const decorationsRef = useRef<Monaco.editor.IEditorDecorationsCollection | undefined>(undefined)
     const applyingRef = useRef(false)
     const [monaco, setMonaco] = useState<typeof Monaco>()
 
     // Monaco listeners are registered once against a live editor, so the newest callbacks are read
     // through a ref instead of re-registering every render.
-    const handlers = useRef({onChange, onSave, onRename, onToggleBreakpoint, onOpenPath})
+    const handlers = useRef({
+        onChange,
+        onSave,
+        onRename,
+        onToggleBreakpoint,
+        onOpenPath,
+        onViewChange
+    })
     useEffect(() => {
-        handlers.current = {onChange, onSave, onRename, onToggleBreakpoint, onOpenPath}
-    }, [onChange, onSave, onRename, onToggleBreakpoint, onOpenPath])
+        handlers.current = {
+            onChange,
+            onSave,
+            onRename,
+            onToggleBreakpoint,
+            onOpenPath,
+            onViewChange
+        }
+    }, [onChange, onSave, onRename, onToggleBreakpoint, onOpenPath, onViewChange])
 
     const reportError = useCallback(
         (error: unknown) => {
@@ -180,9 +209,32 @@ export function ScriptEditor({
                 )
             }
         })
+        /*
+         * Remembers where the file is being read, once the reading settles.
+         *
+         * Cursor and scroll events arrive per keystroke and per wheel notch, and neither is worth
+         * a write on its own — what is worth keeping is where they came to rest.
+         */
+        const settle = () => {
+            if (viewTimerRef.current !== undefined) clearTimeout(viewTimerRef.current)
+            viewTimerRef.current = setTimeout(() => {
+                viewTimerRef.current = undefined
+                const model = editor.getModel()
+                if (!model) return
+                const path = workspacePathFromUri(model.uri)
+                const view = editor.saveViewState()
+                viewStatesRef.current.set(path, view)
+                handlers.current.onViewChange(path, view)
+            }, VIEW_SETTLE_MS)
+        }
+        const moved = editor.onDidChangeCursorPosition(settle)
+        const scrolled = editor.onDidScrollChange(settle)
         return () => {
+            if (viewTimerRef.current !== undefined) clearTimeout(viewTimerRef.current)
             changed.dispose()
             clicked.dispose()
+            moved.dispose()
+            scrolled.dispose()
             editor.dispose()
             editorRef.current = undefined
             decorationsRef.current = undefined
@@ -217,10 +269,10 @@ export function ScriptEditor({
         if (editor.getModel() !== model) {
             const previous = editor.getModel()
             if (previous) {
-                viewStatesRef.current.set(
-                    workspacePathFromUri(previous.uri),
-                    editor.saveViewState()
-                )
+                const previousPath = workspacePathFromUri(previous.uri)
+                const view = editor.saveViewState()
+                viewStatesRef.current.set(previousPath, view)
+                handlers.current.onViewChange(previousPath, view)
             }
             editor.setModel(model)
             const restored = viewStatesRef.current.get(buffer.path)

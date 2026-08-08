@@ -352,6 +352,51 @@ describe('Workspace', () => {
         })
     })
 
+    /*
+     * The unsent message is part of the conversation, so it is kept with the task and comes back
+     * with it. Losing a half-written prompt to a window close is losing work.
+     */
+    it('keeps an unsent message with its task and restores it', async () => {
+        const drafts: Record<string, string | undefined> = {
+            'ui.draft.0198f4c0-02ef-7000-8000-000000000001': 'Half a thought about the'
+        }
+        tauri.invoke.mockImplementation(async (command, args) => {
+            const state = args as {key?: string; value?: string} | undefined
+            if (command === 'list_workspace_files') return []
+            if (command === 'load_chat') {
+                return {
+                    taskId: '0198f4c0-02ef-7000-8000-000000000001',
+                    messages: [],
+                    agentMessages: []
+                }
+            }
+            if (command === 'read_project_state') {
+                const stored = drafts[state?.key ?? '']
+                return stored === undefined ? null : JSON.stringify(stored)
+            }
+            if (command === 'write_project_state') {
+                drafts[state?.key ?? ''] =
+                    state?.value === undefined ? undefined : (JSON.parse(state.value) as string)
+            }
+            return undefined
+        })
+
+        render(<Workspace />)
+
+        // What was being written when the project was last closed is in the composer.
+        const composer = await screen.findByRole('textbox')
+        await waitFor(() => {
+            expect(composer).toHaveTextContent('Half a thought about the')
+        })
+
+        await userEvent.type(composer, ' level')
+
+        // Typing again records the new text against the same task.
+        await waitFor(() => {
+            expect(drafts['ui.draft.0198f4c0-02ef-7000-8000-000000000001']).toContain('level')
+        })
+    })
+
     it('coalesces chat snapshots while a save is already running', async () => {
         let resolveFirstSave: (() => void) | undefined
         tauri.invoke.mockImplementation((command, args) => {
@@ -376,11 +421,11 @@ describe('Workspace', () => {
         await waitFor(() => {
             expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
         })
-        await userEvent.type(screen.getByRole('textbox'), 'First{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'First{enter}')
         await waitFor(() => {
             expect(screen.getByRole('textbox')).toBeEnabled()
         })
-        await userEvent.type(screen.getByRole('textbox'), 'Second{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Second{enter}')
         await new Promise(resolve => window.setTimeout(resolve, 250))
 
         expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
@@ -432,7 +477,7 @@ describe('Workspace', () => {
             'src',
             'data:image/png;base64,aGk='
         )
-        await userEvent.type(screen.getByRole('textbox'), 'Continue{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Continue{enter}')
         await waitFor(() => {
             expect(
                 tauri.invoke.mock.calls.filter(call => call[0] === 'read_chat_attachment')
@@ -491,7 +536,7 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(screen.getByRole('textbox'), 'Say hello{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Say hello{enter}')
 
         expect(await screen.findByText('Hello from local AI')).toBeInTheDocument()
         expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
@@ -530,7 +575,7 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(screen.getByRole('textbox'), 'Keep going{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Keep going{enter}')
 
         expect(
             await screen.findByText('Summarising the conversation to make room (105K / 120K)')
@@ -589,7 +634,7 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
 
         // The tool row rather than the sentence: streaming Markdown holds its last chunk back until
         // the next delta settles it, so the newest sentence is deliberately not on screen yet.
@@ -643,7 +688,7 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
 
         expect(await screen.findByText('godot_scene')).toBeInTheDocument()
         expect(
@@ -669,7 +714,7 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
 
         expect(await screen.findByText('bash')).toBeInTheDocument()
         await waitFor(() => {
@@ -706,7 +751,7 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
 
         expect(await screen.findByText('Starting.')).toBeInTheDocument()
         expect(
@@ -790,7 +835,7 @@ describe('Workspace', () => {
         render(<Workspace />)
 
         await screen.findByText('Local AI connected')
-        await userEvent.type(screen.getByRole('textbox'), 'Inspect workspace{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Inspect workspace{enter}')
 
         expect(await screen.findByText('Finished')).toBeInTheDocument()
         expect(screen.getByText('bash')).toBeInTheDocument()
@@ -834,7 +879,7 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(screen.getByRole('textbox'), 'Build a scene{enter}')
+        await userEvent.type(await screen.findByRole('textbox'), 'Build a scene{enter}')
         expect(await screen.findByText('godot --headless')).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('button', {name: 'Stop'}))

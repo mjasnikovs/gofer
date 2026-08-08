@@ -30,15 +30,22 @@ import type {GodotError, GodotLogSeverity, GodotSessionState} from '../../models
 import type {ScriptDiagnostic} from '../../models/script'
 import type {WorkspaceEntry} from '../../models/script'
 import type {GodotCall} from '../../models/workspace'
+import type {BottomTab, LogScope} from '../../models/ui-state'
 import {PanelState} from './PanelState'
-
-export type BottomTab = 'problems' | 'debugger' | 'output' | 'import'
 
 type BottomPanelProps = Readonly<{
     tab: BottomTab
     onTabChange: (tab: BottomTab) => void
     isCollapsed: boolean
     onToggle: () => void
+    /*
+     * The two output filters are the frame's, not the panel's: they are remembered with the
+     * project, and a panel that owns them would forget them every time it unmounts.
+     */
+    logSeverity: GodotLogSeverity
+    onLogSeverityChange: (severity: GodotLogSeverity) => void
+    logScope: LogScope
+    onLogScopeChange: (scope: LogScope) => void
     call: GodotCall
     state: GodotSessionState
     diagnostics: Readonly<Record<string, readonly ScriptDiagnostic[]>>
@@ -58,8 +65,6 @@ type Problem = Readonly<{
 const SEVERITY_LABEL = ['', 'Error', 'Warning', 'Information', 'Hint'] as const
 const SEVERITY_VARIANT = ['neutral', 'error', 'warning', 'accent', 'neutral'] as const
 const LOG_SEVERITIES: readonly GodotLogSeverity[] = ['info', 'warning', 'error']
-/** Which output the panel is showing: the running editor's, or every recorded session's. */
-type LogScope = 'session' | 'history'
 
 function problems(diagnostics: Readonly<Record<string, readonly ScriptDiagnostic[]>>): Problem[] {
     return Object.entries(diagnostics)
@@ -91,6 +96,10 @@ export function BottomPanel({
     onTabChange,
     isCollapsed,
     onToggle,
+    logSeverity: minSeverity,
+    onLogSeverityChange: setMinSeverity,
+    logScope: scope,
+    onLogScopeChange: setScope,
     call,
     state,
     diagnostics,
@@ -98,9 +107,7 @@ export function BottomPanel({
     files,
     onOpenLocation
 }: BottomPanelProps) {
-    const [minSeverity, setMinSeverity] = useState<GodotLogSeverity>('info')
     const [contains, setContains] = useState('')
-    const [scope, setScope] = useState<LogScope>('session')
     const [rescan, setRescan] = useState<GodotError>()
     const [isRescanning, setIsRescanning] = useState(false)
     const isOffline = state === 'offline' || state === 'error'

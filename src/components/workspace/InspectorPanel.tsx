@@ -20,9 +20,8 @@ import type {
     GodotSettingsPage
 } from '../../models/godot'
 import type {GodotCall, GodotSelection} from '../../models/workspace'
+import type {InspectorTab} from '../../models/ui-state'
 import {PanelState} from './PanelState'
-
-export type InspectorTab = 'node' | 'project' | 'editor'
 
 type InspectorPanelProps = Readonly<{
     tab: InspectorTab

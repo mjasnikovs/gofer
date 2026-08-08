@@ -767,6 +767,22 @@ fn import_legacy_chat(app: AppHandle, chat: StoredChat) -> Result<StoredChat, St
     storage.load_chat()
 }
 
+/// Reads one piece of remembered interface state for the open project.
+///
+/// The renderer keeps its layout — which tabs were open, how wide the panels were, which scripts
+/// were being edited — per project rather than per machine, because they are facts about the work
+/// rather than about the window.
+#[tauri::command(async)]
+fn read_project_state(app: AppHandle, key: String) -> Result<Option<String>, String> {
+    project_storage(&app)?.read_ui_state(&key)
+}
+
+/// Records one piece of interface state, or forgets it when no value is sent.
+#[tauri::command(async)]
+fn write_project_state(app: AppHandle, key: String, value: Option<String>) -> Result<(), String> {
+    project_storage(&app)?.write_ui_state(&key, value.as_deref())
+}
+
 #[tauri::command(async)]
 fn list_project_tasks(app: AppHandle) -> Result<Vec<TaskRecord>, String> {
     project_storage(&app)?.list_tasks()
@@ -2438,6 +2454,7 @@ pub fn run() {
         query_godot_docs,
         read_chat_attachment,
         read_godot_logs,
+        read_project_state,
         read_workspace_file,
         respond_tool_approval,
         run_storage_maintenance,
@@ -2457,6 +2474,7 @@ pub fn run() {
         unwatch_workspace_files,
         update_script_document,
         watch_workspace_files,
+        write_project_state,
         write_workspace_file,
     ]);
 

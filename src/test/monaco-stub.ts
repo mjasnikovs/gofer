@@ -38,6 +38,10 @@ export interface MonacoStubState {
     clickGlyphMargin: (line: number) => void
     /** Runs a registered editor action, such as the save keybinding. */
     runAction: (id: string) => void
+    /** Simulates the cursor coming to rest on a line, which is what gets remembered. */
+    moveCursor: (line: number) => void
+    /** View states the editor was asked to restore, in the order it was asked. */
+    restored: unknown[]
     reset: () => void
 }
 
@@ -46,7 +50,9 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
     const disposable = {dispose: () => undefined}
     let contentListener: (() => void) | undefined
     let mouseListener: ((event: unknown) => void) | undefined
+    let cursorListener: (() => void) | undefined
     let activeModel: StubModel | undefined
+    let cursorLine = 1
     const actionRunners = new Map<string, (editor: unknown) => void>()
 
     const state: MonacoStubState = {
@@ -67,7 +73,15 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
         runAction: (id: string) => {
             actionRunners.get(id)?.(editorInstance)
         },
+        moveCursor: (line: number) => {
+            cursorLine = line
+            cursorListener?.()
+        },
+        restored: [],
         reset: () => {
+            state.restored = []
+            cursorListener = undefined
+            cursorLine = 1
             state.editors = 0
             state.markers = {}
             state.decorations = []
@@ -117,8 +131,14 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
         revealLineInCenter: (line: number) => {
             state.revealed.push(line)
         },
-        saveViewState: () => null,
-        restoreViewState: () => undefined,
+        // The real view state is opaque JSON; this stands in for it with the one part a test can
+        // recognize, so a restored cursor is visible as a value rather than only as a call.
+        saveViewState: () => ({cursorLine}),
+        restoreViewState: (view: unknown) => {
+            state.restored.push(view)
+            const line = (view as {cursorLine?: number} | null)?.cursorLine
+            if (typeof line === 'number') cursorLine = line
+        },
         createDecorationsCollection: () => ({
             set: (decorations: readonly Monaco.editor.IModelDeltaDecoration[]) => {
                 state.decorations = decorations
@@ -135,6 +155,11 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
             mouseListener = listener
             return disposable
         },
+        onDidChangeCursorPosition: (listener: () => void) => {
+            cursorListener = listener
+            return disposable
+        },
+        onDidScrollChange: () => disposable,
         addAction: (action: {id: string; run: (editor: unknown) => void}) => {
             state.actions.push(action.id)
             actionRunners.set(action.id, action.run)
