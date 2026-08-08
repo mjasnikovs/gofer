@@ -14,7 +14,10 @@ import {Slider} from '@astryxdesign/core/Slider'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
+import {TextArea} from '@astryxdesign/core/TextArea'
 import {TextInput} from '@astryxdesign/core/TextInput'
+import ArrowUturnLeftIcon from '@heroicons/react/24/outline/ArrowUturnLeftIcon'
+import ChatBubbleLeftRightIcon from '@heroicons/react/24/outline/ChatBubbleLeftRightIcon'
 import CircleStackIcon from '@heroicons/react/24/outline/CircleStackIcon'
 import CloudArrowDownIcon from '@heroicons/react/24/outline/CloudArrowDownIcon'
 import KeyIcon from '@heroicons/react/24/outline/KeyIcon'
@@ -27,8 +30,10 @@ import {
     initializeRag,
     listAiModels,
     loadSettings,
+    readAgentPrompt,
     readCacheStatus,
     runStorageMaintenance,
+    saveAgentPrompt,
     saveSettings,
     testAiConnection
 } from '../../services/settings-store'
@@ -47,6 +52,8 @@ import {
 import type {AiModelOption, AiSettings} from '../../models/settings'
 import {
     INITIAL_SETTINGS_DRAFT,
+    agentPromptIsDefault,
+    agentPromptIsUnsaved,
     canDeleteCache,
     reduce,
     settingsRequest
@@ -90,11 +97,12 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             }
 
             try {
-                const [response, cacheResponse] = await Promise.all([
+                const [response, cacheResponse, prompt] = await Promise.all([
                     loadSettings(),
-                    readCacheStatus()
+                    readCacheStatus(),
+                    readAgentPrompt()
                 ])
-                dispatch({type: 'loaded', response, cache: cacheResponse})
+                dispatch({type: 'loaded', response, cache: cacheResponse, prompt})
             } catch (error) {
                 dispatch({
                     type: 'unavailable',
@@ -145,6 +153,12 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         if (!nextRequest) return
         dispatch({type: 'began', task: 'saving'})
         try {
+            // The prompt has a store of its own — it belongs to the project rather than to the
+            // connection — and one button saves both, because two save buttons on one page is a
+            // question the user should not have to answer.
+            if (agentPromptIsUnsaved(state)) {
+                dispatch({type: 'prompt-saved', prompt: await saveAgentPrompt(state.agentPrompt)})
+            }
             const response = await saveSettings(nextRequest)
             dispatch({type: 'saved', response})
         } catch (error) {
@@ -275,6 +289,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
 
     const value = progressValue(progress)
     const isDeletable = canDeleteCache(state)
+    const isShippedPrompt = agentPromptIsDefault(state)
     const selectModel = (model: AiModelOption) => {
         dispatch({type: 'model-chosen', model})
     }
@@ -457,15 +472,6 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                     }))}
                                                 />
                                                 <TextInput
-                                                    label='Agent system prompt'
-                                                    value={draft.ai.systemPrompt}
-                                                    isOptional
-                                                    description='Leave blank to use Gofer’s built-in coding-agent prompt.'
-                                                    onChange={systemPrompt => {
-                                                        updateAi({systemPrompt})
-                                                    }}
-                                                />
-                                                <TextInput
                                                     label='API dialect'
                                                     value='OpenAI chat completions'
                                                     isDisabled
@@ -516,6 +522,75 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                             {state.isLoading ?
                                                 'Loading Gofer settings…'
                                             :   'Settings are unavailable.'}
+                                        </Text>
+                                    }
+                                </Grid>
+
+                                <Divider />
+
+                                <Grid
+                                    columns={SETTINGS_GRID_COLUMNS}
+                                    gap={10}
+                                >
+                                    <VStack gap={2}>
+                                        <HStack
+                                            gap={2}
+                                            vAlign='center'
+                                        >
+                                            <Icon
+                                                icon={ChatBubbleLeftRightIcon}
+                                                size='md'
+                                                color='accent'
+                                            />
+                                            <Heading level={2}>Agent prompt</Heading>
+                                        </HStack>
+                                        <Text color='secondary'>
+                                            What the agent is told before every turn, sent exactly
+                                            as it reads here. It belongs to this project, so another
+                                            project keeps its own.
+                                        </Text>
+                                    </VStack>
+
+                                    {draft ?
+                                        <VStack gap={5}>
+                                            <TextArea
+                                                label='System prompt'
+                                                value={state.agentPrompt}
+                                                rows={18}
+                                                hasSpellCheck={false}
+                                                description={
+                                                    isShippedPrompt ?
+                                                        'This is the prompt Gofer ships. Editing it stores your version with the project.'
+                                                    :   'Edited for this project. Restoring the default lets later Gofer versions update it again.'
+                                                }
+                                                onChange={typed => {
+                                                    dispatch({type: 'prompt-typed', value: typed})
+                                                }}
+                                            />
+                                            <HStack
+                                                gap={3}
+                                                hAlign='end'
+                                            >
+                                                <Button
+                                                    label='Restore default'
+                                                    variant='secondary'
+                                                    icon={
+                                                        <Icon
+                                                            icon={ArrowUturnLeftIcon}
+                                                            size='sm'
+                                                        />
+                                                    }
+                                                    isDisabled={isShippedPrompt}
+                                                    clickAction={() => {
+                                                        dispatch({type: 'prompt-restored'})
+                                                    }}
+                                                />
+                                            </HStack>
+                                        </VStack>
+                                    :   <Text color='secondary'>
+                                            {state.isLoading ?
+                                                'Loading the agent prompt…'
+                                            :   'The agent prompt is unavailable.'}
                                         </Text>
                                     }
                                 </Grid>

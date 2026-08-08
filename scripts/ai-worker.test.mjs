@@ -736,7 +736,12 @@ test('a refused tool call reaches the model as an error result', async context =
     assert.match(end.output, /revision_conflict/u)
 })
 
-test('the Godot guidance is added to the prompt only when the domain tools are offered', async context => {
+/*
+ * The prompt itself is composed in Rust and shown to the user in settings, so what is left to
+ * prove here is that the worker does not touch it: the text arrives whole and reaches the model
+ * whole. Memory is the exception, because it is this turn's data rather than the user's wording.
+ */
+test('the system prompt reaches the model as it arrived, with this turn’s memory behind it', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     // One server per turn: the shared mock accumulates request bodies, and this test compares two.
@@ -749,6 +754,7 @@ test('the Godot guidance is added to the prompt only when the domain tools are o
                     ...settings,
                     baseUrl: `http://127.0.0.1:${String(mock.server.address().port)}/v1`
                 },
+                systemPrompt: 'Be brief. Never mention cats.',
                 messages: [{sender: 'user', text: 'Hello', timestamp: 1}],
                 workspacePath: workspace.path,
                 emit: () => undefined,
@@ -760,11 +766,16 @@ test('the Godot guidance is added to the prompt only when the domain tools are o
         }
     }
 
-    assert.doesNotMatch(await systemPrompt({}), /godot_session status/u)
-    const guided = await systemPrompt({tools: catalog, host: {call: () => Promise.resolve({})}})
-    assert.match(guided, /godot_session status/u)
-    assert.match(guided, /expectedRevision/u)
-    assert.match(guided, /approval_denied means they said no: do not retry it/u)
+    assert.equal(await systemPrompt({}), 'Be brief. Never mention cats.')
+    const withTools = await systemPrompt({
+        tools: catalog,
+        host: {call: () => Promise.resolve({})},
+        memoryContext: 'The player is a cat.'
+    })
+    assert.equal(
+        withTools,
+        'Be brief. Never mention cats.\n\nRelevant persistent project memory:\nThe player is a cat.'
+    )
 })
 
 /**
@@ -1157,6 +1168,7 @@ test('compaction set to 100 percent sends the conversation whole', async context
 
     await runAgent({
         settings: {...settings, baseUrl: url, compactionPercent: 100},
+        systemPrompt: 'You are Gofer.',
         messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
         agentMessages: history,
         workspacePath: workspace.path,

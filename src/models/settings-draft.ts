@@ -1,6 +1,7 @@
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import {apiKeyUpdate, normalizeSettings} from './settings'
 import type {
+    AgentPrompt,
     AiModelOption,
     AiSettings,
     ApiKeyIntent,
@@ -44,11 +45,24 @@ export type SettingsDraft = Readonly<{
     busy: SettingsBusy
     /** Models the server reported on the last successful connection test. */
     availableModels: readonly AiModelOption[]
+    /**
+     * The agent's system prompt, as three texts: what is in the box, what the backend last stored,
+     * and what Gofer ships. The middle one is what makes a save worth sending and the last one is
+     * what Restore puts back, so the page can answer both questions without asking the backend.
+     */
+    agentPrompt: string
+    savedAgentPrompt: string
+    defaultAgentPrompt: string
 }>
 
 export type SettingsAction =
     /** The backend answered with settings and a cache reading. */
-    | Readonly<{type: 'loaded'; response: SettingsResponse; cache: CacheStatus}>
+    | Readonly<{
+          type: 'loaded'
+          response: SettingsResponse
+          cache: CacheStatus
+          prompt: AgentPrompt
+      }>
     /** Loading finished without settings: no desktop backend, or the call threw. */
     | Readonly<{type: 'unavailable'; notice: Notice}>
     | Readonly<{type: 'began'; task: SettingsTask}>
@@ -60,6 +74,10 @@ export type SettingsAction =
     | Readonly<{type: 'api-key-typed'; value: string}>
     | Readonly<{type: 'api-key-removal-toggled'}>
     | Readonly<{type: 'saved'; response: SettingsResponse}>
+    | Readonly<{type: 'prompt-typed'; value: string}>
+    /** The user asked for the shipped prompt back. It is theirs to save or to type over. */
+    | Readonly<{type: 'prompt-restored'}>
+    | Readonly<{type: 'prompt-saved'; prompt: AgentPrompt}>
     /** Something finished with a result worth showing, and nothing else about the page changed. */
     | Readonly<{type: 'noticed'; notice: Notice}>
     | Readonly<{type: 'cache-read'; cache: CacheStatus}>
@@ -85,7 +103,10 @@ export const INITIAL_SETTINGS_DRAFT: SettingsDraft = {
     isLoading: true,
     isDeleteOpen: false,
     busy: NOTHING_RUNNING,
-    availableModels: []
+    availableModels: [],
+    agentPrompt: '',
+    savedAgentPrompt: '',
+    defaultAgentPrompt: ''
 }
 
 function busyWith(busy: SettingsBusy, task: SettingsTask, isRunning: boolean): SettingsBusy {
@@ -117,6 +138,16 @@ function savedNotice(response: SettingsResponse): Notice {
     }
 }
 
+/** Whether the box holds something the backend has not been told about yet. */
+export function agentPromptIsUnsaved(state: SettingsDraft) {
+    return state.agentPrompt !== state.savedAgentPrompt
+}
+
+/** Whether the box holds the prompt Gofer ships, so there is nothing to restore. */
+export function agentPromptIsDefault(state: SettingsDraft) {
+    return state.agentPrompt.trim() === state.defaultAgentPrompt.trim()
+}
+
 /** Whether the model cache may not be touched: the backend says busy, or this page is downloading. */
 export function cacheIsBusy(state: SettingsDraft) {
     return state.cache?.state === 'busy' || state.busy.downloading
@@ -134,6 +165,9 @@ export function reduce(state: SettingsDraft, action: SettingsAction): SettingsDr
                 settings: normalizeSettings(action.response.settings),
                 hasApiKey: action.response.hasApiKey,
                 cache: action.cache,
+                agentPrompt: action.prompt.prompt,
+                savedAgentPrompt: action.prompt.prompt,
+                defaultAgentPrompt: action.prompt.defaultPrompt,
                 isLoading: false,
                 notice:
                     action.response.credentialStoreError ?
@@ -228,6 +262,22 @@ export function reduce(state: SettingsDraft, action: SettingsAction): SettingsDr
                 apiKeyIntent: 'keep',
                 busy: busyWith(state.busy, 'saving', false),
                 notice: savedNotice(action.response)
+            }
+
+        case 'prompt-typed':
+            return {...state, agentPrompt: action.value}
+
+        case 'prompt-restored':
+            return {...state, agentPrompt: state.defaultAgentPrompt}
+
+        // The backend answers with the prompt it will send, which is the shipped one whenever the
+        // stored text was the shipped one. Taking its word keeps the box and the agent in step.
+        case 'prompt-saved':
+            return {
+                ...state,
+                agentPrompt: action.prompt.prompt,
+                savedAgentPrompt: action.prompt.prompt,
+                defaultAgentPrompt: action.prompt.defaultPrompt
             }
 
         case 'noticed':

@@ -585,6 +585,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
                 max_retries: 0,
                 ..AiSettings::default()
             },
+            system_prompt: String::new(),
             api_key: None,
             messages: vec![AiWorkerMessage {
                 sender: ChatSender::User,

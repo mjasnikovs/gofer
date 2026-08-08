@@ -1,13 +1,21 @@
 import {describe, expect, it} from 'vitest'
 import {
     INITIAL_SETTINGS_DRAFT,
+    agentPromptIsDefault,
+    agentPromptIsUnsaved,
     canDeleteCache,
     cacheIsBusy,
     reduce,
     settingsRequest
 } from './settings-draft'
 import type {SettingsAction, SettingsDraft} from './settings-draft'
-import type {AiModelOption, CacheStatus, GoferSettings, SettingsResponse} from './settings'
+import type {
+    AgentPrompt,
+    AiModelOption,
+    CacheStatus,
+    GoferSettings,
+    SettingsResponse
+} from './settings'
 
 const SETTINGS: GoferSettings = {
     version: 1,
@@ -26,12 +34,14 @@ const SETTINGS: GoferSettings = {
         thinkingLevel: 'high',
         maxRetries: 2,
         timeoutMs: 120_000,
-        compactionPercent: 86,
-        systemPrompt: ''
+        compactionPercent: 86
     }
 }
 
 const CACHE: CacheStatus = {path: '/cache', sizeBytes: 1024, state: 'installed'}
+
+const SHIPPED_PROMPT = 'You are Gofer.'
+const PROMPT: AgentPrompt = {prompt: SHIPPED_PROMPT, defaultPrompt: SHIPPED_PROMPT}
 
 const RESPONSE: SettingsResponse = {settings: SETTINGS, hasApiKey: false}
 
@@ -40,7 +50,7 @@ function apply(...actions: readonly SettingsAction[]): SettingsDraft {
     return actions.reduce(reduce, INITIAL_SETTINGS_DRAFT)
 }
 
-const loaded = apply({type: 'loaded', response: RESPONSE, cache: CACHE})
+const loaded = apply({type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT})
 
 describe('loading', () => {
     it('starts with nothing loaded and nothing running', () => {
@@ -60,6 +70,7 @@ describe('loading', () => {
         const sparse = {version: 1, ai: {model: 'gpt'}} as unknown as GoferSettings
         const state = apply({
             type: 'loaded',
+            prompt: PROMPT,
             response: {settings: sparse, hasApiKey: false},
             cache: CACHE
         })
@@ -71,6 +82,7 @@ describe('loading', () => {
     it('warns when the credential store could not be reached', () => {
         const state = apply({
             type: 'loaded',
+            prompt: PROMPT,
             response: {...RESPONSE, credentialStoreError: 'no keyring'},
             cache: CACHE
         })
@@ -106,7 +118,7 @@ describe('the request the page would send', () => {
 
     it('keeps rather than clears when the typed key is erased again', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'api-key-typed', value: 'sk-1'},
             {type: 'api-key-typed', value: '   '}
         )
@@ -122,7 +134,7 @@ describe('the request the page would send', () => {
 
     it('discards a typed key when removal is chosen', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'api-key-typed', value: 'sk-1'},
             {type: 'api-key-removal-toggled'}
         )
@@ -197,6 +209,7 @@ describe('work in flight', () => {
         const state = apply(
             {
                 type: 'loaded',
+                prompt: PROMPT,
                 response: {...RESPONSE, credentialStoreError: 'no keyring'},
                 cache: CACHE
             },
@@ -240,7 +253,7 @@ describe('work in flight', () => {
 describe('saving', () => {
     it('adopts what the backend stored and forgets the typed key', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'api-key-typed', value: 'sk-1'},
             {type: 'began', task: 'saving'},
             {type: 'saved', response: {settings: SETTINGS, hasApiKey: true}}
@@ -277,7 +290,7 @@ describe('the model cache', () => {
 
     it('cannot be deleted while this page is downloading into it', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'began', task: 'downloading'},
             {type: 'cache-downloading'}
         )
@@ -296,7 +309,7 @@ describe('the model cache', () => {
 
     it('closes its confirmation dialog when the delete succeeds', () => {
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'delete-dialog', isOpen: true},
             {type: 'began', task: 'deleting'},
             {type: 'cache-read', cache: {...CACHE, sizeBytes: 0, state: 'not-installed'}},
@@ -314,7 +327,7 @@ describe('the model cache', () => {
             description: 'x'
         } as const
         const state = apply(
-            {type: 'loaded', response: RESPONSE, cache: CACHE},
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'delete-dialog', isOpen: true},
             {type: 'began', task: 'deleting'},
             {type: 'failed', task: 'deleting', notice},
@@ -329,5 +342,44 @@ describe('notices', () => {
         const notice = {status: 'success', title: 'Saved', description: 'x'} as const
         const state = apply({type: 'noticed', notice}, {type: 'notice-dismissed'})
         expect(state.notice).toBeUndefined()
+    })
+})
+
+describe('the agent prompt', () => {
+    it('arrives as the text the box shows and the text Restore puts back', () => {
+        expect(loaded.agentPrompt).toBe(SHIPPED_PROMPT)
+        expect(agentPromptIsUnsaved(loaded)).toBe(false)
+        expect(agentPromptIsDefault(loaded)).toBe(true)
+    })
+
+    it('is unsaved from the first keystroke, and restoring it is a change of its own', () => {
+        const edited = apply(
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'prompt-typed', value: 'Answer in Latvian.'}
+        )
+        expect(agentPromptIsUnsaved(edited)).toBe(true)
+        expect(agentPromptIsDefault(edited)).toBe(false)
+
+        const restored = reduce(edited, {type: 'prompt-restored'})
+        expect(restored.agentPrompt).toBe(SHIPPED_PROMPT)
+        // Restoring only fills the box. The backend is told when the page is saved, like everything
+        // else on it, so until then the shipped text is still an unsaved change.
+        expect(agentPromptIsUnsaved(restored)).toBe(false)
+        expect(agentPromptIsDefault(restored)).toBe(true)
+    })
+
+    /*
+     * The backend answers a save with what it will actually send, which is the shipped prompt
+     * whenever the stored text was the shipped one. Taking its word is what keeps the box from
+     * claiming an edit the project does not have.
+     */
+    it('takes the saved prompt from the backend rather than from the box', () => {
+        const state = apply(
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'prompt-typed', value: `  ${SHIPPED_PROMPT}  `},
+            {type: 'prompt-saved', prompt: PROMPT}
+        )
+        expect(state.agentPrompt).toBe(SHIPPED_PROMPT)
+        expect(agentPromptIsUnsaved(state)).toBe(false)
     })
 })

@@ -37,6 +37,14 @@ export function deleteRagCache() {
     return invoke('delete_rag_cache')
 }
 
+export function readAgentPrompt() {
+    return invoke('read_agent_prompt')
+}
+
+export function saveAgentPrompt(prompt: string) {
+    return invoke('save_agent_prompt', {prompt})
+}
+
 export function createProjectBackup() {
     return invoke('create_project_backup')
 }

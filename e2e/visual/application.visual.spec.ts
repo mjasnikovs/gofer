@@ -41,8 +41,7 @@ async function installDesktop(page: Page, state: VisualState) {
                 input: ['text', 'image'],
                 thinkingLevel: 'medium',
                 maxRetries: 2,
-                timeoutMs: 120_000,
-                systemPrompt: ''
+                timeoutMs: 120_000
             }
         }
         // The approval prompt is still an event, and rightly so: it is a rare notification that
@@ -240,6 +239,12 @@ async function installDesktop(page: Page, state: VisualState) {
                     }
                 if (command === 'load_chat') return {messages: [], agentMessages: []}
                 if (command === 'load_settings') return {settings, hasApiKey: true}
+                if (command === 'read_agent_prompt' || command === 'save_agent_prompt')
+                    return {
+                        prompt: 'You are Gofer, a capable local coding agent. Work autonomously toward the user’s goal.',
+                        defaultPrompt:
+                            'You are Gofer, a capable local coding agent. Work autonomously toward the user’s goal.'
+                    }
                 if (command === 'get_rag_cache_status')
                     return {path: '/fixture/cache', sizeBytes: 1_024, state: 'installed'}
                 if (command === 'list_ai_models')

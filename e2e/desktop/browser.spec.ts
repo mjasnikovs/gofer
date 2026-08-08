@@ -33,8 +33,7 @@ describe('renderer desktop journey', () => {
                     input: ['text'],
                     thinkingLevel: 'off',
                     maxRetries: 0,
-                    timeoutMs: 5_000,
-                    systemPrompt: ''
+                    timeoutMs: 5_000
                 }
             },
             hasApiKey: true

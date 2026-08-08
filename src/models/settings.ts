@@ -20,7 +20,16 @@ export type AiSettings = Readonly<{
      * compaction off. 86 draws the same line Pi does with its 16,384-token reserve.
      */
     compactionPercent: number
-    systemPrompt: string
+}>
+
+/**
+ * The agent's system prompt as the settings page holds it: what this project sends, and the text
+ * Gofer ships. Both are the whole prompt — the page shows what the turn will send, not a fragment
+ * of it — and a project storing nothing is simply a project whose `prompt` is the default.
+ */
+export type AgentPrompt = Readonly<{
+    prompt: string
+    defaultPrompt: string
 }>
 
 export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -109,8 +118,7 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
                 thinkingLevel: 'off',
                 maxRetries: 2,
                 timeoutMs: 120_000,
-                compactionPercent: 86,
-                systemPrompt: ''
+                compactionPercent: 86
             },
             settings.ai
         )

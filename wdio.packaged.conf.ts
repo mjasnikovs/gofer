@@ -137,8 +137,7 @@ export const config: Options.Testrunner = {
                             input: ['text', 'image'],
                             thinkingLevel: 'off',
                             maxRetries: 0,
-                            timeoutMs: 10_000,
-                            systemPrompt: ''
+                            timeoutMs: 10_000
                         }
                     },
                     null,

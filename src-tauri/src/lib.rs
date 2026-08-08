@@ -12,6 +12,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
 
 pub mod addon;
+mod agent_prompt;
 mod ai_tools;
 mod approvals;
 mod cancel;
@@ -138,8 +139,6 @@ struct AiSettings {
     timeout_ms: u64,
     #[serde(default = "default_compaction_percent")]
     compaction_percent: u32,
-    #[serde(default)]
-    system_prompt: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -257,6 +256,9 @@ struct ChatRequest {
 #[serde(rename_all = "camelCase")]
 struct AiWorkerRequest {
     settings: AiSettings,
+    /// The whole system prompt, sent as it stands. Empty means the shipped one, which
+    /// [`run_ai_worker_with`] fills in so no caller can start a turn with no prompt at all.
+    system_prompt: String,
     api_key: Option<String>,
     messages: Vec<AiWorkerMessage>,
     agent_messages: Option<serde_json::Value>,
@@ -409,7 +411,6 @@ impl Default for AiSettings {
             max_retries: default_max_retries(),
             timeout_ms: default_timeout_ms(),
             compaction_percent: default_compaction_percent(),
-            system_prompt: String::new(),
         }
     }
 }
@@ -666,6 +667,10 @@ async fn send_ai_message(
             &stream,
             AiWorkerRequest {
                 settings: settings.ai,
+                system_prompt: agent_prompt::resolve(
+                    storage.read_agent_prompt()?.as_deref(),
+                    ai_tools::CATALOG,
+                ),
                 api_key,
                 messages,
                 agent_messages: request.agent_messages,
@@ -1260,6 +1265,50 @@ async fn initialize_rag(app: AppHandle) -> Result<(), CommandError> {
         .map_err(|message| CommandError::new("models_unavailable", message).retryable())
 }
 
+/// The prompt as the settings page shows it: what this project sends, and what Gofer ships.
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentPromptResponse {
+    prompt: String,
+    default_prompt: String,
+}
+
+fn agent_prompt_response(stored: Option<String>) -> AgentPromptResponse {
+    AgentPromptResponse {
+        prompt: agent_prompt::resolve(stored.as_deref(), ai_tools::CATALOG),
+        default_prompt: agent_prompt::default_prompt(ai_tools::CATALOG),
+    }
+}
+
+#[tauri::command(async)]
+fn read_agent_prompt(app: AppHandle) -> Result<AgentPromptResponse, CommandError> {
+    let stored = project_storage(&app)
+        .and_then(|storage| storage.read_agent_prompt())
+        .map_err(CommandError::coded("prompt_unreadable"))?;
+    Ok(agent_prompt_response(stored))
+}
+
+/// Stores this project's prompt, or forgets it when the text is the one Gofer ships.
+#[tauri::command(async)]
+fn save_agent_prompt(app: AppHandle, prompt: String) -> Result<AgentPromptResponse, CommandError> {
+    if prompt.len() > agent_prompt::MAX_PROMPT_BYTES {
+        return Err(CommandError::new(
+            "prompt_too_large",
+            "System prompts cannot exceed 64 KiB",
+        ));
+    }
+    let stored = if prompt.trim().is_empty() || agent_prompt::is_default(&prompt, ai_tools::CATALOG)
+    {
+        None
+    } else {
+        Some(prompt)
+    };
+    project_storage(&app)
+        .and_then(|storage| storage.write_agent_prompt(stored.as_deref()))
+        .map_err(CommandError::coded("prompt_unwritable"))?;
+    Ok(agent_prompt_response(stored))
+}
+
 #[tauri::command]
 async fn query_godot_docs(request: rag::GodotDocsQuery) -> Result<rag::GodotDocsResponse, String> {
     tauri::async_runtime::spawn_blocking(move || rag::retrieve_query(request))
@@ -1755,7 +1804,6 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             max_retries: default_max_retries(),
             timeout_ms: default_timeout_ms(),
             compaction_percent: default_compaction_percent(),
-            system_prompt: String::new(),
         },
     })
 }
@@ -1799,9 +1847,6 @@ fn validate_settings(mut settings: GoferSettings) -> Result<GoferSettings, Strin
     }
     if settings.ai.model_name.len() > 512 {
         return Err("Model names cannot exceed 512 bytes".to_owned());
-    }
-    if settings.ai.system_prompt.len() > 64 * 1024 {
-        return Err("System prompts cannot exceed 64 KiB".to_owned());
     }
     if settings.ai.input.is_empty()
         || settings.ai.input.len() > 16
@@ -2073,9 +2118,12 @@ fn run_ai_worker_with<R: Runtime>(
     app: &AppHandle<R>,
     request_id: u64,
     stream: &tauri::ipc::Channel<AiStreamPayload>,
-    request: AiWorkerRequest,
+    mut request: AiWorkerRequest,
     spawner: &impl ProcessSpawner,
 ) -> Result<String, String> {
+    // The one place every turn passes through, so a request built without a prompt — an acceptance
+    // suite, a test — still runs the agent Gofer ships rather than one with nothing said to it.
+    request.system_prompt = agent_prompt::resolve(Some(&request.system_prompt), request.tools);
     let worker = ai_worker_path()?;
     // Approvals belong to a turn: the gate opens here and closes when this one ends, so a gated
     // tool call always has an agent waiting for its answer.
@@ -2470,12 +2518,14 @@ pub fn run() {
         move_workspace_path,
         open_script_document,
         query_godot_docs,
+        read_agent_prompt,
         read_chat_attachment,
         read_godot_logs,
         read_project_state,
         read_workspace_file,
         respond_tool_approval,
         run_storage_maintenance,
+        save_agent_prompt,
         save_chat,
         save_script_document,
         save_settings,
@@ -2651,6 +2701,7 @@ mod tests {
     fn worker_request() -> AiWorkerRequest {
         AiWorkerRequest {
             settings: AiSettings::default(),
+            system_prompt: String::new(),
             api_key: None,
             messages: vec![AiWorkerMessage {
                 sender: ChatSender::User,
@@ -3470,11 +3521,6 @@ mod tests {
             {
                 let mut value = settings("http://localhost", "model");
                 value.ai.model_name = "x".repeat(513);
-                value
-            },
-            {
-                let mut value = settings("http://localhost", "model");
-                value.ai.system_prompt = "x".repeat(64 * 1_024 + 1);
                 value
             },
             {

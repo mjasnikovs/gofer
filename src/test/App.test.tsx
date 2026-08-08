@@ -49,6 +49,11 @@ const settingsResponse = {
     hasApiKey: true
 } as const
 
+const agentPrompt = {
+    prompt: 'You are Gofer, a capable local coding agent.',
+    defaultPrompt: 'You are Gofer, a capable local coding agent.'
+} as const
+
 const incompleteCache = {
     path: '/tmp/gofer-rag',
     sizeBytes: 42,
@@ -140,6 +145,7 @@ describe('SettingsPage', () => {
         tauri.invoke.mockImplementation(async (command: string) => {
             if (command === 'list_workspace_files') return []
             if (command === 'load_settings') return settingsResponse
+            if (command === 'read_agent_prompt') return agentPrompt
             if (command === 'get_rag_cache_status') return incompleteCache
             if (command === 'test_ai_connection') {
                 return {status: 'connected', message: 'Connected.'}

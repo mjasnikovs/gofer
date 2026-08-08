@@ -38,6 +38,7 @@ import type {
     ToolApprovalSettled
 } from '../models/chat'
 import type {
+    AgentPrompt,
     AiModelOption,
     CacheStatus,
     ConnectionTestResult,
@@ -147,6 +148,7 @@ type DesktopCommandMap = Readonly<{
     open_script_document: CommandSpec<{request: OpenScriptRequest}, ScriptDocument>
     'plugin:dialog|open': CommandSpec<{options: OpenDialogOptions}, string | null>
     query_godot_docs: CommandSpec<{request: DocsQuery}, DocsResponse>
+    read_agent_prompt: CommandSpec<undefined, AgentPrompt>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
     read_godot_logs: CommandSpec<{query: GodotLogQuery}, GodotLogPage>
     // Remembered interface state, as the JSON the renderer wrote. Absent when nothing is stored.
@@ -154,6 +156,7 @@ type DesktopCommandMap = Readonly<{
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
     respond_tool_approval: CommandSpec<{request: ToolApprovalRequest}, void>
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>
+    save_agent_prompt: CommandSpec<{prompt: string}, AgentPrompt>
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
     save_script_document: CommandSpec<{request: SaveScriptRequest}, ScriptStamp>

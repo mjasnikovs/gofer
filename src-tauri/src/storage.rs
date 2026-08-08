@@ -17,6 +17,8 @@ const LEGACY_PROJECTS_DIRECTORY: &str = "projects";
 const PROJECT_DATABASE_FILE_NAME: &str = "project.sqlite";
 /// The project's own identity, kept in its own database so that moving the folder moves it too.
 const PROJECT_ID_KEY: &str = "project.id";
+/// The project's own agent prompt, absent while the project follows the shipped one.
+const AGENT_PROMPT_KEY: &str = "agent.system_prompt";
 const MEMORY_EMBEDDING_DIMENSIONS: usize = 1024;
 const MEMORY_EMBEDDING_MODEL: &str = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
 const MAX_STORED_CHAT_BYTES: usize = 32 * 1024 * 1024;
@@ -862,6 +864,47 @@ impl ProjectStorage {
             None => {
                 connection
                     .execute("DELETE FROM project_state WHERE key = ?1", [key])
+                    .map_err(database_error)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The prompt this project sends its agent, or `None` while it follows the shipped one.
+    pub fn read_agent_prompt(&self) -> Result<Option<String>, String> {
+        self.connection()?
+            .query_row(
+                "SELECT value FROM project_state WHERE key = ?1",
+                [AGENT_PROMPT_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
+    /// Stores this project's prompt, or forgets it so the project follows the shipped one again.
+    ///
+    /// It shares `project_state` with the interface keys but not their prefix, because the renderer
+    /// cannot reach it the way it reaches those: it is what the agent is told, so it comes through
+    /// a command that checks its size rather than through the general interface-state write.
+    pub fn write_agent_prompt(&self, prompt: Option<&str>) -> Result<(), String> {
+        let (_write_guard, connection) = self.write_connection()?;
+        match prompt {
+            Some(prompt) => {
+                connection
+                    .execute(
+                        "INSERT INTO project_state (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        params![AGENT_PROMPT_KEY, prompt],
+                    )
+                    .map_err(database_error)?;
+            }
+            None => {
+                connection
+                    .execute(
+                        "DELETE FROM project_state WHERE key = ?1",
+                        [AGENT_PROMPT_KEY],
+                    )
                     .map_err(database_error)?;
             }
         }
@@ -2941,6 +2984,42 @@ mod tests {
             storage
                 .write_ui_state("ui.workspace", Some(&"x".repeat(MAX_UI_STATE_BYTES + 1)))
                 .is_err()
+        );
+    }
+
+    /// A prompt the project stores is the project's; storing none is how it follows the shipped one.
+    #[test]
+    fn the_agent_prompt_round_trips_and_can_be_given_back() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+
+        assert_eq!(storage.read_agent_prompt().expect("read"), None);
+        storage
+            .write_agent_prompt(Some("Answer in Latvian."))
+            .expect("write");
+        assert_eq!(
+            storage.read_agent_prompt().expect("read"),
+            Some("Answer in Latvian.".to_owned())
+        );
+
+        storage
+            .write_agent_prompt(Some("Answer in Latvian, briefly."))
+            .expect("overwrite");
+        assert_eq!(
+            storage.read_agent_prompt().expect("read"),
+            Some("Answer in Latvian, briefly.".to_owned())
+        );
+
+        storage.write_agent_prompt(None).expect("forget");
+        assert_eq!(storage.read_agent_prompt().expect("read"), None);
+        // It shares `project_state` with the interface keys, and forgetting it left them alone.
+        storage
+            .write_ui_state("ui.workspace", Some("kept"))
+            .expect("write interface state");
+        storage.write_agent_prompt(None).expect("forget again");
+        assert_eq!(
+            storage.read_ui_state("ui.workspace").expect("read"),
+            Some("kept".to_owned())
         );
     }
 
