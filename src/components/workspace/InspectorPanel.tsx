@@ -161,11 +161,11 @@ export function InspectorPanel({
             <EmptyState
                 isCompact
                 headingLevel={3}
-                title='No editor session'
-                description='The inspector reads a running editor session.'
+                title='No editor running'
+                description='The inspector reads a running editor.'
                 actions={
                     <Button
-                        label='Start editor session'
+                        label='Start editor'
                         size='sm'
                         clickAction={onStartSession}
                     />

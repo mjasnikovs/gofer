@@ -454,7 +454,7 @@ async function renderWithChatReferences(added: ChatReference[]) {
 /** The explorer's own offer to start one. The inspector beside it makes the same offer. */
 function startSessionButton() {
     return within(screen.getByRole('navigation', {name: 'Explorer'})).getByRole('button', {
-        name: 'Start editor session'
+        name: 'Start editor'
     })
 }
 
@@ -517,7 +517,7 @@ describe('InspectorWorkspace', () => {
         await flush()
         expect(
             within(screen.getByRole('navigation', {name: 'Explorer'})).getByText(
-                'No editor session'
+                'No editor running'
             )
         ).toBeInTheDocument()
         expect(screen.getByText('No problems')).toBeInTheDocument()
@@ -885,7 +885,7 @@ describe('InspectorWorkspace', () => {
         expect(
             screen.getByText('ERROR: Invalid call in a session that already stopped')
         ).toBeInTheDocument()
-        expect(screen.getByText(/session session-0/)).toBeInTheDocument()
+        expect(screen.getByText(/run session-0/)).toBeInTheDocument()
     })
 
     it('cites documentation by chapter, because retrieval exposes no URL', async () => {

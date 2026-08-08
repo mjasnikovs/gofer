@@ -43,7 +43,7 @@ type ExplorerPanelProps = Readonly<{
     onOpenFile: (path: string) => void
     /** Opens a scene in the managed editor, which is what every scene-reading panel follows. */
     onOpenScene: (path: string) => void
-    /** Opens the scene `project.godot` names, for a session that is editing none. */
+    /** Opens the scene `project.godot` names, for an editor that is editing none. */
     onOpenMainScene: () => void
     onStartSession: () => void
 }>
@@ -333,11 +333,11 @@ export function ExplorerPanel({
             <EmptyState
                 isCompact
                 headingLevel={3}
-                title='No editor session'
+                title='No editor running'
                 description='Gofer starts one Godot editor bound to the active task worktree.'
                 actions={
                     <Button
-                        label='Start editor session'
+                        label='Start editor'
                         size='sm'
                         clickAction={onStartSession}
                     />

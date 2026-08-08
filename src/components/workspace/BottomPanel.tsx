@@ -518,7 +518,7 @@ export function BottomPanel({
                                             >
                                                 <SegmentedControlItem
                                                     value='session'
-                                                    label='Session'
+                                                    label='This run'
                                                 />
                                                 <SegmentedControlItem
                                                     value='history'
@@ -545,12 +545,12 @@ export function BottomPanel({
                                         container='section'
                                         status='warning'
                                         title='Older output was discarded'
-                                        description={`${String(logs.dropped)} line(s) left the session buffer before this panel read them.`}
+                                        description={`${String(logs.dropped)} line(s) left the editor's output buffer before this panel read them.`}
                                     />
                                 :   null}
                                 {scope === 'session' ?
                                     <PanelState
-                                        label='session output'
+                                        label='editor output'
                                         isLoading={false}
                                         error={logs.error}
                                         isEmpty={logs.entries.length === 0}
@@ -589,7 +589,7 @@ export function BottomPanel({
                                         error={history.error}
                                         isEmpty={history.hits.length === 0}
                                         emptyTitle='Nothing found'
-                                        emptyDescription='Search the warnings and errors recorded for every session, including the ones that have already stopped.'
+                                        emptyDescription='Search the warnings and errors recorded for every editor run, including the ones that have already stopped.'
                                     >
                                         <VStack
                                             gap={0}
@@ -612,7 +612,7 @@ export function BottomPanel({
                                                     }
                                                     label={hit.message}
                                                     labelLines={2}
-                                                    description={`${new Date(hit.timestamp).toLocaleString()} · session ${hit.sessionId ?? 'before managed sessions'}`}
+                                                    description={`${new Date(hit.timestamp).toLocaleString()} · run ${hit.sessionId ?? 'recorded before runs were numbered'}`}
                                                     descriptionLines={1}
                                                 />
                                             ))}

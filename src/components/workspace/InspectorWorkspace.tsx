@@ -522,7 +522,7 @@ function InspectorFrame({chat, layout: opened, views, onError}: InspectorFramePr
                         height='100%'
                     >
                         <Toolbar
-                            label='Session'
+                            label='Editor'
                             size='sm'
                             dividers={['bottom']}
                             startContent={
@@ -532,14 +532,14 @@ function InspectorFrame({chat, layout: opened, views, onError}: InspectorFramePr
                                 >
                                     <StatusDot
                                         variant={STATE_VARIANT[state]}
-                                        label={`Editor session: ${state}`}
+                                        label={`Editor: ${state}`}
                                     />
                                     <Text
                                         type='supporting'
                                         color='secondary'
                                     >
                                         {isOffline ?
-                                            'Editor session stopped'
+                                            'Editor stopped'
                                         :   `${session?.godotVersion ?? 'Godot'} · ${scenePath === '' ? 'no scene open' : scenePath}${scene?.dirty === true ? ' •' : ''}`
                                         }
                                     </Text>
@@ -560,9 +560,9 @@ function InspectorFrame({chat, layout: opened, views, onError}: InspectorFramePr
                                         />
                                     :   null}
                                     {/*
-                                     * Emphasis follows whatever the screen is for. With no session
+                                     * Emphasis follows whatever the screen is for. With no editor
                                      * there is only one thing to do, and starting it is already the
-                                     * primary; once a session is live the project controls are, and
+                                     * primary; once the editor is live the project controls are, and
                                      * they were both rendering grey-on-grey, so a running workspace
                                      * had no primary action at all.
                                      */}
@@ -574,7 +574,7 @@ function InspectorFrame({chat, layout: opened, views, onError}: InspectorFramePr
                                         clickAction={debug.isLaunched ? stopProject : runProject}
                                     />
                                     <Button
-                                        label={isOffline ? 'Start session' : 'Stop session'}
+                                        label={isOffline ? 'Start editor' : 'Stop editor'}
                                         size='sm'
                                         variant={isOffline ? 'primary' : 'ghost'}
                                         isDisabled={isBusy}

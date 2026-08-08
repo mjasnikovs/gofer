@@ -477,7 +477,7 @@ test('raises the mention action on the row under the pointer @interaction', asyn
     await page.goto('/')
     await page
         .getByRole('navigation', {name: 'Explorer'})
-        .getByRole('button', {name: 'Start editor session'})
+        .getByRole('button', {name: 'Start editor'})
         .click()
     // The deepest row with the longest name: the one a row-width mistake takes out of reach first.
     const action = page.getByRole('button', {
@@ -513,7 +513,7 @@ test('inspector workspace', async ({page}) => {
     // Both the explorer and the inspector offer to start one; this is the explorer's.
     await page
         .getByRole('navigation', {name: 'Explorer'})
-        .getByRole('button', {name: 'Start editor session'})
+        .getByRole('button', {name: 'Start editor'})
         .click()
     // The name is its own element now, so `Player` alone also matches the collision shape below it.
     await page.getByText('Player', {exact: true}).click()
@@ -546,7 +546,7 @@ async function openSession(page: Page) {
     await page
         .getByRole('navigation', {name: 'Explorer'})
         .getByRole('button', {
-            name: 'Start editor session'
+            name: 'Start editor'
         })
         .click()
 }

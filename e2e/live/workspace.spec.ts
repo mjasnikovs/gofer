@@ -592,7 +592,7 @@ describe('the live workspace', () => {
         })
 
         it('offers the session controls the workspace is built around', async () => {
-            await expectText(['Start session', 'Run project', 'Chat', 'Scripts', 'Game', 'Docs'])
+            await expectText(['Start editor', 'Run project', 'Chat', 'Scripts', 'Game', 'Docs'])
         })
 
         it('creates a task backed by an isolated worktree', async () => {
@@ -823,7 +823,7 @@ describe('the live workspace', () => {
                 interval: 100,
                 timeoutMsg: 'the settings page never closed'
             })
-            await expectText(['Start session'])
+            await expectText(['Start editor'])
         })
     })
 
@@ -862,9 +862,9 @@ describe('the live workspace', () => {
 
         it('says every panel is waiting for a session it does not have', async () => {
             await clickTab('Scene')
-            await expectText(['No editor session', 'Start editor session'])
+            await expectText(['No editor running', 'Start editor'])
             await clickTab('Runtime')
-            await expectText(['No editor session'])
+            await expectText(['No editor running'])
             await clickTab('Debugger')
             await expectText(['The game is not stopped'])
             await clickTab('Problems')
@@ -877,9 +877,9 @@ describe('the live workspace', () => {
             await clickTab('Scene')
             // The explorer offers the session to a user who is looking at the empty tree, which is
             // where they find out there is none; the toolbar's button is exercised further down.
-            await clickButton('Start editor session')
+            await clickButton('Start editor')
             await expectSessionState('ready', 180_000)
-            await expectText(['4.7.1', 'Stop session'])
+            await expectText(['4.7.1', 'Stop editor'])
             // The lifecycle the toolbar's status dot reflects, in the order it happened.
             expect(await sessionStates()).toContain('importing')
             bound = await sessionWorktree()
@@ -2083,7 +2083,7 @@ describe('the live workspace', () => {
 
             // The window has to say so on its own, without the sweep clicking anything: what it
             // polls is the session, and the session is what has to notice.
-            await expectText(['No editor session'], {limitMs: 60_000})
+            await expectText(['No editor running'], {limitMs: 60_000})
         })
 
         it('closes the run it was recording rather than leaving it open', () => {
@@ -2105,7 +2105,7 @@ describe('the live workspace', () => {
             // The session the dead editor left behind must not stand in the way of the next one.
             await forgetSessionStates()
             await clickTab('Scene')
-            await clickButton('Start editor session')
+            await clickButton('Start editor')
             await expectSessionState('ready', 180_000)
             bound = await sessionWorktree()
         })
@@ -2113,14 +2113,14 @@ describe('the live workspace', () => {
 
     describe('shutting the session down', () => {
         it('stops the editor and removes the staged addon', async () => {
-            await clickButton('Stop session')
-            await expectText(['Editor session stopped', 'Start session'], {limitMs: 60_000})
+            await clickButton('Stop editor')
+            await expectText(['Editor session stopped', 'Start editor'], {limitMs: 60_000})
             expect(existsSync(join(bound, 'addons/gofer'))).toBe(false)
         })
 
         it('leaves the panels saying there is no session rather than failing', async () => {
             await clickTab('Scene')
-            await expectText(['No editor session'], {limitMs: 30_000})
+            await expectText(['No editor running'], {limitMs: 30_000})
         })
     })
 
@@ -2134,7 +2134,7 @@ describe('the live workspace', () => {
         it('refuses the session by naming the directory and what to do about it', async () => {
             renameSync(join(bound, 'project.godot'), join(bound, 'project.godot.hidden'))
             try {
-                await clickButton('Start session')
+                await clickButton('Start editor')
                 await expectText(
                     // A task worktree is a linked checkout, so the refusal names the fix that
                     // belongs to one: pointing Gofer somewhere else would not help, because the
@@ -2153,7 +2153,7 @@ describe('the live workspace', () => {
         })
 
         it('leaves the session offline rather than half started', async () => {
-            await expectText(['Start session', 'Editor session stopped'], {allow: REFUSAL})
+            await expectText(['Start editor', 'Editor session stopped'], {allow: REFUSAL})
         })
     })
 
