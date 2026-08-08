@@ -318,6 +318,7 @@ describe('Workspace', () => {
             request: {
                 requestId: 1,
                 agentMessages: [],
+                isRetry: false,
                 messages: [
                     expect.objectContaining({
                         sender: 'user',
@@ -564,6 +565,7 @@ describe('Workspace', () => {
             request: {
                 requestId: 1,
                 agentMessages: [],
+                isRetry: false,
                 messages: [expect.objectContaining({sender: 'user', text: 'Say hello'})]
             }
         })

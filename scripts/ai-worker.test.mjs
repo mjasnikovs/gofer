@@ -1179,3 +1179,140 @@ test('compaction set to 100 percent sends the conversation whole', async context
     // The system prompt and the new prompt on either side of an untouched conversation.
     assert.equal(mock.bodies[0].messages.length, history.length + 2)
 })
+
+test('a turn reports what the agent remembers at every step, not only at the end', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {calls: [{name: 'bash', args: {command: 'echo one'}}]},
+        {text: 'Done'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'Run it', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    // Two steps, so two checkpoints — the first one lands while the turn is still running, which is
+    // the only reason a turn that dies part-way leaves anything behind at all.
+    const checkpoints = events.filter(event => event.type === 'turn-state')
+    assert.equal(checkpoints.length, 2)
+    assert.ok(checkpoints[0].agentMessages.length > 0)
+    assert.ok(
+        events.indexOf(checkpoints[0]) < events.findIndex(event => event.type === 'done'),
+        'the first checkpoint arrives before the turn ends'
+    )
+})
+
+test('a retry takes the failed prompt and its work back off the transcript', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{text: 'This time it worked'}])
+    const url = await baseUrl(context, mock.server)
+    // What a crashed turn leaves behind: the settled turn above it, then its own prompt and the
+    // half-finished work it did before it died.
+    const crashed = [
+        ...longConversation(1, 20),
+        {role: 'user', content: 'Build the level', timestamp: 10},
+        {
+            role: 'assistant',
+            content: [{type: 'text', text: 'Starting on it'}],
+            api: 'openai-completions',
+            provider: 'local',
+            model: settings.model,
+            usage: NO_USAGE,
+            stopReason: 'stop',
+            timestamp: 11
+        }
+    ]
+
+    await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 10}],
+        agentMessages: crashed,
+        isRetry: true,
+        workspacePath: workspace.path,
+        emit: () => undefined
+    })
+
+    const sent = mock.bodies[0].messages
+    // The one settled turn, then the prompt being asked again — and only once.
+    assert.equal(sent.length, 3)
+    assert.equal(
+        sent.filter(message => JSON.stringify(message).includes('Build the level')).length,
+        1
+    )
+    assert.ok(!JSON.stringify(sent).includes('Starting on it'), 'the failed work is rolled back')
+})
+
+test('an ordinary turn keeps the transcript it was given', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{text: 'Carrying on'}])
+    const url = await baseUrl(context, mock.server)
+    const history = longConversation(2, 20)
+
+    await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'Next', timestamp: 99}],
+        agentMessages: history,
+        workspacePath: workspace.path,
+        emit: () => undefined
+    })
+
+    assert.equal(mock.bodies[0].messages.length, history.length + 1)
+})
+
+test('an empty transcript is rebuilt from the conversation on screen', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{text: 'Carrying on'}])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    // What a task looks like after its first turn failed: three messages on screen, and a model
+    // that was never told any of them.
+    await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [
+            {sender: 'user', text: 'Earlier question', timestamp: 1},
+            {sender: 'assistant', text: 'Earlier answer', timestamp: 2},
+            {sender: 'user', text: 'Continue', timestamp: 3}
+        ],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    assert.deepEqual(
+        mock.bodies[0].messages.map(message => message.role),
+        ['user', 'assistant', 'user']
+    )
+    const rebuilt = events.find(event => event.type === 'context-rebuilt')
+    assert.ok(rebuilt, 'the rebuild is announced rather than done silently')
+    assert.equal(rebuilt.messages, 2)
+})
+
+test('a first turn with nothing behind it rebuilds nothing', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{text: 'Starting'}])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    await runAgent({
+        settings: {...settings, baseUrl: url},
+        messages: [{sender: 'user', text: 'First question', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    assert.equal(mock.bodies[0].messages.length, 1)
+    assert.ok(!events.some(event => event.type === 'context-rebuilt'))
+})

@@ -83,6 +83,21 @@ export type AiStreamEvent =
           model: string
           agentMessages: readonly unknown[]
       }>
+    /**
+     * The model's memory of this task, as it stands part-way through a turn.
+     *
+     * Sent at every step rather than only at the end, so a turn that never reaches `done` still
+     * leaves behind what it did. It carries no message content: nothing on screen changes when one
+     * arrives.
+     */
+    | Readonly<{type: 'turn-state'; agentMessages: readonly unknown[]}>
+    /**
+     * The model had no memory of this task, so the conversation on screen was sent in its place.
+     *
+     * Worth saying out loud: what the agent did with its tools is not in the rebuilt context, only
+     * what it wrote about it, so the turn may cover ground it has already covered.
+     */
+    | Readonly<{type: 'context-rebuilt'; messages: number}>
     | Readonly<{type: 'aborted'}>
 
 export type AiStreamPayload = Readonly<{

@@ -74,6 +74,8 @@ export type SendAiMessageRequest = Readonly<{
     taskId?: string | undefined
     agentMessages: readonly unknown[]
     messages: readonly ChatMessageInput[]
+    /** Set when this turn replaces one that already ran, so the worker rolls the failed one back. */
+    isRetry: boolean
 }>
 
 type AttachmentUpload = Readonly<{

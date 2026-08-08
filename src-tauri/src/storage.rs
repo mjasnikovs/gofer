@@ -567,6 +567,27 @@ impl ProjectStorage {
             }
             None => self.ensure_active_task(&transaction)?,
         };
+        // A chat is stored by replacing every row the task owns, so a caller holding fewer messages
+        // than are on disk deletes the difference. That is never what a save means: the renderer
+        // sends the whole conversation, and a short one is a renderer that lost its state — a chat
+        // that failed to load, a turn rewritten by hand, a remount that arrived before its read.
+        // Losing the user's conversation to any of those is worse than refusing the write, so the
+        // write is refused and the message says what it was about to cost.
+        let stored_messages: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE task_id = ?1",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .map_err(database_error)?;
+        let saving_messages = chat.messages.len() as i64;
+        if saving_messages < stored_messages {
+            return Err(format!(
+                "Refusing to save {saving_messages} chat messages over the {stored_messages} \
+                 already stored: {} would be lost",
+                stored_messages - saving_messages
+            ));
+        }
         transaction
             .execute("DELETE FROM messages WHERE task_id = ?1", [&task_id])
             .map_err(database_error)?;
@@ -2565,6 +2586,90 @@ mod tests {
                 .expect("read attachment"),
             b"hi"
         );
+    }
+
+    /// A save is the whole conversation, so a save holding fewer messages is a caller that lost
+    /// some. The renderer used to shorten the array whenever a turn was retried, and this write
+    /// deleted the difference from the database with nothing to restore it from.
+    #[test]
+    fn a_shorter_chat_is_refused_rather_than_saved_over_a_longer_one() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let message = |id: u64, text: &str| StoredMessage {
+            id,
+            sender: if id % 2 == 1 { "user" } else { "assistant" }.to_owned(),
+            text: text.to_owned(),
+            timestamp: id * 10,
+            attachments: Vec::new(),
+            extra: serde_json::Map::new(),
+        };
+        let full = StoredChat {
+            task_id: None,
+            messages: vec![
+                message(1, "First"),
+                message(2, "First reply"),
+                message(3, "Second"),
+                message(4, "Second reply"),
+            ],
+            agent_messages: Vec::new(),
+        };
+        storage.save_chat(&full).expect("save four messages");
+        let task_id = storage.load_chat().expect("stored chat").task_id;
+
+        let truncated = StoredChat {
+            task_id: task_id.clone(),
+            messages: full.messages[..2].to_vec(),
+            agent_messages: Vec::new(),
+        };
+        let refusal = storage
+            .save_chat(&truncated)
+            .expect_err("a shorter chat is refused");
+        assert!(refusal.contains("2 would be lost"), "{refusal}");
+
+        let loaded = storage.load_chat().expect("load chat");
+        assert_eq!(loaded.messages.len(), 4);
+        assert_eq!(loaded.messages[3].text, "Second reply");
+    }
+
+    /// The retry this refusal exists for: the same number of messages, the last one rewritten.
+    #[test]
+    fn a_reply_rewritten_in_place_saves_over_the_row_it_kept() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let message = |id: u64, sender: &str, text: &str| StoredMessage {
+            id,
+            sender: sender.to_owned(),
+            text: text.to_owned(),
+            timestamp: id * 10,
+            attachments: Vec::new(),
+            extra: serde_json::Map::new(),
+        };
+        let chat = StoredChat {
+            task_id: None,
+            messages: vec![
+                message(1, "user", "Build it"),
+                message(2, "assistant", "It failed"),
+            ],
+            agent_messages: Vec::new(),
+        };
+        storage.save_chat(&chat).expect("save the failed turn");
+        let task_id = storage.load_chat().expect("stored chat").task_id;
+
+        storage
+            .save_chat(&StoredChat {
+                task_id,
+                messages: vec![
+                    message(1, "user", "Build it"),
+                    message(2, "assistant", "It worked"),
+                ],
+                agent_messages: Vec::new(),
+            })
+            .expect("save the retried turn");
+
+        let loaded = storage.load_chat().expect("load chat");
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.messages[1].id, 2);
+        assert_eq!(loaded.messages[1].text, "It worked");
     }
 
     #[test]

@@ -1,6 +1,12 @@
 import {describe, expect, it} from 'vitest'
 import type {AiStreamEvent, Message, TokenUsage} from './chat'
-import {applyStreamEvent, messageParts, settleRunningTools} from './chat-timeline'
+import {
+    applyStreamEvent,
+    messageParts,
+    retryPlan,
+    settleRunningTools,
+    settleStoredChat
+} from './chat-timeline'
 
 const USAGE: TokenUsage = {
     input: 10,
@@ -175,5 +181,101 @@ describe('settleRunningTools', () => {
             tools: [{id: 'a', name: 'bash', status: 'complete', startedAt: 1, endedAt: 2}]
         }
         expect(settleRunningTools(message, 'stopped')).toBe(message)
+    })
+})
+
+describe('retryPlan', () => {
+    const user: Message = {id: 1, sender: 'user', text: 'Build the level', timestamp: 0}
+    const failed: Message = {
+        id: 2,
+        sender: 'assistant',
+        text: 'The AI response could not be completed.',
+        timestamp: 0,
+        tools: [{id: 'a', name: 'bash', status: 'error', startedAt: 1, endedAt: 2}],
+        parts: [{kind: 'text', text: 'The AI response could not be completed.'}],
+        status: 'error'
+    }
+
+    it('rewrites the failed reply in place and removes nothing', () => {
+        const plan = retryPlan([user, failed], 2)
+        expect(plan?.conversation).toHaveLength(2)
+        expect(plan?.conversation[0]).toBe(user)
+        expect(plan?.conversation[1]).toMatchObject({
+            id: 2,
+            sender: 'assistant',
+            text: '',
+            tools: [],
+            parts: [],
+            status: 'streaming'
+        })
+    })
+
+    it('keeps every earlier turn, and sends them as the history', () => {
+        const earlier: readonly Message[] = [
+            {id: 1, sender: 'user', text: 'First', timestamp: 0},
+            {id: 2, sender: 'assistant', text: 'Done', timestamp: 0, status: 'complete'},
+            {...user, id: 3},
+            {...failed, id: 4}
+        ]
+        const plan = retryPlan(earlier, 4)
+        expect(plan?.conversation.map(message => message.id)).toEqual([1, 2, 3, 4])
+        expect(plan?.history.map(message => message.id)).toEqual([1, 2])
+        expect(plan?.prompt.id).toBe(3)
+    })
+
+    it('replays the user turn with its attachments', () => {
+        const withImage: Message = {
+            ...user,
+            attachments: [{id: 'x', name: 'a.png', mimeType: 'image/png', size: 1}]
+        }
+        expect(retryPlan([withImage, failed], 2)?.prompt.attachments).toEqual(withImage.attachments)
+    })
+
+    it('refuses a reply that is not the last message', () => {
+        const later: readonly Message[] = [
+            user,
+            failed,
+            {id: 3, sender: 'user', text: 'Never mind', timestamp: 0},
+            {id: 4, sender: 'assistant', text: 'Fine', timestamp: 0, status: 'complete'}
+        ]
+        expect(retryPlan(later, 2)).toBeUndefined()
+    })
+
+    it('refuses a reply with no user turn above it', () => {
+        expect(retryPlan([failed], 2)).toBeUndefined()
+        expect(retryPlan([{...failed, id: 9}, failed], 2)).toBeUndefined()
+    })
+
+    it('refuses an id that names no message', () => {
+        expect(retryPlan([user, failed], 99)).toBeUndefined()
+    })
+})
+
+describe('settleStoredChat', () => {
+    it('leaves a conversation that ended properly alone', () => {
+        const messages: readonly Message[] = [
+            {id: 1, sender: 'user', text: 'Hi', timestamp: 0},
+            {id: 2, sender: 'assistant', text: 'Hello', timestamp: 0, status: 'complete'}
+        ]
+        expect(settleStoredChat(messages)).toBe(messages)
+    })
+
+    it('ends a turn the window stopped in the middle of', () => {
+        const settled = settleStoredChat([
+            {id: 1, sender: 'user', text: 'Build it', timestamp: 0},
+            {
+                id: 2,
+                sender: 'assistant',
+                text: 'Starting',
+                timestamp: 0,
+                activity: 'Summarising the conversation',
+                tools: [{id: 'a', name: 'bash', status: 'running', startedAt: 1}],
+                status: 'streaming'
+            }
+        ])
+        const reply = settled[1]
+        expect(reply?.status).toBe('aborted')
+        expect(reply?.activity).toBeUndefined()
+        expect(reply?.tools?.[0]?.status).toBe('error')
     })
 })

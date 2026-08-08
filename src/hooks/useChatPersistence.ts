@@ -4,6 +4,7 @@ import {importLegacyChat, loadChat, saveChat} from '../services/chat-session'
 import {isTauri} from '../services/desktop'
 import {commandErrorMessage} from '../utils/command-error'
 import type {Message, StoredChat} from '../models/chat'
+import {settleStoredChat} from '../models/chat-timeline'
 import {
     clearLegacyChat,
     isStoredChat,
@@ -32,6 +33,10 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
     const nextMessageId = useRef(1)
     const isMounted = useRef(false)
     const pendingSave = useRef<StoredChat | undefined>(undefined)
+    /** The newest snapshot, saved or not. What the unmount flush has to fall back on. */
+    const latestChat = useRef<StoredChat | undefined>(undefined)
+    /** The newest snapshot the backend has taken, by identity. */
+    const savedChat = useRef<StoredChat | undefined>(undefined)
     const isSaveRunning = useRef(false)
 
     useEffect(() => {
@@ -50,6 +55,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
                 pendingSave.current = undefined
                 try {
                     await saveChat(chat)
+                    savedChat.current = chat
                     if (isMounted.current) onTasksChanged?.()
                 } catch (error) {
                     if (isMounted.current)
@@ -78,20 +84,29 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
                         await importLegacyChat(legacy)
                     :   stored
                 if (isCancelled) return
-                setMessages(chat.messages)
+                setMessages(settleStoredChat(chat.messages))
                 setAgentMessages(chat.agentMessages)
                 setTaskId(chat.taskId)
                 nextMessageId.current = nextStoredMessageId(chat.messages)
                 clearLegacyChat()
+                setIsChatLoaded(true)
             } catch (error) {
                 if (isCancelled) return
+                /*
+                 * Saving stays off after a failed read, and that is the point.
+                 *
+                 * A save is the whole conversation, so enabling it here armed the debounced write
+                 * to put whatever this failure left on screen — usually nothing — over a chat that
+                 * is still on disk and still fine. The backend now refuses a write that would
+                 * shorten a chat, but a refusal the user sees as an error is a worse answer than
+                 * never making the write: the conversation is not lost, it just was not read, and
+                 * the next start reads it again.
+                 */
                 const legacy = loadLegacyChat()
-                setMessages(legacy.messages)
+                setMessages(settleStoredChat(legacy.messages))
                 setAgentMessages(legacy.agentMessages)
                 nextMessageId.current = nextStoredMessageId(legacy.messages)
                 onError(`Chat history could not be loaded: ${commandErrorMessage(error)}`)
-            } finally {
-                if (!isCancelled) setIsChatLoaded(true)
             }
         }
         void load()
@@ -104,15 +119,36 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
 
     useEffect(() => {
         if (!isChatLoaded || !isTauri()) return
+        const snapshot: StoredChat = {
+            ...(taskId !== undefined && {taskId}),
+            messages,
+            agentMessages
+        }
+        latestChat.current = snapshot
         return schedule(() => {
-            pendingSave.current = {
-                ...(taskId !== undefined && {taskId}),
-                messages,
-                agentMessages
-            }
+            pendingSave.current = snapshot
             void savePending()
         }, SAVE_DEBOUNCE_MS)
     }, [agentMessages, isChatLoaded, messages, savePending, taskId])
+
+    /*
+     * The debounce is given its last chance on the way out.
+     *
+     * The workspace is keyed on the task, so switching tasks unmounts it — and everything the
+     * debounce was still holding went with it. A message sent and then followed by an immediate
+     * switch is exactly that window, and it is the message the user is most sure they sent. The
+     * write names its own task, so it lands on the task being left rather than the one being
+     * opened.
+     */
+    useEffect(
+        () => () => {
+            const pending = latestChat.current
+            if (pending === undefined || pending === savedChat.current) return
+            pendingSave.current = pending
+            void savePending()
+        },
+        [savePending]
+    )
 
     // Handing out ids through a callback keeps the counter ref inside this hook, so the caller
     // never mutates a ref during render.

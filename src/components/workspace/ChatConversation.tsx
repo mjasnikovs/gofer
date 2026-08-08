@@ -122,11 +122,12 @@ const ProseBubble = memo(({isReasoning, isStreaming, text}: ProseBubbleProps) =>
 ProseBubble.displayName = 'ProseBubble'
 
 type MessageMetadataProps = Readonly<{
+    isLast: boolean
     message: Message
     onRetry: (assistantId: number) => void
 }>
 
-function AssistantMetadata({message, onRetry}: MessageMetadataProps) {
+function AssistantMetadata({isLast, message, onRetry}: MessageMetadataProps) {
     return (
         <ChatMessageMetadata
             {...(message.status === 'error' && {status: 'error'})}
@@ -146,7 +147,12 @@ function AssistantMetadata({message, onRetry}: MessageMetadataProps) {
                                 && ` · ${message.usage.reasoning.toLocaleString()} reasoning`}
                         </Text>
                     :   null}
-                    {message.status === 'error' || message.status === 'aborted' ?
+                    {/*
+                     * Only the turn at the end can be retried. Re-running an earlier one is a
+                     * branch, and this conversation has no branches: the reply on screen and the
+                     * transcript the model was given would stop being the same conversation.
+                     */}
+                    {isLast && (message.status === 'error' || message.status === 'aborted') ?
                         <Button
                             label='Retry'
                             variant='ghost'
@@ -257,6 +263,7 @@ function AssistantTimeline({message}: {message: Message}) {
 
 type ConversationMessageProps = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
+    isLast: boolean
     message: Message
     onRetry: (assistantId: number) => void
 }>
@@ -274,7 +281,7 @@ type ConversationMessageProps = Readonly<{
  * tool rows above it.
  */
 const ConversationMessage = memo(
-    ({attachmentPreviews, message, onRetry}: ConversationMessageProps) => {
+    ({attachmentPreviews, isLast, message, onRetry}: ConversationMessageProps) => {
         if (message.sender === 'assistant') {
             return (
                 <ChatMessage
@@ -288,6 +295,7 @@ const ConversationMessage = memo(
                     {...(message.status !== 'streaming' && {
                         metadata: (
                             <AssistantMetadata
+                                isLast={isLast}
                                 message={message}
                                 onRetry={onRetry}
                             />
@@ -355,10 +363,11 @@ export function ChatConversation({
                 isStreaming={isStreaming}
                 style={CHAT_MESSAGE_LIST_STYLE}
             >
-                {messages.map(message => (
+                {messages.map((message, index) => (
                     <ConversationMessage
                         key={message.id}
                         attachmentPreviews={attachmentPreviews}
+                        isLast={index === messages.length - 1}
                         message={message}
                         onRetry={onRetry}
                     />

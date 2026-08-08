@@ -36,6 +36,16 @@ export function compactionActivity(tokens: number, contextWindow: number) {
     return `Summarising the conversation to make room (${formatContextUsage(tokens, contextWindow)})`
 }
 
+/**
+ * Says that this turn started from the conversation on screen rather than from the model's own
+ * memory of it, which happens when a task's memory was lost with a turn that never finished.
+ */
+export function rebuiltActivity(messages: number) {
+    return `Rebuilt this conversation from the ${messages.toLocaleString()} message${
+        messages === 1 ? '' : 's'
+    } on screen`
+}
+
 export function contextProgressVariant(value: number, max: number) {
     const usage = max > 0 ? value / max : 0
     if (usage <= 0.8) return 'success'

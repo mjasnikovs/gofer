@@ -11,6 +11,8 @@ import type {AiStreamPayload, ChatAttachment, DraftAttachment, Message} from '..
 import {messageUsage} from '../../utils/chat-format'
 import {
     applyStreamEvent,
+    isAiStreamEvent,
+    retryPlan,
     settleRunningTools,
     settleStreaming,
     withFallbackText,
@@ -28,6 +30,7 @@ import {ComposerContext} from '../../hooks/useComposer'
 import type {Composer} from '../../hooks/useComposer'
 import {appendReference} from '../../utils/chat-references'
 import type {ChatReference} from '../../utils/chat-references'
+import {ErrorBoundary} from '../application/ErrorBoundary'
 import {ChatConversation} from './ChatConversation'
 import {InspectorWorkspace} from './InspectorWorkspace'
 import {ToolApprovalDialog} from './ToolApprovalDialog'
@@ -163,44 +166,47 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         [setMessages]
     )
 
-    const runRequest = useCallback(
-        (
-            prompt: string,
-            history: readonly Message[],
-            attachments: readonly ChatAttachment[] = []
-        ) => {
-            const userMessage: Message = {
-                id: takeMessageId(),
-                sender: 'user',
-                text: prompt,
-                timestamp: Date.now(),
-                ...(attachments.length > 0 && {attachments})
-            }
-            const assistantMessage: Message = {
-                id: takeMessageId(),
-                sender: 'assistant',
-                text: '',
-                timestamp: Date.now(),
-                tools: [],
-                parts: [],
-                status: 'streaming'
-            }
+    /**
+     * Runs one turn against a conversation that is already decided.
+     *
+     * The caller says which messages are on screen, which reply is being written, and what history
+     * the model is given. A new turn appends a pair; a retry rewrites one reply in place. Neither
+     * shortens the conversation, because the chat is saved by replacing every row of the task.
+     */
+    const runTurn = useCallback(
+        (turn: {
+            conversation: readonly Message[]
+            history: readonly Message[]
+            prompt: Message
+            assistantId: number
+            isRetry: boolean
+        }) => {
             const requestId = nextRequestId.current++
-            const requestMessages = [...history, userMessage]
+            const requestMessages = [...turn.history, turn.prompt]
 
             activeRequestId.current = requestId
-            setMessages([...history, userMessage, assistantMessage])
-            setDraft('')
-            setDraftAttachments([])
+            setMessages(turn.conversation)
             setStreamError(undefined)
             setIsStreaming(true)
 
             const receive = (payload: AiStreamPayload) => {
                 if (payload.requestId !== requestId) return
+                // Anything the timeline does not recognise is dropped here rather than folded in.
+                // The alternative was an undefined message reaching the renderer, and a render that
+                // throws takes the window with it.
+                if (!isAiStreamEvent(payload.event)) return
                 const event = payload.event
-                // The transcript is the one thing the message cannot carry, so it stays here.
+                /*
+                 * The transcript is the one thing the message cannot carry, so it stays here.
+                 *
+                 * `turn-state` arrives at every step of the turn and `done` only at a clean end, so
+                 * a turn that crashed, was stopped, or lost its worker still leaves the model's
+                 * memory holding what it had done. Storing it only on `done` was what let the
+                 * conversation on screen and the conversation the model was given drift apart.
+                 */
+                if (event.type === 'turn-state') setAgentMessages(event.agentMessages)
                 if (event.type === 'done') setAgentMessages(event.agentMessages)
-                updateAssistant(assistantMessage.id, message => applyStreamEvent(message, event))
+                updateAssistant(turn.assistantId, message => applyStreamEvent(message, event))
             }
 
             const run = async () => {
@@ -210,6 +216,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                             requestId,
                             taskId,
                             agentMessages,
+                            isRetry: turn.isRetry,
                             messages: requestMessages.map(message => ({
                                 sender: message.sender,
                                 text: message.text,
@@ -230,7 +237,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                         failure.code === 'ai_request_in_progress' ?
                             'Gofer is still working on the previous message.'
                         :   'The AI response could not be completed.'
-                    updateAssistant(assistantMessage.id, entry => ({
+                    updateAssistant(turn.assistantId, entry => ({
                         ...withFallbackText(
                             settleRunningTools(entry, 'The turn ended before this call finished.'),
                             reason
@@ -241,7 +248,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     // The stream is over however it ended, so nothing it started can still be
                     // running — a `tool-end` the backend never sent is one it never will, and the
                     // same goes for the `done` that would otherwise have ended the turn.
-                    updateAssistant(assistantMessage.id, entry =>
+                    updateAssistant(turn.assistantId, entry =>
                         withoutActivity(
                             settleStreaming(
                                 settleRunningTools(
@@ -257,7 +264,40 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
             }
             void run()
         },
-        [agentMessages, setAgentMessages, setMessages, takeMessageId, taskId, updateAssistant]
+        [agentMessages, setAgentMessages, setMessages, taskId, updateAssistant]
+    )
+
+    /** A new turn: the pair is appended to the conversation as it stands, and the composer clears. */
+    const startTurn = useCallback(
+        (prompt: string, attachments: readonly ChatAttachment[] = []) => {
+            const history = conversation.current
+            const userMessage: Message = {
+                id: takeMessageId(),
+                sender: 'user',
+                text: prompt,
+                timestamp: Date.now(),
+                ...(attachments.length > 0 && {attachments})
+            }
+            const assistantMessage: Message = {
+                id: takeMessageId(),
+                sender: 'assistant',
+                text: '',
+                timestamp: Date.now(),
+                tools: [],
+                parts: [],
+                status: 'streaming'
+            }
+            setDraft('')
+            setDraftAttachments([])
+            runTurn({
+                conversation: [...history, userMessage, assistantMessage],
+                history,
+                prompt: userMessage,
+                assistantId: assistantMessage.id,
+                isRetry: false
+            })
+        },
+        [runTurn, takeMessageId]
     )
 
     const submitMessage = async (value: string) => {
@@ -284,9 +324,8 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     draftAttachments.map(attachment => [attachment.id, attachment.previewUrl])
                 )
             )
-            runRequest(
+            startTurn(
                 prompt,
-                messages,
                 draftAttachments.map(attachment => ({
                     id: attachment.id,
                     name: attachment.name,
@@ -358,22 +397,25 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
     /**
      * Retry is handed to every message in the conversation, so it has to keep its identity between
      * renders or `ConversationMessage`'s memo never holds: a callback redefined per token
-     * re-renders the whole conversation per token. The history it replays comes from a ref rather
-     * than from `messages`, which is a new array on every delta.
+     * re-renders the whole conversation per token. The conversation it replays comes from a ref
+     * rather than from `messages`, which is a new array on every delta.
+     *
+     * The draft is deliberately left alone — a retry is not a message the user just sent, and
+     * clearing the composer threw away whatever they had started typing while the turn failed.
      */
     const retry = useCallback(
         (assistantId: number) => {
-            const history = conversation.current
-            const assistantIndex = history.findIndex(message => message.id === assistantId)
-            const userMessage = history[assistantIndex - 1]
-            if (assistantIndex < 1 || userMessage?.sender !== 'user') return
-            runRequest(
-                userMessage.text,
-                history.slice(0, assistantIndex - 1),
-                userMessage.attachments
-            )
+            const plan = retryPlan(conversation.current, assistantId)
+            if (!plan) return
+            runTurn({
+                conversation: plan.conversation,
+                history: plan.history,
+                prompt: plan.prompt,
+                assistantId: plan.assistant.id,
+                isRetry: true
+            })
         },
-        [runRequest]
+        [runTurn]
     )
 
     const usage = messageUsage(messages)
@@ -450,13 +492,18 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
                     maxWidth={CHAT_CONTENT_WIDTH}
                     hAlign='center'
                 >
-                    <ChatConversation
-                        attachmentPreviews={attachmentPreviews}
-                        isStreaming={isStreaming}
-                        messages={messages}
-                        scrollRef={messageScrollRef}
-                        onRetry={retry}
-                    />
+                    <ErrorBoundary
+                        title='This conversation could not be drawn'
+                        description='The messages are still stored, and reopening the task reads them again.'
+                    >
+                        <ChatConversation
+                            attachmentPreviews={attachmentPreviews}
+                            isStreaming={isStreaming}
+                            messages={messages}
+                            scrollRef={messageScrollRef}
+                            onRetry={retry}
+                        />
+                    </ErrorBoundary>
                     <VStack
                         width='100%'
                         paddingInline={3}

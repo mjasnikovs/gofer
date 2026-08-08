@@ -595,6 +595,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
                 images: Vec::new(),
             }],
             agent_messages: None,
+            is_retry: false,
             workspace_path: session.worktree.display().to_string(),
             memory_context: None,
             tools: ai_tools::CATALOG,

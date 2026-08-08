@@ -205,12 +205,29 @@ export function createAgentTools(workspacePath, domains, host) {
     }
 }
 
+/**
+ * The transcript with the last prompt, and everything the agent did about it, taken back off.
+ *
+ * A turn is checkpointed as it runs, so a turn that failed leaves its own prompt and its half-done
+ * work in the transcript. Re-prompting on top of that asks the same question twice — once in the
+ * history, once as the question — and the model answers the conversation it can see. A retry is the
+ * one caller that means "this did not happen", so it is the one caller that rolls it back.
+ */
+function withoutLastPrompt(messages) {
+    let at = -1
+    for (const [index, message] of messages.entries()) {
+        if (message.role === 'user') at = index
+    }
+    return at < 0 ? messages : messages.slice(0, at)
+}
+
 export async function runAgent({
     settings,
     systemPrompt = '',
     apiKey,
     messages,
     agentMessages,
+    isRetry = false,
     workspacePath,
     memoryContext,
     tools: domains,
@@ -235,10 +252,26 @@ export async function runAgent({
     const models = createModels()
     models.setProvider(provider)
     const {env, tools} = createAgentTools(workspacePath, domains, host)
+    /*
+     * The model's memory, or the screen's copy of it when the memory is empty.
+     *
+     * This used to be `Array.isArray(agentMessages)`, and the renderer always sends an array — it
+     * starts as `[]` — so the rebuild below was unreachable from the application and only ever ran
+     * in a test that omitted the field. A task whose first turn failed therefore kept an empty
+     * transcript for good, and every message after it was sent to the model with no history at all
+     * while the window showed the whole conversation. Emptiness is the condition that matters, not
+     * the type, so emptiness is what is asked.
+     */
+    const stored = Array.isArray(agentMessages) ? agentMessages : []
+    const rolledBack = isRetry ? withoutLastPrompt(stored) : stored
+    const isRebuilt = rolledBack.length === 0 && messages.length > 1
     const previousMessages =
-        Array.isArray(agentMessages) ? agentMessages : (
+        isRebuilt ?
             messages.slice(0, -1).map(message => contextMessage(message, model))
-        )
+        :   rolledBack
+    // Said out loud, because a rebuilt context is a conversation the model is seeing for the first
+    // time: the tool calls it made are gone, and only what it wrote about them survives.
+    if (isRebuilt) emit({type: 'context-rebuilt', messages: previousMessages.length})
     const promptMessage = messages.at(-1)
     if (!promptMessage || (!promptMessage.text && promptMessage.images.length === 0)) {
         throw new Error('The agent request does not contain a user prompt or image')
@@ -336,6 +369,14 @@ export async function runAgent({
         if (event.type === 'turn_end' && event.message.role === 'assistant') {
             finalMessage = event.message
             emit({type: 'usage', usage: event.message.usage, model: event.message.model})
+            // The transcript is checkpointed at every step, not only at the end.
+            //
+            // It is the model's whole memory of this task, and it used to be reported once, in the
+            // completion. A turn that crashed, was stopped, or whose worker was killed never got
+            // that far, so everything it had done — every tool call, every file it edited — was
+            // dropped from the memory while staying on screen and on disk. The next turn was then
+            // answered against a conversation that had never happened.
+            emit({type: 'turn-state', agentMessages: agent.state.messages})
         }
     })
 
@@ -361,6 +402,11 @@ export async function runAgent({
         }
         emit(completion)
         return completion
+    } catch (error) {
+        // The last word on what the agent remembers, for a turn that is ending badly. The events
+        // above cover the steps that finished; this covers the one that was still running.
+        emit({type: 'turn-state', agentMessages: agent.state.messages})
+        throw error
     } finally {
         unsubscribe()
         await env.cleanup()

@@ -250,6 +250,10 @@ struct ChatRequest {
     messages: Vec<ChatMessageInput>,
     #[serde(default)]
     agent_messages: Option<serde_json::Value>,
+    /// Set when this turn replaces one that already ran. The worker takes the failed prompt and
+    /// its half-finished work back off the transcript before asking again.
+    #[serde(default)]
+    is_retry: bool,
 }
 
 #[derive(Serialize)]
@@ -262,6 +266,7 @@ struct AiWorkerRequest {
     api_key: Option<String>,
     messages: Vec<AiWorkerMessage>,
     agent_messages: Option<serde_json::Value>,
+    is_retry: bool,
     workspace_path: String,
     memory_context: Option<String>,
     /// The domain tools the worker registers. Generated from the router's own catalog, so the
@@ -674,6 +679,7 @@ async fn send_ai_message(
                 api_key,
                 messages,
                 agent_messages: request.agent_messages,
+                is_retry: request.is_retry,
                 workspace_path,
                 memory_context,
                 tools: ai_tools::CATALOG,
@@ -2710,6 +2716,7 @@ mod tests {
                 images: Vec::new(),
             }],
             agent_messages: None,
+            is_retry: false,
             workspace_path: "/tmp/workspace".to_owned(),
             memory_context: None,
             tools: ai_tools::CATALOG,
