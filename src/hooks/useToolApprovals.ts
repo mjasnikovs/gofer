@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useState} from 'react'
-import {invoke, isTauri, listen} from '../services/desktop'
+import {respondToolApproval} from '../services/chat-session'
+import {isTauri, listen} from '../services/desktop'
 import {commandErrorMessage} from '../utils/command-error'
 import type {ToolApprovalPrompt} from '../models/chat'
 
@@ -57,11 +58,9 @@ export function useToolApprovals({onError}: ToolApprovalOptions) {
             // Dropped here as well as on the settled event: the tool call resumes the moment the
             // backend has the answer, and the dialog must not outlive that.
             setApprovals(previous => previous.filter(prompt => prompt.approvalId !== approvalId))
-            void invoke('respond_tool_approval', {request: {approvalId, approved}}).catch(
-                (error: unknown) => {
-                    onError(`The approval could not be sent: ${commandErrorMessage(error)}`)
-                }
-            )
+            void respondToolApproval(approvalId, approved).catch((error: unknown) => {
+                onError(`The approval could not be sent: ${commandErrorMessage(error)}`)
+            })
         },
         [onError]
     )

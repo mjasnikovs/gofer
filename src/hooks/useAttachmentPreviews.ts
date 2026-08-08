@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
-import {invoke, isTauri} from '../services/desktop'
+import {readChatAttachment} from '../services/chat-session'
+import {isTauri} from '../services/desktop'
 import type {Message} from '../models/chat'
 
 type AttachmentPreviewOptions = Readonly<{
@@ -48,7 +49,7 @@ export function useAttachmentPreviews({
             const previews = await Promise.all(
                 attachments.map(async attachment => {
                     try {
-                        const preview = await invoke('read_chat_attachment', {attachment})
+                        const preview = await readChatAttachment(attachment)
                         return [attachment.id, preview] as const
                     } catch {
                         return undefined

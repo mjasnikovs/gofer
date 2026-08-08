@@ -2,7 +2,8 @@ import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
-import {invoke, isTauri} from '../../services/desktop'
+import {cancelAiRequest, saveChatAttachment} from '../../services/chat-session'
+import {isTauri} from '../../services/desktop'
 import {sendAiMessage} from '../../services/ai-stream'
 import {commandErrorMessage, toCommandError} from '../../utils/command-error'
 import type {TaskSummary} from '../../models/app'
@@ -267,17 +268,15 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
         try {
             await Promise.all(
                 draftAttachments.map(attachment =>
-                    invoke('save_chat_attachment', {
-                        request: {
-                            attachment: {
-                                id: attachment.id,
-                                name: attachment.name,
-                                mimeType: attachment.mimeType,
-                                size: attachment.size
-                            },
-                            data: attachment.data
-                        }
-                    })
+                    saveChatAttachment(
+                        {
+                            id: attachment.id,
+                            name: attachment.name,
+                            mimeType: attachment.mimeType,
+                            size: attachment.size
+                        },
+                        attachment.data
+                    )
                 )
             )
             addPreviews(
@@ -343,7 +342,7 @@ export function Workspace({activeTask, onTasksChanged, onMergeTask}: WorkspacePr
 
     const stop = () => {
         if (activeRequestId.current === undefined) return
-        void invoke('cancel_ai_request', {requestId: activeRequestId.current})
+        void cancelAiRequest(activeRequestId.current)
     }
 
     const mergeTask = async () => {

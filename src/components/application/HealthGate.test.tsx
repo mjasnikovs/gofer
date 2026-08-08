@@ -1,24 +1,14 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen, waitFor} from '@testing-library/react'
+import {act, cleanup, render, screen} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {HealthGate} from './HealthGate'
 import type {HealthReport} from '../../models/health'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
+import {flush} from '../../test/flush'
+import {createManualScheduler, setScheduler, timerScheduler} from '../../services/clock'
 
-type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
-type IsTauriFunction = () => boolean
-
-const tauri = vi.hoisted(() => ({
-    invoke: vi.fn<InvokeFunction>(),
-    isTauri: vi.fn<IsTauriFunction>(),
-    listen: vi.fn()
-}))
-
-vi.mock('../../services/desktop', () => ({
-    invoke: tauri.invoke,
-    isTauri: tauri.isTauri,
-    listen: tauri.listen
-}))
+const tauri = createDesktopFake()
 
 /** The report an empty folder produces: no repository, no project, and a fix for each. */
 const emptyFolder: HealthReport = {
@@ -73,12 +63,19 @@ const readyWorkspace: HealthReport = {
     ]
 }
 
+/** The "this is taking a while" delay, held until a test says the check has been slow. */
+let clock = createManualScheduler()
+
 beforeEach(() => {
-    tauri.isTauri.mockReturnValue(true)
+    installDesktopFake(tauri)
+    clock = createManualScheduler()
+    setScheduler(clock.schedule)
 })
 
 afterEach(() => {
     cleanup()
+    removeDesktopFake()
+    setScheduler(timerScheduler)
     vi.clearAllMocks()
 })
 
@@ -88,20 +85,38 @@ describe('HealthGate', () => {
         const onReady = vi.fn()
 
         const {container} = render(<HealthGate onReady={onReady} />)
+        await flush()
 
-        await waitFor(() => {
-            expect(onReady).toHaveBeenCalled()
-        })
+        expect(onReady).toHaveBeenCalled()
         // A healthy workspace must not flash a checklist on the way past.
         expect(container).toBeEmptyDOMElement()
+    })
+
+    /*
+     * The delay is a real 400 ms in the application. Driven here rather than waited out: the
+     * assertion is about what a slow check shows, not about how long the machine took to notice.
+     */
+    it('says the check is running once it has taken a while', async () => {
+        tauri.invoke.mockReturnValue(new Promise(() => undefined))
+
+        render(<HealthGate onReady={vi.fn()} />)
+        await flush()
+        expect(screen.queryByRole('status')).not.toBeInTheDocument()
+
+        await act(async () => {
+            clock.run()
+        })
+
+        expect(screen.getByLabelText('Checking this project…')).toBeInTheDocument()
     })
 
     it('names every blocking problem and offers the fix for it', async () => {
         tauri.invoke.mockResolvedValue(emptyFolder)
 
         render(<HealthGate onReady={vi.fn()} />)
+        await flush()
 
-        expect(await screen.findByText('Git repository')).toBeInTheDocument()
+        expect(screen.getByText('Git repository')).toBeInTheDocument()
         expect(screen.getByText('/home/dev/game is not a Git repository.')).toBeInTheDocument()
         expect(
             screen.getByRole('button', {name: 'Initialize a Git repository'})
@@ -118,14 +133,14 @@ describe('HealthGate', () => {
         const onReady = vi.fn()
 
         render(<HealthGate onReady={onReady} />)
-        await user.click(await screen.findByRole('button', {name: 'Initialize a Git repository'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Initialize a Git repository'}))
+        await flush()
 
         expect(tauri.invoke).toHaveBeenLastCalledWith('apply_health_remedy', {
             request: {action: 'initialize-git-repository'}
         })
-        await waitFor(() => {
-            expect(onReady).toHaveBeenCalled()
-        })
+        expect(onReady).toHaveBeenCalled()
     })
 
     it('asks for a folder before applying a fix that needs one', async () => {
@@ -154,12 +169,12 @@ describe('HealthGate', () => {
         })
 
         render(<HealthGate onReady={vi.fn()} />)
-        await user.click(await screen.findByRole('button', {name: 'Choose project folder…'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Choose project folder…'}))
+        await flush()
 
-        await waitFor(() => {
-            expect(tauri.invoke).toHaveBeenCalledWith('apply_health_remedy', {
-                request: {action: 'choose-workspace', path: '/home/dev/other'}
-            })
+        expect(tauri.invoke).toHaveBeenCalledWith('apply_health_remedy', {
+            request: {action: 'choose-workspace', path: '/home/dev/other'}
         })
     })
 
@@ -188,11 +203,11 @@ describe('HealthGate', () => {
         })
 
         render(<HealthGate onReady={vi.fn()} />)
-        await user.click(await screen.findByRole('button', {name: 'Choose project folder…'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Choose project folder…'}))
+        await flush()
 
-        await waitFor(() => {
-            expect(tauri.invoke).toHaveBeenCalledWith('plugin:dialog|open', expect.anything())
-        })
+        expect(tauri.invoke).toHaveBeenCalledWith('plugin:dialog|open', expect.anything())
         expect(tauri.invoke).not.toHaveBeenCalledWith(
             'apply_health_remedy',
             expect.objectContaining({})
@@ -209,9 +224,11 @@ describe('HealthGate', () => {
         })
 
         render(<HealthGate onReady={vi.fn()} />)
-        await user.click(await screen.findByRole('button', {name: 'Initialize a Git repository'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Initialize a Git repository'}))
+        await flush()
 
-        expect(await screen.findByText(/read-only/)).toBeInTheDocument()
+        expect(screen.getByText(/read-only/)).toBeInTheDocument()
         expect(screen.getByText('Git repository')).toBeInTheDocument()
     })
 
@@ -220,10 +237,9 @@ describe('HealthGate', () => {
         const onReady = vi.fn()
 
         render(<HealthGate onReady={onReady} />)
+        await flush()
 
-        await waitFor(() => {
-            expect(onReady).toHaveBeenCalled()
-        })
+        expect(onReady).toHaveBeenCalled()
         expect(tauri.invoke).not.toHaveBeenCalled()
     })
 
@@ -231,7 +247,8 @@ describe('HealthGate', () => {
         tauri.invoke.mockResolvedValue(emptyFolder)
 
         const {container} = render(<HealthGate onReady={vi.fn()} />)
-        await screen.findByText('Git repository')
+        await flush()
+        expect(screen.getByText('Git repository')).toBeInTheDocument()
 
         const result = await axe.run(container)
 

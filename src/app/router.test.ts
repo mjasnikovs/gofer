@@ -1,16 +1,9 @@
-import {beforeEach, describe, expect, it, vi} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it} from 'vitest'
 import {createMemoryHistory} from '@tanstack/react-router'
 import {createAppRouter} from './router'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 
-type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
-type IsTauriFunction = () => boolean
-
-const tauri = vi.hoisted(() => ({
-    invoke: vi.fn<InvokeFunction>(),
-    isTauri: vi.fn<IsTauriFunction>()
-}))
-
-vi.mock('../services/desktop', () => ({invoke: tauri.invoke, isTauri: tauri.isTauri}))
+const tauri = createDesktopFake()
 
 const tasks = [
     {
@@ -32,11 +25,15 @@ const tasks = [
 ] as const
 
 beforeEach(() => {
-    tauri.isTauri.mockReturnValue(true)
+    installDesktopFake(tauri)
     tauri.invoke.mockImplementation(async command => {
         if (command === 'list_project_tasks') return tasks
         return undefined
     })
+})
+
+afterEach(() => {
+    removeDesktopFake()
 })
 
 describe('application router', () => {

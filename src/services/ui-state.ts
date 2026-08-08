@@ -1,4 +1,6 @@
+import {schedule} from './clock'
 import {invoke, isTauri} from './desktop'
+import type {WriteScheduler} from './clock'
 
 /** How the whole workspace was left: tabs, sizes, filters, open scripts, the chosen node. */
 export const WORKSPACE_LAYOUT_KEY = 'ui.workspace'
@@ -16,34 +18,6 @@ export function draftKey(taskId: string) {
  */
 export const WRITE_DEBOUNCE_MS = 250
 
-/**
- * Runs `write` once the delay has passed, and hands back a way to call it off.
- *
- * The clock is a parameter rather than a fact about the module because the alternative is that
- * every test of anything that remembers its layout has to spend 250 ms of real time proving it —
- * a cost that is invisible in the test's own source and that grows with how busy the machine is.
- */
-export type WriteScheduler = (write: () => void, delayMs: number) => () => void
-
-/** The real clock. What the application runs on. */
-export const timerScheduler: WriteScheduler = (write, delayMs) => {
-    const timer = setTimeout(write, delayMs)
-    return () => {
-        clearTimeout(timer)
-    }
-}
-
-/**
- * No clock at all: the write happens on the spot.
- *
- * Coalescing is the debounce's only job, and dropping it costs a test nothing — the assertion is
- * that the right value reached the backend, never that it reached it once.
- */
-export const immediateScheduler: WriteScheduler = write => {
-    write()
-    return () => undefined
-}
-
 /** One project's worth of pending writes, holding whatever clock it was built with. */
 export type ProjectStateWriter = Readonly<{
     write: (key: string, value: unknown) => void
@@ -51,7 +25,7 @@ export type ProjectStateWriter = Readonly<{
 }>
 
 export function createProjectStateWriter(
-    schedule: WriteScheduler,
+    delay: WriteScheduler,
     delayMs = WRITE_DEBOUNCE_MS
 ): ProjectStateWriter {
     const pending = new Map<string, unknown>()
@@ -76,7 +50,7 @@ export function createProjectStateWriter(
             cancels.get(key)?.()
             cancels.set(
                 key,
-                schedule(() => {
+                delay(() => {
                     send(key, value)
                 }, delayMs)
             )
@@ -89,16 +63,9 @@ export function createProjectStateWriter(
     }
 }
 
-let writer = createProjectStateWriter(timerScheduler)
-
-/**
- * Swaps the clock the shared writer runs on, and empties it.
- *
- * Tests call this with `immediateScheduler`; the application never calls it at all.
- */
-export function setWriteScheduler(schedule: WriteScheduler) {
-    writer = createProjectStateWriter(schedule)
-}
+// Built with the shared clock rather than a clock of its own, so `setScheduler` reaches it without
+// this module having to be told about the swap.
+const writer = createProjectStateWriter(schedule)
 
 /**
  * Reads one remembered piece of interface state, or `undefined` when the project has none.

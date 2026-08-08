@@ -3,9 +3,11 @@ import {
     DEFAULT_WORKSPACE_LAYOUT,
     EXPLORER_MAX,
     INSPECTOR_MIN,
+    reduceLayout,
     toScriptViews,
     toWorkspaceLayout
 } from './ui-state'
+import type {LayoutAction, WorkspaceLayout} from './ui-state'
 
 const STORED = {
     centerTab: 'scripts',
@@ -107,5 +109,197 @@ describe('toScriptViews', () => {
 
     it('answers with nothing when nothing was stored', () => {
         expect(toScriptViews(undefined, ['scripts/player.gd'])).toEqual({})
+    })
+})
+
+/** Applies a run of actions in order, which is the only way a layout ever reaches a state. */
+function apply(...actions: readonly LayoutAction[]): WorkspaceLayout {
+    return actions.reduce(reduceLayout, DEFAULT_WORKSPACE_LAYOUT)
+}
+
+const NODE = {origin: 'edited', path: '/Main/Player', name: 'Player', type: 'Node2D'} as const
+
+describe('reduceLayout', () => {
+    it('moves each tab on its own without disturbing the others', () => {
+        const moved = apply(
+            {type: 'center-tab', tab: 'game'},
+            {type: 'explorer-tab', tab: 'files'},
+            {type: 'inspector-tab', tab: 'editor'},
+            {type: 'bottom-tab', tab: 'output'}
+        )
+        expect(moved.centerTab).toBe('game')
+        expect(moved.explorerTab).toBe('files')
+        expect(moved.inspectorTab).toBe('editor')
+        expect(moved.bottomTab).toBe('output')
+    })
+
+    /*
+     * The layout's identity is what triggers the write to the project's database. A tab click on
+     * the tab already open must therefore answer with the same value, or every idle click records
+     * the workspace as having been left differently.
+     */
+    it('answers with the same value when a choice does not change', () => {
+        expect(reduceLayout(DEFAULT_WORKSPACE_LAYOUT, {type: 'center-tab', tab: 'chat'})).toBe(
+            DEFAULT_WORKSPACE_LAYOUT
+        )
+        expect(reduceLayout(DEFAULT_WORKSPACE_LAYOUT, {type: 'log-scope', scope: 'session'})).toBe(
+            DEFAULT_WORKSPACE_LAYOUT
+        )
+        expect(
+            reduceLayout(DEFAULT_WORKSPACE_LAYOUT, {
+                type: 'resized',
+                explorerWidth: DEFAULT_WORKSPACE_LAYOUT.explorerWidth,
+                inspectorWidth: DEFAULT_WORKSPACE_LAYOUT.inspectorWidth
+            })
+        ).toBe(DEFAULT_WORKSPACE_LAYOUT)
+    })
+
+    it('collapses and reopens the bottom panel', () => {
+        expect(apply({type: 'bottom-toggled'}).isBottomCollapsed).toBe(true)
+        expect(apply({type: 'bottom-toggled'}, {type: 'bottom-toggled'}).isBottomCollapsed).toBe(
+            false
+        )
+    })
+
+    /** Running the project is one change, so a collapsed panel cannot hide the debugger it opens. */
+    it('shows the debugger and reopens the panel when the project runs', () => {
+        const running = apply(
+            {type: 'bottom-tab', tab: 'output'},
+            {type: 'bottom-toggled'},
+            {type: 'debug-started'}
+        )
+        expect(running.bottomTab).toBe('debugger')
+        expect(running.isBottomCollapsed).toBe(false)
+    })
+
+    it('opens the node tab with the node that was chosen', () => {
+        const chosen = apply(
+            {type: 'inspector-tab', tab: 'project'},
+            {type: 'node-chosen', selection: NODE, scene: 'res://main.tscn'}
+        )
+        expect(chosen.inspectorTab).toBe('node')
+        expect(chosen.selection).toEqual({selection: NODE, scene: 'res://main.tscn'})
+    })
+
+    /** Re-clicking the node already selected is a no-op, not a fresh record of the same choice. */
+    it('answers with the same value when the same node is chosen again', () => {
+        const chosen = apply({type: 'node-chosen', selection: NODE, scene: 'res://main.tscn'})
+        expect(
+            reduceLayout(chosen, {
+                type: 'node-chosen',
+                selection: {...NODE},
+                scene: 'res://main.tscn'
+            })
+        ).toBe(chosen)
+    })
+
+    it('treats the same node in another scene as a different choice', () => {
+        const chosen = apply({type: 'node-chosen', selection: NODE, scene: 'res://main.tscn'})
+        expect(
+            reduceLayout(chosen, {type: 'node-chosen', selection: NODE, scene: 'res://level.tscn'})
+        ).not.toBe(chosen)
+    })
+
+    it('records both panel widths together', () => {
+        const dragged = apply({type: 'resized', explorerWidth: 300, inspectorWidth: 420})
+        expect(dragged.explorerWidth).toBe(300)
+        expect(dragged.inspectorWidth).toBe(420)
+    })
+
+    it('follows the open scripts, the active one, and its breakpoints', () => {
+        const edited = apply({
+            type: 'scripts-changed',
+            openScripts: ['scripts/player.gd', 'scripts/enemy.gd'],
+            activeScript: 'scripts/enemy.gd',
+            breakpoints: {'scripts/player.gd': [4, 9]}
+        })
+        expect(edited.openScripts).toEqual(['scripts/player.gd', 'scripts/enemy.gd'])
+        expect(edited.activeScript).toBe('scripts/enemy.gd')
+        expect(edited.breakpoints).toEqual({'scripts/player.gd': [4, 9]})
+    })
+
+    /*
+     * The open scripts arrive as a fresh array on every render of the frame. Comparing by identity
+     * would make each render a change, and a debounced write that never settles.
+     */
+    it('answers with the same value when the scripts are equal but newly built', () => {
+        const edited = apply({
+            type: 'scripts-changed',
+            openScripts: ['scripts/player.gd'],
+            activeScript: 'scripts/player.gd',
+            breakpoints: {'scripts/player.gd': [4]}
+        })
+        expect(
+            reduceLayout(edited, {
+                type: 'scripts-changed',
+                openScripts: ['scripts/player.gd'],
+                activeScript: 'scripts/player.gd',
+                breakpoints: {'scripts/player.gd': [4]}
+            })
+        ).toBe(edited)
+    })
+
+    it('notices a breakpoint added to a script that already had one', () => {
+        const edited = apply({
+            type: 'scripts-changed',
+            openScripts: ['scripts/player.gd'],
+            breakpoints: {'scripts/player.gd': [4]}
+        })
+        const more = reduceLayout(edited, {
+            type: 'scripts-changed',
+            openScripts: ['scripts/player.gd'],
+            breakpoints: {'scripts/player.gd': [4, 9]}
+        })
+        expect(more).not.toBe(edited)
+        expect(more.breakpoints).toEqual({'scripts/player.gd': [4, 9]})
+    })
+
+    it('notices a breakpoint moved to another script', () => {
+        const edited = apply({
+            type: 'scripts-changed',
+            openScripts: ['scripts/player.gd', 'scripts/enemy.gd'],
+            breakpoints: {'scripts/player.gd': [4]}
+        })
+        expect(
+            reduceLayout(edited, {
+                type: 'scripts-changed',
+                openScripts: ['scripts/player.gd', 'scripts/enemy.gd'],
+                breakpoints: {'scripts/enemy.gd': [4]}
+            })
+        ).not.toBe(edited)
+    })
+
+    /** Closing the last tab leaves no active script, which is not the same as leaving the old one. */
+    it('forgets the active script when the last tab is closed', () => {
+        const edited = apply(
+            {
+                type: 'scripts-changed',
+                openScripts: ['scripts/player.gd'],
+                activeScript: 'scripts/player.gd',
+                breakpoints: {}
+            },
+            {type: 'scripts-changed', openScripts: [], breakpoints: {}}
+        )
+        expect(edited.activeScript).toBeUndefined()
+        expect(edited.openScripts).toEqual([])
+    })
+
+    /** What is stored has to survive being read back, or the layout is remembered as something else. */
+    it('answers with a layout the reader accepts unchanged', () => {
+        const moved = apply(
+            {type: 'center-tab', tab: 'docs'},
+            {type: 'explorer-tab', tab: 'runtime'},
+            {type: 'bottom-toggled'},
+            {type: 'log-severity', severity: 'error'},
+            {type: 'resized', explorerWidth: 300, inspectorWidth: 420},
+            {type: 'node-chosen', selection: NODE, scene: 'res://main.tscn'},
+            {
+                type: 'scripts-changed',
+                openScripts: ['scripts/player.gd'],
+                activeScript: 'scripts/player.gd',
+                breakpoints: {'scripts/player.gd': [4]}
+            }
+        )
+        expect(toWorkspaceLayout(JSON.parse(JSON.stringify(moved)))).toEqual(moved)
     })
 })

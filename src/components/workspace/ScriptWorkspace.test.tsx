@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {act, cleanup, render, screen, waitFor, within} from '@testing-library/react'
+import {cleanup, render, screen, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {ScriptWorkspace} from './ScriptWorkspace'
@@ -7,20 +7,11 @@ import type {ScriptReveal} from './ScriptWorkspace'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
 import type {WorkspaceFileChange} from '../../models/files'
 import type {MonacoStubState} from '../../test/monaco-stub'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
+import {flush} from '../../test/flush'
+import {createManualScheduler, setScheduler, timerScheduler} from '../../services/clock'
 
-type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
-
-const tauri = vi.hoisted(() => ({
-    invoke: vi.fn<InvokeFunction>(),
-    isTauri: vi.fn(() => true),
-    listen: vi.fn()
-}))
-
-vi.mock('../../services/desktop', () => ({
-    invoke: tauri.invoke,
-    isTauri: tauri.isTauri,
-    listen: tauri.listen
-}))
+const tauri = createDesktopFake()
 
 const editor = vi.hoisted(() => ({state: undefined as MonacoStubState | undefined}))
 
@@ -194,19 +185,26 @@ async function openPlayer() {
     const user = userEvent.setup()
     render(<Harness onError={vi.fn()} />)
     await user.click(screen.getByRole('button', {name: 'Open player.gd'}))
-    await waitFor(() => {
-        expect(editor.state?.editors).toBe(1)
-    })
+    await flush()
+    expect(editor.state?.editors).toBe(1)
     return user
 }
 
+// The change debounce and the editor's view-settle delay, both held: this file is about what the
+// buffers do, and neither delay decides any of it.
+let clock = createManualScheduler()
+
 beforeEach(() => {
-    tauri.isTauri.mockReturnValue(true)
+    installDesktopFake(tauri)
+    clock = createManualScheduler()
+    setScheduler(clock.schedule)
     editor.state?.reset()
 })
 
 afterEach(() => {
     cleanup()
+    removeDesktopFake()
+    setScheduler(timerScheduler)
     vi.clearAllMocks()
 })
 
@@ -225,21 +223,16 @@ describe('ScriptWorkspace', () => {
         await openPlayer()
 
         editor.state?.type('extends Node2D\n')
-        await waitFor(() => {
-            expect(openTab()).toHaveTextContent('•')
-        })
+        await flush()
+        expect(openTab()).toHaveTextContent('•')
 
         editor.state?.runAction('gofer.saveScript')
+        await flush()
 
-        await waitFor(() => {
-            expect(server.saved).toEqual(['extends Node2D\n'])
-        })
-        /*
-         * Pinned to the moment the save landed, not left to `waitFor`. A negative inside `waitFor`
-         * passes on its first poll — before the save has even been attempted — so it would score a
-         * tab that never went dirty exactly the same as a tab that went clean again.
-         */
-        await act(async () => undefined)
+        expect(server.saved).toEqual(['extends Node2D\n'])
+        // Read after the save landed, never inside a poll: a negative passes on the first poll,
+        // before the save has been attempted, so it scores a tab that never went dirty the same as
+        // a tab that went clean again.
         expect(openTab()).not.toHaveTextContent('•')
     })
 
@@ -262,18 +255,18 @@ describe('ScriptWorkspace', () => {
             ]
         })
 
-        await waitFor(() => {
-            expect(editor.state?.markers['/player.gd']).toEqual([
-                {
-                    startLineNumber: 3,
-                    startColumn: 1,
-                    endLineNumber: 3,
-                    endColumn: 5,
-                    message: 'Unexpected identifier',
-                    severity: 8
-                }
-            ])
-        })
+        await flush()
+
+        expect(editor.state?.markers['/player.gd']).toEqual([
+            {
+                startLineNumber: 3,
+                startColumn: 1,
+                endLineNumber: 3,
+                endColumn: 5,
+                message: 'Unexpected identifier',
+                severity: 8
+            }
+        ])
         expect(within(openTab()).getByText('1')).toBeInTheDocument()
     })
 
@@ -282,15 +275,15 @@ describe('ScriptWorkspace', () => {
         await openPlayer()
 
         editor.state?.clickGlyphMargin(3)
-        await waitFor(() => {
-            expect(editor.state?.decorations).toHaveLength(1)
-        })
+        await flush()
+
+        expect(editor.state?.decorations).toHaveLength(1)
         expect(editor.state?.decorations[0]?.options.glyphMarginClassName).toBe('gofer-breakpoint')
 
         editor.state?.clickGlyphMargin(3)
-        await waitFor(() => {
-            expect(editor.state?.decorations).toHaveLength(0)
-        })
+        await flush()
+
+        expect(editor.state?.decorations).toHaveLength(0)
     })
 
     it('previews formatting and only applies it when accepted', async () => {
@@ -298,14 +291,14 @@ describe('ScriptWorkspace', () => {
         const user = await openPlayer()
 
         await user.click(screen.getByRole('button', {name: 'Format'}))
-        expect(await screen.findByText('Formatted with gdformat')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Formatted with gdformat')).toBeInTheDocument()
         expect(server.saved).toEqual([])
 
         await user.click(screen.getByRole('button', {name: 'Apply to buffer'}))
+        await flush()
 
-        await waitFor(() => {
-            expect(editor.state?.activeText()).toBe(FORMATTED)
-        })
+        expect(editor.state?.activeText()).toBe(FORMATTED)
         // Applying formats the buffer only; writing it is still an explicit save.
         expect(server.saved).toEqual([])
         expect(openTab()).toHaveTextContent('•')
@@ -318,13 +311,15 @@ describe('ScriptWorkspace', () => {
         editor.state?.runAction('gofer.renameSymbol')
 
         // The dialog opens on the identifier the server named, not on whatever the cursor touched.
-        const name = await screen.findByLabelText('New name')
+        await flush()
+        const name = screen.getByLabelText('New name')
         expect(name).toHaveValue('ready')
         await user.clear(name)
         await user.type(name, 'start')
         await user.click(screen.getByRole('button', {name: 'Preview rename'}))
 
-        expect(await screen.findByText('Rename to start')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Rename to start')).toBeInTheDocument()
         expect(
             screen.getByText('2 file(s) would be rewritten as one transaction.')
         ).toBeInTheDocument()
@@ -335,14 +330,11 @@ describe('ScriptWorkspace', () => {
         expect(server.file.text).toBe(SOURCE)
 
         await user.click(screen.getByRole('button', {name: 'Apply rename'}))
+        await flush()
 
-        await waitFor(() => {
-            expect(server.applied).toEqual([['player.gd', 'enemy.gd']])
-        })
+        expect(server.applied).toEqual([['player.gd', 'enemy.gd']])
         // The open buffer takes the text the transaction wrote, clean rather than dirty.
-        await waitFor(() => {
-            expect(editor.state?.activeText()).toBe(RENAMED)
-        })
+        expect(editor.state?.activeText()).toBe(RENAMED)
         expect(openTab()).not.toHaveTextContent('•')
     })
 
@@ -351,26 +343,25 @@ describe('ScriptWorkspace', () => {
         const user = await openPlayer()
 
         editor.state?.type('extends Node2D\n')
-        await waitFor(() => {
-            expect(openTab()).toHaveTextContent('•')
-        })
+        await flush()
+        expect(openTab()).toHaveTextContent('•')
 
         server.file.text = EXTERNAL
         server.file.hash = 'hash-external'
         server.publishChanges([{path: 'player.gd', kind: 'modified'}])
+        await flush()
 
         expect(
-            await screen.findByText('This file changed on disk while the buffer was edited.')
+            screen.getByText('This file changed on disk while the buffer was edited.')
         ).toBeInTheDocument()
         // The user's edit is still there: a conflict warns, it does not overwrite either side.
         expect(editor.state?.activeText()).toBe('extends Node2D\n')
         expect(server.saved).toEqual([])
 
         await user.click(screen.getByRole('button', {name: 'Reload from disk'}))
+        await flush()
 
-        await waitFor(() => {
-            expect(editor.state?.activeText()).toBe(EXTERNAL)
-        })
+        expect(editor.state?.activeText()).toBe(EXTERNAL)
         expect(screen.queryByText('This buffer is out of date')).not.toBeInTheDocument()
         expect(openTab()).not.toHaveTextContent('•')
     })
@@ -381,12 +372,13 @@ describe('ScriptWorkspace', () => {
 
         server.file.hash = 'hash-external'
         editor.state?.type('extends Node2D\n')
-        await waitFor(() => {
-            expect(openTab()).toHaveTextContent('•')
-        })
-        await user.click(screen.getByRole('button', {name: 'Save'}))
+        await flush()
+        expect(openTab()).toHaveTextContent('•')
 
-        expect(await screen.findByText('This buffer is out of date')).toBeInTheDocument()
+        await user.click(screen.getByRole('button', {name: 'Save'}))
+        await flush()
+
+        expect(screen.getByText('This buffer is out of date')).toBeInTheDocument()
         expect(server.saved).toEqual([])
         expect(screen.getByRole('button', {name: 'Overwrite'})).toBeInTheDocument()
         expect(screen.getByRole('button', {name: 'Reload from disk'})).toBeInTheDocument()
@@ -405,18 +397,18 @@ describe('ScriptWorkspace', () => {
         const user = userEvent.setup()
         render(<Harness onError={report} />)
         await user.click(screen.getByRole('button', {name: 'Open player.gd'}))
-        await waitFor(() => {
-            expect(openTab()).toBeInTheDocument()
-        })
+        await flush()
+        expect(openTab()).toBeInTheDocument()
 
         server.file.hash = 'hash-external'
         editor.state?.type('extends Node2D\n')
-        await waitFor(() => {
-            expect(openTab()).toHaveTextContent('•')
-        })
-        await user.click(screen.getByRole('button', {name: 'Save'}))
+        await flush()
+        expect(openTab()).toHaveTextContent('•')
 
-        expect(await screen.findByText('This buffer is out of date')).toBeInTheDocument()
+        await user.click(screen.getByRole('button', {name: 'Save'}))
+        await flush()
+
+        expect(screen.getByText('This buffer is out of date')).toBeInTheDocument()
         expect(report).not.toHaveBeenCalled()
     })
 
@@ -426,9 +418,8 @@ describe('ScriptWorkspace', () => {
         const user = userEvent.setup()
         const {rerender} = render(<Harness onError={report} />)
         await user.click(screen.getByRole('button', {name: 'Open player.gd'}))
-        await waitFor(() => {
-            expect(editor.state?.editors).toBe(1)
-        })
+        await flush()
+        expect(editor.state?.editors).toBe(1)
         expect(editor.state?.revealed).toEqual([])
 
         rerender(
@@ -438,15 +429,16 @@ describe('ScriptWorkspace', () => {
             />
         )
 
-        await waitFor(() => {
-            expect(editor.state?.revealed).toEqual([3])
-        })
+        await flush()
+
+        expect(editor.state?.revealed).toEqual([3])
     })
 
     it('has no automatically detectable accessibility violations', async () => {
         backend()
         const {container} = render(<Harness onError={vi.fn()} />)
-        await screen.findByRole('button', {name: 'Open player.gd'})
+        await flush()
+        expect(screen.getByRole('button', {name: 'Open player.gd'})).toBeInTheDocument()
 
         const result = await axe.run(container)
 

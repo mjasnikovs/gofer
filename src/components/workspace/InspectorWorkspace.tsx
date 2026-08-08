@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
+import {useCallback, useEffect, useMemo, useReducer, useRef, useState} from 'react'
 import type {ReactNode} from 'react'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -37,13 +37,13 @@ import {
     EXPLORER_MIN,
     INSPECTOR_MAX,
     INSPECTOR_MIN,
+    reduceLayout,
     toScriptViews,
     toWorkspaceLayout
 } from '../../models/ui-state'
 import type {
     BottomTab,
     CenterTab,
-    ChosenNode,
     ExplorerTab,
     InspectorTab,
     LogScope,
@@ -176,16 +176,12 @@ export function InspectorWorkspace({chat, onError}: InspectorWorkspaceProps) {
     )
 }
 
-function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
-    const [centerTab, setCenterTab] = useState<CenterTab>(layout.centerTab)
-    const [explorerTab, setExplorerTab] = useState<ExplorerTab>(layout.explorerTab)
-    const [inspectorTab, setInspectorTab] = useState<InspectorTab>(layout.inspectorTab)
-    const [bottomTab, setBottomTab] = useState<BottomTab>(layout.bottomTab)
-    const [isBottomCollapsed, setIsBottomCollapsed] = useState(layout.isBottomCollapsed)
-    const [logSeverity, setLogSeverity] = useState<GodotLogSeverity>(layout.logSeverity)
-    const [logScope, setLogScope] = useState<LogScope>(layout.logScope)
+function InspectorFrame({chat, layout: opened, views, onError}: InspectorFrameProps) {
+    // One value rather than nine, because that is what gets stored. Nine variables can only be
+    // reassembled into a layout at write time, and the assembly is where a tab from before a drag
+    // ends up beside a width from after it.
+    const [layout, dispatch] = useReducer(reduceLayout, opened)
     const [isInspectorOpen, setIsInspectorOpen] = useState(false)
-    const [chosen, setChosen] = useState<ChosenNode | undefined>(layout.selection)
     const [fileFilter, setFileFilter] = useState('')
     const [reveal, setReveal] = useState<ScriptReveal>()
     const [failure, setFailure] = useState<string>()
@@ -215,13 +211,38 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
     const clearFailure = useCallback(() => {
         setFailure(undefined)
     }, [])
+
+    // `dispatch` never changes, so every one of these is stable for the life of the frame and none
+    // of the panels below re-render because a handler was rebuilt.
+    const showCenterTab = useCallback((tab: CenterTab) => {
+        dispatch({type: 'center-tab', tab})
+    }, [])
+    const showExplorerTab = useCallback((tab: ExplorerTab) => {
+        dispatch({type: 'explorer-tab', tab})
+    }, [])
+    const showInspectorTab = useCallback((tab: InspectorTab) => {
+        dispatch({type: 'inspector-tab', tab})
+    }, [])
+    const showBottomTab = useCallback((tab: BottomTab) => {
+        dispatch({type: 'bottom-tab', tab})
+    }, [])
+    const toggleBottom = useCallback(() => {
+        dispatch({type: 'bottom-toggled'})
+    }, [])
+    const showLogSeverity = useCallback((severity: GodotLogSeverity) => {
+        dispatch({type: 'log-severity', severity})
+    }, [])
+    const showLogScope = useCallback((scope: LogScope) => {
+        dispatch({type: 'log-scope', scope})
+    }, [])
+
     const scripts = useScriptBuffers({
         onError: report,
         onResolved: clearFailure,
         restore: {
-            openScripts: layout.openScripts,
-            breakpoints: layout.breakpoints,
-            ...(layout.activeScript !== undefined && {activeScript: layout.activeScript})
+            openScripts: opened.openScripts,
+            breakpoints: opened.breakpoints,
+            ...(opened.activeScript !== undefined && {activeScript: opened.activeScript})
         }
     })
     const {
@@ -243,12 +264,12 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
      * what makes it a property of the work rather than of the window it was last dragged in.
      */
     const explorer = useResizable({
-        defaultSize: layout.explorerWidth,
+        defaultSize: opened.explorerWidth,
         minSizePx: EXPLORER_MIN,
         maxSizePx: EXPLORER_MAX
     })
     const inspector = useResizable({
-        defaultSize: layout.inspectorWidth,
+        defaultSize: opened.inspectorWidth,
         minSizePx: INSPECTOR_MIN,
         maxSizePx: INSPECTOR_MAX
     })
@@ -277,45 +298,36 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
 
     const openScripts = useMemo(() => scripts.buffers.map(buffer => buffer.path), [scripts.buffers])
 
+    // The widths and the open scripts belong to hooks that own their own state, so the layout
+    // catches up with them rather than reading them at write time.
+    useEffect(() => {
+        dispatch({
+            type: 'resized',
+            explorerWidth: explorer.size,
+            inspectorWidth: inspector.size
+        })
+    }, [explorer.size, inspector.size])
+
+    useEffect(() => {
+        dispatch({
+            type: 'scripts-changed',
+            openScripts,
+            activeScript: scripts.activePath,
+            breakpoints: Object.fromEntries(breakpoints.map(source => [source.path, source.lines]))
+        })
+    }, [breakpoints, openScripts, scripts.activePath])
+
     /*
      * Records how the workspace is being left, on every change that is a choice.
      *
-     * One effect for the whole layout rather than one per control: the writes are coalesced
-     * anyway, and a single snapshot cannot store a tab from before a drag alongside a width from
-     * after it. What is deliberately absent is every filter box — a stored search would reopen the
-     * project with files hidden and no sign of why.
+     * One effect for the whole layout rather than one per control, and it writes the state itself:
+     * the reducer answers with the same value when nothing moved, so this runs exactly when the
+     * layout is genuinely different. What is deliberately absent is every filter box — a stored
+     * search would reopen the project with files hidden and no sign of why.
      */
     useEffect(() => {
-        writeProjectState(WORKSPACE_LAYOUT_KEY, {
-            centerTab,
-            explorerTab,
-            inspectorTab,
-            bottomTab,
-            isBottomCollapsed,
-            explorerWidth: explorer.size,
-            inspectorWidth: inspector.size,
-            logSeverity,
-            logScope,
-            openScripts,
-            ...(scripts.activePath !== undefined && {activeScript: scripts.activePath}),
-            breakpoints: Object.fromEntries(breakpoints.map(source => [source.path, source.lines])),
-            ...(chosen && {selection: chosen})
-        })
-    }, [
-        bottomTab,
-        breakpoints,
-        centerTab,
-        chosen,
-        explorer.size,
-        explorerTab,
-        inspector.size,
-        inspectorTab,
-        isBottomCollapsed,
-        logScope,
-        logSeverity,
-        openScripts,
-        scripts.activePath
-    ])
+        writeProjectState(WORKSPACE_LAYOUT_KEY, layout)
+    }, [layout])
 
     /** Records where the cursor was left in one script. */
     const rememberScriptView = useCallback((path: string, view: unknown) => {
@@ -345,8 +357,7 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
     const runProject = useCallback(() => {
         void (async () => {
             if (!(await ensureReady())) return
-            setBottomTab('debugger')
-            setIsBottomCollapsed(false)
+            dispatch({type: 'debug-started'})
             await debug.launch()
         })()
     }, [debug, ensureReady])
@@ -358,9 +369,9 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
     const openFile = useCallback(
         (path: string) => {
             void scripts.openBuffer(path)
-            setCenterTab('scripts')
+            showCenterTab('scripts')
         },
-        [scripts]
+        [scripts, showCenterTab]
     )
 
     /**
@@ -378,13 +389,13 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
                     // scene by its resource path, and `scene.open` is the editor's command. Sending
                     // the worktree path asks the editor to open a scene it has never heard of.
                     await call('scene.open', {path: resourcePath(path)})
-                    setExplorerTab('scene')
+                    showExplorerTab('scene')
                 } catch (error) {
                     report(`The scene could not be opened: ${toGodotError(error).message}`)
                 }
             })()
         },
-        [call, ensureReady, report]
+        [call, ensureReady, report, showExplorerTab]
     )
 
     /** Opens the scene `project.godot` names, which is the scene Run plays. */
@@ -398,26 +409,25 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
                     return
                 }
                 await call('scene.open', {path: resourcePath(settings.mainScene)})
-                setExplorerTab('scene')
+                showExplorerTab('scene')
             } catch (error) {
                 report(`The main scene could not be opened: ${toGodotError(error).message}`)
             }
         })()
-    }, [call, ensureReady, report])
+    }, [call, ensureReady, report, showExplorerTab])
 
     const openLocation = useCallback(
         (path: string, line: number) => {
             void scripts.openBuffer(path)
-            setCenterTab('scripts')
+            showCenterTab('scripts')
             setReveal({path, line, at: Date.now()})
         },
-        [scripts]
+        [scripts, showCenterTab]
     )
 
     const select = useCallback(
         (next: GodotSelection) => {
-            setChosen({selection: next, scene: scenePath})
-            setInspectorTab('node')
+            dispatch({type: 'node-chosen', selection: next, scene: scenePath})
         },
         [scenePath]
     )
@@ -436,6 +446,7 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
      * choice is kept: it belongs to the running game, which the edited scene changing does not
      * touch.
      */
+    const chosen = layout.selection
     const selection =
         (
             chosen === undefined
@@ -455,8 +466,8 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
 
     const inspectorPanel = (
         <InspectorPanel
-            tab={inspectorTab}
-            onTabChange={setInspectorTab}
+            tab={layout.inspectorTab}
+            onTabChange={showInspectorTab}
             call={call}
             state={state}
             scenePath={scenePath}
@@ -479,8 +490,8 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
                         resizable={explorer.props}
                     >
                         <ExplorerPanel
-                            tab={explorerTab}
-                            onTabChange={setExplorerTab}
+                            tab={layout.explorerTab}
+                            onTabChange={showExplorerTab}
                             call={call}
                             state={state}
                             sceneEpoch={sceneEpoch}
@@ -591,9 +602,9 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
                             size='sm'
                             hasDivider
                             aria-label='Workspace views'
-                            value={centerTab}
+                            value={layout.centerTab}
                             onChange={value => {
-                                setCenterTab(value as CenterTab)
+                                showCenterTab(value as CenterTab)
                             }}
                         >
                             <Tab
@@ -614,14 +625,14 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
                             />
                         </TabList>
                         <StackItem size='fill'>
-                            {centerTab === 'chat' ?
+                            {layout.centerTab === 'chat' ?
                                 <VStack
                                     gap={0}
                                     height='100%'
                                 >
                                     {chat}
                                 </VStack>
-                            : centerTab === 'scripts' ?
+                            : layout.centerTab === 'scripts' ?
                                 <ScriptWorkspace
                                     scripts={scripts}
                                     views={views}
@@ -629,7 +640,7 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
                                     onError={onError}
                                     {...(reveal && {reveal})}
                                 />
-                            : centerTab === 'game' ?
+                            : layout.centerTab === 'game' ?
                                 <GameView
                                     call={call}
                                     state={state}
@@ -639,19 +650,17 @@ function InspectorFrame({chat, layout, views, onError}: InspectorFrameProps) {
                         <Divider />
                         <VStack
                             gap={0}
-                            height={isBottomCollapsed ? 'auto' : BOTTOM_HEIGHT}
+                            height={layout.isBottomCollapsed ? 'auto' : BOTTOM_HEIGHT}
                         >
                             <BottomPanel
-                                tab={bottomTab}
-                                onTabChange={setBottomTab}
-                                isCollapsed={isBottomCollapsed}
-                                onToggle={() => {
-                                    setIsBottomCollapsed(previous => !previous)
-                                }}
-                                logSeverity={logSeverity}
-                                onLogSeverityChange={setLogSeverity}
-                                logScope={logScope}
-                                onLogScopeChange={setLogScope}
+                                tab={layout.bottomTab}
+                                onTabChange={showBottomTab}
+                                isCollapsed={layout.isBottomCollapsed}
+                                onToggle={toggleBottom}
+                                logSeverity={layout.logSeverity}
+                                onLogSeverityChange={showLogSeverity}
+                                logScope={layout.logScope}
+                                onLogScopeChange={showLogScope}
                                 call={call}
                                 state={state}
                                 diagnostics={scripts.diagnostics}

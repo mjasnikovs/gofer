@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
 import type * as Monaco from 'monaco-editor'
 import {StackItem} from '@astryxdesign/core/Stack'
+import {schedule} from '../../services/clock'
 import {languageForPath} from '../../services/monaco-gdscript'
 import {loadMonaco} from '../../services/monaco-runtime'
 import {GOFER_EDITOR_THEME} from '../../services/monaco-theme'
@@ -88,7 +89,8 @@ export function ScriptEditor({
             Object.entries(views) as [string, Monaco.editor.ICodeEditorViewState][]
         )
     )
-    const viewTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+    /** A way to call off the pending record of where the file is being read, while one is pending. */
+    const cancelSettleRef = useRef<(() => void) | undefined>(undefined)
     const decorationsRef = useRef<Monaco.editor.IEditorDecorationsCollection | undefined>(undefined)
     const applyingRef = useRef(false)
     const [monaco, setMonaco] = useState<typeof Monaco>()
@@ -216,9 +218,9 @@ export function ScriptEditor({
          * a write on its own — what is worth keeping is where they came to rest.
          */
         const settle = () => {
-            if (viewTimerRef.current !== undefined) clearTimeout(viewTimerRef.current)
-            viewTimerRef.current = setTimeout(() => {
-                viewTimerRef.current = undefined
+            cancelSettleRef.current?.()
+            cancelSettleRef.current = schedule(() => {
+                cancelSettleRef.current = undefined
                 const model = editor.getModel()
                 if (!model) return
                 const path = workspacePathFromUri(model.uri)
@@ -230,7 +232,7 @@ export function ScriptEditor({
         const moved = editor.onDidChangeCursorPosition(settle)
         const scrolled = editor.onDidScrollChange(settle)
         return () => {
-            if (viewTimerRef.current !== undefined) clearTimeout(viewTimerRef.current)
+            cancelSettleRef.current?.()
             changed.dispose()
             clicked.dispose()
             moved.dispose()

@@ -8,7 +8,8 @@ import {ProgressBar} from '@astryxdesign/core/ProgressBar'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import CircleStackIcon from '@heroicons/react/24/outline/CircleStackIcon'
-import {invoke, isTauri, listen} from '../../services/desktop'
+import {isTauri, listen} from '../../services/desktop'
+import {initializeRag} from '../../services/settings-store'
 import {commandErrorMessage} from '../../utils/command-error'
 import type {InitializationState} from '../../models/chat'
 import {progressLabel, progressValue} from '../../models/settings'
@@ -34,7 +35,7 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
             unlisten = await listen('rag-download-progress', event => {
                 setState({status: 'initializing', progress: event.payload})
             })
-            await invoke('initialize_rag')
+            await initializeRag()
             setState({status: 'ready'})
             onReady()
         } catch (error) {

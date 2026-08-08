@@ -14,7 +14,15 @@ import {
 } from '@tanstack/react-router'
 import type {RouterHistory} from '@tanstack/react-router'
 import {AppShell} from '@astryxdesign/core/AppShell'
-import {invoke, isTauri} from '../services/desktop'
+import {defer} from '../services/clock'
+import {isTauri} from '../services/desktop'
+import {
+    activateChatTask,
+    createChatTask,
+    deleteChatTask,
+    listProjectTasks,
+    mergeTaskWorktree
+} from '../services/tasks'
 import {HealthGate} from '../components/application/HealthGate'
 import {InitializationSplash} from '../components/application/InitializationSplash'
 import {Navigation} from '../components/application/Navigation'
@@ -34,7 +42,7 @@ const Workspace = lazy(() => preloadWorkspace().then(module => ({default: module
 
 async function loadTasks() {
     if (!isTauri()) return []
-    const response = await invoke('list_project_tasks')
+    const response = await listProjectTasks()
     if (!Array.isArray(response) || !response.every(isTaskSummary)) return []
     return response
 }
@@ -103,7 +111,7 @@ function Application() {
     )
     const newTask = useCallback(async () => {
         if (!isTauri()) return
-        const created = await invoke('create_chat_task').catch(() => undefined)
+        const created = await createChatTask().catch(() => undefined)
         if (!created?.taskId) return
         await refreshTasks()
         await navigate({to: '/tasks/$taskId', params: {taskId: created.taskId}})
@@ -119,7 +127,7 @@ function Application() {
     const deleteTask = useCallback(
         async (taskId: string) => {
             if (!isTauri()) return
-            const replacement = await invoke('delete_chat_task', {taskId}).catch(() => undefined)
+            const replacement = await deleteChatTask(taskId).catch(() => undefined)
             await refreshTasks()
             if (!replacement?.taskId) {
                 await navigate({to: '/'})
@@ -142,7 +150,7 @@ function Application() {
                 'This task has no worktree to merge. Reopen it from the sidebar and try again.'
             )
         }
-        await invoke('merge_task_worktree', {taskId: displayedTask.id})
+        await mergeTaskWorktree(displayedTask.id)
         await refreshTasks()
     }, [displayedTask, refreshTasks])
     const context = useMemo<ApplicationContextValue>(
@@ -150,14 +158,13 @@ function Application() {
         [prepareModels, refreshTasks, tasks]
     )
 
+    // Deferred to after the render rather than run inside it, so a mount and its StrictMode double
+    // collapse into one refresh instead of two.
     useEffect(() => {
         if (!isReady) return
-        const timeout = window.setTimeout(() => {
+        return defer(() => {
             void refreshTasks()
-        }, 0)
-        return () => {
-            window.clearTimeout(timeout)
-        }
+        })
     }, [isReady, refreshTasks])
 
     // The workspace is checked before the models are downloaded: a folder Gofer cannot work in is
@@ -263,7 +270,7 @@ const taskRoute = createRoute({
     path: 'tasks/$taskId',
     loader: async ({params}) => {
         if (!isTauri()) return
-        await invoke('activate_chat_task', {taskId: params.taskId})
+        await activateChatTask(params.taskId)
     },
     component: TaskRoute
 })

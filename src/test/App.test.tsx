@@ -8,27 +8,16 @@ import {SettingsPage} from '../components/settings/SettingsPage'
 import {Workspace} from '../components/workspace/Workspace'
 import type {TaskSummary} from '../models/app'
 import type {StoredChat, TokenUsage} from '../models/chat'
-import {immediateScheduler, setWriteScheduler} from '../services/ui-state'
+import {immediateScheduler, setScheduler} from '../services/clock'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from './desktop-driver'
+import {flush} from './flush'
 
-type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
-type IsTauriFunction = () => boolean
 type EventHandler = (event: {payload: never}) => void
 interface AiStream {
     onmessage: (payload: unknown) => void
 }
-type ListenFunction = (event?: string, handler?: EventHandler) => Promise<() => void>
 
-const tauri = vi.hoisted(() => ({
-    invoke: vi.fn<InvokeFunction>(),
-    isTauri: vi.fn<IsTauriFunction>(),
-    listen: vi.fn<ListenFunction>()
-}))
-
-vi.mock('../services/desktop', () => ({
-    invoke: tauri.invoke,
-    isTauri: tauri.isTauri,
-    listen: tauri.listen
-}))
+const tauri = createDesktopFake()
 
 /** The channel `send_ai_message` now streams its deltas down, as the fixture receives it. */
 const emptyUsage: TokenUsage = {
@@ -73,14 +62,14 @@ beforeEach(() => {
      * that out of the test's budget, so an assertion about a stored layout is never also a race
      * against the clock on a loaded machine.
      */
-    setWriteScheduler(immediateScheduler)
+    setScheduler(immediateScheduler)
     window.localStorage.clear()
-    tauri.isTauri.mockReturnValue(true)
-    tauri.listen.mockResolvedValue(vi.fn())
+    installDesktopFake(tauri)
 })
 
 afterEach(() => {
     cleanup()
+    removeDesktopFake()
     vi.clearAllMocks()
 })
 
@@ -89,7 +78,8 @@ describe('InitializationSplash', () => {
         tauri.isTauri.mockReturnValue(false)
         const {container} = render(<InitializationSplash onReady={vi.fn()} />)
 
-        await screen.findByText('Models could not be initialized')
+        await flush()
+        expect(screen.getByText('Models could not be initialized')).toBeInTheDocument()
         const result = await axe.run(container)
 
         expect(result.violations).toEqual([])
@@ -100,7 +90,8 @@ describe('InitializationSplash', () => {
 
         render(<InitializationSplash onReady={vi.fn()} />)
 
-        expect(await screen.findByText('Models could not be initialized')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Models could not be initialized')).toBeInTheDocument()
         expect(
             screen.getByText(/Model initialization requires the desktop app/)
         ).toBeInTheDocument()
@@ -121,9 +112,9 @@ describe('InitializationSplash', () => {
 
         render(<InitializationSplash onReady={onReady} />)
 
-        await waitFor(() => {
-            expect(onReady).toHaveBeenCalledOnce()
-        })
+        await flush()
+
+        expect(onReady).toHaveBeenCalledOnce()
         expect(calls).toEqual(['listen', 'invoke'])
         expect(unlisten).toHaveBeenCalledOnce()
     })
@@ -135,11 +126,12 @@ describe('InitializationSplash', () => {
 
         render(<InitializationSplash onReady={onReady} />)
 
-        expect(await screen.findByText(/event system unavailable/)).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText(/event system unavailable/)).toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', {name: 'Try again'}))
-        await waitFor(() => {
-            expect(onReady).toHaveBeenCalledOnce()
-        })
+        await flush()
+
+        expect(onReady).toHaveBeenCalledOnce()
     })
 })
 
@@ -168,7 +160,8 @@ describe('SettingsPage', () => {
         )
         const user = userEvent.setup()
 
-        expect(await screen.findByDisplayValue('Local AI')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByDisplayValue('Local AI')).toBeInTheDocument()
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
         const keepRequest = tauri.invoke.mock.calls.find(call => call[0] === 'test_ai_connection')
         expect(keepRequest?.[1]).toMatchObject({request: {apiKey: {action: 'keep'}}})
@@ -180,9 +173,9 @@ describe('SettingsPage', () => {
         await user.type(screen.getByPlaceholderText('Stored securely'), ' new-secret ')
         // `toHaveValue` rather than `findByDisplayValue`: the surrounding spaces are the point of
         // this key, and the display-value query normalizes them away before it compares.
-        await waitFor(() => {
-            expect(screen.getByPlaceholderText('Stored securely')).toHaveValue(' new-secret ')
-        })
+        await flush()
+
+        expect(screen.getByPlaceholderText('Stored securely')).toHaveValue(' new-secret ')
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
         const setRequest = tauri.invoke.mock.calls
             .filter(call => call[0] === 'test_ai_connection')
@@ -194,7 +187,8 @@ describe('SettingsPage', () => {
         await user.click(screen.getByRole('button', {name: 'Remove stored API key'}))
         // The button renames itself once the stored key is marked for removal: that render is the
         // proof the intent is `clear` before the connection test reads it.
-        expect(await screen.findByRole('button', {name: 'Keep stored API key'})).toBeInTheDocument()
+        await flush()
+        expect(screen.getByRole('button', {name: 'Keep stored API key'})).toBeInTheDocument()
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
         const clearRequest = tauri.invoke.mock.calls
             .filter(call => call[0] === 'test_ai_connection')
@@ -213,11 +207,13 @@ describe('SettingsPage', () => {
         )
         const user = userEvent.setup()
 
-        await screen.findByDisplayValue('Local AI')
+        await flush()
+        expect(screen.getByDisplayValue('Local AI')).toBeInTheDocument()
         tauri.listen.mockRejectedValueOnce(new Error('listener unavailable'))
         await user.click(screen.getByRole('button', {name: 'Download models'}))
 
-        expect(await screen.findByText(/listener unavailable/)).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText(/listener unavailable/)).toBeInTheDocument()
         expect(screen.getByText('Incomplete')).toBeInTheDocument()
     })
 
@@ -251,15 +247,15 @@ describe('Workspace', () => {
         )
 
         const rendered = render(<Workspace />)
-        await waitFor(() => {
-            expect(tauri.listen).toHaveBeenCalledWith('godot-session-event', expect.any(Function))
-        })
+        await flush()
+
+        expect(tauri.listen).toHaveBeenCalledWith('godot-session-event', expect.any(Function))
         rendered.unmount()
         resolveListen?.(dispose)
 
-        await waitFor(() => {
-            expect(dispose).toHaveBeenCalledOnce()
-        })
+        await flush()
+
+        expect(dispose).toHaveBeenCalledOnce()
     })
 
     it('attaches and sends an image without requiring text', async () => {
@@ -291,45 +287,45 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        const attachButton = await screen.findByRole('button', {name: 'Attach images'})
+        await flush()
+        const attachButton = screen.getByRole('button', {name: 'Attach images'})
         expect(attachButton).toBeEnabled()
         const input = document.querySelector<HTMLInputElement>('input[type="file"]')
         if (!input) throw new Error('Attachment input was not rendered')
         await userEvent.upload(input, new File(['hi'], 'scene.png', {type: 'image/png'}))
 
-        expect(await screen.findByAltText('Attached image: scene.png')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByAltText('Attached image: scene.png')).toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', {name: 'Send'}))
 
-        await waitFor(() => {
-            const saveCall = tauri.invoke.mock.calls.find(
-                call => call[0] === 'save_chat_attachment'
-            )
-            const serializedSaveRequest = JSON.stringify(saveCall?.[1])
-            expect(serializedSaveRequest).toContain('"name":"scene.png"')
-            expect(serializedSaveRequest).toContain('"mimeType":"image/png"')
-            expect(serializedSaveRequest).toContain('"size":2')
-            expect(serializedSaveRequest).toContain('"data":"aGk="')
-            expect(serializedSaveRequest).toMatch(/"id":"[a-z\d-]+"/u)
-            expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
-                stream: expect.anything() as unknown,
-                request: {
-                    requestId: 1,
-                    agentMessages: [],
-                    messages: [
-                        expect.objectContaining({
-                            sender: 'user',
-                            text: '',
-                            attachments: [
-                                expect.objectContaining({
-                                    name: 'scene.png',
-                                    mimeType: 'image/png',
-                                    size: 2
-                                })
-                            ]
-                        })
-                    ]
-                }
-            })
+        await flush()
+
+        const saveCall = tauri.invoke.mock.calls.find(call => call[0] === 'save_chat_attachment')
+        const serializedSaveRequest = JSON.stringify(saveCall?.[1])
+        expect(serializedSaveRequest).toContain('"name":"scene.png"')
+        expect(serializedSaveRequest).toContain('"mimeType":"image/png"')
+        expect(serializedSaveRequest).toContain('"size":2')
+        expect(serializedSaveRequest).toContain('"data":"aGk="')
+        expect(serializedSaveRequest).toMatch(/"id":"[a-z\d-]+"/u)
+        expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
+            stream: expect.anything() as unknown,
+            request: {
+                requestId: 1,
+                agentMessages: [],
+                messages: [
+                    expect.objectContaining({
+                        sender: 'user',
+                        text: '',
+                        attachments: [
+                            expect.objectContaining({
+                                name: 'scene.png',
+                                mimeType: 'image/png',
+                                size: 2
+                            })
+                        ]
+                    })
+                ]
+            }
         })
         expect(window.localStorage.getItem('gofer.agent-chat.v1')).toBeNull()
     })
@@ -351,12 +347,13 @@ describe('Workspace', () => {
 
         render(<Workspace />)
 
-        expect(await screen.findByText('Persisted project message')).toBeInTheDocument()
-        await waitFor(() => {
-            const saveCall = tauri.invoke.mock.calls.find(call => call[0] === 'save_chat')
-            expect(saveCall?.[1]).toMatchObject({
-                chat: {taskId: '0198f4c0-02ef-7000-8000-000000000001'}
-            })
+        await flush()
+        expect(screen.getByText('Persisted project message')).toBeInTheDocument()
+        await flush()
+
+        const saveCall = tauri.invoke.mock.calls.find(call => call[0] === 'save_chat')
+        expect(saveCall?.[1]).toMatchObject({
+            chat: {taskId: '0198f4c0-02ef-7000-8000-000000000001'}
         })
     })
 
@@ -392,17 +389,18 @@ describe('Workspace', () => {
         render(<Workspace />)
 
         // What was being written when the project was last closed is in the composer.
-        const composer = await screen.findByRole('textbox')
-        await waitFor(() => {
-            expect(composer).toHaveTextContent('Half a thought about the')
-        })
+        await flush()
+        const composer = screen.getByRole('textbox')
+        await flush()
+
+        expect(composer).toHaveTextContent('Half a thought about the')
 
         await userEvent.type(composer, ' level')
 
         // Typing again records the new text against the same task.
-        await waitFor(() => {
-            expect(drafts['ui.draft.0198f4c0-02ef-7000-8000-000000000001']).toContain('level')
-        })
+        await flush()
+
+        expect(drafts['ui.draft.0198f4c0-02ef-7000-8000-000000000001']).toContain('level')
     })
 
     it('coalesces chat snapshots while a save is already running', async () => {
@@ -426,21 +424,23 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await waitFor(() => {
-            expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
-        })
-        await userEvent.type(await screen.findByRole('textbox'), 'First{enter}')
-        await waitFor(() => {
-            expect(screen.getByRole('textbox')).toBeEnabled()
-        })
-        await userEvent.type(await screen.findByRole('textbox'), 'Second{enter}')
+        await flush()
+
+        expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
+        await flush()
+        await userEvent.type(screen.getByRole('textbox'), 'First{enter}')
+        await flush()
+
+        expect(screen.getByRole('textbox')).toBeEnabled()
+        await flush()
+        await userEvent.type(screen.getByRole('textbox'), 'Second{enter}')
         await new Promise(resolve => window.setTimeout(resolve, 250))
 
         expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(1)
         resolveFirstSave?.()
-        await waitFor(() => {
-            expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(2)
-        })
+        await flush()
+
+        expect(tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat')).toHaveLength(2)
         const latestSave = tauri.invoke.mock.calls.filter(call => call[0] === 'save_chat').at(-1)
         const latestChat = (latestSave?.[1] as {chat: StoredChat} | undefined)?.chat
         expect(latestChat?.taskId).toBe('task-1')
@@ -481,16 +481,18 @@ describe('Workspace', () => {
 
         render(<Workspace />)
 
-        expect(await screen.findByAltText('Attached image: scene.png')).toHaveAttribute(
+        await flush()
+        expect(screen.getByAltText('Attached image: scene.png')).toHaveAttribute(
             'src',
             'data:image/png;base64,aGk='
         )
-        await userEvent.type(await screen.findByRole('textbox'), 'Continue{enter}')
-        await waitFor(() => {
-            expect(
-                tauri.invoke.mock.calls.filter(call => call[0] === 'read_chat_attachment')
-            ).toHaveLength(1)
-        })
+        await flush()
+        await userEvent.type(screen.getByRole('textbox'), 'Continue{enter}')
+        await flush()
+
+        expect(
+            tauri.invoke.mock.calls.filter(call => call[0] === 'read_chat_attachment')
+        ).toHaveLength(1)
     })
 
     it('imports legacy localStorage chat once', async () => {
@@ -510,7 +512,8 @@ describe('Workspace', () => {
 
         render(<Workspace />)
 
-        expect(await screen.findByText('Legacy message')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Legacy message')).toBeInTheDocument()
         expect(tauri.invoke).toHaveBeenCalledWith('import_legacy_chat', {chat: legacy})
         expect(window.localStorage.getItem('gofer.agent-chat.v1')).toBeNull()
     })
@@ -544,9 +547,12 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(await screen.findByRole('textbox'), 'Say hello{enter}')
+        await flush()
 
-        expect(await screen.findByText('Hello from local AI')).toBeInTheDocument()
+        await userEvent.type(screen.getByRole('textbox'), 'Say hello{enter}')
+
+        await flush()
+        expect(screen.getByText('Hello from local AI')).toBeInTheDocument()
         expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
             stream: expect.anything() as unknown,
             request: {
@@ -583,17 +589,21 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(await screen.findByRole('textbox'), 'Keep going{enter}')
+        await flush()
 
+        await userEvent.type(screen.getByRole('textbox'), 'Keep going{enter}')
+
+        await flush()
         expect(
-            await screen.findByText('Summarising the conversation to make room (105K / 120K)')
+            screen.getByText('Summarising the conversation to make room (105K / 120K)')
         ).toBeInTheDocument()
 
         stream?.onmessage({requestId: 1, event: {type: 'compaction-end'}})
         stream?.onmessage({requestId: 1, event: {type: 'text-delta', delta: 'Carried on'}})
         endTurn?.()
 
-        expect(await screen.findByText('Carried on')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Carried on')).toBeInTheDocument()
         expect(screen.queryByText(/Summarising the conversation/)).not.toBeInTheDocument()
     })
 
@@ -642,13 +652,16 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
+        await flush()
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
 
         // The tool row rather than the sentence: streaming Markdown holds its last chunk back until
         // the next delta settles it, so the newest sentence is deliberately not on screen yet.
-        expect(await screen.findByText('godot_session')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('godot_session')).toBeInTheDocument()
         expect(
-            await screen.findByRole('status', {name: 'Working'}),
+            screen.getByRole('status', {name: 'Working'}),
             'a turn between steps looks finished'
         ).toBeInTheDocument()
 
@@ -701,9 +714,12 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
+        await flush()
 
-        expect(await screen.findByText('godot_scene')).toBeInTheDocument()
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+
+        await flush()
+        expect(screen.getByText('godot_scene')).toBeInTheDocument()
         expect(
             screen.queryByRole('status', {name: 'Working'}),
             'a running call is indicated twice'
@@ -727,11 +743,14 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
+        await flush()
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
 
         // The call's own row appearing is the turn having been processed end to end: the stream
         // closes in the same microtask that starts it. The indicator is then read at that moment.
-        expect(await screen.findByText('bash')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('bash')).toBeInTheDocument()
         await act(async () => undefined)
         expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
     })
@@ -765,9 +784,18 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
+        await flush()
 
-        expect(await screen.findByText('Starting.')).toBeInTheDocument()
+        await userEvent.type(screen.getByRole('textbox'), 'Build the level{enter}')
+
+        /*
+         * One of the few real waits left. `Markdown` parses a growing stretch incrementally and
+         * schedules that work itself, so the first delta appearing is an external library's doing
+         * rather than an effect this test can flush.
+         */
+        await waitFor(() => {
+            expect(screen.getByText('Starting.')).toBeInTheDocument()
+        })
         expect(
             screen.queryByText(/156 in/),
             'the running turn is already showing its closing line'
@@ -787,7 +815,8 @@ describe('Workspace', () => {
         })
         endTurn?.()
 
-        expect(await screen.findByText(/156 in/)).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText(/156 in/)).toBeInTheDocument()
     })
 
     it('renders agent tool activity and token usage', async () => {
@@ -848,10 +877,13 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await screen.findByText('Local AI connected')
-        await userEvent.type(await screen.findByRole('textbox'), 'Inspect workspace{enter}')
+        await flush()
+        expect(screen.getByText('Local AI connected')).toBeInTheDocument()
+        await flush()
+        await userEvent.type(screen.getByRole('textbox'), 'Inspect workspace{enter}')
 
-        expect(await screen.findByText('Finished')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Finished')).toBeInTheDocument()
         expect(screen.getByText('bash')).toBeInTheDocument()
         expect(screen.getByText('pwd')).toBeInTheDocument()
         expect(screen.getByText(/10 in/)).toBeInTheDocument()
@@ -893,8 +925,11 @@ describe('Workspace', () => {
         })
         render(<Workspace />)
 
-        await userEvent.type(await screen.findByRole('textbox'), 'Build a scene{enter}')
-        expect(await screen.findByText('godot --headless')).toBeInTheDocument()
+        await flush()
+
+        await userEvent.type(screen.getByRole('textbox'), 'Build a scene{enter}')
+        await flush()
+        expect(screen.getByText('godot --headless')).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('button', {name: 'Stop'}))
         expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId: 1})
@@ -908,16 +943,16 @@ describe('Workspace', () => {
     it('asks the user before the agent runs a gated tool call, and answers the backend', async () => {
         const handlers = new Map<string, EventHandler>()
         tauri.listen.mockImplementation(async (event, handler) => {
-            if (event && handler) handlers.set(event, handler)
+            handlers.set(event, handler)
             return vi.fn<() => void>()
         })
         tauri.invoke.mockImplementation(async command =>
             command === 'list_workspace_files' ? [] : undefined
         )
         render(<Workspace />)
-        await waitFor(() => {
-            expect(handlers.has('ai-approval-request')).toBe(true)
-        })
+        await flush()
+
+        expect(handlers.has('ai-approval-request')).toBe(true)
         const raise = (approvalId: string, op: string, params: Record<string, unknown>) => {
             handlers.get('ai-approval-request')?.({
                 payload: {
@@ -933,8 +968,9 @@ describe('Workspace', () => {
         raise('approval-1', 'delete', {path: 'scenes/main.tscn'})
         // A second prompt queues behind the first rather than stacking a second dialog.
         raise('approval-2', 'move', {from: 'a.gd', to: 'b.gd'})
+        await flush()
         expect(
-            await screen.findByText(/The agent is waiting to run godot_resource delete/)
+            screen.getByText(/The agent is waiting to run godot_resource delete/)
         ).toBeInTheDocument()
         expect(screen.getByText(/scenes\/main.tscn/)).toBeInTheDocument()
         expect(screen.queryByText(/godot_resource move/)).not.toBeInTheDocument()
@@ -944,7 +980,8 @@ describe('Workspace', () => {
             request: {approvalId: 'approval-1', approved: false}
         })
 
-        expect(await screen.findByText(/a.gd → b.gd/)).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText(/a.gd → b.gd/)).toBeInTheDocument()
         await userEvent.click(screen.getByRole('button', {name: 'Approve'}))
         expect(tauri.invoke).toHaveBeenCalledWith('respond_tool_approval', {
             request: {approvalId: 'approval-2', approved: true}
@@ -952,7 +989,8 @@ describe('Workspace', () => {
 
         // A prompt the backend settles on its own — a timeout, or a cancelled turn — closes too.
         raise('approval-3', 'delete', {path: 'scenes/other.tscn'})
-        expect(await screen.findByText(/scenes\/other.tscn/)).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText(/scenes\/other.tscn/)).toBeInTheDocument()
         await act(async () => {
             handlers.get('ai-approval-settled')?.({
                 payload: {approvalId: 'approval-3', approved: false} as never

@@ -1,9 +1,11 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
-import {invoke, isTauri} from '../services/desktop'
+import {useCallback, useEffect, useReducer, useRef, useState} from 'react'
+import {schedule} from '../services/clock'
+import {isTauri} from '../services/desktop'
 import {
     applyScriptRename,
     callScriptLanguage,
     closeScriptDocument,
+    formatGdscript,
     openScriptDocument,
     saveScriptDocument,
     subscribeScriptDiagnostics,
@@ -16,6 +18,8 @@ import {
     subscribeWorkspaceChanges,
     unsubscribeWorkspaceChanges
 } from '../services/workspace-files'
+import {NO_SCRIPT_TABS, reduceScriptTabs} from '../models/script-buffers'
+import type {ScriptBuffer} from '../models/script-buffers'
 import type {
     PlannedScriptFile,
     ScriptDiagnostic,
@@ -23,27 +27,7 @@ import type {
     WorkspaceEntry
 } from '../models/script'
 
-/**
- * Why a buffer refuses to write. `externalChange` means the file moved underneath a dirty buffer;
- * `staleSave` means the write itself lost the optimistic-concurrency check.
- */
-export type ScriptBufferConflict = 'externalChange' | 'staleSave'
-
-export type ScriptBuffer = Readonly<{
-    path: string
-    /** What the editor holds right now. */
-    text: string
-    /** What Gofer last read from or wrote to disk. */
-    savedText: string
-    /** The hash the next write claims to replace. */
-    hash: string
-    /** The language server's document version. Rust owns it; the renderer only records it. */
-    version: number
-    dirty: boolean
-    /** One-based lines carrying a breakpoint, in the order the user set them. */
-    breakpoints: readonly number[]
-    conflict?: ScriptBufferConflict | undefined
-}>
+export type {ScriptBuffer, ScriptBufferConflict} from '../models/script-buffers'
 
 export type FormatPreview = Readonly<{
     path: string
@@ -85,14 +69,6 @@ export type ScriptBuffers = ReturnType<typeof useScriptBuffers>
 /** Keystrokes are batched before `didChange`: the server answers from the editor's main loop. */
 const CHANGE_DEBOUNCE_MS = 250
 
-function replaceBuffer(
-    buffers: readonly ScriptBuffer[],
-    path: string,
-    update: (buffer: ScriptBuffer) => ScriptBuffer
-) {
-    return buffers.map(buffer => (buffer.path === path ? update(buffer) : buffer))
-}
-
 /**
  * Owns every open script buffer: its text, the hash it expects on disk, the language server's
  * document version, its breakpoints, and its conflict state.
@@ -102,11 +78,15 @@ function replaceBuffer(
  * of the same file cannot leave two versions of the truth behind.
  */
 export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOptions) {
-    const [buffers, setBuffers] = useState<readonly ScriptBuffer[]>([])
-    const [activePath, setActivePath] = useState<string | undefined>(restore?.activeScript)
+    const [tabs, dispatch] = useReducer(reduceScriptTabs, {
+        ...NO_SCRIPT_TABS,
+        ...(restore?.activeScript !== undefined && {activePath: restore.activeScript})
+    })
+    const {activePath, buffers} = tabs
     const [files, setFiles] = useState<readonly WorkspaceEntry[]>([])
     const [diagnostics, setDiagnostics] = useState<Readonly<Record<string, ScriptDiagnostic[]>>>({})
-    const changeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+    // One way to call off the pending sync of each edited file, keyed by that file's path.
+    const changeDelays = useRef(new Map<string, () => void>())
     const isFollowingDiagnostics = useRef(false)
     // The external-change handler runs outside React's render, so it reads the buffers from a ref
     // rather than deciding inside a state updater, which StrictMode would run twice.
@@ -141,10 +121,10 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
     }, [report])
 
     const flushChange = useCallback((path: string) => {
-        const timer = changeTimers.current.get(path)
-        if (timer === undefined) return
-        clearTimeout(timer)
-        changeTimers.current.delete(path)
+        const cancel = changeDelays.current.get(path)
+        if (cancel === undefined) return
+        cancel()
+        changeDelays.current.delete(path)
     }, [])
 
     /**
@@ -183,23 +163,12 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
             try {
                 const document = await openScriptDocument(path)
                 followDiagnostics()
-                setBuffers(previous => {
-                    const existing = previous.find(buffer => buffer.path === path)
-                    const next: ScriptBuffer = {
-                        path,
-                        text: document.text,
-                        savedText: document.text,
-                        hash: document.hash,
-                        version: document.version,
-                        dirty: false,
-                        breakpoints: existing?.breakpoints ?? restored.current[path] ?? [],
-                        conflict: undefined
-                    }
-                    return existing ?
-                            replaceBuffer(previous, path, () => next)
-                        :   [...previous, next]
+                dispatch({
+                    type: 'opened',
+                    document,
+                    ...(restored.current[path] && {restored: restored.current[path]}),
+                    activate
                 })
-                if (activate) setActivePath(path)
                 // What the server already thinks of this file, rather than only what it says
                 // next: a script opened with an error in it should show that error now.
                 pullDiagnostics(path)
@@ -218,13 +187,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
     const closeBuffer = useCallback(
         (path: string) => {
             flushChange(path)
-            setBuffers(previous => {
-                const remaining = previous.filter(buffer => buffer.path !== path)
-                setActivePath(current =>
-                    current === path ? remaining[remaining.length - 1]?.path : current
-                )
-                return remaining
-            })
+            dispatch({type: 'closed', path})
             if (!isTauri()) return
             void closeScriptDocument(path).catch((error: unknown) => {
                 report(error, `${path} could not be closed`)
@@ -235,27 +198,16 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
 
     const changeBuffer = useCallback(
         (path: string, text: string) => {
-            setBuffers(previous =>
-                replaceBuffer(previous, path, buffer => ({
-                    ...buffer,
-                    text,
-                    dirty: text !== buffer.savedText
-                }))
-            )
+            dispatch({type: 'edited', path, text})
             if (!isTauri()) return
             flushChange(path)
-            changeTimers.current.set(
+            changeDelays.current.set(
                 path,
-                setTimeout(() => {
-                    changeTimers.current.delete(path)
+                schedule(() => {
+                    changeDelays.current.delete(path)
                     void updateScriptDocument(path, text)
                         .then(stamp => {
-                            setBuffers(previous =>
-                                replaceBuffer(previous, path, buffer => ({
-                                    ...buffer,
-                                    version: stamp.version
-                                }))
-                            )
+                            dispatch({type: 'synced', path, version: stamp.version})
                         })
                         .catch((error: unknown) => {
                             report(error, `${path} could not be synchronized`)
@@ -273,26 +225,14 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
             flushChange(path)
             try {
                 const stamp = await saveScriptDocument(path, buffer.text, buffer.hash)
-                setBuffers(previous =>
-                    replaceBuffer(previous, path, entry => ({
-                        ...entry,
-                        savedText: buffer.text,
-                        hash: stamp.hash ?? entry.hash,
-                        version: stamp.version,
-                        dirty: entry.text !== buffer.text,
-                        conflict: undefined
-                    }))
-                )
+                dispatch({type: 'saved', path, text: buffer.text, stamp})
                 resolved()
             } catch (error) {
                 const failure = toScriptError(error)
                 // The file changed since this buffer read it. Nothing is written, and the buffer
                 // keeps its text so the user can compare before overwriting or reloading.
-                if (failure.code === 'file_conflict') {
-                    setBuffers(previous =>
-                        replaceBuffer(previous, path, entry => ({...entry, conflict: 'staleSave'}))
-                    )
-                }
+                if (failure.code === 'file_conflict')
+                    dispatch({type: 'conflicted', path, conflict: 'staleSave'})
                 report(error, `${path} could not be saved`)
             }
         },
@@ -317,17 +257,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
             try {
                 const current = await openScriptDocument(path)
                 const stamp = await saveScriptDocument(path, buffer.text, current.hash)
-                setBuffers(previous =>
-                    replaceBuffer(previous, path, entry => ({
-                        ...entry,
-                        text: buffer.text,
-                        savedText: buffer.text,
-                        hash: stamp.hash ?? entry.hash,
-                        version: stamp.version,
-                        dirty: false,
-                        conflict: undefined
-                    }))
-                )
+                dispatch({type: 'overwritten', path, text: buffer.text, stamp})
                 resolved()
             } catch (error) {
                 report(error, `${path} could not be overwritten`)
@@ -336,16 +266,13 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
         [buffers, flushChange, report, resolved]
     )
 
+    /** Shows a tab that is already open. Opening one that is not is `openBuffer`'s job. */
+    const showBuffer = useCallback((path: string) => {
+        dispatch({type: 'shown', path})
+    }, [])
+
     const toggleBreakpoint = useCallback((path: string, line: number) => {
-        setBuffers(previous =>
-            replaceBuffer(previous, path, buffer => ({
-                ...buffer,
-                breakpoints:
-                    buffer.breakpoints.includes(line) ?
-                        buffer.breakpoints.filter(entry => entry !== line)
-                    :   [...buffer.breakpoints, line]
-            }))
-        )
+        dispatch({type: 'breakpoint-toggled', path, line})
     }, [])
 
     /** Formats through the pinned sidecar and returns the diff for the user to accept. */
@@ -354,7 +281,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
             const buffer = buffers.find(entry => entry.path === path)
             if (!buffer || !isTauri()) return undefined
             try {
-                const response = await invoke('format_gdscript', {request: {source: buffer.text}})
+                const response = await formatGdscript(buffer.text)
                 return {
                     path,
                     original: buffer.text,
@@ -385,8 +312,11 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
         ): Promise<RenamePreview | undefined> => {
             if (!isTauri()) return undefined
             try {
-                const response = await invoke('call_script_language', {
-                    request: {op: 'rename', path, position, newName}
+                const response = await callScriptLanguage({
+                    op: 'rename',
+                    path,
+                    position,
+                    newName
                 })
                 if (response.op !== 'rename') return undefined
                 return {path, newName, files: response.files}
@@ -403,22 +333,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
             if (!isTauri()) return
             try {
                 const stamps = await applyScriptRename(preview.files)
-                setBuffers(previous =>
-                    previous.map(buffer => {
-                        const file = preview.files.find(entry => entry.path === buffer.path)
-                        const stamp = stamps.find(entry => entry.path === buffer.path)
-                        if (!file || !stamp) return buffer
-                        return {
-                            ...buffer,
-                            text: file.updatedText,
-                            savedText: file.updatedText,
-                            hash: stamp.hash ?? buffer.hash,
-                            version: stamp.version,
-                            dirty: false,
-                            conflict: undefined
-                        }
-                    })
-                )
+                dispatch({type: 'renamed', files: preview.files, stamps})
             } catch (error) {
                 report(error, 'The rename could not be applied')
             }
@@ -446,12 +361,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
                 const buffer = buffersRef.current.find(entry => entry.path === change.path)
                 if (!buffer) continue
                 if (buffer.dirty) {
-                    setBuffers(previous =>
-                        replaceBuffer(previous, change.path, entry => ({
-                            ...entry,
-                            conflict: 'externalChange'
-                        }))
-                    )
+                    dispatch({type: 'conflicted', path: change.path, conflict: 'externalChange'})
                     continue
                 }
                 void openBuffer(change.path, false)
@@ -484,11 +394,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
                 if (await openBuffer(path, false, true)) opened.push(path)
             }
             if (cancelled) return
-            setActivePath(current =>
-                current !== undefined && opened.includes(current) ?
-                    current
-                :   opened[opened.length - 1]
-            )
+            dispatch({type: 'reopened', opened})
         }
         void reopen()
         return () => {
@@ -518,10 +424,10 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
     }, [report])
 
     useEffect(() => {
-        const timers = changeTimers.current
+        const delays = changeDelays.current
         return () => {
-            for (const timer of timers.values()) clearTimeout(timer)
-            timers.clear()
+            for (const cancel of delays.values()) cancel()
+            delays.clear()
         }
     }, [])
 
@@ -544,7 +450,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
         refreshFiles,
         reloadBuffer,
         saveBuffer,
-        setActivePath,
+        showBuffer,
         toggleBreakpoint
     }
 }

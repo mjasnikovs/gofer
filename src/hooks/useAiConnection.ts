@@ -1,5 +1,7 @@
 import {useCallback, useEffect, useState} from 'react'
-import {invoke, isTauri} from '../services/desktop'
+import {defer} from '../services/clock'
+import {isTauri} from '../services/desktop'
+import {listAiModels, loadSettings, saveSettings as storeSettings} from '../services/settings-store'
 import {commandErrorMessage} from '../utils/command-error'
 import {normalizeSettings} from '../models/settings'
 import type {AiModelOption, GoferSettings, ThinkingLevel} from '../models/settings'
@@ -29,9 +31,7 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
         async (nextSettings: GoferSettings, failure: string) => {
             setSettings(nextSettings)
             try {
-                await invoke('save_settings', {
-                    request: {settings: nextSettings, apiKey: {action: 'keep'}}
-                })
+                await storeSettings({settings: nextSettings, apiKey: {action: 'keep'}})
                 onConnected()
             } catch (error) {
                 onError(`${failure}: ${commandErrorMessage(error)}`)
@@ -81,11 +81,12 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
         setConnectionState('connecting')
         onConnected()
         try {
-            const response = await invoke('load_settings')
+            const response = await loadSettings()
             const loadedSettings = normalizeSettings(response.settings)
             setSettings(loadedSettings)
-            const available = await invoke('list_ai_models', {
-                request: {settings: loadedSettings, apiKey: {action: 'keep'}}
+            const available = await listAiModels({
+                settings: loadedSettings,
+                apiKey: {action: 'keep'}
             })
             setModels(available)
             setConnectionState('connected')
@@ -102,14 +103,15 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
         }
     }, [applyModel, onConnected, onError])
 
-    useEffect(() => {
-        const timeout = window.setTimeout(() => {
-            void connect()
-        }, 0)
-        return () => {
-            window.clearTimeout(timeout)
-        }
-    }, [connect])
+    // Deferred to after the render rather than run inside it, so a mount and its StrictMode double
+    // collapse into one connection attempt instead of two.
+    useEffect(
+        () =>
+            defer(() => {
+                void connect()
+            }),
+        [connect]
+    )
 
     return {settings, models, connectionState, connect, applyModel, applyThinkingLevel}
 }

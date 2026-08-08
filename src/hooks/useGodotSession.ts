@@ -1,4 +1,5 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useCallback, useEffect, useMemo, useReducer, useRef} from 'react'
+import {wait} from '../services/clock'
 import {isTauri, listen} from '../services/desktop'
 import {
     callGodot,
@@ -9,7 +10,8 @@ import {
     toGodotError,
     unsubscribeGodotEvents
 } from '../services/godot-session'
-import type {GodotCallOptions, GodotSessionState, GodotSessionSummary} from '../models/godot'
+import {INITIAL_SESSION_VIEW, reduceSession} from '../models/godot-session-state'
+import type {GodotCallOptions, GodotSessionState} from '../models/godot'
 
 type GodotSessionOptions = Readonly<{
     onError: (message: string) => void
@@ -25,12 +27,7 @@ const READY_STATES: ReadonlySet<GodotSessionState> = new Set<GodotSessionState>(
     'debugPaused'
 ])
 
-/** What the edited scene is, as the addon's own events report it. */
-export type EditedScene = Readonly<{
-    path: string
-    revision: number
-    dirty: boolean
-}>
+export type {EditedScene} from '../models/godot-session-state'
 
 /**
  * The renderer's view of the one Gofer-managed editor session: its lifecycle state, the scene the
@@ -41,12 +38,7 @@ export type EditedScene = Readonly<{
  * moves, so an editor-side change and a Gofer-side change refresh the same way.
  */
 export function useGodotSession({onError}: GodotSessionOptions) {
-    const [session, setSession] = useState<GodotSessionSummary>()
-    const [state, setState] = useState<GodotSessionState>('offline')
-    const [scene, setScene] = useState<EditedScene>()
-    const [isBusy, setIsBusy] = useState(false)
-    const [sceneEpoch, setSceneEpoch] = useState(0)
-    const [runtimeEpoch, setRuntimeEpoch] = useState(0)
+    const [view, dispatch] = useReducer(reduceSession, INITIAL_SESSION_VIEW)
     const subscribed = useRef(false)
 
     const report = useCallback(
@@ -77,15 +69,17 @@ export function useGodotSession({onError}: GodotSessionOptions) {
             if (event.type !== 'rpcEvent') return
             if (event.event === 'scene.changed') {
                 const data = event.data
-                setScene({
-                    path: typeof data['scene'] === 'string' ? data['scene'] : '',
-                    revision: Number(data['revision'] ?? 0),
-                    dirty: data['dirty'] === true
+                dispatch({
+                    type: 'scene-changed',
+                    scene: {
+                        path: typeof data['scene'] === 'string' ? data['scene'] : '',
+                        revision: Number(data['revision'] ?? 0),
+                        dirty: data['dirty'] === true
+                    }
                 })
-                setSceneEpoch(previous => previous + 1)
             }
             if (event.event === 'runtime.ready' || event.event === 'runtime.stopped')
-                setRuntimeEpoch(previous => previous + 1)
+                dispatch({type: 'runtime-changed'})
         }).catch(() => {
             subscribed.current = false
         })
@@ -93,11 +87,10 @@ export function useGodotSession({onError}: GodotSessionOptions) {
 
     const start = useCallback(async () => {
         if (!isTauri()) return
-        setIsBusy(true)
+        dispatch({type: 'working'})
         try {
             const started = await startGodotSession()
-            setSession(started)
-            setState(started.state)
+            dispatch({type: 'started', session: started})
             // Every start subscribes again, because a subscription belongs to the editor it was
             // made for. The stream of the editor that came before is closed with it, and the
             // worker behind it has already stopped; leaving the old one in place meant nothing
@@ -106,10 +99,8 @@ export function useGodotSession({onError}: GodotSessionOptions) {
             subscribed.current = false
             subscribe()
         } catch (error) {
-            setState('error')
+            dispatch({type: 'start-failed'})
             report(error, 'The Godot session could not be started')
-        } finally {
-            setIsBusy(false)
         }
     }, [report, subscribe])
 
@@ -129,12 +120,11 @@ export function useGodotSession({onError}: GodotSessionOptions) {
         while (Date.now() < deadline) {
             const current = await getGodotSession().catch(() => undefined)
             if (current && READY_STATES.has(current.state)) {
-                setSession(current)
-                setState(current.state)
+                dispatch({type: 'found', session: current})
                 return true
             }
             if (!current) break
-            await new Promise(resolve => setTimeout(resolve, READY_POLL_MS))
+            await wait(READY_POLL_MS)
         }
         onError('The Godot editor did not become ready, so the game was not launched.')
         return false
@@ -142,18 +132,18 @@ export function useGodotSession({onError}: GodotSessionOptions) {
 
     const stop = useCallback(async () => {
         if (!isTauri()) return
-        setIsBusy(true)
+        dispatch({type: 'working'})
         try {
             await stopGodotSession()
-            setSession(undefined)
-            setState('offline')
-            setScene(undefined)
+            dispatch({type: 'stopped'})
         } catch (error) {
+            // A stop that would not go through leaves the session as it was: saying it is offline
+            // when it is still running is worse than saying nothing.
+            dispatch({type: 'settled'})
             report(error, 'The Godot session could not be stopped')
         } finally {
             subscribed.current = false
             void unsubscribeGodotEvents().catch(() => undefined)
-            setIsBusy(false)
         }
     }, [report])
 
@@ -164,8 +154,7 @@ export function useGodotSession({onError}: GodotSessionOptions) {
         void getGodotSession()
             .then(current => {
                 if (cancelled || !current) return
-                setSession(current)
-                setState(current.state)
+                dispatch({type: 'found', session: current})
                 subscribe()
             })
             .catch(() => undefined)
@@ -183,9 +172,7 @@ export function useGodotSession({onError}: GodotSessionOptions) {
         void listen('godot-session-event', received => {
             if (isCancelled) return
             if (received.payload.type !== 'stateChanged') return
-            setState(received.payload.state)
-            if (received.payload.state === 'playing' || received.payload.state === 'ready')
-                setRuntimeEpoch(previous => previous + 1)
+            dispatch({type: 'state-changed', state: received.payload.state})
         }).then(cancel => {
             // The disposer can arrive after the effect has already torn down — StrictMode
             // guarantees it on every development mount — so a late one is disposed on arrival.
@@ -205,16 +192,8 @@ export function useGodotSession({onError}: GodotSessionOptions) {
         []
     )
 
-    return {
-        call,
-        ensureReady,
-        isBusy,
-        runtimeEpoch,
-        scene,
-        sceneEpoch,
-        session,
-        start,
-        state,
-        stop
-    }
+    return useMemo(
+        () => ({...view, call, ensureReady, start, stop}),
+        [call, ensureReady, start, stop, view]
+    )
 }

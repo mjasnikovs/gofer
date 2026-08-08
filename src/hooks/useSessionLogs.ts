@@ -1,7 +1,9 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useCallback, useEffect, useReducer} from 'react'
+import {repeat} from '../services/clock'
 import {isTauri} from '../services/desktop'
 import {readGodotLogs, toGodotError} from '../services/godot-session'
-import type {GodotError, GodotLogEntry, GodotLogSeverity} from '../models/godot'
+import {INITIAL_SESSION_LOGS, reduceSessionLogs} from '../models/session-logs'
+import type {GodotLogSeverity} from '../models/godot'
 
 type SessionLogOptions = Readonly<{
     enabled: boolean
@@ -9,8 +11,6 @@ type SessionLogOptions = Readonly<{
     contains: string
 }>
 
-/** How many lines the panel keeps on screen. The backend's own ring buffer is the real bound. */
-const MAX_ENTRIES = 500
 const POLL_INTERVAL_MS = 1_000
 const PAGE_LIMIT = 200
 
@@ -19,62 +19,48 @@ const PAGE_LIMIT = 200
  * between two reads cannot be skipped, and `dropped` reports what the backend's ring buffer
  * discarded before this panel asked for it.
  *
- * Changing a filter restarts from the oldest buffered line rather than filtering what is already on
- * screen: the filter belongs to the query, and the backend is the only place that still holds the
- * lines the previous filter excluded.
+ * What each page does to what is on screen is `reduceSessionLogs`; this is only the polling.
  */
 export function useSessionLogs({enabled, minSeverity, contains}: SessionLogOptions) {
-    const [entries, setEntries] = useState<readonly GodotLogEntry[]>([])
-    const [dropped, setDropped] = useState(0)
-    const [error, setError] = useState<GodotError>()
-    const cursor = useRef<number | undefined>(undefined)
+    const [logs, dispatch] = useReducer(reduceSessionLogs, INITIAL_SESSION_LOGS)
 
     const clear = useCallback(() => {
-        setEntries([])
+        dispatch({type: 'cleared'})
     }, [])
 
     useEffect(() => {
         if (!enabled || !isTauri()) return
         let cancelled = false
-        // The first page of a new subscription replaces what the previous filter left on screen;
-        // every later page appends. Doing it here rather than in the effect body keeps the reset
-        // out of the render the effect would otherwise cascade into.
-        let isFirstPage = true
-        cursor.current = undefined
+        // The cursor is carried here rather than read from the state: it moves with every page, and
+        // an effect that depended on it would tear down and restart the poll on each one.
+        let after: number | undefined
+        dispatch({type: 'restarted'})
 
         const poll = async () => {
             try {
                 const page = await readGodotLogs({
-                    ...(cursor.current !== undefined && {after: cursor.current}),
+                    ...(after !== undefined && {after}),
                     minSeverity,
                     ...(contains.trim() !== '' && {contains: contains.trim()}),
                     limit: PAGE_LIMIT
                 })
                 if (cancelled) return
-                cursor.current = page.cursor
-                setDropped(page.dropped)
-                setError(undefined)
-                if (isFirstPage) {
-                    isFirstPage = false
-                    setEntries(page.entries.slice(-MAX_ENTRIES))
-                    return
-                }
-                if (page.entries.length > 0)
-                    setEntries(previous => [...previous, ...page.entries].slice(-MAX_ENTRIES))
+                after = page.cursor
+                dispatch({type: 'page-read', page})
             } catch (failure) {
-                if (!cancelled) setError(toGodotError(failure))
+                if (!cancelled) dispatch({type: 'failed', error: toGodotError(failure)})
             }
         }
 
         void poll()
-        const timer = setInterval(() => {
+        const stop = repeat(() => {
             void poll()
         }, POLL_INTERVAL_MS)
         return () => {
             cancelled = true
-            clearInterval(timer)
+            stop()
         }
     }, [contains, enabled, minSeverity])
 
-    return {clear, dropped, entries, error}
+    return {clear, dropped: logs.dropped, entries: logs.entries, error: logs.error}
 }

@@ -20,7 +20,18 @@ import CloudArrowDownIcon from '@heroicons/react/24/outline/CloudArrowDownIcon'
 import KeyIcon from '@heroicons/react/24/outline/KeyIcon'
 import ServerStackIcon from '@heroicons/react/24/outline/ServerStackIcon'
 import TrashIcon from '@heroicons/react/24/outline/TrashIcon'
-import {invoke, isTauri, listen} from '../../services/desktop'
+import {isTauri, listen} from '../../services/desktop'
+import {
+    createProjectBackup,
+    deleteRagCache,
+    initializeRag,
+    listAiModels,
+    loadSettings,
+    readCacheStatus,
+    runStorageMaintenance,
+    saveSettings,
+    testAiConnection
+} from '../../services/settings-store'
 import {commandErrorMessage} from '../../utils/command-error'
 import {
     ALL_THINKING_LEVELS,
@@ -57,7 +68,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const draft = state.settings
 
     const refreshCache = async () => {
-        dispatch({type: 'cache-read', cache: await invoke('get_rag_cache_status')})
+        dispatch({type: 'cache-read', cache: await readCacheStatus()})
     }
 
     useEffect(() => {
@@ -80,8 +91,8 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
 
             try {
                 const [response, cacheResponse] = await Promise.all([
-                    invoke('load_settings'),
-                    invoke('get_rag_cache_status')
+                    loadSettings(),
+                    readCacheStatus()
                 ])
                 dispatch({type: 'loaded', response, cache: cacheResponse})
             } catch (error) {
@@ -108,14 +119,10 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         if (!nextRequest) return
         dispatch({type: 'began', task: 'testing'})
         try {
-            const result = await invoke('test_ai_connection', {
-                request: nextRequest
-            })
+            const result = await testAiConnection(nextRequest)
             dispatch({type: 'noticed', notice: connectionNotice(result)})
             if (result.status === 'connected' || result.status === 'model-unavailable') {
-                const models = await invoke('list_ai_models', {
-                    request: nextRequest
-                })
+                const models = await listAiModels(nextRequest)
                 dispatch({type: 'models-listed', models})
             }
         } catch (error) {
@@ -138,7 +145,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         if (!nextRequest) return
         dispatch({type: 'began', task: 'saving'})
         try {
-            const response = await invoke('save_settings', {request: nextRequest})
+            const response = await saveSettings(nextRequest)
             dispatch({type: 'saved', response})
         } catch (error) {
             dispatch({
@@ -163,7 +170,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             unlisten = await listen('rag-download-progress', event => {
                 dispatch({type: 'progress', progress: event.payload})
             })
-            await invoke('initialize_rag')
+            await initializeRag()
             await refreshCache()
             dispatch({
                 type: 'noticed',
@@ -193,7 +200,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const deleteCache = async () => {
         dispatch({type: 'began', task: 'deleting'})
         try {
-            const nextCache = await invoke('delete_rag_cache')
+            const nextCache = await deleteRagCache()
             dispatch({type: 'cache-read', cache: nextCache})
             dispatch({type: 'delete-dialog', isOpen: false})
             onCacheDeleted()
@@ -215,7 +222,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const createBackup = async () => {
         dispatch({type: 'began', task: 'backingUp'})
         try {
-            const result = await invoke('create_project_backup')
+            const result = await createProjectBackup()
             dispatch({
                 type: 'noticed',
                 notice: {
@@ -242,7 +249,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     const cleanStorage = async () => {
         dispatch({type: 'began', task: 'cleaningStorage'})
         try {
-            const result = await invoke('run_storage_maintenance')
+            const result = await runStorageMaintenance()
             dispatch({
                 type: 'noticed',
                 notice: {

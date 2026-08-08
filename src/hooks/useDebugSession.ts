@@ -1,15 +1,9 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useCallback, useEffect, useMemo, useReducer, useRef} from 'react'
 import {callGodotDebug, toGodotError} from '../services/godot-session'
 import {isTauri} from '../services/desktop'
-import type {
-    DebugRequest,
-    DebugScope,
-    DebugSourceBreakpoints,
-    DebugStackFrame,
-    DebugStopped,
-    DebugVariable,
-    GodotError
-} from '../models/godot'
+import {INITIAL_DEBUG_PANEL, isDebugBusy, reduceDebug} from '../models/debug-panel'
+import type {ScopeVariables} from '../models/debug-panel'
+import type {DebugRequest, DebugSourceBreakpoints} from '../models/godot'
 
 type DebugSessionOptions = Readonly<{
     /** The breakpoints Monaco's gutter holds, installed with the launch. */
@@ -30,10 +24,7 @@ type DebugSessionOptions = Readonly<{
  */
 export type DebugSession = ReturnType<typeof useDebugSession>
 
-export type ScopeVariables = Readonly<{
-    scope: DebugScope
-    variables: readonly DebugVariable[]
-}>
+export type {ScopeVariables} from '../models/debug-panel'
 
 /**
  * The debugger panel's state machine over Godot's DAP adapter.
@@ -44,14 +35,7 @@ export type ScopeVariables = Readonly<{
  * debuggee has not dumped the reference yet, and Rust already retries it, so the panel asks once.
  */
 export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
-    const [stopped, setStopped] = useState<DebugStopped>()
-    const [frames, setFrames] = useState<readonly DebugStackFrame[]>([])
-    const [frameId, setFrameId] = useState<number>()
-    const [scopes, setScopes] = useState<readonly ScopeVariables[]>([])
-    const [isLaunched, setIsLaunched] = useState(false)
-    const [isBusy, setIsBusy] = useState(false)
-    const [error, setError] = useState<GodotError>()
-    const pending = useRef(0)
+    const [panel, dispatch] = useReducer(reduceDebug, INITIAL_DEBUG_PANEL)
     /**
      * What the adapter has been told about the breakpoints, so only a real change is sent again.
      *
@@ -79,27 +63,21 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
             // listening. Counting it as busy disabled every control for the length of the wait,
             // Pause included, which is the one control whose whole purpose is to end it.
             const isWatching = input.op === 'awaitStop'
-            if (!isWatching) {
-                pending.current += 1
-                setIsBusy(true)
-            }
+            if (!isWatching) dispatch({type: 'began'})
             try {
                 const response = await callGodotDebug(input)
-                setError(undefined)
+                dispatch({type: 'succeeded'})
                 return response
             } catch (failure) {
                 const reported = toGodotError(failure)
                 // A wait that has not seen a stop is not a failure: the game is simply still
                 // running, which is what the user asked for when they pressed Continue.
                 if (input.op === 'awaitStop' && reported.code === 'stop_timeout') return undefined
-                setError(reported)
+                dispatch({type: 'failed', error: reported})
                 onError(`The debugger could not ${input.op}: ${reported.message}`)
                 return undefined
             } finally {
-                if (!isWatching) {
-                    pending.current -= 1
-                    if (pending.current === 0) setIsBusy(false)
-                }
+                if (!isWatching) dispatch({type: 'ended'})
             }
         },
         [onError]
@@ -121,7 +99,7 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
                     variables: variables?.op === 'variables' ? variables.variables : []
                 })
             }
-            setScopes(filled)
+            dispatch({type: 'scopes-read', scopes: filled})
         },
         [request]
     )
@@ -130,19 +108,15 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
     const readStack = useCallback(async () => {
         const stack = await request({op: 'stackTrace'})
         if (stack?.op !== 'stackTrace') return
-        setFrames(stack.frames)
+        dispatch({type: 'stack-read', frames: stack.frames})
         const top = stack.frames[0]
-        setFrameId(top?.id)
-        if (!top) {
-            setScopes([])
-            return
-        }
+        if (!top) return
         await loadScopes(top.id)
     }, [loadScopes, request])
 
     const selectFrame = useCallback(
         async (id: number) => {
-            setFrameId(id)
+            dispatch({type: 'frame-chosen', frameId: id})
             await loadScopes(id)
         },
         [loadScopes]
@@ -160,14 +134,10 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
         if (answered?.op !== 'stopped') return
         if (!answered.stopped) {
             // The debuggee ended before it stopped again: the session is over, not paused.
-            setStopped(undefined)
-            setFrames([])
-            setScopes([])
-            setFrameId(undefined)
-            setIsLaunched(false)
+            dispatch({type: 'finished'})
             return
         }
-        setStopped(answered.stopped)
+        dispatch({type: 'stopped', stop: answered.stopped})
         await readStack()
     }, [readStack, request])
 
@@ -178,23 +148,20 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
             signature: JSON.stringify(breakpoints),
             paths: breakpoints.map(source => source.path)
         }
-        setIsLaunched(true)
-        setStopped(undefined)
+        dispatch({type: 'launched'})
         await awaitStop()
     }, [awaitStop, breakpoints, request])
 
     const resume = useCallback(
         async (op: 'continue' | 'stepOver' | 'stepIn' | 'stepOut') => {
-            setStopped(undefined)
-            setFrames([])
-            setScopes([])
+            dispatch({type: 'resuming'})
             const answered = await request({op})
             if (!answered) return
             // A step answers with where it landed; a continue only acknowledges, so the next stop
             // has to be waited for.
             if (answered.op === 'stepped') {
                 if (answered.outcome.kind === 'terminated') {
-                    setIsLaunched(false)
+                    dispatch({type: 'finished'})
                     return
                 }
                 // Stepping out of the outermost frame is resuming: there is no caller to land in,
@@ -203,7 +170,7 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
                     await awaitStop()
                     return
                 }
-                setStopped(answered.outcome.stop)
+                dispatch({type: 'stopped', stop: answered.outcome.stop})
                 await readStack()
                 return
             }
@@ -231,7 +198,7 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
      * all — the gutter and the debugger would be describing two different games.
      */
     useEffect(() => {
-        if (!isLaunched) {
+        if (!panel.isLaunched) {
             installed.current = {signature: '', paths: []}
             return
         }
@@ -248,29 +215,23 @@ export function useDebugSession({breakpoints, onError}: DebugSessionOptions) {
             for (const path of cleared) await request({op: 'setBreakpoints', path, lines: []})
         }
         void sync()
-    }, [breakpoints, isLaunched, request])
+    }, [breakpoints, panel.isLaunched, request])
 
     const terminate = useCallback(async () => {
         await request({op: 'terminate'})
-        setIsLaunched(false)
-        setStopped(undefined)
-        setFrames([])
-        setScopes([])
-        setFrameId(undefined)
+        dispatch({type: 'finished'})
     }, [request])
 
-    return {
-        error,
-        frameId,
-        frames,
-        isBusy,
-        isLaunched,
-        launch,
-        pause,
-        resume,
-        scopes,
-        selectFrame,
-        stopped,
-        terminate
-    }
+    return useMemo(
+        () => ({
+            ...panel,
+            isBusy: isDebugBusy(panel),
+            launch,
+            pause,
+            resume,
+            selectFrame,
+            terminate
+        }),
+        [launch, panel, pause, resume, selectFrame, terminate]
+    )
 }

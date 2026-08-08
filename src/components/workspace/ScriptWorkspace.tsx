@@ -9,7 +9,7 @@ import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
-import {invoke} from '../../services/desktop'
+import {callScriptLanguage} from '../../services/script-session'
 import type {
     FormatPreview,
     RenamePreview,
@@ -85,7 +85,7 @@ export function ScriptWorkspace({
         previewRename,
         reloadBuffer,
         saveBuffer,
-        setActivePath,
+        showBuffer,
         toggleBreakpoint
     } = scripts
     const [formatPreview, setFormatPreview] = useState<FormatPreview>()
@@ -117,8 +117,10 @@ export function ScriptWorkspace({
         const prepare = async () => {
             let name = ''
             try {
-                const response = await invoke('call_script_language', {
-                    request: {op: 'prepareRename', path, position}
+                const response = await callScriptLanguage({
+                    op: 'prepareRename',
+                    path,
+                    position
                 })
                 if (response.op === 'prepareRename') name = response.placeholder ?? ''
             } catch {
@@ -158,7 +160,7 @@ export function ScriptWorkspace({
                 hasDivider
                 aria-label='Open scripts'
                 value={activePath ?? ''}
-                onChange={setActivePath}
+                onChange={showBuffer}
             >
                 {buffers.map(buffer => (
                     <Tab

@@ -10,7 +10,9 @@ import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
 import WrenchScrewdriverIcon from '@heroicons/react/24/outline/WrenchScrewdriverIcon'
-import {invoke, isTauri} from '../../services/desktop'
+import {schedule} from '../../services/clock'
+import {isTauri} from '../../services/desktop'
+import {applyHealthRemedy, checkWorkspaceHealth, choosePath} from '../../services/health-check'
 import type {HealthCheck, HealthRemedy, HealthReport} from '../../models/health'
 import {blockingSummary, statusLabel, statusVariant} from '../../models/health'
 
@@ -48,7 +50,7 @@ export function HealthGate({onReady}: HealthGateProps) {
         }
         setError(undefined)
         try {
-            accept(await invoke('check_workspace_health'))
+            accept(await checkWorkspaceHealth())
         } catch (caught) {
             setError(String(caught))
         }
@@ -62,12 +64,9 @@ export function HealthGate({onReady}: HealthGateProps) {
 
     useEffect(() => {
         if (report) return
-        const timeout = window.setTimeout(() => {
+        return schedule(() => {
             setIsSlow(true)
         }, SLOW_CHECK_MS)
-        return () => {
-            window.clearTimeout(timeout)
-        }
     }, [report])
 
     const applyRemedy = useCallback(
@@ -77,24 +76,22 @@ export function HealthGate({onReady}: HealthGateProps) {
             try {
                 let path: string | undefined
                 if (remedy.input !== 'none') {
-                    const chosen = await invoke('plugin:dialog|open', {
-                        options: {
-                            directory: remedy.input === 'directory',
-                            multiple: false,
-                            title: remedy.label.replace('…', ''),
-                            ...(report
-                                && remedy.input === 'directory' && {
-                                    defaultPath: report.workspace
-                                })
-                        }
+                    path = await choosePath({
+                        directory: remedy.input === 'directory',
+                        multiple: false,
+                        title: remedy.label.replace('…', ''),
+                        ...(report
+                            && remedy.input === 'directory' && {
+                                defaultPath: report.workspace
+                            })
                     })
                     // A cancelled picker is not a failure; the user simply changed their mind.
-                    if (typeof chosen !== 'string') return
-                    path = chosen
+                    if (path === undefined) return
                 }
                 accept(
-                    await invoke('apply_health_remedy', {
-                        request: {action: remedy.action, ...(path !== undefined && {path})}
+                    await applyHealthRemedy({
+                        action: remedy.action,
+                        ...(path !== undefined && {path})
                     })
                 )
             } catch (caught) {

@@ -1,24 +1,15 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {act, renderHook, waitFor} from '@testing-library/react'
+import {act, renderHook} from '@testing-library/react'
 import type {Channel} from '@tauri-apps/api/core'
 import {useScriptBuffers} from './useScriptBuffers'
 import type {FormatPreview, RenamePreview} from './useScriptBuffers'
 import type {ScriptDiagnosticsEvent} from '../models/script'
 import type {WorkspaceFileChange} from '../models/files'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
+import {flush} from '../test/flush'
+import {createManualScheduler, setScheduler, timerScheduler} from '../services/clock'
 
-type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
-
-const tauri = vi.hoisted(() => ({
-    invoke: vi.fn<InvokeFunction>(),
-    isTauri: vi.fn(() => true),
-    listen: vi.fn()
-}))
-
-vi.mock('../services/desktop', () => ({
-    invoke: tauri.invoke,
-    isTauri: tauri.isTauri,
-    listen: tauri.listen
-}))
+const tauri = createDesktopFake()
 
 interface FileRecord {
     text: string
@@ -137,22 +128,27 @@ function backend() {
 
 async function openPlayer(onError = vi.fn()) {
     const hook = renderHook(() => useScriptBuffers({onError}))
-    await waitFor(() => {
-        expect(hook.result.current.files).toHaveLength(1)
-    })
+    await flush()
+    expect(hook.result.current.files).toHaveLength(1)
     await act(async () => {
         await hook.result.current.openBuffer('player.gd')
     })
     return {hook, onError}
 }
 
+/** The change debounce, held until a test says the typing has stopped. */
+let clock = createManualScheduler()
+
 beforeEach(() => {
-    tauri.isTauri.mockReturnValue(true)
+    installDesktopFake(tauri)
+    clock = createManualScheduler()
+    setScheduler(clock.schedule)
 })
 
 afterEach(() => {
+    removeDesktopFake()
+    setScheduler(timerScheduler)
     vi.clearAllMocks()
-    vi.useRealTimers()
 })
 
 describe('script buffers', () => {
@@ -170,7 +166,6 @@ describe('script buffers', () => {
     })
 
     it('marks a change dirty at once and synchronizes one document version after the pause', async () => {
-        vi.useFakeTimers({shouldAdvanceTime: true})
         backend()
         const {hook} = await openPlayer()
 
@@ -179,9 +174,12 @@ describe('script buffers', () => {
             hook.result.current.changeBuffer('player.gd', 'extends Node\nvar speed := 2.0\n')
         })
         expect(hook.result.current.activeBuffer?.dirty).toBe(true)
+        // Two keystrokes, one delay outstanding: the second call off the first rather than adding.
+        expect(clock.pending).toBe(1)
 
         await act(async () => {
-            await vi.advanceTimersByTimeAsync(300)
+            clock.run()
+            await Promise.resolve()
         })
 
         const updates = tauri.invoke.mock.calls.filter(call => call[0] === 'update_script_document')
@@ -242,9 +240,7 @@ describe('script buffers', () => {
         await act(async () => {
             server.publishChanges([{path: 'player.gd', kind: 'modified'}])
         })
-        await waitFor(() => {
-            expect(hook.result.current.activeBuffer?.text).toBe('extends CharacterBody2D\n')
-        })
+        expect(hook.result.current.activeBuffer?.text).toBe('extends CharacterBody2D\n')
 
         act(() => {
             hook.result.current.changeBuffer('player.gd', 'extends Node\n')
@@ -253,9 +249,7 @@ describe('script buffers', () => {
             server.publishChanges([{path: 'player.gd', kind: 'modified'}])
         })
 
-        await waitFor(() => {
-            expect(hook.result.current.activeBuffer?.conflict).toBe('externalChange')
-        })
+        expect(hook.result.current.activeBuffer?.conflict).toBe('externalChange')
         expect(hook.result.current.activeBuffer?.text).toBe('extends Node\n')
     })
 
@@ -375,9 +369,7 @@ describe('script buffers', () => {
             })
         })
 
-        await waitFor(() => {
-            expect(hook.result.current.diagnostics['player.gd']).toHaveLength(1)
-        })
+        expect(hook.result.current.diagnostics['player.gd']).toHaveLength(1)
     })
 
     it('closes the document and drops the tab', async () => {
@@ -387,10 +379,9 @@ describe('script buffers', () => {
         act(() => {
             hook.result.current.closeBuffer('player.gd')
         })
+        await flush()
 
-        await waitFor(() => {
-            expect(server.closed).toEqual(['player.gd'])
-        })
+        expect(server.closed).toEqual(['player.gd'])
         expect(hook.result.current.buffers).toEqual([])
         expect(hook.result.current.activePath).toBeUndefined()
     })

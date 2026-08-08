@@ -191,6 +191,135 @@ export function toWorkspaceLayout(value: unknown): WorkspaceLayout {
     }
 }
 
+/**
+ * Every change to the layout that is a choice worth remembering.
+ *
+ * The two that carry no tab — `resized` and `scripts-changed` — are the layout catching up with a
+ * value another hook owns. They are actions rather than reads so that the layout stays one value:
+ * a snapshot assembled at write time from nine variables can hold a tab from before a drag beside
+ * a width from after it, and this cannot.
+ */
+export type LayoutAction =
+    | Readonly<{type: 'center-tab'; tab: CenterTab}>
+    | Readonly<{type: 'explorer-tab'; tab: ExplorerTab}>
+    | Readonly<{type: 'inspector-tab'; tab: InspectorTab}>
+    | Readonly<{type: 'bottom-tab'; tab: BottomTab}>
+    | Readonly<{type: 'bottom-toggled'}>
+    /** Running the project shows the debugger, which is one change to the layout rather than two. */
+    | Readonly<{type: 'debug-started'}>
+    | Readonly<{type: 'log-severity'; severity: GodotLogSeverity}>
+    | Readonly<{type: 'log-scope'; scope: LogScope}>
+    /** A node was chosen, which is also what opens the inspector's node tab. */
+    | Readonly<{type: 'node-chosen'; selection: GodotSelection; scene: string}>
+    | Readonly<{type: 'resized'; explorerWidth: number; inspectorWidth: number}>
+    | Readonly<{
+          type: 'scripts-changed'
+          openScripts: readonly string[]
+          activeScript?: string | undefined
+          breakpoints: Readonly<Record<string, readonly number[]>>
+      }>
+
+function sameOrder<Item>(left: readonly Item[], right: readonly Item[]) {
+    return left.length === right.length && left.every((item, index) => item === right[index])
+}
+
+function sameBreakpoints(
+    left: Readonly<Record<string, readonly number[]>>,
+    right: Readonly<Record<string, readonly number[]>>
+) {
+    const marked = Object.keys(left)
+    if (marked.length !== Object.keys(right).length) return false
+    return marked.every(path => {
+        const listed = right[path]
+        return listed !== undefined && sameOrder(left[path] ?? [], listed)
+    })
+}
+
+function sameSelection(left: ChosenNode | undefined, right: ChosenNode) {
+    return (
+        left?.scene === right.scene
+        && left.selection.origin === right.selection.origin
+        && left.selection.path === right.selection.path
+        && left.selection.name === right.selection.name
+        && left.selection.type === right.selection.type
+    )
+}
+
+/**
+ * How the workspace's layout moves, as a pure function.
+ *
+ * Every case answers with the state it was given when nothing actually changed. That is not an
+ * optimisation: the layout's identity is what triggers the write to the project's database, and a
+ * drag that ends on the width it started at, or a tab click on the tab already open, must not
+ * count as the workspace having been left differently.
+ */
+export function reduceLayout(state: WorkspaceLayout, action: LayoutAction): WorkspaceLayout {
+    switch (action.type) {
+        case 'center-tab':
+            return state.centerTab === action.tab ? state : {...state, centerTab: action.tab}
+
+        case 'explorer-tab':
+            return state.explorerTab === action.tab ? state : {...state, explorerTab: action.tab}
+
+        case 'inspector-tab':
+            return state.inspectorTab === action.tab ? state : {...state, inspectorTab: action.tab}
+
+        case 'bottom-tab':
+            return state.bottomTab === action.tab ? state : {...state, bottomTab: action.tab}
+
+        case 'bottom-toggled':
+            return {...state, isBottomCollapsed: !state.isBottomCollapsed}
+
+        case 'debug-started':
+            return state.bottomTab === 'debugger' && !state.isBottomCollapsed ?
+                    state
+                :   {...state, bottomTab: 'debugger', isBottomCollapsed: false}
+
+        case 'log-severity':
+            return state.logSeverity === action.severity ?
+                    state
+                :   {...state, logSeverity: action.severity}
+
+        case 'log-scope':
+            return state.logScope === action.scope ? state : {...state, logScope: action.scope}
+
+        case 'node-chosen': {
+            const chosen: ChosenNode = {selection: action.selection, scene: action.scene}
+            if (state.inspectorTab === 'node' && sameSelection(state.selection, chosen))
+                return state
+            return {...state, inspectorTab: 'node', selection: chosen}
+        }
+
+        case 'resized':
+            return (
+                    state.explorerWidth === action.explorerWidth
+                        && state.inspectorWidth === action.inspectorWidth
+                ) ?
+                    state
+                :   {
+                        ...state,
+                        explorerWidth: action.explorerWidth,
+                        inspectorWidth: action.inspectorWidth
+                    }
+
+        case 'scripts-changed': {
+            if (
+                state.activeScript === action.activeScript
+                && sameOrder(state.openScripts, action.openScripts)
+                && sameBreakpoints(state.breakpoints, action.breakpoints)
+            ) {
+                return state
+            }
+            return {
+                ...state,
+                openScripts: action.openScripts,
+                breakpoints: action.breakpoints,
+                activeScript: action.activeScript
+            }
+        }
+    }
+}
+
 /** Keeps only the view states of files that still have a tab, so the record cannot grow forever. */
 export function toScriptViews(value: unknown, openScripts: readonly string[]): ScriptViews {
     return Object.fromEntries(

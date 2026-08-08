@@ -1,12 +1,12 @@
 import {afterEach, beforeEach, describe, expect, it} from 'vitest'
+import {immediateScheduler} from './clock'
 import {
     WORKSPACE_LAYOUT_KEY,
     createProjectStateWriter,
     draftKey,
-    immediateScheduler,
     readProjectState
 } from './ui-state'
-import type {WriteScheduler} from './ui-state'
+import type {WriteScheduler} from './clock'
 
 type Call = Readonly<{command: string; arguments: unknown}>
 

@@ -1,26 +1,16 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {act, cleanup, render, screen, waitFor, within} from '@testing-library/react'
+import {act, cleanup, render, screen, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {InspectorWorkspace} from './InspectorWorkspace'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
 import type {ChatReference} from '../../utils/chat-references'
 import type {MonacoStubState} from '../../test/monaco-stub'
-import {immediateScheduler, setWriteScheduler} from '../../services/ui-state'
+import {immediateScheduler, setScheduler} from '../../services/clock'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
+import {flush} from '../../test/flush'
 
-type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
-
-const tauri = vi.hoisted(() => ({
-    invoke: vi.fn<InvokeFunction>(),
-    isTauri: vi.fn(() => true),
-    listen: vi.fn()
-}))
-
-vi.mock('../../services/desktop', () => ({
-    invoke: tauri.invoke,
-    isTauri: tauri.isTauri,
-    listen: tauri.listen
-}))
+const tauri = createDesktopFake()
 
 const editor = vi.hoisted(() => ({state: undefined as MonacoStubState | undefined}))
 
@@ -435,7 +425,8 @@ async function renderWorkspace(onError: (message: string) => void = vi.fn()) {
             onError={onError}
         />
     )
-    await screen.findByRole('navigation', {name: 'Explorer'})
+    await flush()
+    expect(screen.getByRole('navigation', {name: 'Explorer'})).toBeInTheDocument()
     return rendered
 }
 
@@ -455,31 +446,32 @@ async function renderWithChatReferences(added: ChatReference[]) {
             />
         </ChatReferenceContext.Provider>
     )
-    await screen.findByRole('navigation', {name: 'Explorer'})
+    await flush()
+    expect(screen.getByRole('navigation', {name: 'Explorer'})).toBeInTheDocument()
     return rendered
 }
 
 /** The explorer's own offer to start one. The inspector beside it makes the same offer. */
 function startSessionButton() {
-    return within(screen.getByRole('navigation', {name: 'Explorer'})).findByRole('button', {
+    return within(screen.getByRole('navigation', {name: 'Explorer'})).getByRole('button', {
         name: 'Start editor session'
     })
 }
 
 /** Starts the editor session the way the explorer's empty state offers to. */
 async function startSession(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(await startSessionButton())
-    await waitFor(() => {
-        expect(screen.getByText('Player')).toBeInTheDocument()
-    })
+    await user.click(startSessionButton())
+    await flush()
+
+    expect(screen.getByText('Player')).toBeInTheDocument()
 }
 
 /** The same start, for a session whose editor is editing no scene yet. */
 async function startSessionWithoutScene(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(await startSessionButton())
-    await waitFor(() => {
-        expect(screen.getByText('No scene is open')).toBeInTheDocument()
-    })
+    await user.click(startSessionButton())
+    await flush()
+
+    expect(screen.getByText('No scene is open')).toBeInTheDocument()
 }
 
 beforeEach(() => {
@@ -489,15 +481,15 @@ beforeEach(() => {
      * that out of the test's budget, so an assertion about a stored layout is never also a race
      * against the clock on a loaded machine.
      */
-    setWriteScheduler(immediateScheduler)
-    tauri.isTauri.mockReturnValue(true)
-    tauri.listen.mockResolvedValue(() => undefined)
+    setScheduler(immediateScheduler)
+    installDesktopFake(tauri)
     narrowViewport(false)
     editor.state?.reset()
 })
 
 afterEach(() => {
     cleanup()
+    removeDesktopFake()
     vi.clearAllMocks()
 })
 
@@ -522,8 +514,9 @@ describe('InspectorWorkspace', () => {
         const user = userEvent.setup()
         await renderWorkspace()
 
+        await flush()
         expect(
-            await within(screen.getByRole('navigation', {name: 'Explorer'})).findByText(
+            within(screen.getByRole('navigation', {name: 'Explorer'})).getByText(
                 'No editor session'
             )
         ).toBeInTheDocument()
@@ -559,10 +552,10 @@ describe('InspectorWorkspace', () => {
             announce?.({payload: {type: 'stateChanged', state: 'error'}})
         })
 
-        await user.click(await startSessionButton())
-        await waitFor(() => {
-            expect(subscriptions()).toBe(2)
-        })
+        await user.click(startSessionButton())
+        await flush()
+
+        expect(subscriptions()).toBe(2)
     })
 
     /**
@@ -588,9 +581,9 @@ describe('InspectorWorkspace', () => {
 
         // The read reaching the stopped session is the event worth waiting on. Both assertions then
         // describe one settled moment, rather than passing on the first poll after the click.
-        await waitFor(() => {
-            expect(server.calls.length).toBeGreaterThan(before)
-        })
+        await flush()
+
+        expect(server.calls.length).toBeGreaterThan(before)
         await act(async () => undefined)
         expect(screen.queryByText('Player')).not.toBeInTheDocument()
         expect(screen.queryByText('The scene tree could not be read')).not.toBeInTheDocument()
@@ -604,10 +597,11 @@ describe('InspectorWorkspace', () => {
 
         await user.click(screen.getByText('Player'))
 
-        const inspector = await screen.findByRole('complementary', {name: 'Inspector'})
-        await waitFor(() => {
-            expect(within(inspector).getByText('Main/Player')).toBeInTheDocument()
-        })
+        await flush()
+        const inspector = screen.getByRole('complementary', {name: 'Inspector'})
+        await flush()
+
+        expect(within(inspector).getByText('Main/Player')).toBeInTheDocument()
         expect(within(inspector).getByText('CharacterBody2D')).toBeInTheDocument()
         expect(within(inspector).getByText('players')).toBeInTheDocument()
         // What is wired to what, not merely what the node could emit: a scene's connections live in
@@ -625,16 +619,17 @@ describe('InspectorWorkspace', () => {
         await renderWorkspace()
         await startSession(user)
 
-        const player = await screen.findByAltText('CharacterBody2D')
+        await flush()
+        const player = screen.getByAltText('CharacterBody2D')
         expect(player).toHaveAttribute('src', `data:image/png;base64,${ICON_PNG}`)
         // The script class the node carries is what was asked for, not the engine class beneath it.
         expect(server.iconRequests[0]).toEqual(['Node2D', 'PlayerBody'])
 
         // A second read of the same tree is not a second request for artwork that cannot change.
         await user.click(screen.getByRole('button', {name: 'Refresh'}))
-        await waitFor(() => {
-            expect(server.calls.filter(call => call === 'scene.get_tree').length).toBe(2)
-        })
+        await flush()
+
+        expect(server.calls.filter(call => call === 'scene.get_tree').length).toBe(2)
         expect(server.iconRequests).toHaveLength(1)
     })
 
@@ -662,7 +657,8 @@ describe('InspectorWorkspace', () => {
         // helper, which is true of every session that has not pressed Run. The panel has an empty
         // message for exactly that, and reporting it as a failed read would have made the message
         // unreachable and told the user something had gone wrong.
-        expect(await screen.findByText('The game is not running')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('The game is not running')).toBeInTheDocument()
         expect(screen.queryByText('The runtime tree could not be read')).not.toBeInTheDocument()
     })
 
@@ -673,15 +669,16 @@ describe('InspectorWorkspace', () => {
 
         await user.click(screen.getByRole('button', {name: 'Files'}))
 
-        expect(await screen.findByText('player.gd')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('player.gd')).toBeInTheDocument()
         expect(screen.queryByText('player.gd.uid')).not.toBeInTheDocument()
         expect(screen.queryByText('plugin.gd')).not.toBeInTheDocument()
 
         await user.click(screen.getByText('player.gd'))
 
-        await waitFor(() => {
-            expect(editor.state?.editors).toBe(1)
-        })
+        await flush()
+
+        expect(editor.state?.editors).toBe(1)
         expect(editor.state?.activeText()).toBe(SCRIPT)
     })
 
@@ -692,15 +689,16 @@ describe('InspectorWorkspace', () => {
         await startSessionWithoutScene(user)
 
         await user.click(screen.getByRole('button', {name: 'Files'}))
-        await user.click(await screen.findByText('main.tscn'))
+        await flush()
+        await user.click(screen.getByText('main.tscn'))
 
         // The editor owns the edited scene: a scene opened as text would leave the tree, the
         // inspector, and Run reading nothing while looking like it had been opened.
-        await waitFor(() => {
-            // The editor names a scene by its resource path; the explorer names a file by its
-            // place in the worktree, and the editor has never heard of that name.
-            expect(server.sceneOpens).toEqual(['res://scenes/main.tscn'])
-        })
+        await flush()
+
+        // The editor names a scene by its resource path; the explorer names a file by its
+        // place in the worktree, and the editor has never heard of that name.
+        expect(server.sceneOpens).toEqual(['res://scenes/main.tscn'])
         expect(editor.state?.editors).toBe(0)
     })
 
@@ -719,19 +717,20 @@ describe('InspectorWorkspace', () => {
         await startSession(user)
 
         await user.click(screen.getByText('Player'))
-        const inspector = await screen.findByRole('complementary', {name: 'Inspector'})
-        await waitFor(() => {
-            expect(within(inspector).getByText('Main/Player')).toBeInTheDocument()
-        })
+        await flush()
+        const inspector = screen.getByRole('complementary', {name: 'Inspector'})
+        await flush()
+
+        expect(within(inspector).getByText('Main/Player')).toBeInTheDocument()
 
         // The editor moves to another scene, which is where the old path stops meaning anything.
         act(() => {
             publishSceneChanged('res://scenes/level_1.tscn')
         })
 
-        await waitFor(() => {
-            expect(within(inspector).getByText('Nothing selected')).toBeInTheDocument()
-        })
+        await flush()
+
+        expect(within(inspector).getByText('Nothing selected')).toBeInTheDocument()
         expect(within(inspector).queryByText('Main/Player')).not.toBeInTheDocument()
         // The reading is gone rather than replaced by the refusal it used to show.
         expect(
@@ -745,11 +744,12 @@ describe('InspectorWorkspace', () => {
         await renderWorkspace()
         await startSessionWithoutScene(user)
 
-        await user.click(await screen.findByRole('button', {name: 'Open main scene'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Open main scene'}))
 
-        await waitFor(() => {
-            expect(server.sceneOpens).toEqual([MAIN_SCENE])
-        })
+        await flush()
+
+        expect(server.sceneOpens).toEqual([MAIN_SCENE])
         expect(server.calls).toContain('project.get_settings')
     })
 
@@ -759,13 +759,14 @@ describe('InspectorWorkspace', () => {
         const user = userEvent.setup()
         await renderWorkspace(onError)
 
-        await user.click(await screen.findByRole('button', {name: 'Run project'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Run project'}))
 
-        await waitFor(() => {
-            expect(onError).toHaveBeenCalledWith(
-                expect.stringContaining('No scene is open and the project names no main scene')
-            )
-        })
+        await flush()
+
+        expect(onError).toHaveBeenCalledWith(
+            expect.stringContaining('No scene is open and the project names no main scene')
+        )
         // The game never started, so the control still offers to start it.
         expect(screen.getByRole('button', {name: 'Run project'})).toBeInTheDocument()
     })
@@ -774,19 +775,20 @@ describe('InspectorWorkspace', () => {
         backend()
         const user = userEvent.setup()
         await renderWorkspace()
-        await waitFor(() => {
-            expect(
-                tauri.invoke.mock.calls.some(call => call[0] === 'subscribe_script_diagnostics')
-            ).toBe(true)
-        })
+        await flush()
+
+        expect(
+            tauri.invoke.mock.calls.some(call => call[0] === 'subscribe_script_diagnostics')
+        ).toBe(true)
         publishDiagnostic()
 
-        const problem = await screen.findByText('Unexpected identifier')
+        await flush()
+        const problem = screen.getByText('Unexpected identifier')
         await user.click(problem)
 
-        await waitFor(() => {
-            expect(editor.state?.revealed).toEqual([3])
-        })
+        await flush()
+
+        expect(editor.state?.revealed).toEqual([3])
     })
 
     it('searches the project and editor settings separately', async () => {
@@ -821,7 +823,8 @@ describe('InspectorWorkspace', () => {
 
         await user.click(screen.getByRole('button', {name: 'Run'}))
 
-        const frame = await screen.findByRole('img', {name: /the running game/i})
+        await flush()
+        const frame = screen.getByRole('img', {name: /the running game/i})
         expect(frame).toHaveAttribute('src', `data:image/png;base64,${FRAME.data}`)
     })
 
@@ -833,7 +836,8 @@ describe('InspectorWorkspace', () => {
 
         await user.click(screen.getByRole('button', {name: 'Output'}))
 
-        expect(await screen.findByText('Godot Engine v4.7.1.stable')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Godot Engine v4.7.1.stable')).toBeInTheDocument()
         expect(screen.getByText('SCRIPT ERROR: Parse error')).toBeInTheDocument()
     })
 
@@ -844,22 +848,25 @@ describe('InspectorWorkspace', () => {
 
         // No session is running: Run is one action, because the debug adapter belongs to the
         // editor and there is nothing to launch the game with until the editor is up.
-        await user.click(await screen.findByRole('button', {name: 'Run project'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Run project'}))
 
-        await waitFor(() => {
-            expect(server.session.started).toBe(true)
-        })
-        await waitFor(() => {
-            expect(server.debugCalls).toContain('launch')
-        })
+        await flush()
+
+        expect(server.session.started).toBe(true)
+        await flush()
+
+        expect(server.debugCalls).toContain('launch')
         // The bottom panel follows the game to the debugger, where the stop it hit is readable.
-        expect(await screen.findByText('Stopped: breakpoint')).toBeInTheDocument()
-        expect(await screen.findByText('amount')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Stopped: breakpoint')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('amount')).toBeInTheDocument()
 
         await user.click(screen.getByRole('button', {name: 'Stop project'}))
-        await waitFor(() => {
-            expect(server.debugCalls).toContain('terminate')
-        })
+        await flush()
+
+        expect(server.debugCalls).toContain('terminate')
     })
 
     it('searches recorded output from sessions that have already stopped', async () => {
@@ -874,8 +881,9 @@ describe('InspectorWorkspace', () => {
         expect(screen.getByText('Nothing found')).toBeInTheDocument()
         await user.type(screen.getByRole('textbox', {name: 'Search recorded output'}), 'Invalid')
 
+        await flush()
         expect(
-            await screen.findByText('ERROR: Invalid call in a session that already stopped')
+            screen.getByText('ERROR: Invalid call in a session that already stopped')
         ).toBeInTheDocument()
         expect(screen.getByText(/session session-0/)).toBeInTheDocument()
     })
@@ -898,7 +906,8 @@ describe('InspectorWorkspace', () => {
         )
         await user.click(screen.getByRole('button', {name: 'Search'}))
 
-        expect(await screen.findByText('Physics introduction')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('Physics introduction')).toBeInTheDocument()
         expect(screen.getByText('Section 3')).toBeInTheDocument()
         expect(screen.getByText('score 0.820')).toBeInTheDocument()
     })
@@ -918,13 +927,15 @@ describe('InspectorWorkspace', () => {
         // interaction returns: on a loaded machine the label is still the old one when the click
         // resolves. Waiting for the button asserts what the user sees rather than how fast the
         // machine running the test happens to be.
-        const show = await screen.findByRole('button', {name: 'Show panel'})
+        await flush()
+        const show = screen.getByRole('button', {name: 'Show panel'})
         expect(show).toHaveAttribute('aria-expanded', 'false')
         expect(screen.queryByText('No problems')).not.toBeInTheDocument()
         expect(screen.getByRole('button', {name: 'Problems'})).toBeInTheDocument()
 
         await user.click(show)
-        expect(await screen.findByText('No problems')).toBeInTheDocument()
+        await flush()
+        expect(screen.getByText('No problems')).toBeInTheDocument()
     })
 
     it('reaches and activates the centre tabs from the keyboard', async () => {
@@ -937,8 +948,9 @@ describe('InspectorWorkspace', () => {
         expect(docs).toHaveFocus()
         await user.keyboard('{Enter}')
 
+        await flush()
         expect(
-            await screen.findByRole('textbox', {name: 'Ask the Godot documentation'})
+            screen.getByRole('textbox', {name: 'Ask the Godot documentation'})
         ).toBeInTheDocument()
     })
 
@@ -948,14 +960,16 @@ describe('InspectorWorkspace', () => {
         const user = userEvent.setup()
         await renderWorkspace()
 
-        const opener = await screen.findByRole('button', {name: 'Inspector'})
+        await flush()
+        const opener = screen.getByRole('button', {name: 'Inspector'})
         expect(opener).toHaveAttribute('aria-expanded', 'false')
         // The inspector's own tabs are not in the frame while it is overlaid and closed.
         expect(screen.queryByRole('button', {name: 'Project'})).not.toBeInTheDocument()
 
         await user.click(opener)
 
-        const dialog = await screen.findByRole('dialog')
+        await flush()
+        const dialog = screen.getByRole('dialog')
         expect(within(dialog).getByRole('button', {name: 'Project'})).toBeInTheDocument()
 
         await user.click(within(dialog).getByRole('button', {name: /close/i}))
@@ -963,9 +977,9 @@ describe('InspectorWorkspace', () => {
         // Focus coming back is the close completing, and it is a positive fact to wait on. The
         // dialog's absence is then read at that moment rather than on the first poll after the
         // click, when it would still be open and the assertion would pass anyway.
-        await waitFor(() => {
-            expect(opener).toHaveFocus()
-        })
+        await flush()
+
+        expect(opener).toHaveFocus()
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
 
@@ -1001,18 +1015,18 @@ describe('InspectorWorkspace', () => {
          * source — so anchoring on the tab and then reading the buffer synchronously was a race,
          * and it lost roughly one run in three.
          */
-        await waitFor(() => {
-            expect(editor.state?.activeText()).toBe(SCRIPT)
-        })
+        await flush()
+
+        expect(editor.state?.activeText()).toBe(SCRIPT)
         // The script is open, in the centre tab it was open in, at the line it was left on.
         expect(document.querySelector('[data-tab-value="scripts/player.gd"]')).toHaveTextContent(
             'player.gd'
         )
         expect(editor.state?.restored).toContainEqual({cursorLine: 3})
         // Its breakpoint came back with it, which is what makes the next Run stop there.
-        await waitFor(() => {
-            expect(editor.state?.decorations).toHaveLength(1)
-        })
+        await flush()
+
+        expect(editor.state?.decorations).toHaveLength(1)
         expect(editor.state?.decorations[0]?.range).toMatchObject({startLineNumber: 3})
         // The explorer opened on Files rather than on the scene tree it defaults to.
         expect(
@@ -1029,9 +1043,9 @@ describe('InspectorWorkspace', () => {
 
         await renderWorkspace(onError)
 
-        await waitFor(() => {
-            expect(screen.getByRole('button', {name: 'Chat'})).toBeInTheDocument()
-        })
+        await flush()
+
+        expect(screen.getByRole('button', {name: 'Chat'})).toBeInTheDocument()
         expect(onError).not.toHaveBeenCalled()
         expect(screen.queryByText(/could not be opened/)).not.toBeInTheDocument()
     })
@@ -1043,11 +1057,11 @@ describe('InspectorWorkspace', () => {
 
         await user.click(screen.getByRole('button', {name: 'Game'}))
 
-        await waitFor(() => {
-            expect(
-                server.writes.filter(write => write.key === 'ui.workspace').at(-1)?.value
-            ).toMatchObject({centerTab: 'game'})
-        })
+        await flush()
+
+        expect(
+            server.writes.filter(write => write.key === 'ui.workspace').at(-1)?.value
+        ).toMatchObject({centerTab: 'game'})
     })
 
     it('records the node the user chose, with the scene it was chosen in', async () => {
@@ -1058,15 +1072,15 @@ describe('InspectorWorkspace', () => {
 
         await user.click(screen.getByText('Player'))
 
-        await waitFor(() => {
-            expect(
-                server.writes.filter(write => write.key === 'ui.workspace').at(-1)?.value
-            ).toMatchObject({
-                selection: {
-                    scene: 'res://main.tscn',
-                    selection: {origin: 'edited', path: 'Main/Player'}
-                }
-            })
+        await flush()
+
+        expect(
+            server.writes.filter(write => write.key === 'ui.workspace').at(-1)?.value
+        ).toMatchObject({
+            selection: {
+                scene: 'res://main.tscn',
+                selection: {origin: 'edited', path: 'Main/Player'}
+            }
         })
     })
 

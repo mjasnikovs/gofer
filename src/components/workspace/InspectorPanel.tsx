@@ -10,6 +10,7 @@ import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Token} from '@astryxdesign/core/Token'
 import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon'
+import {schedule} from '../../services/clock'
 import {useGodotQuery} from '../../hooks/useGodotQuery'
 import {formatGodotValue} from '../../utils/godot-format'
 import {isSessionReadable} from '../../models/godot'
@@ -53,14 +54,13 @@ const SEARCH_DEBOUNCE_MS = 250
 /** Search reaches the editor's main loop, so keystrokes settle before one query is sent. */
 function useDebounced(value: string) {
     const [settled, setSettled] = useState(value)
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            setSettled(value)
-        }, SEARCH_DEBOUNCE_MS)
-        return () => {
-            clearTimeout(timer)
-        }
-    }, [value])
+    useEffect(
+        () =>
+            schedule(() => {
+                setSettled(value)
+            }, SEARCH_DEBOUNCE_MS),
+        [value]
+    )
     return settled
 }
 

@@ -213,6 +213,13 @@ doing anything at all — no DOM mutation, no backend event, no command in fligh
 claiming to be busy — quoting what the window actually showed. It is not part of `npm run check`,
 because it needs a display, a Godot install, and a model server that a CI machine does not have.
 
+**Who runs it, and when.** Nothing schedules the sweep, and nothing can: no GitHub runner has the
+three things it needs. It is a manual gate, owned by the maintainer — Edgars Mjasnikovs — and run on
+their own machine before tagging a release, and after any change to the desktop IPC seam
+(`src/services/`), the Godot addon, or the session lifecycle. A release goes out on a sweep that
+passed, not on `npm run check` alone: `check` stubs the backend, and the backend is where the class
+of bug that this suite exists to catch has always lived.
+
 Astryx's project guidance lives in `AGENTS.md`. Refresh it after an Astryx upgrade with:
 
 ```bash

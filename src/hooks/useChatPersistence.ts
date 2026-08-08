@@ -1,5 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
-import {invoke, isTauri} from '../services/desktop'
+import {schedule} from '../services/clock'
+import {importLegacyChat, loadChat, saveChat} from '../services/chat-session'
+import {isTauri} from '../services/desktop'
 import {commandErrorMessage} from '../utils/command-error'
 import type {Message, StoredChat} from '../models/chat'
 import {
@@ -47,7 +49,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
                 const chat = pendingSave.current
                 pendingSave.current = undefined
                 try {
-                    await invoke('save_chat', {chat})
+                    await saveChat(chat)
                     if (isMounted.current) onTasksChanged?.()
                 } catch (error) {
                     if (isMounted.current)
@@ -64,7 +66,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
         let isCancelled = false
         const load = async () => {
             try {
-                const response = await invoke('load_chat')
+                const response = await loadChat()
                 const stored = isStoredChat(response) ? response : {messages: [], agentMessages: []}
                 const legacy = loadLegacyChat()
                 const chat =
@@ -73,7 +75,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
                         && stored.agentMessages.length === 0
                         && (legacy.messages.length > 0 || legacy.agentMessages.length > 0)
                     ) ?
-                        await invoke('import_legacy_chat', {chat: legacy})
+                        await importLegacyChat(legacy)
                     :   stored
                 if (isCancelled) return
                 setMessages(chat.messages)
@@ -102,7 +104,7 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
 
     useEffect(() => {
         if (!isChatLoaded || !isTauri()) return
-        const timeout = window.setTimeout(() => {
+        return schedule(() => {
             pendingSave.current = {
                 ...(taskId !== undefined && {taskId}),
                 messages,
@@ -110,9 +112,6 @@ export function useChatPersistence({onError, onTasksChanged}: ChatPersistenceOpt
             }
             void savePending()
         }, SAVE_DEBOUNCE_MS)
-        return () => {
-            window.clearTimeout(timeout)
-        }
     }, [agentMessages, isChatLoaded, messages, savePending, taskId])
 
     // Handing out ids through a callback keeps the counter ref inside this hook, so the caller

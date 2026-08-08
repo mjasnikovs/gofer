@@ -39,6 +39,11 @@ export function callScriptLanguage(request: ScriptRequest): Promise<ScriptRespon
     return invoke('call_script_language', {request})
 }
 
+/** Formats through the pinned sidecar. Writing the answer back is the caller's separate decision. */
+export function formatGdscript(source: string) {
+    return invoke('format_gdscript', {request: {source}})
+}
+
 export function applyScriptRename(
     files: readonly PlannedScriptFile[]
 ): Promise<readonly ScriptStamp[]> {
