@@ -676,7 +676,23 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                             />
                                                         }
                                                         isLoading={busy.downloading}
-                                                        clickAction={downloadModels}
+                                                        /*
+                                                         * Started rather than awaited. `Button`
+                                                         * runs `clickAction` inside
+                                                         * `startTransition`, and React holds the
+                                                         * old screen for as long as a transition
+                                                         * is pending — so awaiting a 1.68 GiB
+                                                         * download here meant the progress bar and
+                                                         * the Busy badge this sets did not appear
+                                                         * until the download was already over.
+                                                         * Returning at once ends the transition and
+                                                         * lets the rest paint as it happens; the
+                                                         * button still spins, on `busy.downloading`
+                                                         * above.
+                                                         */
+                                                        clickAction={() => {
+                                                            void downloadModels()
+                                                        }}
                                                     />
                                                 )}
                                                 <Button
