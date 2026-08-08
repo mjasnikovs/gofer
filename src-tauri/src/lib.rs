@@ -78,6 +78,8 @@ const SETTINGS_FILE_NAME: &str = "settings.json";
 /// saves the AI connection, and a field it does not know about would be erased by the next save.
 const ENVIRONMENT_FILE_NAME: &str = "environment.json";
 const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
+/// Gofer's own directory inside a workspace, holding everything Gofer knows about that project.
+const PROJECT_DATA_DIRECTORY: &str = ".gofer";
 const SETTINGS_VERSION: u32 = 1;
 const MAX_CHAT_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_BASE64_BYTES: usize = MAX_CHAT_ATTACHMENT_BYTES.div_ceil(3) * 4;
@@ -1619,9 +1621,25 @@ fn project_storage<R: Runtime>(app: &AppHandle<R>) -> Result<ProjectStorage, Str
 /// records a folder the user chose. It is validated exactly like `GOFER_APP_DATA_DIR`, because both
 /// name a directory Gofer will write.
 fn open_project_storage(app: &AppHandle) -> Result<ProjectStorage, String> {
-    let data_root = app_data_path(app)?;
     let workspace = resolve_workspace(app)?.path;
+    let data_root = project_data_path(&workspace)?;
+    if let Ok(legacy_root) = app.path().app_data_dir() {
+        storage::migrate_legacy_data(&legacy_root, &workspace, &data_root)?;
+    }
     ProjectStorage::open(&data_root, &workspace)
+}
+
+/// Where this workspace's own data lives: `.gofer` beside the files it belongs to.
+///
+/// Keeping it in the workspace is what makes a project portable. Copy the folder and its chats,
+/// logs, and worktrees come with it; delete the folder and they are gone, which is what deleting a
+/// project should mean. `GOFER_APP_DATA_DIR` overrides the location for a test that needs to hand
+/// the directory to something else, and names the project directory itself.
+fn project_data_path(workspace: &Path) -> Result<PathBuf, String> {
+    if let Some(path) = configured_app_data_path()? {
+        return Ok(path);
+    }
+    Ok(workspace.join(PROJECT_DATA_DIRECTORY))
 }
 
 /// Rebinds the project database after the health check changed what it depends on.

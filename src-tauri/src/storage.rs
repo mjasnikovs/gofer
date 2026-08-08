@@ -12,9 +12,11 @@ use uuid::Uuid;
 use crate::git;
 use crate::paths;
 
-const CATALOG_FILE_NAME: &str = "catalog.sqlite";
-const PROJECTS_DIRECTORY: &str = "projects";
+const LEGACY_CATALOG_FILE_NAME: &str = "catalog.sqlite";
+const LEGACY_PROJECTS_DIRECTORY: &str = "projects";
 const PROJECT_DATABASE_FILE_NAME: &str = "project.sqlite";
+/// The project's own identity, kept in its own database so that moving the folder moves it too.
+const PROJECT_ID_KEY: &str = "project.id";
 const MEMORY_EMBEDDING_DIMENSIONS: usize = 1024;
 const MEMORY_EMBEDDING_MODEL: &str = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
 const MAX_STORED_CHAT_BYTES: usize = 32 * 1024 * 1024;
@@ -26,17 +28,6 @@ const MAX_UI_STATE_BYTES: usize = 1024 * 1024;
 /// Everything the renderer may write into `project_state`, and nothing else.
 const UI_STATE_PREFIX: &str = "ui.";
 static SQLITE_VEC_REGISTRATION: Once = Once::new();
-
-const CATALOG_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
-    canonical_path TEXT NOT NULL UNIQUE,
-    display_name TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    last_opened_at INTEGER NOT NULL
-) STRICT;
-PRAGMA user_version = 1;
-"#;
 
 const PROJECT_SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS tasks (
@@ -480,50 +471,30 @@ impl StorageSlot {
 }
 
 impl ProjectStorage {
+    /// Opens the one project whose data lives in `data_root`.
+    ///
+    /// `data_root` *is* the project directory — normally `.gofer` inside the workspace. There is no
+    /// index from a path to a project, because there is nothing to look up: a project's chats, logs,
+    /// blobs, and worktrees sit beside its files, so copying or renaming the folder carries them
+    /// along and deleting the folder deletes them.
     pub fn open(data_root: &Path, workspace_path: &Path) -> Result<Self, String> {
-        // Neither sentence names a path: the data root is Gofer's own application directory and
-        // the workspace is the one the user already has open, so a host path in the message is
+        // Neither sentence names a path: the data root is Gofer's own directory inside the project
+        // and the workspace is the one the user already has open, so a host path in the message is
         // detail the user cannot act on and the renderer has no reason to print.
         fs::create_dir_all(data_root)
             .map_err(|error| format!("Could not create the Gofer data directory: {error}"))?;
         let canonical_path = paths::canonical(workspace_path)
             .map_err(|error| format!("Could not resolve the workspace directory: {error}"))?;
-        let catalog_path = data_root.join(CATALOG_FILE_NAME);
-        let catalog = open_connection(&catalog_path)?;
-        migrate(&catalog, CATALOG_SCHEMA, 1)?;
-        let canonical = canonical_path.to_string_lossy().into_owned();
-        let existing = catalog
-            .query_row(
-                "SELECT id FROM projects WHERE canonical_path = ?1",
-                [&canonical],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(database_error)?;
-        let project_id = existing.unwrap_or_else(|| Uuid::now_v7().to_string());
-        let now = now_millis()?;
-        let display_name = canonical_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Project");
-        catalog
-            .execute(
-                "INSERT INTO projects (id, canonical_path, display_name, created_at, last_opened_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
-                 ON CONFLICT(canonical_path) DO UPDATE SET last_opened_at = excluded.last_opened_at",
-                params![project_id, canonical, display_name, now],
-            )
-            .map_err(database_error)?;
-        let storage = Self {
+        ignore_own_directory(data_root)?;
+        let mut storage = Self {
             data_root: data_root.to_path_buf(),
-            project_id,
+            project_id: String::new(),
             workspace_path: canonical_path,
             write_lock: Arc::new(Mutex::new(())),
         };
-        fs::create_dir_all(storage.project_directory())
-            .map_err(|error| format!("Could not create project storage: {error}"))?;
         let project = storage.connection()?;
         migrate_project(&project)?;
+        storage.project_id = ensure_project_id(&project)?;
         // A workspace whose Git repository cannot yet supply a worktree — one with no commits, most
         // often — must not stop the database from opening. Failing here failed Tauri's `setup`,
         // which panics: the user got no window at all, in a repository they could have fixed with
@@ -1697,7 +1668,7 @@ impl ProjectStorage {
     pub fn create_backup(&self) -> Result<BackupResult, String> {
         let _write_guard = self.write_lock()?;
         let created_at = now_millis()?;
-        let backup_root = self.data_root.join("backups").join(&self.project_id);
+        let backup_root = self.data_root.join("backups");
         fs::create_dir_all(&backup_root)
             .map_err(|error| format!("Could not create {}: {error}", backup_root.display()))?;
         let destination = backup_root.join(format!("{created_at}-{}", Uuid::now_v7()));
@@ -1794,8 +1765,7 @@ impl ProjectStorage {
                     .map_err(|error| format!("Could not remove {}: {error}", path.display()))?;
             }
         }
-        let backups_removed =
-            prune_backups(&self.data_root.join("backups").join(&self.project_id), 5)?;
+        let backups_removed = prune_backups(&self.data_root.join("backups"), 5)?;
         Ok(MaintenanceResult {
             attachments_removed: orphaned.len(),
             blobs_removed,
@@ -1832,9 +1802,7 @@ impl ProjectStorage {
     }
 
     fn project_directory(&self) -> PathBuf {
-        self.data_root
-            .join(PROJECTS_DIRECTORY)
-            .join(&self.project_id)
+        self.data_root.clone()
     }
 
     fn blob_path(&self, hash: &str) -> PathBuf {
@@ -1942,18 +1910,100 @@ fn migrate_project(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn migrate(connection: &Connection, schema: &str, version: u32) -> Result<(), String> {
-    let current = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+/// Gives the project its identity once, and reads it back on every open after that.
+///
+/// The identity lives in the project's own database rather than in an index somewhere else, so a
+/// folder that is copied keeps naming itself the same thing wherever it lands.
+fn ensure_project_id(connection: &Connection) -> Result<String, String> {
+    let existing = connection
+        .query_row(
+            "SELECT value FROM project_state WHERE key = ?1",
+            [PROJECT_ID_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
         .map_err(database_error)?;
-    if current > version {
-        return Err(format!(
-            "The database schema version {current} is newer than supported version {version}"
-        ));
+    if let Some(project_id) = existing {
+        return Ok(project_id);
     }
-    if current < version {
-        connection.execute_batch(schema).map_err(database_error)?;
+    let project_id = Uuid::now_v7().to_string();
+    connection
+        .execute(
+            "INSERT INTO project_state (key, value) VALUES (?1, ?2)",
+            params![PROJECT_ID_KEY, project_id],
+        )
+        .map_err(database_error)?;
+    Ok(project_id)
+}
+
+/// Keeps Gofer's own directory out of the repository it sits in.
+///
+/// The data root is now inside the workspace, which means Git can see it: databases, logs, and
+/// worktrees would all show up as untracked noise in the user's own project. A `.gitignore` that
+/// ignores everything, written once, keeps `git status` about the user's work. It is never
+/// rewritten, so a user who edits it keeps their edit.
+fn ignore_own_directory(data_root: &Path) -> Result<(), String> {
+    let path = data_root.join(".gitignore");
+    if path.exists() {
+        return Ok(());
     }
+    fs::write(&path, "*\n").map_err(|error| format!("Could not write {}: {error}", path.display()))
+}
+
+/// Moves a project out of the shared application directory the first time it is opened.
+///
+/// Gofer used to keep every project's data under one application directory, found through an index
+/// keyed by workspace path. That made a project's history invisible from the project, and stranded
+/// it whenever the folder moved. This carries the old data across once, and does nothing at all
+/// once there is no old data to carry — including for every project created since.
+pub fn migrate_legacy_data(
+    legacy_root: &Path,
+    workspace_path: &Path,
+    data_root: &Path,
+) -> Result<(), String> {
+    if data_root.join(PROJECT_DATABASE_FILE_NAME).exists() {
+        return Ok(());
+    }
+    let catalog_path = legacy_root.join(LEGACY_CATALOG_FILE_NAME);
+    if !catalog_path.is_file() {
+        return Ok(());
+    }
+    let canonical = paths::canonical(workspace_path)
+        .map_err(|error| format!("Could not resolve the workspace directory: {error}"))?
+        .to_string_lossy()
+        .into_owned();
+    let catalog = open_connection(&catalog_path)?;
+    let project_id = catalog
+        .query_row(
+            "SELECT id FROM projects WHERE canonical_path = ?1",
+            [&canonical],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(database_error)?;
+    let Some(project_id) = project_id else {
+        return Ok(());
+    };
+    let source = legacy_root
+        .join(LEGACY_PROJECTS_DIRECTORY)
+        .join(&project_id);
+    if !source.join(PROJECT_DATABASE_FILE_NAME).is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = data_root.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+    // A rename keeps the move atomic and cheap when both sides share a filesystem, which is the
+    // common case. When they do not, a copy is the only way across, and the original is left where
+    // it was rather than deleted: the copy is the one Gofer will use from now on, and a stale
+    // duplicate is a far smaller problem than a half-moved history.
+    if fs::rename(&source, data_root).is_err() {
+        copy_directory(&source, data_root)?;
+    }
+    catalog
+        .execute("DELETE FROM projects WHERE id = ?1", [&project_id])
+        .map_err(database_error)?;
     Ok(())
 }
 
@@ -2250,6 +2300,140 @@ mod tests {
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).expect("workspace directory");
         ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage")
+    }
+
+    /// Copying the data directory copies the project, which is the whole point of keeping it in the
+    /// workspace: a project that is moved, renamed, or copied is still the same project, and a
+    /// project whose folder is deleted is gone rather than waiting to reappear.
+    #[test]
+    fn a_project_travels_with_its_own_directory() {
+        let directory = TempDir::new().expect("temporary directory");
+        let first = storage(&directory);
+        first
+            .write_ui_state("ui.workspace", Some("carried"))
+            .expect("write");
+        let project_id = first.project_id.clone();
+
+        let moved_workspace = directory.path().join("elsewhere");
+        fs::create_dir(&moved_workspace).expect("second workspace");
+        let moved_root = moved_workspace.join(".gofer");
+        copy_directory(&directory.path().join("data"), &moved_root).expect("copy");
+        let second = ProjectStorage::open(&moved_root, &moved_workspace).expect("storage");
+
+        assert_eq!(
+            second.read_ui_state("ui.workspace").expect("read"),
+            Some("carried".to_owned())
+        );
+        assert_eq!(second.project_id, project_id);
+    }
+
+    /// The directory keeps itself out of the repository it now sits in, and never argues with a user
+    /// who has edited that decision.
+    #[test]
+    fn the_data_directory_ignores_itself_without_overwriting_an_edit() {
+        let directory = TempDir::new().expect("temporary directory");
+        let data_root = directory.path().join("data");
+        storage(&directory);
+        assert_eq!(
+            fs::read_to_string(data_root.join(".gitignore")).expect("ignore file"),
+            "*\n"
+        );
+
+        fs::write(data_root.join(".gitignore"), "*\n!notes.md\n").expect("edit");
+        let workspace = directory.path().join("workspace");
+        ProjectStorage::open(&data_root, &workspace).expect("storage");
+        assert_eq!(
+            fs::read_to_string(data_root.join(".gitignore")).expect("ignore file"),
+            "*\n!notes.md\n"
+        );
+    }
+
+    /// A project that predates the move is carried into its workspace once, and only once.
+    #[test]
+    fn legacy_project_data_is_carried_into_the_workspace_once() {
+        let directory = TempDir::new().expect("temporary directory");
+        let legacy_root = directory.path().join("legacy");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace directory");
+        let canonical = paths::canonical(&workspace).expect("canonical");
+
+        let legacy_project =
+            ProjectStorage::open(&legacy_root.join("projects").join("old-id"), &workspace)
+                .expect("legacy storage");
+        legacy_project
+            .write_ui_state("ui.workspace", Some("remembered"))
+            .expect("write");
+        let catalog =
+            open_connection(&legacy_root.join(LEGACY_CATALOG_FILE_NAME)).expect("catalog");
+        catalog
+            .execute_batch(
+                "CREATE TABLE projects (
+                    id TEXT PRIMARY KEY,
+                    canonical_path TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_opened_at INTEGER NOT NULL
+                ) STRICT;",
+            )
+            .expect("legacy schema");
+        catalog
+            .execute(
+                "INSERT INTO projects VALUES (?1, ?2, 'workspace', 1, 1)",
+                params!["old-id", canonical.to_string_lossy().into_owned()],
+            )
+            .expect("legacy row");
+
+        let data_root = workspace.join(".gofer");
+        migrate_legacy_data(&legacy_root, &workspace, &data_root).expect("migrate");
+        let carried = ProjectStorage::open(&data_root, &workspace).expect("storage");
+        assert_eq!(
+            carried.read_ui_state("ui.workspace").expect("read"),
+            Some("remembered".to_owned())
+        );
+
+        // A second open has nothing left to carry, and must not reach back into the old directory.
+        carried
+            .write_ui_state("ui.workspace", Some("since moved"))
+            .expect("write");
+        migrate_legacy_data(&legacy_root, &workspace, &data_root).expect("migrate again");
+        assert_eq!(
+            ProjectStorage::open(&data_root, &workspace)
+                .expect("storage")
+                .read_ui_state("ui.workspace")
+                .expect("read"),
+            Some("since moved".to_owned())
+        );
+    }
+
+    /// A workspace Gofer has never opened before has no legacy data, and the migration says so by
+    /// doing nothing at all rather than by failing.
+    #[test]
+    fn a_workspace_with_no_legacy_data_is_left_alone() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace directory");
+        let data_root = workspace.join(".gofer");
+
+        migrate_legacy_data(&directory.path().join("missing"), &workspace, &data_root)
+            .expect("no catalog");
+        assert!(!data_root.exists());
+
+        let legacy_root = directory.path().join("legacy");
+        fs::create_dir(&legacy_root).expect("legacy directory");
+        open_connection(&legacy_root.join(LEGACY_CATALOG_FILE_NAME))
+            .expect("catalog")
+            .execute_batch(
+                "CREATE TABLE projects (
+                    id TEXT PRIMARY KEY,
+                    canonical_path TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    last_opened_at INTEGER NOT NULL
+                ) STRICT;",
+            )
+            .expect("legacy schema");
+        migrate_legacy_data(&legacy_root, &workspace, &data_root).expect("no row");
+        assert!(!data_root.exists());
     }
 
     fn git_text(workspace: &Path, arguments: &[&str]) -> String {

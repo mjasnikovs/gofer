@@ -2087,9 +2087,8 @@ describe('the live workspace', () => {
         })
 
         it('closes the run it was recording rather than leaving it open', () => {
-            // `GOFER_APP_DATA_DIR` is already the `data` directory the projects sit under.
-            const projects = join(process.env.GOFER_APP_DATA_DIR ?? '', 'projects')
-            const database = join(projects, readdirSync(projects)[0] ?? '', 'project.sqlite')
+            // `GOFER_APP_DATA_DIR` names the project directory itself, database and all.
+            const database = join(process.env.GOFER_APP_DATA_DIR ?? '', 'project.sqlite')
             const rows = execFileSync(
                 'sqlite3',
                 [database, 'select status from godot_runs order by rowid'],
