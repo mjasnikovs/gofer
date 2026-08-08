@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useEffect, useReducer, useRef} from 'react'
 import {AlertDialog} from '@astryxdesign/core/AlertDialog'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -10,6 +10,7 @@ import {Grid} from '@astryxdesign/core/Grid'
 import {Icon} from '@astryxdesign/core/Icon'
 import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
 import {ProgressBar} from '@astryxdesign/core/ProgressBar'
+import {Slider} from '@astryxdesign/core/Slider'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {Heading, Text} from '@astryxdesign/core/Text'
@@ -21,28 +22,24 @@ import ServerStackIcon from '@heroicons/react/24/outline/ServerStackIcon'
 import TrashIcon from '@heroicons/react/24/outline/TrashIcon'
 import {invoke, isTauri, listen} from '../../services/desktop'
 import {commandErrorMessage} from '../../utils/command-error'
-import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import {
     ALL_THINKING_LEVELS,
     NO_THINKING_LEVELS,
-    apiKeyUpdate,
     cacheStateLabel,
     cacheStateVariant,
+    compactionLabel,
     connectionNotice,
     formatBytes,
-    normalizeSettings,
     progressLabel,
     progressValue
 } from '../../models/settings'
-import type {
-    AiModelOption,
-    AiSettings,
-    ApiKeyIntent,
-    CacheStatus,
-    GoferSettings,
-    Notice,
-    SettingsRequest
-} from '../../models/settings'
+import type {AiModelOption, AiSettings} from '../../models/settings'
+import {
+    INITIAL_SETTINGS_DRAFT,
+    canDeleteCache,
+    reduce,
+    settingsRequest
+} from '../../models/settings-draft'
 
 /** Every settings group breaks to one column at the same width. */
 const SETTINGS_GRID_COLUMNS = {minWidth: 320} as const
@@ -55,27 +52,13 @@ type SettingsPageProps = Readonly<{
 
 export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPageProps) {
     const hasLoaded = useRef(false)
-    const [draft, setDraft] = useState<GoferSettings>()
-    const [hasApiKey, setHasApiKey] = useState(false)
-    const [apiKey, setApiKey] = useState('')
-    const [apiKeyIntent, setApiKeyIntent] = useState<ApiKeyIntent>('keep')
-    const [cache, setCache] = useState<CacheStatus>()
-    const [progress, setProgress] = useState<DownloadProgress>()
-    const [notice, setNotice] = useState<Notice>()
-    const [isLoading, setIsLoading] = useState(true)
-    const [isTesting, setIsTesting] = useState(false)
-    const [isSaving, setIsSaving] = useState(false)
-    const [isDownloading, setIsDownloading] = useState(false)
-    const [isDeleteOpen, setIsDeleteOpen] = useState(false)
-    const [isDeleting, setIsDeleting] = useState(false)
-    const [isBackingUp, setIsBackingUp] = useState(false)
-    const [isCleaningStorage, setIsCleaningStorage] = useState(false)
-    const [availableModels, setAvailableModels] = useState<readonly AiModelOption[]>([])
+    const [state, dispatch] = useReducer(reduce, INITIAL_SETTINGS_DRAFT)
+    const {apiKey, apiKeyIntent, availableModels, busy, cache, notice, progress} = state
+    const draft = state.settings
 
-    const refreshCache = useCallback(async () => {
-        const nextCache = await invoke('get_rag_cache_status')
-        setCache(nextCache)
-    }, [])
+    const refreshCache = async () => {
+        dispatch({type: 'cache-read', cache: await invoke('get_rag_cache_status')})
+    }
 
     useEffect(() => {
         if (hasLoaded.current) return
@@ -83,39 +66,33 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
 
         const load = async () => {
             if (!isTauri()) {
-                setNotice({
-                    status: 'warning',
-                    title: 'Desktop app required',
-                    description:
-                        'Local settings and model management are available in the Tauri desktop app.'
+                dispatch({
+                    type: 'unavailable',
+                    notice: {
+                        status: 'warning',
+                        title: 'Desktop app required',
+                        description:
+                            'Local settings and model management are available in the Tauri desktop app.'
+                    }
                 })
-                setIsLoading(false)
                 return
             }
 
             try {
-                const [settingsResponse, cacheResponse] = await Promise.all([
+                const [response, cacheResponse] = await Promise.all([
                     invoke('load_settings'),
                     invoke('get_rag_cache_status')
                 ])
-                setDraft(normalizeSettings(settingsResponse.settings))
-                setHasApiKey(settingsResponse.hasApiKey)
-                setCache(cacheResponse)
-                if (settingsResponse.credentialStoreError) {
-                    setNotice({
-                        status: 'warning',
-                        title: 'API key storage is unavailable',
-                        description: settingsResponse.credentialStoreError
-                    })
-                }
+                dispatch({type: 'loaded', response, cache: cacheResponse})
             } catch (error) {
-                setNotice({
-                    status: 'error',
-                    title: 'Settings could not be loaded',
-                    description: commandErrorMessage(error)
+                dispatch({
+                    type: 'unavailable',
+                    notice: {
+                        status: 'error',
+                        title: 'Settings could not be loaded',
+                        description: commandErrorMessage(error)
+                    }
                 })
-            } finally {
-                setIsLoading(false)
             }
         }
 
@@ -123,187 +100,182 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     }, [])
 
     const updateAi = (update: Partial<AiSettings>) => {
-        setDraft(previous => (previous ? {...previous, ai: {...previous.ai, ...update}} : previous))
-    }
-
-    const request = (): SettingsRequest | undefined => {
-        if (!draft) return undefined
-        return {settings: draft, apiKey: apiKeyUpdate(apiKeyIntent, apiKey)}
+        dispatch({type: 'ai-changed', update})
     }
 
     const testConnection = async () => {
-        const nextRequest = request()
+        const nextRequest = settingsRequest(state)
         if (!nextRequest) return
-        setIsTesting(true)
-        setNotice(undefined)
+        dispatch({type: 'began', task: 'testing'})
         try {
             const result = await invoke('test_ai_connection', {
                 request: nextRequest
             })
-            setNotice(connectionNotice(result))
+            dispatch({type: 'noticed', notice: connectionNotice(result)})
             if (result.status === 'connected' || result.status === 'model-unavailable') {
                 const models = await invoke('list_ai_models', {
                     request: nextRequest
                 })
-                setAvailableModels(models)
+                dispatch({type: 'models-listed', models})
             }
         } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Connection test failed',
-                description: commandErrorMessage(error)
+            dispatch({
+                type: 'failed',
+                task: 'testing',
+                notice: {
+                    status: 'error',
+                    title: 'Connection test failed',
+                    description: commandErrorMessage(error)
+                }
             })
         } finally {
-            setIsTesting(false)
+            dispatch({type: 'ended', task: 'testing'})
         }
     }
 
     const save = async () => {
-        const nextRequest = request()
+        const nextRequest = settingsRequest(state)
         if (!nextRequest) return
-        setIsSaving(true)
-        setNotice(undefined)
+        dispatch({type: 'began', task: 'saving'})
         try {
             const response = await invoke('save_settings', {request: nextRequest})
-            setDraft(response.settings)
-            setHasApiKey(response.hasApiKey)
-            setApiKey('')
-            setApiKeyIntent('keep')
-            setNotice(
-                response.credentialStoreError ?
-                    {
-                        status: 'warning',
-                        title: 'Connection saved without API key access',
-                        description: response.credentialStoreError
-                    }
-                :   {
-                        status: 'success',
-                        title: 'Settings saved',
-                        description: 'Gofer will use this AI connection for subsequent requests.'
-                    }
-            )
+            dispatch({type: 'saved', response})
         } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Settings could not be saved',
-                description: commandErrorMessage(error)
+            dispatch({
+                type: 'failed',
+                task: 'saving',
+                notice: {
+                    status: 'error',
+                    title: 'Settings could not be saved',
+                    description: commandErrorMessage(error)
+                }
             })
         } finally {
-            setIsSaving(false)
+            dispatch({type: 'ended', task: 'saving'})
         }
     }
 
     const downloadModels = async () => {
-        setIsDownloading(true)
-        setNotice(undefined)
-        setCache(previous => (previous ? {...previous, state: 'busy'} : previous))
+        dispatch({type: 'began', task: 'downloading'})
+        dispatch({type: 'cache-downloading'})
         let unlisten: (() => void) | undefined
         try {
             unlisten = await listen('rag-download-progress', event => {
-                setProgress(event.payload)
+                dispatch({type: 'progress', progress: event.payload})
             })
             await invoke('initialize_rag')
             await refreshCache()
-            setNotice({
-                status: 'success',
-                title: 'Documentation models installed',
-                description: 'Gofer can now search the local Godot 4.7 documentation.'
+            dispatch({
+                type: 'noticed',
+                notice: {
+                    status: 'success',
+                    title: 'Documentation models installed',
+                    description: 'Gofer can now search the local Godot 4.7 documentation.'
+                }
             })
         } catch (error) {
             await refreshCache()
-            setNotice({
-                status: 'error',
-                title: 'Models could not be installed',
-                description: commandErrorMessage(error)
+            dispatch({
+                type: 'failed',
+                task: 'downloading',
+                notice: {
+                    status: 'error',
+                    title: 'Models could not be installed',
+                    description: commandErrorMessage(error)
+                }
             })
         } finally {
             unlisten?.()
-            setIsDownloading(false)
-            setProgress(undefined)
+            dispatch({type: 'ended', task: 'downloading'})
         }
     }
 
     const deleteCache = async () => {
-        setIsDeleting(true)
-        setNotice(undefined)
+        dispatch({type: 'began', task: 'deleting'})
         try {
             const nextCache = await invoke('delete_rag_cache')
-            setCache(nextCache)
-            setIsDeleteOpen(false)
+            dispatch({type: 'cache-read', cache: nextCache})
+            dispatch({type: 'delete-dialog', isOpen: false})
             onCacheDeleted()
         } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Model cache could not be deleted',
-                description: commandErrorMessage(error)
+            dispatch({
+                type: 'failed',
+                task: 'deleting',
+                notice: {
+                    status: 'error',
+                    title: 'Model cache could not be deleted',
+                    description: commandErrorMessage(error)
+                }
             })
         } finally {
-            setIsDeleting(false)
+            dispatch({type: 'ended', task: 'deleting'})
         }
     }
 
     const createBackup = async () => {
-        setIsBackingUp(true)
-        setNotice(undefined)
+        dispatch({type: 'began', task: 'backingUp'})
         try {
             const result = await invoke('create_project_backup')
-            setNotice({
-                status: 'success',
-                title: 'Project backup created',
-                description: result.path
+            dispatch({
+                type: 'noticed',
+                notice: {
+                    status: 'success',
+                    title: 'Project backup created',
+                    description: result.path
+                }
             })
         } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Backup failed',
-                description: commandErrorMessage(error)
+            dispatch({
+                type: 'failed',
+                task: 'backingUp',
+                notice: {
+                    status: 'error',
+                    title: 'Backup failed',
+                    description: commandErrorMessage(error)
+                }
             })
         } finally {
-            setIsBackingUp(false)
+            dispatch({type: 'ended', task: 'backingUp'})
         }
     }
 
     const cleanStorage = async () => {
-        setIsCleaningStorage(true)
-        setNotice(undefined)
+        dispatch({type: 'began', task: 'cleaningStorage'})
         try {
             const result = await invoke('run_storage_maintenance')
-            setNotice({
-                status: 'success',
-                title: 'Storage maintenance complete',
-                description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, and ${String(result.backupsRemoved)} old backups removed. ${String(result.memoryEmbeddingsRestored)} memory embeddings restored.`
+            dispatch({
+                type: 'noticed',
+                notice: {
+                    status: 'success',
+                    title: 'Storage maintenance complete',
+                    description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, and ${String(result.backupsRemoved)} old backups removed. ${String(result.memoryEmbeddingsRestored)} memory embeddings restored.`
+                }
             })
         } catch (error) {
-            setNotice({
-                status: 'error',
-                title: 'Storage cleanup failed',
-                description: commandErrorMessage(error)
+            dispatch({
+                type: 'failed',
+                task: 'cleaningStorage',
+                notice: {
+                    status: 'error',
+                    title: 'Storage cleanup failed',
+                    description: commandErrorMessage(error)
+                }
             })
         } finally {
-            setIsCleaningStorage(false)
+            dispatch({type: 'ended', task: 'cleaningStorage'})
         }
     }
 
     const value = progressValue(progress)
-    const cacheIsBusy = cache?.state === 'busy' || isDownloading
-    const canDeleteCache = Boolean(cache && cache.sizeBytes > 0 && !cacheIsBusy)
+    const isDeletable = canDeleteCache(state)
     const selectModel = (model: AiModelOption) => {
-        updateAi({
-            model: model.id,
-            modelName: model.name,
-            contextWindow: model.contextWindow,
-            maxTokens: model.maxTokens,
-            reasoning: model.reasoning,
-            supportsReasoningEffort: model.supportsReasoningEffort,
-            input: model.input,
-            thinkingLevel: model.reasoning ? (draft?.ai.thinkingLevel ?? 'off') : 'off'
-        })
+        dispatch({type: 'model-chosen', model})
     }
 
     return (
         <>
             <Dialog
-                isOpen={isOpen && !isDeleteOpen}
+                isOpen={isOpen && !state.isDeleteOpen}
                 onOpenChange={onOpenChange}
                 purpose='form'
                 width={960}
@@ -328,7 +300,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         description={notice.description}
                                         isDismissable={notice.status !== 'error'}
                                         onDismiss={() => {
-                                            setNotice(undefined)
+                                            dispatch({type: 'notice-dismissed'})
                                         }}
                                     />
                                 )}
@@ -424,16 +396,24 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                         updateAi({maxTokens: Number(maxTokens)})
                                                     }}
                                                 />
-                                                <TextInput
-                                                    label='Compact conversations at (% of context)'
-                                                    value={String(draft.ai.compactionPercent)}
-                                                    isRequired
+                                                <Slider
+                                                    label='Compact conversations at'
+                                                    value={draft.ai.compactionPercent}
+                                                    min={50}
+                                                    max={100}
+                                                    step={1}
+                                                    valueDisplay='text'
+                                                    marks={[
+                                                        {value: 50, label: '50%'},
+                                                        {value: 75, label: '75%'},
+                                                        {value: 100, label: 'Off'}
+                                                    ]}
+                                                    formatValue={compactionLabel(
+                                                        draft.ai.contextWindow
+                                                    )}
                                                     description='Older messages are summarised once a conversation fills this much of the window. 100 keeps every message and lets long conversations run out of room.'
-                                                    onChange={compactionPercent => {
-                                                        updateAi({
-                                                            compactionPercent:
-                                                                Number(compactionPercent)
-                                                        })
+                                                    onChange={(compactionPercent: number) => {
+                                                        updateAi({compactionPercent})
                                                     }}
                                                 />
                                                 <TextInput
@@ -491,27 +471,27 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                     isOptional
                                                     startIcon={KeyIcon}
                                                     placeholder={
-                                                        hasApiKey ? 'Stored securely' : (
+                                                        state.hasApiKey ? 'Stored securely' : (
                                                             'Not required by local servers'
                                                         )
                                                     }
                                                     description={
                                                         apiKeyIntent === 'clear' ?
                                                             'The stored key will be removed when you save.'
-                                                        : hasApiKey ?
+                                                        : state.hasApiKey ?
                                                             'Leave blank to keep the key stored in the operating system credential store.'
                                                         :   'Enter a key only if this server requires authentication.'
 
                                                     }
                                                     onChange={enteredApiKey => {
-                                                        setApiKey(enteredApiKey)
-                                                        setApiKeyIntent(
-                                                            enteredApiKey.trim() ? 'set' : 'keep'
-                                                        )
+                                                        dispatch({
+                                                            type: 'api-key-typed',
+                                                            value: enteredApiKey
+                                                        })
                                                     }}
                                                 />
                                             </FormLayout>
-                                            {(hasApiKey || apiKeyIntent === 'clear') && (
+                                            {(state.hasApiKey || apiKeyIntent === 'clear') && (
                                                 <Button
                                                     label={
                                                         apiKeyIntent === 'clear' ?
@@ -520,18 +500,13 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                     }
                                                     variant='ghost'
                                                     clickAction={() => {
-                                                        setApiKey('')
-                                                        setApiKeyIntent(
-                                                            apiKeyIntent === 'clear' ? 'keep' : (
-                                                                'clear'
-                                                            )
-                                                        )
+                                                        dispatch({type: 'api-key-removal-toggled'})
                                                     }}
                                                 />
                                             )}
                                         </VStack>
                                     :   <Text color='secondary'>
-                                            {isLoading ?
+                                            {state.isLoading ?
                                                 'Loading Gofer settings…'
                                             :   'Settings are unavailable.'}
                                         </Text>
@@ -587,7 +562,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                 </VStack>
                                             </VStack>
 
-                                            {isDownloading && (
+                                            {busy.downloading && (
                                                 <VStack gap={2}>
                                                     <ProgressBar
                                                         label={progressLabel(progress)}
@@ -618,7 +593,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                                 size='sm'
                                                             />
                                                         }
-                                                        isLoading={isDownloading}
+                                                        isLoading={busy.downloading}
                                                         clickAction={downloadModels}
                                                     />
                                                 )}
@@ -631,15 +606,18 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                                             size='sm'
                                                         />
                                                     }
-                                                    isDisabled={!canDeleteCache}
+                                                    isDisabled={!isDeletable}
                                                     clickAction={() => {
-                                                        setIsDeleteOpen(true)
+                                                        dispatch({
+                                                            type: 'delete-dialog',
+                                                            isOpen: true
+                                                        })
                                                     }}
                                                 />
                                             </HStack>
                                         </VStack>
                                     :   <Text color='secondary'>
-                                            {isLoading ?
+                                            {state.isLoading ?
                                                 'Inspecting the model cache…'
                                             :   'Cache status is unavailable.'}
                                         </Text>
@@ -678,8 +656,8 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         <Button
                                             label='Clean storage'
                                             variant='secondary'
-                                            isLoading={isCleaningStorage}
-                                            isDisabled={isBackingUp}
+                                            isLoading={busy.cleaningStorage}
+                                            isDisabled={busy.backingUp}
                                             clickAction={cleanStorage}
                                         />
                                         {/*
@@ -690,8 +668,8 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         <Button
                                             label='Back up project'
                                             variant='secondary'
-                                            isLoading={isBackingUp}
-                                            isDisabled={isCleaningStorage}
+                                            isLoading={busy.backingUp}
+                                            isDisabled={busy.cleaningStorage}
                                             clickAction={createBackup}
                                         />
                                     </HStack>
@@ -719,15 +697,15 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     <Button
                                         label='Test connection'
                                         variant='secondary'
-                                        isLoading={isTesting}
-                                        isDisabled={isSaving}
+                                        isLoading={busy.testing}
+                                        isDisabled={busy.saving}
                                         clickAction={testConnection}
                                     />
                                     <Button
                                         label='Save connection'
                                         variant='primary'
-                                        isLoading={isSaving}
-                                        isDisabled={isTesting}
+                                        isLoading={busy.saving}
+                                        isDisabled={busy.testing}
                                         clickAction={save}
                                     />
                                 </HStack>
@@ -737,12 +715,14 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                 />
             </Dialog>
             <AlertDialog
-                isOpen={isDeleteOpen}
-                onOpenChange={setIsDeleteOpen}
+                isOpen={state.isDeleteOpen}
+                onOpenChange={isDeleteOpen => {
+                    dispatch({type: 'delete-dialog', isOpen: isDeleteOpen})
+                }}
                 title='Delete documentation model cache?'
                 description='This removes only the downloaded embedding and reranking models. Gofer will return to the preparation screen and download approximately 1.68 GiB again.'
                 actionLabel='Delete model cache'
-                isActionLoading={isDeleting}
+                isActionLoading={busy.deleting}
                 onAction={deleteCache}
             />
         </>

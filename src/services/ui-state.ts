@@ -14,20 +14,90 @@ export function draftKey(taskId: string) {
  * Long enough that typing and dragging do not write once per event, short enough that a window
  * closed straight after a change still records it.
  */
-const WRITE_DEBOUNCE_MS = 250
+export const WRITE_DEBOUNCE_MS = 250
 
-const pending = new Map<string, unknown>()
-const timers = new Map<string, ReturnType<typeof setTimeout>>()
+/**
+ * Runs `write` once the delay has passed, and hands back a way to call it off.
+ *
+ * The clock is a parameter rather than a fact about the module because the alternative is that
+ * every test of anything that remembers its layout has to spend 250 ms of real time proving it —
+ * a cost that is invisible in the test's own source and that grows with how busy the machine is.
+ */
+export type WriteScheduler = (write: () => void, delayMs: number) => () => void
 
-function send(key: string, value: unknown) {
-    pending.delete(key)
-    void invoke('write_project_state', {
-        key,
-        ...(value === undefined ? {} : {value: JSON.stringify(value)})
-    }).catch(() => {
-        // Remembering the layout is a convenience. Failing to is not something to interrupt the
-        // user over, and the next change tries again.
-    })
+/** The real clock. What the application runs on. */
+export const timerScheduler: WriteScheduler = (write, delayMs) => {
+    const timer = setTimeout(write, delayMs)
+    return () => {
+        clearTimeout(timer)
+    }
+}
+
+/**
+ * No clock at all: the write happens on the spot.
+ *
+ * Coalescing is the debounce's only job, and dropping it costs a test nothing — the assertion is
+ * that the right value reached the backend, never that it reached it once.
+ */
+export const immediateScheduler: WriteScheduler = write => {
+    write()
+    return () => undefined
+}
+
+/** One project's worth of pending writes, holding whatever clock it was built with. */
+export type ProjectStateWriter = Readonly<{
+    write: (key: string, value: unknown) => void
+    flush: () => void
+}>
+
+export function createProjectStateWriter(
+    schedule: WriteScheduler,
+    delayMs = WRITE_DEBOUNCE_MS
+): ProjectStateWriter {
+    const pending = new Map<string, unknown>()
+    const cancels = new Map<string, () => void>()
+
+    const send = (key: string, value: unknown) => {
+        pending.delete(key)
+        cancels.delete(key)
+        void invoke('write_project_state', {
+            key,
+            ...(value === undefined ? {} : {value: JSON.stringify(value)})
+        }).catch(() => {
+            // Remembering the layout is a convenience. Failing to is not something to interrupt
+            // the user over, and the next change tries again.
+        })
+    }
+
+    return {
+        write(key, value) {
+            if (!isTauri()) return
+            pending.set(key, value)
+            cancels.get(key)?.()
+            cancels.set(
+                key,
+                schedule(() => {
+                    send(key, value)
+                }, delayMs)
+            )
+        },
+        flush() {
+            for (const cancel of cancels.values()) cancel()
+            cancels.clear()
+            for (const [key, value] of [...pending]) send(key, value)
+        }
+    }
+}
+
+let writer = createProjectStateWriter(timerScheduler)
+
+/**
+ * Swaps the clock the shared writer runs on, and empties it.
+ *
+ * Tests call this with `immediateScheduler`; the application never calls it at all.
+ */
+export function setWriteScheduler(schedule: WriteScheduler) {
+    writer = createProjectStateWriter(schedule)
 }
 
 /**
@@ -49,26 +119,24 @@ export async function readProjectState(key: string): Promise<unknown> {
 
 /** Records one piece of interface state, coalescing the writes of a drag or a burst of typing. */
 export function writeProjectState(key: string, value: unknown) {
-    if (!isTauri()) return
-    pending.set(key, value)
-    const running = timers.get(key)
-    if (running !== undefined) clearTimeout(running)
-    timers.set(
-        key,
-        setTimeout(() => {
-            timers.delete(key)
-            send(key, value)
-        }, WRITE_DEBOUNCE_MS)
-    )
+    writer.write(key, value)
 }
 
 /** Writes whatever is still waiting out, so a window closing mid-debounce does not lose it. */
 export function flushProjectState() {
-    for (const timer of timers.values()) clearTimeout(timer)
-    timers.clear()
-    for (const [key, value] of [...pending]) send(key, value)
+    writer.flush()
 }
 
-if (typeof window !== 'undefined') {
+/**
+ * Starts listening for the window closing, and hands back a way to stop.
+ *
+ * Called from the entry point rather than run on import: a module that attaches a global listener
+ * merely because something imported it cannot be loaded by a test without also being started.
+ */
+export function watchForWindowClose(): () => void {
+    if (typeof window === 'undefined') return () => undefined
     window.addEventListener('beforeunload', flushProjectState)
+    return () => {
+        window.removeEventListener('beforeunload', flushProjectState)
+    }
 }

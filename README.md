@@ -191,21 +191,21 @@ and `npm run lint:fix` to apply safe automatic fixes.
 `npm run check` stubs what it has to. One suite stubs nothing:
 
 ```bash
-npm run build:desktop:test
-node node_modules/@wdio/cli/bin/wdio.js run wdio.live.conf.ts
+npm run test:live:build   # build the application, then sweep it
+npm run test:live         # sweep the application already built
+npm run test:live:reset   # put the machine back between sweeps
 ```
 
-It drives the built application against a real Godot project — `~/hub/test-gd` unless
-`GOFER_LIVE_WORKSPACE` says otherwise — with the AI endpoint you configured, the retrieval models in
-your own cache, and a real windowed Godot 4.7. Only the application data directory is redirected
+It drives the built application against a real Godot project — seeded into
+`/tmp/gofer-live-workspace` from `fixtures/live-project`, unless `GOFER_LIVE_WORKSPACE` points at a
+project of your own — with the AI endpoint you configured, the retrieval models in your own cache,
+and a real windowed Godot 4.7. Only the application data directory is redirected
 (`/tmp/gofer-live-run`), so a sweep cannot touch your projects; the task worktrees it creates live
-there too. Between runs:
+there too.
 
-```bash
-rm -rf /tmp/gofer-live-run
-git -C ~/hub/test-gd worktree prune
-git -C ~/hub/test-gd branch | grep gofer/task | xargs -r git -C ~/hub/test-gd branch -D
-```
+Run `test:live:reset` between sweeps. A sweep leaves its data directory, its worktrees, and its
+`gofer/task` branches in place on purpose — a failed sweep is worth opening afterwards — but a
+second sweep started on top of the first reopens the first one's tasks and reports on those.
 
 Nothing in the suite waits on a clock. Every wait runs inside the page, resolves the instant its
 condition holds or the application reports a failure, and gives up the moment the application stops

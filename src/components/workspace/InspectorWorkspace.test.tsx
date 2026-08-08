@@ -6,6 +6,7 @@ import {InspectorWorkspace} from './InspectorWorkspace'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
 import type {ChatReference} from '../../utils/chat-references'
 import type {MonacoStubState} from '../../test/monaco-stub'
+import {immediateScheduler, setWriteScheduler} from '../../services/ui-state'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 
@@ -482,6 +483,13 @@ async function startSessionWithoutScene(user: ReturnType<typeof userEvent.setup>
 }
 
 beforeEach(() => {
+    /*
+     * Interface state is written through a 250 ms debounce. It coalesces a drag or a burst of
+     * typing into one write; it does not decide what is written. Running it on the spot here keeps
+     * that out of the test's budget, so an assertion about a stored layout is never also a race
+     * against the clock on a loaded machine.
+     */
+    setWriteScheduler(immediateScheduler)
     tauri.isTauri.mockReturnValue(true)
     tauri.listen.mockResolvedValue(() => undefined)
     narrowViewport(false)
@@ -571,15 +579,20 @@ describe('InspectorWorkspace', () => {
         await startSession(user)
 
         server.session.started = false
+        const before = server.calls.length
         await user.click(
             within(screen.getByRole('navigation', {name: 'Explorer'})).getByRole('button', {
                 name: 'Refresh'
             })
         )
 
+        // The read reaching the stopped session is the event worth waiting on. Both assertions then
+        // describe one settled moment, rather than passing on the first poll after the click.
         await waitFor(() => {
-            expect(screen.queryByText('Player')).not.toBeInTheDocument()
+            expect(server.calls.length).toBeGreaterThan(before)
         })
+        await act(async () => undefined)
+        expect(screen.queryByText('Player')).not.toBeInTheDocument()
         expect(screen.queryByText('The scene tree could not be read')).not.toBeInTheDocument()
     })
 
@@ -947,10 +960,13 @@ describe('InspectorWorkspace', () => {
 
         await user.click(within(dialog).getByRole('button', {name: /close/i}))
 
+        // Focus coming back is the close completing, and it is a positive fact to wait on. The
+        // dialog's absence is then read at that moment rather than on the first poll after the
+        // click, when it would still be open and the assertion would pass anyway.
         await waitFor(() => {
-            expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+            expect(opener).toHaveFocus()
         })
-        expect(opener).toHaveFocus()
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     })
 
     /*
@@ -979,13 +995,19 @@ describe('InspectorWorkspace', () => {
 
         await renderWorkspace()
 
-        // The script is open, in the centre tab it was open in, at the line it was left on.
+        /*
+         * Waited on the text rather than on the tab. The tab strip renders as soon as the layout
+         * names the script, a whole round trip before `open_script_document` answers with the
+         * source — so anchoring on the tab and then reading the buffer synchronously was a race,
+         * and it lost roughly one run in three.
+         */
         await waitFor(() => {
-            expect(
-                document.querySelector('[data-tab-value="scripts/player.gd"]')
-            ).toHaveTextContent('player.gd')
+            expect(editor.state?.activeText()).toBe(SCRIPT)
         })
-        expect(editor.state?.activeText()).toBe(SCRIPT)
+        // The script is open, in the centre tab it was open in, at the line it was left on.
+        expect(document.querySelector('[data-tab-value="scripts/player.gd"]')).toHaveTextContent(
+            'player.gd'
+        )
         expect(editor.state?.restored).toContainEqual({cursorLine: 3})
         // Its breakpoint came back with it, which is what makes the next Run stop there.
         await waitFor(() => {

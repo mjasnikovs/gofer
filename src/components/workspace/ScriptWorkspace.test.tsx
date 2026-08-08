@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
+import {act, cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {ScriptWorkspace} from './ScriptWorkspace'
@@ -234,9 +234,13 @@ describe('ScriptWorkspace', () => {
         await waitFor(() => {
             expect(server.saved).toEqual(['extends Node2D\n'])
         })
-        await waitFor(() => {
-            expect(openTab()).not.toHaveTextContent('•')
-        })
+        /*
+         * Pinned to the moment the save landed, not left to `waitFor`. A negative inside `waitFor`
+         * passes on its first poll — before the save has even been attempted — so it would score a
+         * tab that never went dirty exactly the same as a tab that went clean again.
+         */
+        await act(async () => undefined)
+        expect(openTab()).not.toHaveTextContent('•')
     })
 
     it('renders published diagnostics as editor markers and a tab badge', async () => {

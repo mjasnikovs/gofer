@@ -139,6 +139,18 @@ export function progressLabel(progress?: DownloadProgress) {
     return `${progress.model}: ${progress.status}`
 }
 
+/**
+ * Reads the compaction slider back as the thing it actually sets: the point in this connection's
+ * window where summarising starts. A percentage on its own says nothing about whether the line
+ * lands anywhere useful for a 120k window or an 8k one, so the token count travels with it.
+ */
+export function compactionLabel(contextWindow: number) {
+    return (percent: number) => {
+        if (percent >= 100) return 'Off · never summarise'
+        return `${String(percent)}% · ${Math.floor((contextWindow * percent) / 100).toLocaleString()} tokens`
+    }
+}
+
 export function apiKeyUpdate(intent: ApiKeyIntent, value: string): ApiKeyUpdate {
     if (intent === 'clear') return {action: 'clear'}
     if (intent === 'set') return {action: 'set', value}

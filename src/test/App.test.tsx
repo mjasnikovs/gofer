@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen, waitFor} from '@testing-library/react'
+import {act, cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {InitializationSplash} from '../components/application/InitializationSplash'
@@ -8,6 +8,7 @@ import {SettingsPage} from '../components/settings/SettingsPage'
 import {Workspace} from '../components/workspace/Workspace'
 import type {TaskSummary} from '../models/app'
 import type {StoredChat, TokenUsage} from '../models/chat'
+import {immediateScheduler, setWriteScheduler} from '../services/ui-state'
 
 type InvokeFunction = (command: string, args?: unknown) => Promise<unknown>
 type IsTauriFunction = () => boolean
@@ -66,6 +67,13 @@ const incompleteCache = {
 } as const
 
 beforeEach(() => {
+    /*
+     * Interface state is written through a 250 ms debounce. It coalesces a drag or a burst of
+     * typing into one write; it does not decide what is written. Running it on the spot here keeps
+     * that out of the test's budget, so an assertion about a stored layout is never also a race
+     * against the clock on a loaded machine.
+     */
+    setWriteScheduler(immediateScheduler)
     window.localStorage.clear()
     tauri.isTauri.mockReturnValue(true)
     tauri.listen.mockResolvedValue(vi.fn())
@@ -644,23 +652,28 @@ describe('Workspace', () => {
             'a turn between steps looks finished'
         ).toBeInTheDocument()
 
-        stream?.onmessage({
-            requestId: 1,
-            event: {
-                type: 'done',
-                text: '',
-                thinking: '',
-                stopReason: 'stop',
-                usage: emptyUsage,
-                model: 'local',
-                agentMessages: []
-            }
+        /*
+         * Delivering the end of the turn inside `act` settles every effect it starts, so the
+         * indicator's absence is read once, at a known moment. Inside `waitFor` the same assertion
+         * would pass on its first poll — before these events were even processed.
+         */
+        await act(async () => {
+            stream?.onmessage({
+                requestId: 1,
+                event: {
+                    type: 'done',
+                    text: '',
+                    thinking: '',
+                    stopReason: 'stop',
+                    usage: emptyUsage,
+                    model: 'local',
+                    agentMessages: []
+                }
+            })
+            endTurn?.()
         })
-        endTurn?.()
 
-        await waitFor(() => {
-            expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
-        })
+        expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
     })
 
     /**
@@ -716,10 +729,11 @@ describe('Workspace', () => {
 
         await userEvent.type(await screen.findByRole('textbox'), 'Build the level{enter}')
 
+        // The call's own row appearing is the turn having been processed end to end: the stream
+        // closes in the same microtask that starts it. The indicator is then read at that moment.
         expect(await screen.findByText('bash')).toBeInTheDocument()
-        await waitFor(() => {
-            expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
-        })
+        await act(async () => undefined)
+        expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
     })
 
     /**
@@ -885,9 +899,10 @@ describe('Workspace', () => {
         await userEvent.click(screen.getByRole('button', {name: 'Stop'}))
         expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId: 1})
 
-        await waitFor(() => {
-            expect(screen.queryByRole('status', {name: 'Loading'})).not.toBeInTheDocument()
-        })
+        // The backend has both emitted the abort and resolved the request by now; flushing settles
+        // what they schedule. A `waitFor` here would pass before either had been handled.
+        await act(async () => undefined)
+        expect(screen.queryByRole('status', {name: 'Loading'})).not.toBeInTheDocument()
     })
 
     it('asks the user before the agent runs a gated tool call, and answers the backend', async () => {
@@ -938,12 +953,14 @@ describe('Workspace', () => {
         // A prompt the backend settles on its own — a timeout, or a cancelled turn — closes too.
         raise('approval-3', 'delete', {path: 'scenes/other.tscn'})
         expect(await screen.findByText(/scenes\/other.tscn/)).toBeInTheDocument()
-        handlers.get('ai-approval-settled')?.({
-            payload: {approvalId: 'approval-3', approved: false} as never
+        await act(async () => {
+            handlers.get('ai-approval-settled')?.({
+                payload: {approvalId: 'approval-3', approved: false} as never
+            })
         })
-        await waitFor(() => {
-            expect(screen.queryByText(/scenes\/other.tscn/)).not.toBeInTheDocument()
-        })
+        // Read once, after the event has been delivered: inside `waitFor` this would pass on the
+        // poll before the event arrived, and a prompt that never closed would still score green.
+        expect(screen.queryByText(/scenes\/other.tscn/)).not.toBeInTheDocument()
     })
 })
 
