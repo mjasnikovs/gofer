@@ -123,8 +123,30 @@ describe('createTurnRunner', () => {
 
         expect(sent[0]?.messages.map(message => message.text)).toEqual(['first'])
         expect(sent[1]?.messages.map(message => message.text)).toEqual(['first', '', 'second'])
-        expect(sent.map(request => request.requestId)).toEqual([1, 2])
+        // Consecutive and distinct, not 1 and 2: the counter is process-wide now, so what a
+        // turn is given depends on how many ran before it. See the remount test below.
+        const [first, second] = sent.map(request => request.requestId)
+        expect(second).toBe((first ?? 0) + 1)
         expect(sent.every(request => !request.isRetry)).toBe(true)
+    })
+
+    /*
+     * The workspace is keyed on the task, so opening another task builds a second runner. The
+     * backend cancels a turn by id and holds that id for the life of the process, so a runner that
+     * restarted the count handed the next turn an id that was already stopped — and every backend
+     * tool answered its reachability probe with `cancelled`, refusing the turn before it started.
+     */
+    it('never gives a second runner an id the first one already used', async () => {
+        const first = harness({})
+        const second = harness({})
+
+        first.runner.start('one')
+        await first.idle()
+        second.runner.start('two')
+        await second.idle()
+
+        const ids = [...first.sent, ...second.sent].map(request => request.requestId)
+        expect(new Set(ids).size).toBe(ids.length)
     })
 
     it('keeps the transcript from a turn that never reached done', async () => {
@@ -256,9 +278,11 @@ describe('createTurnRunner', () => {
         it('cancels the turn that is running', async () => {
             let release: (() => void) | undefined
             const cancelled: number[] = []
+            const sent: number[] = []
             const runner = createTurnRunner({
-                send: async () =>
+                send: async request =>
                     new Promise<void>(resolve => {
+                        sent.push(request.requestId)
                         release = resolve
                     }),
                 cancel: async requestId => {
@@ -268,7 +292,7 @@ describe('createTurnRunner', () => {
 
             runner.start('go')
             runner.stop()
-            expect(cancelled).toEqual([1])
+            expect(cancelled).toEqual(sent)
 
             release?.()
         })

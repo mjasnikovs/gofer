@@ -12,8 +12,12 @@
 //! is only ever the tool worker — can be cancelled.
 //!
 //! The turn is identified rather than flagged. A tool that outlives its turn keeps the id it was
-//! spawned with, so the next turn's cancellation cannot reach into it and no reset has to race the
-//! threads still reading it.
+//! spawned with, so the next turn's cancellation cannot reach into it, and ending a turn resets
+//! nothing the threads still running under it are reading.
+//!
+//! The one reset is [`clear_if_cancelled`], and it belongs to a turn *starting* rather than one
+//! ending: the renderer mints the ids, and a reloaded webview starts counting again while this
+//! process does not. See that function for what a reused id did.
 
 use std::cell::Cell;
 #[cfg(test)]
@@ -54,6 +58,21 @@ impl Drop for ToolTurn {
 /// active turn has tool threads to stop.
 pub fn cancel_turn(turn: u64) {
     CANCELLED_TURN.store(turn, Ordering::Release);
+}
+
+/// Clears the cancellation when a turn starts under an id that was already stopped.
+///
+/// The id is minted by the renderer, and the renderer can start counting again without this process
+/// restarting — a reloaded webview is a fresh module and a fresh counter. When that happened the
+/// new turn inherited the stopped turn's id, every tool it dispatched answered `cancelled`, and the
+/// reachability pass refused the turn before the model was asked anything.
+///
+/// Only the matching id is cleared, so a stop of some other turn still stands. Threads left over
+/// from the earlier turn of the same number stop being cancelled and serve out their own timeouts,
+/// which is the behaviour they had before cancellation existed — and a far better outcome than
+/// every later turn under that id being refused.
+pub fn clear_if_cancelled(turn: u64) {
+    let _ = CANCELLED_TURN.compare_exchange(turn, 0, Ordering::AcqRel, Ordering::Acquire);
 }
 
 /// Whether the calling thread is running a tool call for a turn the user stopped.
@@ -146,6 +165,25 @@ mod tests {
             !is_cancelled(),
             "the thread is free again once the call returns"
         );
+    }
+
+    #[test]
+    fn a_turn_that_starts_under_a_stopped_id_is_not_cancelled() {
+        let _serialized = CANCEL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        cancel_turn(106);
+        clear_if_cancelled(107);
+        {
+            let _turn = ToolTurn::enter(106);
+            assert!(
+                is_cancelled(),
+                "another turn's start must not clear this one"
+            );
+        }
+        clear_if_cancelled(106);
+        let _turn = ToolTurn::enter(106);
+        assert!(!is_cancelled(), "the id was minted again by a new turn");
     }
 
     #[test]

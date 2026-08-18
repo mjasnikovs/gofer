@@ -217,8 +217,10 @@ pub(crate) struct AiStreamPayload {
 /// It is one value now, and ending is one `Drop`. This is what `end_session` already is for the
 /// editor: an order, held in one place, rather than a habit several functions have.
 ///
-/// `cancel::CANCELLED_TURN` is deliberately not reset here. That module identifies turns rather
-/// than flagging them, precisely so no reset has to race the tool threads still reading it.
+/// `cancel::CANCELLED_TURN` is deliberately not reset when a turn *ends*. That module identifies
+/// turns rather than flagging them, precisely so no reset has to race the tool threads still
+/// reading it. A turn that *begins* under an id that was already stopped is a different question,
+/// and is cleared — see `cancel::clear_if_cancelled`.
 pub(crate) struct AiTurn {
     request_id: u64,
     _provider_operation: AiProviderOperation,
@@ -259,6 +261,10 @@ impl AiTurn {
         };
         ACTIVE_AI_REQUEST_ID.store(request_id, Ordering::Release);
         AI_REQUEST_CANCELLED.store(false, Ordering::Release);
+        // The renderer mints the id and can start counting again without this process restarting.
+        // A turn that inherited a stopped turn's id had every tool call refused as cancelled — the
+        // reachability pass named all eleven and stopped the turn before the model was asked.
+        crate::cancel::clear_if_cancelled(request_id);
         // Approvals belong to a turn: the gate opens with it and closes with it, so a gated tool
         // call always has an agent waiting for its answer, and a prompt that arrives after the end
         // is refused rather than left waiting.

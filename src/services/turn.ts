@@ -85,6 +85,18 @@ type PlannedTurn = Readonly<{
 const EMPTY: TurnState = {messages: [], agentMessages: [], isStreaming: false}
 
 /**
+ * The next request id, shared by every runner this process ever builds.
+ *
+ * Module scope rather than runner scope, because the backend cancels a turn by id and never clears
+ * it: `cancel::CANCELLED_TURN` holds the last stopped id for the life of the process, deliberately,
+ * so a tool thread that outlives its turn still reads its own cancellation. The workspace is keyed
+ * on the task, so opening another task builds a new runner — and a counter that restarted at 1
+ * handed the next turn the id of the stopped one. Every backend tool then answered its reachability
+ * probe with `cancelled`, and the turn was refused before it started.
+ */
+let nextRequestId = 1
+
+/**
  * The agent turn: what a conversation is, and what happens to it between a prompt and an answer.
  *
  * Owning the whole sequence is the point. The steps are individually simple and only correct in
@@ -99,7 +111,6 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
     let current: TurnState = EMPTY
     const listeners = new Set<() => void>()
     let nextMessageId = 1
-    let nextRequestId = 1
     let activeRequestId: number | undefined
 
     const publish = (next: TurnState) => {

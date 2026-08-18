@@ -35,10 +35,23 @@ const emptyUsage: TokenUsage = {
     cost: {total: 0}
 }
 
+/**
+ * The stream channel for one `send_ai_message`, with the turn's own request id stamped on
+ * everything sent down it.
+ *
+ * Stamped rather than written by the test, because the id is process-wide: a test is not the first
+ * turn this file runs, and a hard-coded one is an event the runner drops as belonging to somebody
+ * else's turn. See `nextRequestId` in `services/turn.ts` for why the counter is not per runner.
+ */
 function streamOf(args: unknown): AiStream {
     const stream = (args as {stream?: AiStream} | undefined)?.stream
     if (!stream) throw new Error('send_ai_message was invoked without its stream channel')
-    return stream
+    const requestId = (args as {request?: {requestId?: number}} | undefined)?.request?.requestId
+    return {
+        onmessage: payload => {
+            stream.onmessage({...(payload as object), requestId})
+        }
+    }
 }
 
 const settingsResponse = {
@@ -312,7 +325,7 @@ describe('Workspace', () => {
         expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
             stream: expect.anything() as unknown,
             request: {
-                requestId: 1,
+                requestId: expect.any(Number) as number,
                 taskId: 'task-1',
                 agentMessages: [],
                 isRetry: false,
@@ -540,7 +553,7 @@ describe('Workspace', () => {
         expect(tauri.invoke).toHaveBeenCalledWith('send_ai_message', {
             stream: expect.anything() as unknown,
             request: {
-                requestId: 1,
+                requestId: expect.any(Number) as number,
                 taskId: 'task-1',
                 agentMessages: [],
                 isRetry: false,
@@ -929,7 +942,9 @@ describe('Workspace', () => {
         expect(screen.getByText(/godot --headless/u)).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('button', {name: 'Stop'}))
-        expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId: 1})
+        expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {
+            requestId: expect.any(Number) as number
+        })
 
         // The backend has both emitted the abort and resolved the request by now; flushing settles
         // what they schedule. A `waitFor` here would pass before either had been handled.
