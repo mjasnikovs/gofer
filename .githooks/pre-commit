@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+# Git hands a hook the commit it is building through the environment: GIT_INDEX_FILE points at this
+# repository's index, GIT_DIR at the repository. `npm run check` runs tests that shell out to `git`
+# inside their own temporary repositories, and those variables follow the child all the way down.
+# A test's `git add` then writes THIS index instead of its own, and its `git commit` fails building
+# a tree out of blobs its temporary object store has never seen.
+#
+# Not hypothetical: it staged a `project.godot` that does not exist into this index, and failed
+# storage::tests::a_worktree_git_no_longer_holds_is_rebuilt_for_the_task_that_owns_it and
+# health::tests::a_project_missing_from_the_history_blocks_with_the_commit_fix with an error naming
+# .claude/skills/gofer-ui/SKILL.md — a file neither test has heard of. Both pass when the same check
+# is run by hand, which is the only environment it is written for. Unsetting these gives it that.
+unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_PREFIX GIT_OBJECT_DIRECTORY
+
+npm run check

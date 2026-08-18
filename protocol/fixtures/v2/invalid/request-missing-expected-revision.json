@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "request",
+    "id": "request-5",
+    "command": "node.rename",
+    "params": {"node": "Player", "name": "Hero"}
+}

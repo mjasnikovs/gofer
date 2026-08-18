@@ -1,0 +1,1911 @@
+{
+    "$comment": "The parameters of every tool operation, and the sentence a model reads when it gets one wrong. Hand-written: this is the specification, and it covers the catalogue exhaustively \u2014 `every_catalog_operation_declares_its_parameters` fails if an operation is added without an entry here. `scripts/generate-command-surface.mjs` emits the Rust table that refuses a call, the signature the model is shown, and the addon-side guard for the operations the addon answers.",
+    "$commandComment": "`command` is the addon command that answers the operation, and its absence \u2014 with `answeredBy: \"rust\"` in its place \u2014 means the operation never reaches the addon. Those are checked in Rust and deserialize into a typed request behind it; `every_rust_answered_operation_matches_its_request` holds this file to those structs.",
+    "$acceptsComment": "`accepts` names a parameter the addon reads and the model is never told about. `scene` is the only one: every node command takes it and defaults it to the scene the editor already has open, so the desktop client passes it and the model has no reason to.",
+    "$gatedComment": "`gated` is the sentence the user is shown before the agent may run this operation. Its absence means auto-allowed, so a new operation is allowed by default and has to be gated deliberately. It lives beside the parameters and the route because all three are facts about the same operation, and keeping the safety model in a table of its own meant a fifth place to look and a fifth thing to hold to the catalogue afterwards.",
+    "$aloneComment": "`alone` is the sentence a caller reads when it puts this operation in an `ops` list beside another. Every tool call is a list, so that a model wanting three inspections writes one call rather than three; these are the operations a list cannot hold twice, because they take no parameters to vary or because they drive something the session owns exactly one of — the open scene, the running game, the undo stack, the debuggee. Its absence means the operation may appear as often as a list names it.",
+    "$vocabularyComment": "`vocabularies` names a set of words a parameter accepts inside a structure, where `kind` cannot reach: `key` sits inside each entry of an `events` list. `accepted` is printed into the signature the model reads, because a generated signature is measurably more reliable than a sentence \u2014 see the note on `Kind` in tool_params.rs. `refused` is names the engine does not have, and it exists so `every_key_name_the_catalog_advertises_is_one_the_engine_knows` can prove the accepted list is meaningful rather than merely present. Both used to be written out twice, in English, inside two catalogue summaries, and read back out of the prose by a parser that split on the literal string \u201cAccepted: \u201d.",
+    "vocabularies": {
+        "godotKeyName": {
+            "note": "Godot's own name for a key, not the browser's.",
+            "accepted": [
+                "Enter",
+                "Kp Enter",
+                "Escape",
+                "Space",
+                "Backspace",
+                "Tab",
+                "Delete",
+                "Left",
+                "Right",
+                "Up",
+                "Down",
+                "PageUp",
+                "PageDown",
+                "Home",
+                "End",
+                "Shift",
+                "Ctrl",
+                "Alt",
+                "Meta",
+                "Comma",
+                "Period",
+                "Slash",
+                "Minus",
+                "Equal",
+                "BracketLeft"
+            ],
+            "refused": ["Return", "Esc", "Control", "Super", "ArrowLeft", "Spacebar"]
+        }
+    },
+    "operations": [
+        {
+            "tool": "godot_session",
+            "op": "status",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_session",
+            "op": "start",
+            "alone": "There is one editor session, so a second one in the same call is the first one again.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_session",
+            "op": "stop",
+            "alone": "There is one editor session, so a second one in the same call is the first one again.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_session",
+            "op": "get_state",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "session.get_state"
+        },
+        {
+            "tool": "godot_session",
+            "op": "undo",
+            "alone": "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
+            "params": [
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "session.undo"
+        },
+        {
+            "tool": "godot_session",
+            "op": "redo",
+            "alone": "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
+            "params": [
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "session.redo"
+        },
+        {
+            "tool": "godot_session",
+            "op": "answer_dialog",
+            "alone": "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press.",
+            "params": [
+                {
+                    "name": "button",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "session.answer_dialog",
+            "gated": "Answering an editor dialog presses that button in the editor, exactly as clicking it would."
+        },
+        {
+            "tool": "godot_scene",
+            "op": "list",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "scene.list"
+        },
+        {
+            "tool": "godot_scene",
+            "op": "open",
+            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "scene.open"
+        },
+        {
+            "tool": "godot_scene",
+            "op": "create",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "rootType",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "rootName",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "scene.create"
+        },
+        {
+            "tool": "godot_scene",
+            "op": "get_tree",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "scene.get_tree"
+        },
+        {
+            "tool": "godot_scene",
+            "op": "save",
+            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "params": [
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "scene.save"
+        },
+        {
+            "tool": "godot_scene",
+            "op": "save_as",
+            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "scene.save_as"
+        },
+        {
+            "tool": "godot_scene",
+            "op": "reload",
+            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "params": [
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "scene.reload"
+        },
+        {
+            "tool": "godot_node",
+            "op": "inspect",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "node.inspect",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "create",
+            "params": [
+                {
+                    "name": "parent",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "type",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "index",
+                    "kind": "int",
+                    "required": false
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.create",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "create_nodes",
+            "params": [
+                {
+                    "name": "nodes",
+                    "kind": "list",
+                    "required": true,
+                    "entry": [
+                        {"name": "parent", "kind": "text", "required": true},
+                        {"name": "type", "kind": "text", "required": true},
+                        {"name": "name", "kind": "text", "required": true},
+                        {"name": "index", "kind": "int", "required": false}
+                    ],
+                    "note": "Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent."
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.create_nodes",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "instantiate",
+            "params": [
+                {
+                    "name": "parent",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "index",
+                    "kind": "int",
+                    "required": false
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.instantiate",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "duplicate",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.duplicate",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "rename",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.rename",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "reparent",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "newParent",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "index",
+                    "kind": "int",
+                    "required": false
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.reparent",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "delete",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.delete",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "set_property",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "property",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "value",
+                    "kind": "tagged",
+                    "required": true,
+                    "note": "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.set_property",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "set_properties",
+            "params": [
+                {
+                    "name": "properties",
+                    "kind": "list",
+                    "required": true,
+                    "entry": [
+                        {"name": "node", "kind": "text", "required": true},
+                        {"name": "property", "kind": "text", "required": true},
+                        {
+                            "name": "value",
+                            "kind": "tagged",
+                            "required": true,
+                            "note": "A script is attached here like any other resource: property \"script\", value {\"type\": \"resource\", \"value\": {\"path\": \"res://scripts/player.gd\"}}."
+                        }
+                    ],
+                    "note": "Entries may name different nodes."
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.set_properties",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
+            "op": "add_to_group",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "group",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.add_to_group"
+        },
+        {
+            "tool": "godot_node",
+            "op": "remove_from_group",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "group",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.remove_from_group"
+        },
+        {
+            "tool": "godot_node",
+            "op": "connect_signal",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "signal",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "method",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "target",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "binds",
+                    "kind": "list",
+                    "required": false
+                },
+                {
+                    "name": "deferred",
+                    "kind": "flag",
+                    "required": false
+                },
+                {
+                    "name": "oneShot",
+                    "kind": "flag",
+                    "required": false
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.connect_signal"
+        },
+        {
+            "tool": "godot_node",
+            "op": "disconnect_signal",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "signal",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "method",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "target",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "binds",
+                    "kind": "list",
+                    "required": false
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.disconnect_signal"
+        },
+        {
+            "tool": "godot_node",
+            "op": "set_cells",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "cells",
+                    "kind": "list",
+                    "required": true,
+                    "entry": [
+                        {"name": "x", "kind": "int", "required": true},
+                        {"name": "y", "kind": "int", "required": true},
+                        {"name": "width", "kind": "int", "required": false},
+                        {"name": "height", "kind": "int", "required": false},
+                        {
+                            "name": "atlas",
+                            "kind": "list",
+                            "required": true,
+                            "note": "A [column, row] pair, naming the tile in the atlas."
+                        },
+                        {"name": "source", "kind": "int", "required": false}
+                    ]
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.set_cells"
+        },
+        {
+            "tool": "godot_node",
+            "op": "get_cells",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "limit",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "command": "node.get_cells"
+        },
+        {
+            "tool": "godot_project",
+            "op": "get_settings",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "project.get_settings"
+        },
+        {
+            "tool": "godot_project",
+            "op": "search_settings",
+            "params": [
+                {
+                    "name": "query",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "project.search_settings"
+        },
+        {
+            "tool": "godot_project",
+            "op": "get_setting",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "project.get_setting"
+        },
+        {
+            "tool": "godot_project",
+            "op": "set_setting",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "value",
+                    "kind": "tagged",
+                    "required": true
+                }
+            ],
+            "command": "project.set_setting"
+        },
+        {
+            "tool": "godot_project",
+            "op": "reset_setting",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "project.reset_setting"
+        },
+        {
+            "tool": "godot_project",
+            "op": "list_autoloads",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "project.list_autoloads"
+        },
+        {
+            "tool": "godot_project",
+            "op": "set_autoload",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "enabled",
+                    "kind": "flag",
+                    "required": false
+                }
+            ],
+            "command": "project.set_autoload"
+        },
+        {
+            "tool": "godot_project",
+            "op": "remove_autoload",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "project.remove_autoload"
+        },
+        {
+            "tool": "godot_project",
+            "op": "list_input_actions",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "project.list_input_actions"
+        },
+        {
+            "tool": "godot_project",
+            "op": "set_input_action",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true,
+                    "note": "The action's own name, like move_left, never a settings path."
+                },
+                {
+                    "name": "events",
+                    "kind": "list",
+                    "required": true,
+                    "note": "Each event is {\"kind\": \"key\", \"key\": \"A\"}, with Godot's key name rather than the browser's.",
+                    "vocabulary": "godotKeyName"
+                },
+                {
+                    "name": "deadzone",
+                    "kind": "number",
+                    "required": false
+                }
+            ],
+            "command": "project.set_input_action"
+        },
+        {
+            "tool": "godot_project",
+            "op": "remove_input_action",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "project.remove_input_action"
+        },
+        {
+            "tool": "godot_project",
+            "op": "reset_input_action",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "project.reset_input_action"
+        },
+        {
+            "tool": "godot_project",
+            "op": "list_plugins",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "project.list_plugins"
+        },
+        {
+            "tool": "godot_project",
+            "op": "set_plugin_enabled",
+            "params": [
+                {
+                    "name": "plugin",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "enabled",
+                    "kind": "flag",
+                    "required": true
+                }
+            ],
+            "command": "project.set_plugin_enabled",
+            "gated": "Enabling or disabling an editor plugin changes what runs inside the editor itself."
+        },
+        {
+            "tool": "godot_project",
+            "op": "search_editor_settings",
+            "params": [
+                {
+                    "name": "query",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "editor.search_settings"
+        },
+        {
+            "tool": "godot_project",
+            "op": "get_editor_setting",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "editor.get_setting"
+        },
+        {
+            "tool": "godot_project",
+            "op": "set_editor_setting",
+            "params": [
+                {
+                    "name": "name",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "value",
+                    "kind": "tagged",
+                    "required": true
+                }
+            ],
+            "command": "editor.set_setting",
+            "gated": "Editor settings are machine-wide: they live outside the task worktree and outside Git, so this change is not part of anything the task can roll back."
+        },
+        {
+            "tool": "godot_resource",
+            "op": "list",
+            "params": [
+                {
+                    "name": "hashes",
+                    "kind": "flag",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_resource",
+            "op": "rescan",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "either",
+                    "of": [
+                        {
+                            "kind": "text"
+                        },
+                        {
+                            "kind": "list"
+                        }
+                    ],
+                    "required": false,
+                    "note": "The file that changed, or a list of them \u2014 name every file you just wrote in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs."
+                }
+            ],
+            "command": "resource.rescan"
+        },
+        {
+            "tool": "godot_resource",
+            "op": "create_tileset",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "texture",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "tileSize",
+                    "kind": "either",
+                    "of": [
+                        {
+                            "kind": "number"
+                        },
+                        {
+                            "kind": "list"
+                        }
+                    ],
+                    "required": false,
+                    "note": "One number or two: 16 or [16, 16]."
+                },
+                {
+                    "name": "tiles",
+                    "kind": "list",
+                    "required": false
+                },
+                {
+                    "name": "solid",
+                    "kind": "either",
+                    "of": [
+                        {
+                            "kind": "list"
+                        },
+                        {
+                            "kind": "choice",
+                            "of": ["all"]
+                        }
+                    ],
+                    "required": false,
+                    "note": "A list of [column, row] pairs, or the word \"all\"."
+                }
+            ],
+            "command": "resource.create_tileset"
+        },
+        {
+            "tool": "godot_resource",
+            "op": "create_shape",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "shapeType",
+                    "kind": "choice",
+                    "of": [
+                        "RectangleShape2D",
+                        "CircleShape2D",
+                        "CapsuleShape2D",
+                        "SegmentShape2D",
+                        "WorldBoundaryShape2D"
+                    ],
+                    "required": true
+                },
+                {
+                    "name": "size",
+                    "kind": "list",
+                    "required": false
+                },
+                {
+                    "name": "radius",
+                    "kind": "number",
+                    "required": false
+                },
+                {
+                    "name": "height",
+                    "kind": "number",
+                    "required": false
+                },
+                {
+                    "name": "points",
+                    "kind": "list",
+                    "required": false
+                }
+            ],
+            "command": "resource.create_shape"
+        },
+        {
+            "tool": "godot_resource",
+            "op": "describe_tileset",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "resource.describe_tileset"
+        },
+        {
+            "tool": "godot_resource",
+            "op": "move",
+            "params": [
+                {
+                    "name": "from",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "to",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust",
+            "gated": "Moving a path removes the file from where it is now, and can overwrite the destination."
+        },
+        {
+            "tool": "godot_resource",
+            "op": "delete",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedHash",
+                    "kind": "hash",
+                    "required": false,
+                    "note": "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "answeredBy": "rust",
+            "gated": "Deleting a file removes it from the task worktree; only a Git checkout brings it back."
+        },
+        {
+            "tool": "godot_script",
+            "op": "list",
+            "params": [
+                {
+                    "name": "under",
+                    "kind": "text",
+                    "required": false,
+                    "note": "A directory to list, named the way the project names it — `scripts`, not its full path. Omit it for every script in the worktree."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "open",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "either",
+                    "of": [
+                        {
+                            "kind": "text"
+                        },
+                        {
+                            "kind": "list"
+                        }
+                    ],
+                    "required": true,
+                    "note": "One script, or a list of them — open every script you are about to query in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "update",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "text",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "save",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "text",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedHash",
+                    "kind": "hash",
+                    "required": false,
+                    "note": "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "edit",
+            "params": [
+                {
+                    "name": "files",
+                    "kind": "list",
+                    "required": true,
+                    "entry": [
+                        {"name": "path", "kind": "text", "required": true},
+                        {
+                            "name": "edits",
+                            "kind": "list",
+                            "required": true,
+                            "entry": [
+                                {"name": "oldText", "kind": "text", "required": true},
+                                {"name": "newText", "kind": "text", "required": true}
+                            ]
+                        }
+                    ],
+                    "note": "Every `oldText` must match one region of that file exactly and must not overlap another edit of the same file. Entries may name different files, and either every file is written or none is."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "close",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "either",
+                    "of": [
+                        {
+                            "kind": "text"
+                        },
+                        {
+                            "kind": "list"
+                        }
+                    ],
+                    "required": true,
+                    "note": "One script, or a list of them — close every script you are done with in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, in the order you named them."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "format",
+            "params": [
+                {
+                    "name": "source",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "hover",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "completion",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "signature_help",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "definition",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "declaration",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "references",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                },
+                {
+                    "name": "includeDeclaration",
+                    "kind": "flag",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "highlights",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "diagnostics",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "either",
+                    "of": [
+                        {
+                            "kind": "text"
+                        },
+                        {
+                            "kind": "list"
+                        }
+                    ],
+                    "required": true,
+                    "note": "One script, or a list of them — ask about every script you just wrote in one call rather than one call each. A list is answered with {\"files\": […]}, one entry per path, and shares one wait for the whole batch instead of waiting that long per file."
+                },
+                {
+                    "name": "timeoutMs",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "document_symbols",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "workspace_symbols",
+            "params": [
+                {
+                    "name": "query",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "prepare_rename",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "rename",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "position",
+                    "kind": "object",
+                    "required": true,
+                    "entry": [
+                        {"name": "line", "kind": "int", "required": true},
+                        {"name": "character", "kind": "int", "required": true}
+                    ],
+                    "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
+                },
+                {
+                    "name": "newName",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_script",
+            "op": "apply_rename",
+            "params": [
+                {
+                    "name": "files",
+                    "kind": "list",
+                    "required": true,
+                    "note": "The list `rename` answered with, passed back unchanged."
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "status",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "set_breakpoints",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "lines",
+                    "kind": "list",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "breakpoint_locations",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "line",
+                    "kind": "int",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "launch",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "playArgs",
+                    "kind": "list",
+                    "required": false
+                },
+                {
+                    "name": "breakpoints",
+                    "kind": "list",
+                    "required": false,
+                    "entry": [
+                        {
+                            "name": "path",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "lines",
+                            "kind": "list",
+                            "required": true,
+                            "note": "The line numbers to break on, counted from one."
+                        }
+                    ]
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "attach",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "await_stop",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                },
+                {
+                    "name": "timeoutMs",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "threads",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "stack_trace",
+            "params": [
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "scopes",
+            "params": [
+                {
+                    "name": "frameId",
+                    "kind": "int",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "variables",
+            "params": [
+                {
+                    "name": "variablesReference",
+                    "kind": "int",
+                    "required": true
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "evaluate",
+            "params": [
+                {
+                    "name": "expression",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "frameId",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "continue",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "pause",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "step_over",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "step_in",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "step_out",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "threadId",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "restart",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "terminate",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_debug",
+            "op": "disconnect",
+            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "params": [
+                {
+                    "name": "terminateDebuggee",
+                    "kind": "flag",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "run",
+            "alone": "There is one running game, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "runtime.run"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "stop",
+            "alone": "There is one running game, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "runtime.stop"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "restart",
+            "alone": "There is one running game, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "runtime.restart"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "get_state",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "runtime.get_state"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "get_tree",
+            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "params": [],
+            "command": "runtime.get_tree"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "inspect_node",
+            "params": [
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "properties",
+                    "kind": "list",
+                    "required": false
+                }
+            ],
+            "command": "runtime.inspect_node"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "input",
+            "params": [
+                {
+                    "name": "events",
+                    "kind": "list",
+                    "required": true,
+                    "note": "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event.",
+                    "vocabulary": "godotKeyName"
+                }
+            ],
+            "command": "runtime.input"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "capture",
+            "params": [
+                {
+                    "name": "source",
+                    "kind": "choice",
+                    "of": ["game", "editor"],
+                    "required": false
+                }
+            ],
+            "command": "runtime.capture"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "get_monitors",
+            "params": [
+                {
+                    "name": "monitors",
+                    "kind": "list",
+                    "required": false
+                }
+            ],
+            "command": "runtime.get_monitors"
+        },
+        {
+            "tool": "godot_logs",
+            "op": "read",
+            "params": [
+                {
+                    "name": "after",
+                    "kind": "int",
+                    "required": false
+                },
+                {
+                    "name": "minSeverity",
+                    "kind": "choice",
+                    "of": ["info", "warning", "error"],
+                    "required": false
+                },
+                {
+                    "name": "source",
+                    "kind": "choice",
+                    "of": ["editor", "editorError"],
+                    "required": false
+                },
+                {
+                    "name": "contains",
+                    "kind": "text",
+                    "required": false
+                },
+                {
+                    "name": "limit",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_docs_search",
+            "op": "search",
+            "params": [
+                {
+                    "name": "question",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "maxPassages",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many passages clear the relevance gate is the search's own decision, not a number the model can reason about — it keeps five and pins up to three more. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
+                    "hidden": true
+                },
+                {
+                    "name": "maxTextChars",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        },
+        {
+            "tool": "godot_docs_search",
+            "op": "ask",
+            "params": [
+                {
+                    "name": "question",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "maxPassages",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many passages clear the relevance gate is the search's own decision, not a number the model can reason about — it keeps five and pins up to three more. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
+                    "hidden": true
+                },
+                {
+                    "name": "maxTextChars",
+                    "kind": "int",
+                    "required": false
+                }
+            ],
+            "answeredBy": "rust"
+        }
+    ]
+}

@@ -1,0 +1,28 @@
+{
+    "compilerOptions": {
+        "composite": true,
+        "skipLibCheck": true,
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "allowSyntheticDefaultImports": true,
+        "strict": true,
+        "exactOptionalPropertyTypes": true,
+        "noImplicitOverride": true,
+        "noPropertyAccessFromIndexSignature": true,
+        "noUncheckedIndexedAccess": true,
+        "noUncheckedSideEffectImports": true,
+        "noUnusedLocals": true,
+        "noUnusedParameters": true,
+        "noFallthroughCasesInSwitch": true,
+        "forceConsistentCasingInFileNames": true,
+        "verbatimModuleSyntax": true,
+        "types": ["node", "@wdio/globals/types", "@wdio/mocha-framework", "expect-webdriverio"]
+    },
+    "include": [
+        "vite.config.ts",
+        "vitest.config.ts",
+        "playwright.config.ts",
+        "wdio.*.conf.ts",
+        "e2e/**/*.ts"
+    ]
+}

@@ -1,0 +1,17 @@
+/*
+ * A toolbar's label yields before its actions do.
+ *
+ * Astryx gives both toolbar slots `flex: 0 1 auto` with the default `min-width: auto`, which floors
+ * a flex item at its own content: neither slot can give ground, so the actions simply run past the
+ * bar. Measured in the script panel at 359 px, the start slot held its full 87 px path and the
+ * action slot overflowed by 29 px, cutting `Close` in half against the panel divider.
+ *
+ * Only the start slot is released. It carries a caption — a path, a count, a status — that can lose
+ * characters to an ellipsis without losing its job, while the buttons on the other side cannot
+ * shrink without becoming unreadable or unclickable. `:only-child` is excluded so a toolbar whose
+ * one slot is its actions is left alone.
+ */
+
+.astryx-toolbar > :first-child:not(:only-child) {
+    min-width: 0;
+}

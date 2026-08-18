@@ -1,0 +1,19 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://gofer.local/protocol/v2/event.schema.json",
+    "title": "Gofer protocol v2 event",
+    "type": "object",
+    "required": ["protocolVersion", "kind", "id", "sequence", "event", "data"],
+    "properties": {
+        "protocolVersion": {"const": 2},
+        "kind": {"const": "event"},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "sequence": {"type": "integer", "minimum": 0},
+        "event": {
+            "type": "string",
+            "pattern": "^(session|scene|node|project|editor|resource|script|debug|runtime|logs|files|docs)\\.[a-z][a-z0-9_]*$"
+        },
+        "data": {"type": "object"}
+    },
+    "additionalProperties": true
+}

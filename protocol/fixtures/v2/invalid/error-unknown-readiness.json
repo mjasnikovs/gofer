@@ -1,0 +1,12 @@
+{
+    "protocolVersion": 2,
+    "kind": "error",
+    "id": "request-12",
+    "error": {
+        "code": "not_ready",
+        "message": "The editor is still importing",
+        "retryable": true,
+        "readiness": "warming_up",
+        "details": {}
+    }
+}

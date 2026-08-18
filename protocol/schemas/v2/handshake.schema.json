@@ -1,0 +1,52 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://gofer.local/protocol/v2/handshake.schema.json",
+    "title": "Gofer protocol v2 handshake",
+    "type": "object",
+    "required": ["protocolVersion", "kind", "id", "token", "acceptedVersions", "client"],
+    "properties": {
+        "protocolVersion": {"const": 2},
+        "kind": {"const": "handshake"},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "token": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "acceptedVersions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "integer", "minimum": 1}
+        },
+        "client": {
+            "type": "object",
+            "required": ["name", "addonVersion", "engineVersion", "projectPath", "capabilities"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "addonVersion": {"type": "string", "minLength": 1},
+                "engineVersion": {
+                    "type": "string",
+                    "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[a-z]+$"
+                },
+                "projectPath": {"type": "string", "pattern": "^(/|[A-Za-z]:[\\\\/])"},
+                "capabilities": {
+                    "type": "array",
+                    "items": {
+                        "enum": [
+                            "session",
+                            "scene",
+                            "node",
+                            "project",
+                            "editor",
+                            "resource",
+                            "script",
+                            "debug",
+                            "runtime",
+                            "logs",
+                            "files",
+                            "docs"
+                        ]
+                    }
+                }
+            },
+            "additionalProperties": true
+        }
+    },
+    "additionalProperties": true
+}

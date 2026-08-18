@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "request",
+    "id": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+    "command": "scene.list",
+    "params": {}
+}

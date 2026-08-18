@@ -1,0 +1,23 @@
+{
+    "version": "4.5.0",
+    "entryPoint": "gdtoolkit.formatter.__main__:main",
+    "requirements": [
+        "colorama==0.4.6",
+        "docopt-ng==0.9.0",
+        "gdtoolkit==4.5.0",
+        "lark==1.2.2",
+        "mando==0.7.1",
+        "PyYAML==6.0.3",
+        "radon==6.0.1",
+        "regex==2026.7.19",
+        "six==1.17.0"
+    ],
+    "builder": ["pyinstaller==6.21.0", "pyinstaller-hooks-contrib==2026.6", "setuptools==83.0.0"],
+    "collect": ["gdtoolkit", "lark"],
+    "proof": ["fixtures/gdformat/probe.gd", "fixtures/godot-project/tests/protocol_test.gd"],
+    "targets": {
+        "linux": "gdformat",
+        "win32": "gdformat.exe",
+        "darwin": "gdformat"
+    }
+}

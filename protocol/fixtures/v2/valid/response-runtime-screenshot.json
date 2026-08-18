@@ -1,0 +1,13 @@
+{
+    "protocolVersion": 2,
+    "kind": "response",
+    "id": "request-4",
+    "result": {
+        "frame": {
+            "encoding": "png-base64",
+            "width": 1920,
+            "height": 1080,
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        }
+    }
+}

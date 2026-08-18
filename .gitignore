@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+coverage
+playwright-report
+test-results
+*.local
+
+# `tsconfig.node.json` is composite so `tsconfig.json` can reference it, which is how eslint's
+# project service finds the runner configs and the end-to-end specs. Composite writes this.
+tsconfig.node.tsbuildinfo
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Bundled from `scripts/` by `npm run build:workers`; only the directory's README is tracked. The
+# directory itself must exist even unbuilt, because Tauri's build script fails the crate when a
+# declared resource path is missing.
+src-tauri/workers/*.mjs
+src-tauri/workers/package.json
+
+# Built per platform by `npm run build:gdformat`; only the directory's README is tracked.
+src-tauri/sidecar/gdformat
+src-tauri/sidecar/gdformat.exe
+src-tauri/sidecar/gdformat*.sha256
+src-tauri/sidecar/LICENSES.md

@@ -1,0 +1,57 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://gofer.local/protocol/v2/request.schema.json",
+    "title": "Gofer protocol v2 request",
+    "type": "object",
+    "required": ["protocolVersion", "kind", "id", "command", "params"],
+    "properties": {
+        "protocolVersion": {"const": 2},
+        "kind": {"const": "request"},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "command": {
+            "type": "string",
+            "pattern": "^(session|scene|node|project|editor|resource|script|debug|runtime|logs|files|docs)\\.[a-z][a-z0-9_]*$"
+        },
+        "params": {"type": "object"},
+        "expectedRevision": {"type": "integer", "minimum": 0},
+        "timeoutMs": {"type": "integer", "minimum": 1, "maximum": 600000}
+    },
+    "allOf": [
+        {
+            "if": {
+                "required": ["command"],
+                "properties": {
+                    "command": {
+                        "enum": [
+                            "session.undo",
+                            "session.redo",
+                            "scene.create",
+                            "scene.save",
+                            "scene.save_as",
+                            "scene.reload",
+                            "node.create",
+                            "node.create_nodes",
+                            "node.instantiate",
+                            "node.duplicate",
+                            "node.rename",
+                            "node.reparent",
+                            "node.delete",
+                            "node.set_property",
+                            "node.set_properties",
+                            "node.add_to_group",
+                            "node.remove_from_group",
+                            "node.connect_signal",
+                            "node.disconnect_signal",
+                            "node.set_cells"
+                        ]
+                    }
+                }
+            },
+            "then": {
+                "required": ["expectedRevision"],
+                "properties": {"expectedRevision": {"type": "integer", "minimum": 0}}
+            }
+        }
+    ],
+    "additionalProperties": true
+}

@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "response",
+    "id": "request-node-create",
+    "result": {"node": "/root/Camera2D"},
+    "revision": 2
+}

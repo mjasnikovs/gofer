@@ -1,0 +1,13 @@
+/*
+ * Monaco owns its own gutter, so a breakpoint marker can only reach it as a CSS class handed to a
+ * decoration — there is no component seam for it. Every value here is a theme token.
+ */
+
+.gofer-breakpoint {
+    background-color: var(--color-error);
+    border-radius: var(--radius-full);
+    margin-block: auto;
+    margin-inline-start: var(--spacing-1);
+    width: var(--spacing-2);
+    height: var(--spacing-2);
+}

@@ -1,0 +1,8 @@
+{
+    "protocolVersion": 2,
+    "kind": "request",
+    "id": "request-7",
+    "command": "scene.list",
+    "params": {},
+    "timeoutMs": 600001
+}

@@ -1,0 +1,13 @@
+{
+    "protocolVersion": 2,
+    "kind": "request",
+    "id": "request-node-create",
+    "command": "node.create",
+    "params": {
+        "scene": "res://levels/first.tscn",
+        "parent": "/root",
+        "name": "Camera2D",
+        "type": "Camera2D"
+    },
+    "expectedRevision": 1
+}

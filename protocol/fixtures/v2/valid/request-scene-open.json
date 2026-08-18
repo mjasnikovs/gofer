@@ -1,0 +1,8 @@
+{
+    "protocolVersion": 2,
+    "kind": "request",
+    "id": "request-1",
+    "command": "scene.open",
+    "params": {"path": "res://levels/first.tscn"},
+    "timeoutMs": 15000
+}

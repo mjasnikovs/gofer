@@ -1,0 +1,56 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "Gofer",
+    "version": "0.1.0",
+    "identifier": "com.gofer.desktop",
+    "build": {
+        "beforeDevCommand": "npm run dev",
+        "devUrl": "http://localhost:1420",
+        "beforeBuildCommand": "npm run build:frontend",
+        "frontendDist": "../dist"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "Gofer",
+                "width": 1280,
+                "height": 800,
+                "minWidth": 960,
+                "minHeight": 640
+            }
+        ],
+        "security": {
+            "capabilities": ["default"],
+            "devCsp": {
+                "default-src": "'self'",
+                "connect-src": "ipc: http://ipc.localhost ws:",
+                "worker-src": "'self' blob:",
+                "font-src": "'self' data:",
+                "img-src": "'self' blob: data:",
+                "object-src": "'none'",
+                "style-src": "'self' 'unsafe-inline'"
+            },
+            "csp": {
+                "default-src": "'self'",
+                "connect-src": "ipc: http://ipc.localhost",
+                "worker-src": "'self' blob:",
+                "font-src": "'self' data:",
+                "img-src": "'self' blob: data:",
+                "object-src": "'none'",
+                "style-src": "'self' 'unsafe-inline'"
+            }
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": ["deb", "rpm"],
+        "resources": ["sidecar", "workers"],
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ]
+    }
+}

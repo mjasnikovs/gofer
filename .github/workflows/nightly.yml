@@ -1,0 +1,24 @@
+name: Nightly desktop journey
+
+on:
+    schedule:
+        - cron: '23 2 * * *'
+    workflow_dispatch:
+
+concurrency:
+    group: nightly-desktop
+    cancel-in-progress: false
+
+jobs:
+    # Every platform runs the journey the push gate runs on Linux, plus the real-editor Godot
+    # acceptance suites, against its own pinned Godot artifact. `fail-fast: false` because the
+    # point of the matrix is which platforms fail, not that one did.
+    desktop:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-24.04, windows-2025, macos-15]
+        uses: ./.github/workflows/packaged-journey.yml
+        with:
+            os: ${{ matrix.os }}
+            godot-suite: true

@@ -1,0 +1,26 @@
+; Engine configuration file.
+; The workspace the live sweep drives: a real Godot project small enough to import in seconds, with
+; the scene tree, the script and the output the sweep asserts against.
+config_version=5
+
+[application]
+
+config/name="Gofer Live Sweep"
+run/main_scene="res://scenes/main.tscn"
+
+[display]
+
+; The sweep asserts the captured frame is this size, so the game window states it rather than
+; inheriting a default that a Godot release is free to change.
+window/size/viewport_width=640
+window/size/viewport_height=360
+; The sweep runs this as a real windowed game on a real desktop. Without this the window takes focus
+; the moment it maps, and the next keystroke goes into the game instead of the editor being driven.
+window/size/no_focus=true
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+; The art in assets/ is 16x16 pixel art, and the default filter smears it the moment a tile is drawn
+; at anything but its own size.
+textures/canvas_textures/default_texture_filter=0

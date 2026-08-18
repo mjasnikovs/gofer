@@ -1,0 +1,4 @@
+{
+    "note": "Theme violations gofer carries today. Never add to this list — a new entry means a screen just lost a distinction. Delete an entry in the same commit that fixes it; scripts/design-check.mjs fails either way.",
+    "allowed": []
+}

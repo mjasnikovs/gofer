@@ -1,0 +1,86 @@
+import {Button} from '@astryxdesign/core/Button'
+import {Icon} from '@astryxdesign/core/Icon'
+import {HStack} from '@astryxdesign/core/Stack'
+import {StatusDot} from '@astryxdesign/core/StatusDot'
+import {Heading} from '@astryxdesign/core/Text'
+import {Token} from '@astryxdesign/core/Token'
+import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
+import type {TaskSummary} from '../../models/app'
+
+export type ConnectionState = 'connecting' | 'connected' | 'offline'
+
+type WorkspaceHeaderProps = Readonly<{
+    activeTask?: TaskSummary
+    connectionState: ConnectionState
+    /** Whether a task operation is running. See `Navigation`'s own flag for what that costs. */
+    isTaskBusy?: boolean
+    onConnect: () => void
+    onMergeTask: () => void
+}>
+
+export function WorkspaceHeader({
+    activeTask,
+    connectionState,
+    isTaskBusy = false,
+    onConnect,
+    onMergeTask
+}: WorkspaceHeaderProps) {
+    const connectionVariant =
+        connectionState === 'connected' ? 'success'
+        : connectionState === 'connecting' ? 'warning'
+        : 'error'
+
+    return (
+        <HStack
+            padding={4}
+            hAlign='between'
+            vAlign='center'
+        >
+            <HStack
+                gap={3}
+                vAlign='center'
+            >
+                <Heading
+                    level={2}
+                    accessibilityLevel={1}
+                >
+                    {activeTask?.title ?? 'New task'}
+                </Heading>
+                <Token label='Godot 4.7' />
+            </HStack>
+            <HStack
+                gap={2}
+                vAlign='center'
+            >
+                <StatusDot
+                    variant={connectionVariant}
+                    label={`Local AI ${connectionState}`}
+                    tooltip={`Local AI ${connectionState}`}
+                />
+                {connectionState === 'offline' ?
+                    <Button
+                        label='Reconnect'
+                        variant='ghost'
+                        size='sm'
+                        icon={
+                            <Icon
+                                icon={ArrowPathIcon}
+                                size='sm'
+                            />
+                        }
+                        clickAction={onConnect}
+                    />
+                :   null}
+                {activeTask?.worktree && !activeTask.worktree.mergedCommit ?
+                    <Button
+                        label='Merge task'
+                        variant='secondary'
+                        size='sm'
+                        isDisabled={isTaskBusy}
+                        clickAction={onMergeTask}
+                    />
+                :   null}
+            </HStack>
+        </HStack>
+    )
+}

@@ -1,0 +1,55 @@
+[package]
+name = "gofer"
+version = "0.1.0"
+description = "An AI agent workspace for Godot"
+authors = ["Gofer contributors"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "gofer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+webdriver = ["dep:tauri-plugin-wdio", "dep:tauri-plugin-wdio-webdriver"]
+# Launches a real Godot editor from the test suite. Off by default so `cargo test` stays fast and
+# needs no engine; `npm run test:godot` turns it on.
+godot-acceptance = []
+# Holds the catalog's claims about the engine to the engine itself. Off by default and off in the
+# acceptance run too: nothing here can break without the pinned Godot version changing, so it is
+# run when that pin moves. `npm run test:godot:api`.
+godot-api-drift = ["godot-acceptance"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+tauri = { version = "2", features = [] }
+dirs = "6"
+dunce = "1"
+keyring = "4"
+reqwest = { version = "0.13", features = ["json"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+sqlite-vec = "=0.1.9"
+uuid = { version = "1", features = ["v7"] }
+zstd = "0.13"
+tauri-plugin-wdio = { version = "1.2.0", optional = true }
+tauri-plugin-wdio-webdriver = { version = "1.2.0", optional = true }
+lsp-types = "0.94"
+tauri-plugin-dialog = "2.7.2"
+tauri-plugin-opener = "2"
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

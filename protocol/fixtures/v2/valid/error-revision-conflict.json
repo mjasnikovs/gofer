@@ -1,0 +1,12 @@
+{
+    "protocolVersion": 2,
+    "kind": "error",
+    "id": "request-2",
+    "error": {
+        "code": "revision_conflict",
+        "message": "The edited scene changed since revision 7",
+        "retryable": true,
+        "readiness": "ready",
+        "details": {"expectedRevision": 7, "currentRevision": 9}
+    }
+}

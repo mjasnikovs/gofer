@@ -1,0 +1,20 @@
+dist
+node_modules
+package-lock.json
+src-tauri/gen
+src-tauri/target
+src-tauri/workers/*.mjs
+src-tauri/workers/package.json
+src-tauri/icons
+src-tauri/addon/*.gd
+# The addon copied into the fixture project for the length of a Godot run, and removed after it.
+# Prettier lists the tree once and reads it afterwards, so a file that is there for the listing and
+# gone for the read fails the whole check — which is what happened, because `test:godot` and
+# `format:check` run in different lanes of `npm run check` at the same time. The copies are the same
+# bytes as the ignored source above, so there was never anything here to format.
+fixtures/godot-project/addons
+
+# Test fixtures for the HTML cleaner. They are inputs, not source: reformatting them changes what
+# the tests measure, and a fixture that Prettier has tidied no longer resembles the pages the real
+# cleaner meets.
+scripts/__fixtures__

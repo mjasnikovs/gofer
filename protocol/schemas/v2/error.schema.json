@@ -1,0 +1,25 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://gofer.local/protocol/v2/error.schema.json",
+    "title": "Gofer protocol v2 error",
+    "type": "object",
+    "required": ["protocolVersion", "kind", "id", "error"],
+    "properties": {
+        "protocolVersion": {"const": 2},
+        "kind": {"const": "error"},
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "error": {
+            "type": "object",
+            "required": ["code", "message", "retryable", "readiness", "details"],
+            "properties": {
+                "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+                "message": {"type": "string", "minLength": 1},
+                "retryable": {"type": "boolean"},
+                "readiness": {"enum": ["ready", "starting", "importing", "unavailable"]},
+                "details": {"type": "object"}
+            },
+            "additionalProperties": true
+        }
+    },
+    "additionalProperties": true
+}

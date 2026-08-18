@@ -1,0 +1,592 @@
+// Some of the five command surfaces are not decisions. They are transcriptions: the window's
+// allow-list is the backend's handler list retyped, the addon's dispatch table is the command
+// catalogue retyped, and three copies of MUTATING_COMMANDS are the schema's enum retyped. Task 1's
+// checker can only report that a transcription slipped. This emits them instead, so there is
+// nothing to slip.
+//
+// Three sources, and none of them is generated:
+//
+//   protocol/schemas/v2/request.schema.json   which commands mutate the edited scene
+//   protocol/schemas/v2/commands.json         every command, and the addon method that answers it
+//   src-tauri/src/lib.rs                      which commands the backend registers
+//
+// Two surfaces stay hand-written on purpose. `src/services/desktop.ts` carries an argument and a
+// response type per command, which are decisions, not transcription. `protocol/README.md` states
+// the mutating list as prose, and prettier reflows prose. Task 1's checker holds both to the rest.
+//
+// Run `npm run generate` after any change to a source. `--check` regenerates into memory and fails
+// on any difference, which is how `npm run check` refuses a hand-edited region.
+
+import {createHash} from 'node:crypto'
+import {readFile, writeFile} from 'node:fs/promises'
+import {fileURLToPath} from 'node:url'
+
+const root = fileURLToPath(new URL('..', import.meta.url))
+const GENERATOR = 'scripts/generate-command-surface.mjs'
+
+async function read(path) {
+    return await readFile(new URL(path, `file://${root}`), 'utf8')
+}
+
+/** Reads the text between `open` and the first `close` after it, or explains which anchor is gone. */
+function slice(text, path, open, close) {
+    const start = text.indexOf(open)
+    if (start === -1) throw new Error(`${path} no longer contains ${JSON.stringify(open)}`)
+    const rest = text.slice(start + open.length)
+    const end = rest.indexOf(close)
+    if (end === -1) throw new Error(`${path} never closes ${JSON.stringify(open)}`)
+    return rest.slice(0, end)
+}
+
+// --- The sources.
+
+/** The commands that must carry `expectedRevision`, in the frozen schema's own order. */
+async function mutatingCommands() {
+    const path = 'protocol/schemas/v2/request.schema.json'
+    const names = JSON.parse(await read(path)).allOf?.[0]?.if?.properties?.command?.enum
+    if (!Array.isArray(names) || names.length === 0)
+        throw new Error(`${path} no longer enumerates the mutating commands`)
+    return names
+}
+
+/**
+ * Every command and its addon method, with the method's own arity read from the addon. Arity is
+ * derived rather than declared because a catalogue that had to repeat it could disagree with the
+ * function it names.
+ */
+/**
+ * The commands routed to the running game instead of answered by a handler method.
+ *
+ * They carry no handler because there is none to name: `_handle_runtime_request` decides, per
+ * command, whether the editor answers or the game is asked. What they do carry is a name, and the
+ * addon needed that name in two places — the routing list and the routing match — with nothing
+ * holding the two together.
+ */
+async function runtimeCatalogue() {
+    const path = 'protocol/schemas/v2/commands.json'
+    const {runtimeCommands} = JSON.parse(await read(path))
+    if (!Array.isArray(runtimeCommands) || runtimeCommands.length === 0)
+        throw new Error(`${path} lists no runtime commands`)
+    return runtimeCommands
+}
+
+/**
+ * The parameter contract of every operation the router forwards as raw JSON.
+ *
+ * One source, three readers that could otherwise disagree: the Rust table that refuses a call, the
+ * signature the model is shown, and the addon-side guard. Before this, the shape of a value was
+ * first examined by GDScript across a socket, and a model that got it wrong was answered with a
+ * sentence carrying no example — which cost a live session eight identical retries.
+ */
+async function parameterCatalogue() {
+    const path = 'protocol/schemas/v2/params.json'
+    const {operations, vocabularies = {}} = JSON.parse(await read(path))
+    if (!Array.isArray(operations) || operations.length === 0)
+        throw new Error(`${path} declares no operations`)
+    for (const entry of operations) {
+        if (!entry.tool || !entry.op)
+            throw new Error(`${path} has an operation without a tool and an op`)
+        if (!entry.command && entry.answeredBy !== 'rust')
+            throw new Error(
+                `${path}: ${entry.tool} ${entry.op} names neither an addon command nor answeredBy: "rust"`
+            )
+        // A blank sentence would refuse the call and say nothing about why, which is the failure the
+        // whole file exists to make impossible. Absence is the default and means "may be repeated".
+        if ('alone' in entry && (typeof entry.alone !== 'string' || entry.alone.trim() === ''))
+            throw new Error(
+                `${path}: ${entry.tool} ${entry.op} is marked alone without a sentence saying why`
+            )
+        for (const param of entry.params ?? []) {
+            checkKind(path, entry, param)
+            // A vocabulary nothing declares would print an empty list into the signature and say
+            // nothing about it, which is the failure mode the whole file exists to make impossible.
+            if (param.vocabulary && !vocabularies[param.vocabulary])
+                throw new Error(
+                    `${path}: ${entry.tool} ${entry.op} ${param.name} speaks ${param.vocabulary}, which no vocabulary declares`
+                )
+        }
+    }
+    for (const [name, words] of Object.entries(vocabularies)) {
+        if (!Array.isArray(words.accepted) || words.accepted.length === 0)
+            throw new Error(`${path}: the ${name} vocabulary accepts nothing`)
+        if (!Array.isArray(words.refused) || words.refused.length === 0)
+            throw new Error(
+                `${path}: the ${name} vocabulary refuses nothing, so nothing can prove it means anything`
+            )
+    }
+    return {operations, vocabularies}
+}
+
+const KINDS = [
+    'text',
+    'int',
+    'number',
+    'flag',
+    'list',
+    'object',
+    'hash',
+    'tagged',
+    'choice',
+    'either'
+]
+
+/** One parameter of the source, held to the kinds the Rust checker knows how to enforce. */
+function checkKind(path, entry, param) {
+    const where = `${path}: ${entry.tool} ${entry.op} ${param.name ?? '(unnamed)'}`
+    if (!param.name || !param.kind) throw new Error(`${where} has no name or no kind`)
+    if (!KINDS.includes(param.kind)) throw new Error(`${where} is of unknown kind ${param.kind}`)
+    if (param.kind === 'choice' && !Array.isArray(param.of))
+        throw new Error(`${where} lists no choices`)
+    if (param.kind === 'either') {
+        if (!Array.isArray(param.of) || param.of.length < 2)
+            throw new Error(`${where} is an either of fewer than two kinds`)
+        for (const one of param.of) checkKind(path, entry, {...one, name: param.name})
+    }
+    // What one entry holds, where the kind stops. Only a list or an object has an inside, and an
+    // inside written down half-way is worse than none: the checker refuses a key the shape does
+    // not name, so an incomplete entry would refuse calls that are right.
+    if (param.entry) {
+        if (param.kind !== 'list' && param.kind !== 'object')
+            throw new Error(`${where} is a ${param.kind}, which has no entries to shape`)
+        if (!Array.isArray(param.entry) || param.entry.length === 0)
+            throw new Error(`${where} declares an empty entry shape`)
+        for (const inner of param.entry)
+            checkKind(path, entry, {...inner, name: `${param.name}.${inner.name}`})
+    }
+}
+
+async function catalogue() {
+    const path = 'protocol/schemas/v2/commands.json'
+    const addon = await read('src-tauri/addon/plugin.gd')
+    const {commands} = JSON.parse(await read(path))
+    if (!Array.isArray(commands) || commands.length === 0)
+        throw new Error(`${path} lists no commands`)
+    return commands.map(({command, handler}) => {
+        const signature = addon.match(new RegExp(`^func ${handler}\\(([^)]*)\\) ->`, 'mu'))?.[1]
+        if (signature === undefined)
+            throw new Error(
+                `${path} binds ${command} to ${handler}, which src-tauri/addon/plugin.gd does not define`
+            )
+        return {command, handler, takesParams: signature.trim().length > 0}
+    })
+}
+
+/** The commands the backend registers, which is the only place a desktop command is real. */
+async function registeredDesktopCommands() {
+    const path = 'src-tauri/src/lib.rs'
+    const list = slice(
+        await read(path),
+        path,
+        'builder.invoke_handler(tauri::generate_handler![',
+        ']);'
+    )
+    const names = list
+        .split(',')
+        .map(name => name.trim())
+        .filter(Boolean)
+    if (names.length === 0) throw new Error(`${path} registers no commands`)
+    return names
+}
+
+// --- The regions.
+
+/**
+ * A generated region is the text between two marker comments. The opening marker carries the
+ * checksum of the body, so a hand-edit is visible in a diff without running anything, and
+ * `--check` catches it either way.
+ */
+function markers(comment, name) {
+    return {
+        begin: checksum => `${comment} GENERATED-BEGIN ${name} sha256:${checksum}`,
+        beginPrefix: `${comment} GENERATED-BEGIN ${name} `,
+        end: `${comment} GENERATED-END ${name}`
+    }
+}
+
+function checksum(body) {
+    return createHash('sha256').update(body).digest('hex').slice(0, 16)
+}
+
+/** Replaces one marked region's body, leaving every byte outside the markers alone. */
+function replaceRegion(text, path, comment, name, body) {
+    const {beginPrefix, begin, end} = markers(comment, name)
+    const start = text.indexOf(beginPrefix)
+    if (start === -1) throw new Error(`${path} no longer marks the generated region ${name}`)
+    const lineEnd = text.indexOf('\n', start)
+    const stop = text.indexOf(end, lineEnd)
+    if (stop === -1) throw new Error(`${path} never closes the generated region ${name}`)
+    return text.slice(0, start) + begin(checksum(body)) + '\n' + body + text.slice(stop)
+}
+
+// --- The emitters. Each returns the exact bytes its formatter would leave behind.
+
+function gdMutating(names) {
+    return `const MUTATING_COMMANDS: Array[String] = [\n${names
+        .map(name => `    "${name}",\n`)
+        .join('')}]\n`
+}
+
+function gdDispatch(commands) {
+    const cases = commands
+        .map(
+            ({command, handler, takesParams}) =>
+                `        "${command}":\n            return ${handler}(${takesParams ? 'params' : ''})\n`
+        )
+        .join('')
+    return `    match command:\n${cases}    return _unknown_command_error(command)\n`
+}
+
+function gdRuntimeCommands(names) {
+    return `const RUNTIME_COMMANDS: Array[String] = [\n${names
+        .map(name => `    "${name}",\n`)
+        .join('')}]\n`
+}
+
+/**
+ * The union the renderer spells a command with, in the order the catalogue lists them.
+ *
+ * Prettier breaks a union this long one member per line with a leading pipe, so that is what is
+ * emitted — the formatter and the generator have to agree byte for byte or `npm run check` fails
+ * one of them whatever the other does.
+ */
+function typescriptCommandNames(names) {
+    return `export type GodotCommandName =\n${names.map(name => `    | '${name}'\n`).join('')}`
+}
+
+function rustMutating(names) {
+    return `pub const MUTATING_COMMANDS: [&str; ${names.length}] = [\n${names
+        .map(name => `    "${name}",\n`)
+        .join('')}];\n`
+}
+
+/** A Rust string literal, escaped. Notes are prose and carry quotes of their own. */
+function rustString(text) {
+    return `"${text.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"')}"`
+}
+
+function rustKind(param) {
+    if (param.kind === 'choice')
+        return `Kind::Choice(&[${param.of.map(word => rustString(word)).join(', ')}])`
+    if (param.kind === 'either')
+        return `Kind::Either(&[${param.of.map(one => rustKind(one)).join(', ')}])`
+    return param.kind.charAt(0).toUpperCase() + param.kind.slice(1)
+}
+
+/**
+ * The table the router refuses a call against.
+ *
+ * Emitted long — one call per line, no width judgement — and handed to rustfmt, because guessing
+ * where rustfmt would break a line is a game the generator cannot win and `npm run check` would
+ * lose loudly.
+ */
+/** The Rust name a vocabulary is emitted under, so a parameter can point at it. */
+function vocabularyConst(name) {
+    return name.replace(/[A-Z]/gu, letter => `_${letter}`).toUpperCase()
+}
+
+/**
+ * Every vocabulary, as a const of its own.
+ *
+ * `accepted` is what the model reads in the signature; `refused` is names the engine does not have,
+ * which is what lets the drift check prove the accepted list means something. Both were written out
+ * twice, in English, inside two catalogue summaries.
+ */
+function rustVocabularies(vocabularies) {
+    return Object.entries(vocabularies)
+        .flatMap(([name, words]) => {
+            const konst = vocabularyConst(name)
+            const list = names => `&[\n${names.map(word => `    ${rustString(word)},\n`).join('')}]`
+            return [
+                `/// ${words.note}\npub const ${konst}: &[&str] = ${list(words.accepted)};\n`,
+                `/// Names the engine does not have, so the drift check can prove ${konst} means something.\n///\n/// Read only by tests: the engine drift check feeds these to a real editor and requires each to\n/// be refused. Nothing in a shipped build has any use for a list of names that do not work.\n#[allow(dead_code)]\npub const ${konst}_REFUSED: &[&str] = ${list(words.refused)};\n`
+            ]
+        })
+        .join('\n')
+}
+
+/**
+ * One parameter as the Rust table declares it, wrapper by wrapper.
+ *
+ * Recursive because an entry shape is made of parameters like any other — `files` holds `edits`
+ * holds `{oldText, newText}` — and the checker walks it with the same code that walks the call.
+ */
+function rustParam(param) {
+    const constructor =
+        param.hidden ? 'hidden'
+        : param.required ? 'need'
+        : 'opt'
+    let call = `${constructor}(${rustString(param.name)}, ${rustKind(param)})`
+    if (param.vocabulary) call = `speaking(${call}, ${vocabularyConst(param.vocabulary)})`
+    if (param.entry) call = `shaped(${call}, &[${param.entry.map(rustParam).join(', ')}])`
+    return param.note ? `noted(${call}, ${rustString(param.note)})` : call
+}
+
+function rustParams(operations) {
+    const entries = operations
+        .map(entry => {
+            const declared = (entry.params ?? []).map(rustParam)
+            // Accepted by the router and left out of the signature, so a desktop client that has
+            // always passed `scene` keeps working without the model being told to.
+            const accepted = (entry.accepts ?? []).map(name => `hidden("${name}", Text)`)
+            const params = [...declared, ...accepted].join(', ')
+            // What answers the operation, from the same row that declares its parameters. The
+            // router used to rebuild the addon command with `format!("{prefix}.{op}")` and keep a
+            // hand-written exception list per domain; this is the mapping those lists approximated.
+            const answers =
+                entry.command ? `Answers::Addon(${rustString(entry.command)})` : 'Answers::Rust'
+            return `op(${rustString(entry.tool)}, ${rustString(entry.op)}, ${answers}, &[${params}]),\n`
+        })
+        .join('')
+    return `pub const TABLE: &[OpParams] = &[\n${entries}];\n`
+}
+
+/**
+ * The addon's own guard table, keyed by the command the dispatch match uses.
+ *
+ * `expectedRevision` and `timeoutMs` never appear: the router lifts both onto the envelope, so a
+ * handler that demanded them among its parameters would refuse every well-formed call. The same
+ * spec therefore means two different things at the two layers, and only the generator knows both.
+ */
+/**
+ * The safety model, keyed by the same (tool, op) as the parameters and the route.
+ *
+ * It was a table of its own in `approvals.rs`, which made it a fifth surface on the same key and a
+ * fifth thing to hold to the catalogue afterwards — `gated_operations_name_real_catalog_operations`
+ * existed only to catch a gate naming an operation that no longer exists. Generated from the row
+ * that declares the operation, that cannot happen.
+ */
+function rustGated(operations) {
+    const rows = operations
+        .filter(entry => entry.gated)
+        .map(
+            entry =>
+                `    gate(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustString(entry.gated)}),\n`
+        )
+        .join('')
+    return `pub const GATED: &[GatedOperation] = &[\n${rows}];\n`
+}
+
+/**
+ * The operations an `ops` list may not hold twice, keyed by the same (tool, op) as everything else.
+ *
+ * Every tool call is a list now, so the model that wanted three inspections writes one call rather
+ * than three. These are the ones a list cannot repeat: an operation with no parameters is the same
+ * call twice, and one that drives something the session owns exactly one of — the open scene, the
+ * running game, the undo stack, the debuggee — would have the second entry act on what the first
+ * left behind. The sentence is the refusal, so it says which of those two it is.
+ */
+function rustAlone(operations) {
+    const rows = operations
+        .filter(entry => entry.alone)
+        .map(
+            entry =>
+                `    only(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustString(entry.alone)}),\n`
+        )
+        .join('')
+    return `pub const ALONE: &[LoneOperation] = &[\n${rows}];\n`
+}
+
+function gdCommandParams(operations) {
+    const rows = operations
+        .filter(entry => entry.command)
+        .map(entry => {
+            const carried = (entry.params ?? []).filter(
+                param => param.name !== 'expectedRevision' && param.name !== 'timeoutMs'
+            )
+            const required = carried
+                .filter(param => param.required && !param.hidden)
+                .map(param => param.name)
+            // `accepts` is the addon's alone: a parameter its handler reads and the model is never
+            // shown. `scene` is the whole population — every node command takes it, defaults it to
+            // the open scene, and the desktop client is what passes it.
+            const optional = [
+                ...carried
+                    .filter(param => !param.required || param.hidden)
+                    .map(param => param.name),
+                ...(entry.accepts ?? [])
+            ]
+            const list = names => `[${names.map(name => `"${name}"`).join(', ')}]`
+            return `    "${entry.command}": {"required": ${list(required)}, "optional": ${list(optional)}},\n`
+        })
+        .join('')
+    return `const COMMAND_PARAMS: Dictionary = {\n${rows}}\n`
+}
+
+function tomlAllowList(names) {
+    return `commands.allow = [\n${[...names]
+        .sort()
+        .map(name => `    "${name}",\n`)
+        .join('')}]\n`
+}
+
+// --- What each file gets.
+
+export async function generateSurfaces() {
+    const mutating = await mutatingCommands()
+    const commands = await catalogue()
+    const runtime = await runtimeCatalogue()
+    const desktop = await registeredDesktopCommands()
+    const {operations: parameters, vocabularies} = await parameterCatalogue()
+
+    const declared = new Set(commands.map(entry => entry.command))
+    for (const name of mutating) {
+        if (!declared.has(name))
+            throw new Error(
+                `protocol/schemas/v2/request.schema.json calls ${name} mutating, but commands.json binds no handler to it`
+            )
+    }
+    for (const name of runtime) {
+        if (declared.has(name))
+            throw new Error(
+                `protocol/schemas/v2/commands.json lists ${name} as a runtime command and binds a handler to it as well`
+            )
+    }
+    // A parameter contract for a command nobody answers is a contract that will never be enforced,
+    // and the misspelling behind one is invisible in every other file.
+    const answered = new Set([...declared, ...runtime])
+    for (const entry of parameters) {
+        if (!entry.command) continue
+        if (!answered.has(entry.command))
+            throw new Error(
+                `protocol/schemas/v2/params.json declares parameters for ${entry.command}, which commands.json does not answer`
+            )
+    }
+
+    const edits = [
+        {
+            path: 'src-tauri/addon/plugin.gd',
+            comment: '#',
+            regions: [
+                {name: 'mutating-commands', body: gdMutating(mutating)},
+                {name: 'runtime-commands', body: gdRuntimeCommands(runtime)},
+                {name: 'command-params', body: gdCommandParams(parameters)},
+                {name: 'dispatch-table', body: gdDispatch(commands)}
+            ]
+        },
+        {
+            path: 'src-tauri/src/protocol_v2.rs',
+            comment: '//',
+            regions: [{name: 'mutating-commands', body: rustMutating(mutating)}]
+        },
+        {
+            path: 'src-tauri/src/tool_params.rs',
+            comment: '//',
+            rustfmt: true,
+            regions: [
+                {name: 'vocabularies', body: rustVocabularies(vocabularies)},
+                {name: 'op-params', body: rustParams(parameters)},
+                {name: 'alone-operations', body: rustAlone(parameters)}
+            ]
+        },
+        {
+            path: 'src-tauri/src/approvals.rs',
+            comment: '//',
+            rustfmt: true,
+            regions: [{name: 'gated-operations', body: rustGated(parameters)}]
+        },
+        {
+            path: 'src/models/godot-commands.ts',
+            comment: '//',
+            regions: [
+                {
+                    name: 'command-names',
+                    body: typescriptCommandNames([
+                        ...commands.map(entry => entry.command),
+                        ...runtime
+                    ])
+                }
+            ]
+        },
+        {
+            path: 'src-tauri/permissions/main-window-commands.toml',
+            comment: '#',
+            regions: [{name: 'allow-list', body: tomlAllowList(desktop)}]
+        }
+    ]
+
+    const results = []
+    for (const {path, comment, regions, rustfmt} of edits) {
+        const before = await read(path)
+        let after = before
+        for (const {name, body} of regions) after = replaceRegion(after, path, comment, name, body)
+        // The checksum is of the body the generator wrote, so formatting has to happen first or
+        // `--check` would compare a formatted file against an unformatted checksum forever.
+        if (rustfmt && after !== before) {
+            const {name} = regions[0]
+            const formatted = await formatRust(after, path)
+            after = replaceRegion(
+                formatted,
+                path,
+                comment,
+                name,
+                sliceRegion(formatted, path, comment, name)
+            )
+        }
+        results.push({path, before, after})
+    }
+    return results
+}
+
+/** The body between one region's markers, after the whole file has been through rustfmt. */
+function sliceRegion(text, path, comment, name) {
+    const {beginPrefix, end} = markers(comment, name)
+    const start = text.indexOf(beginPrefix)
+    if (start === -1) throw new Error(`${path} no longer marks the generated region ${name}`)
+    const lineEnd = text.indexOf('\n', start) + 1
+    const stop = text.indexOf(end, lineEnd)
+    if (stop === -1) throw new Error(`${path} never closes the generated region ${name}`)
+    return text.slice(lineEnd, stop)
+}
+
+/**
+ * Hands a whole Rust file to rustfmt and returns what it makes of it.
+ *
+ * The generator emits one `op(...)` call per line and lets rustfmt decide where the lines break.
+ * Predicting that by hand is a game the generator cannot win, and losing it fails `npm run check`
+ * on a file nobody edited.
+ */
+async function formatRust(text, path) {
+    const {spawn} = await import('node:child_process')
+    return await new Promise((resolve, reject) => {
+        const child = spawn('rustfmt', ['--edition', '2024', '--emit', 'stdout', '--quiet'], {
+            stdio: ['pipe', 'pipe', 'pipe']
+        })
+        let out = ''
+        let error = ''
+        child.stdout.on('data', chunk => (out += chunk))
+        child.stderr.on('data', chunk => (error += chunk))
+        child.on('error', cause =>
+            reject(
+                new Error(`${GENERATOR} needs rustfmt on PATH to emit ${path}: ${cause.message}`)
+            )
+        )
+        child.on('close', code =>
+            code === 0 ?
+                resolve(out)
+            :   reject(new Error(`rustfmt refused ${path}: ${error.trim() || `exit ${code}`}`))
+        )
+        child.stdin.end(text)
+    })
+}
+
+/** Throws naming every file whose generated region no longer matches its source. */
+export async function checkSurfacesAreGenerated() {
+    const stale = (await generateSurfaces())
+        .filter(result => result.before !== result.after)
+        .map(result => result.path)
+    if (stale.length > 0)
+        throw new Error(
+            `these generated regions do not match their source — run \`npm run generate\`:\n${stale.join('\n')}`
+        )
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    if (process.argv.includes('--check')) await checkSurfacesAreGenerated()
+    else {
+        for (const {path, before, after} of await generateSurfaces()) {
+            if (before === after) continue
+            await writeFile(new URL(path, `file://${root}`), after)
+            console.log(`${GENERATOR}: rewrote ${path}`)
+        }
+    }
+}

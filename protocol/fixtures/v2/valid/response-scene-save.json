@@ -1,0 +1,7 @@
+{
+    "protocolVersion": 2,
+    "kind": "response",
+    "id": "request-scene-save",
+    "result": {"scene": "res://levels/first.tscn", "revision": 3, "dirty": false},
+    "revision": 3
+}

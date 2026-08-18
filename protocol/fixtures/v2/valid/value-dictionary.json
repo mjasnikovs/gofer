@@ -1,0 +1,17 @@
+{
+    "type": "dictionary",
+    "value": [
+        {
+            "key": {"type": "string", "value": "name"},
+            "value": {"type": "string", "value": "Player"}
+        },
+        {"key": {"type": "int", "value": 3}, "value": {"type": "bool", "value": true}},
+        {
+            "key": {"type": "vector2i", "value": [1, 2]},
+            "value": {
+                "type": "array",
+                "value": [{"type": "null"}, {"type": "float", "value": 0.25}]
+            }
+        }
+    ]
+}
