@@ -1,8 +1,7 @@
 import {invoke, isTauri} from './desktop'
 import {isPendingChange, isTaskSummary} from '../models/app'
 import type {PendingChange, TaskSummary} from '../models/app'
-import {stageTaskStart} from './task-start'
-import type {TaskStart} from './task-start'
+import type {UnsavedWork} from '../models/unsaved-work'
 
 /**
  * What the window does to a task, as opposed to which task it draws.
@@ -72,16 +71,22 @@ export type TaskActions = Readonly<{
     /** Opens an existing task. The only action that changes nothing but the route. */
     open: (taskId: string) => Promise<void>
     /**
-     * Makes a task, and stages what it should do the moment its workspace opens.
+     * Makes a task and opens it.
      *
      * `bringChanges` decides what happens to files loose in the checkout. Left alone they are
      * committed onto the task being closed, which is how a file the user copied in by hand
      * disappears from disk the moment the new branch is checked out.
      */
-    create: (start?: TaskStart, bringChanges?: boolean) => Promise<void>
+    create: (bringChanges?: boolean) => Promise<void>
     remove: (taskId: string) => Promise<void>
-    /** Merges the task the window is displaying, or says why it cannot. */
-    merge: (task: TaskSummary | undefined) => Promise<void>
+    /**
+     * Merges the task the window is displaying, or says why it cannot.
+     *
+     * `unsavedWork` is the answer to the question the merge asks about the Godot editor. Left out,
+     * a merge that would throw away unsaved scenes is refused and names them; `save` writes them
+     * first and `discard` is the user saying to let them go.
+     */
+    merge: (task: TaskSummary | undefined, unsavedWork?: UnsavedWork) => Promise<void>
     /**
      * Brings the project's branch into the task, and answers what clashed.
      *
@@ -148,14 +153,12 @@ export function createTaskActions({navigate, refresh}: TaskActionDeps): TaskActi
         // click cannot see — a turn still running, another task operation holding the checkout —
         // and a button that quietly does nothing is the same as a broken one.
         //
-        // `start` is what the task does once its workspace opens: send the ask, or plan it first.
-        // It is staged rather than passed, because the thing that acts on it does not exist until
-        // the route has already changed to the task this just made. See `services/task-start.ts`.
-        async create(start, bringChanges = false) {
+        // Nothing is staged with it. A new task opens on an empty composer, and what it should do
+        // is whatever the user types there — including planning, which is a control beside Send.
+        async create(bringChanges = false) {
             if (!isTauri()) return
             const created = await whileRunning(() => invoke('create_chat_task', {bringChanges}))
             if (!created.taskId) return
-            if (start) stageTaskStart(created.taskId, start)
             await refresh()
             await navigate(created.taskId)
         },
@@ -175,13 +178,15 @@ export function createTaskActions({navigate, refresh}: TaskActionDeps): TaskActi
         // record this reads, so the two disagreeing means the list went stale under the window —
         // and returning quietly left a control that did nothing at all when pressed, with no
         // failure anywhere to explain it.
-        async merge(task) {
+        async merge(task, unsavedWork) {
             if (!task?.worktree) {
                 throw new Error(
                     'This task has no branch to merge. Reopen it from the sidebar and try again.'
                 )
             }
-            await whileRunning(() => invoke('merge_task_branch', {taskId: task.id}))
+            await whileRunning(() =>
+                invoke('merge_task_branch', {taskId: task.id, ...(unsavedWork && {unsavedWork})})
+            )
             await refresh()
         },
 

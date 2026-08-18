@@ -1,21 +1,19 @@
-import {useEffect, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {SelectableCard} from '@astryxdesign/core/SelectableCard'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
-import {TextArea} from '@astryxdesign/core/TextArea'
+import {useState} from 'react'
 
 import type {PendingChange} from '../../models/app'
-import {listPendingChanges} from '../../services/task-actions'
 
 type NewTaskDialogProps = Readonly<{
     isOpen: boolean
     onOpenChange: (isOpen: boolean) => void
-    /** Runs the four phases against the ask. Refused while the ask is empty. */
-    onPlan: (prompt: string, bringChanges: boolean) => void
-    /** Makes the task and opens its empty chat, with whatever was typed waiting in the composer. */
-    onSkip: (prompt: string, bringChanges: boolean) => void
+    /** The files loose in the checkout. Never empty — with none, nothing opens this dialog. */
+    changes: readonly PendingChange[]
+    /** Makes the task and opens its empty chat. */
+    onCreate: (bringChanges: boolean) => void
 }>
 
 /** How many loose files are named before the rest are counted. */
@@ -46,40 +44,22 @@ const CHANGE_CHOICES: readonly {
 ]
 
 /**
- * Asks what the new task is, and plans it unless the user says not to.
+ * Asks the one question making a task cannot answer for itself.
  *
- * This dialog IS the plan. Planning is the default because it is the thing the user cannot do from
- * the chat — the four phases have to run against the ask before there is a first turn, so the ask
- * has to be taken before there is a chat to type it into.
+ * It does not ask what the task is. There is exactly one place in Gofer to write what you want, and
+ * it is the composer — the task opens on it, and planning is a control beside its Send button rather
+ * than a mode chosen before the chat exists. A second box here was a second box to wonder about, and
+ * it could hold neither an image nor a file mention.
  *
- * Skipping is the other half, and it is a way out rather than a second mode: it makes the task,
- * opens its empty chat, and leaves the user in front of the composer they already know. Anything
- * typed here goes with them as a draft, unsent — a plan the user changed their mind about must not
- * cost them the sentence they wrote.
+ * So this is only the loose-files question, and it is only shown when there are loose files. With a
+ * clean checkout there is nothing to ask and New task makes one on the spot.
  */
-export function NewTaskDialog({isOpen, onOpenChange, onPlan, onSkip}: NewTaskDialogProps) {
-    const [prompt, setPrompt] = useState('')
-    const [changes, setChanges] = useState<readonly PendingChange[]>([])
-    const [bring, setBring] = useState(false)
-    const ask = prompt.trim()
-
-    // Read once per open. The dialog is mounted only while it is open, so this is that moment.
-    useEffect(() => {
-        let isCurrent = true
-        void listPendingChanges().then(pending => {
-            if (!isCurrent || pending.length === 0) return
-            setChanges(pending)
-            // Files Git has never seen are the user's own copy-in, and the answer is always to keep
-            // them. Anything modified could be the closing task's work, so that one is asked cold.
-            setBring(pending.every(change => change.isNew))
-        })
-        return () => {
-            isCurrent = false
-        }
-    }, [])
+export function NewTaskDialog({isOpen, onOpenChange, changes, onCreate}: NewTaskDialogProps) {
+    // Files Git has never seen are the user's own copy-in, and the answer is always to keep them.
+    // Anything modified could be the closing task's work, so that one is asked cold.
+    const [bring, setBring] = useState(() => changes.every(change => change.isNew))
 
     const close = () => {
-        setPrompt('')
         onOpenChange(false)
     }
 
@@ -101,92 +81,56 @@ export function NewTaskDialog({isOpen, onOpenChange, onPlan, onSkip}: NewTaskDia
                 padding={4}
             >
                 <VStack gap={2}>
-                    <TextArea
-                        label='What needs doing?'
-                        rows={3}
-                        value={prompt}
-                        hasAutoFocus
-                        onChange={setPrompt}
-                    />
-                    {/*
-                     * What planning costs and what it buys, in that order. It is several minutes of
-                     * local model time before the first turn, and the user is one keystroke from
-                     * spending them — so the price is said before the benefit is.
-                     */}
-                    <Text
-                        size='sm'
-                        color='secondary'
-                    >
-                        Planning takes several minutes. It reads the project, asks you what it
-                        cannot settle, and writes a specification the agent works from. Worth it for
-                        anything you would have to explain twice.
+                    <Text weight='medium'>
+                        {changes.length === 1 ?
+                            '1 file is not committed yet'
+                        :   `${String(changes.length)} files are not committed yet`}
                     </Text>
-                </VStack>
-                {changes.length > 0 && (
-                    <VStack gap={2}>
-                        <Text weight='medium'>
-                            {changes.length === 1 ?
-                                '1 file is not committed yet'
-                            :   `${String(changes.length)} files are not committed yet`}
-                        </Text>
-                        <VStack gap={0}>
-                            {changes.slice(0, NAMED_CHANGES).map(change => (
-                                <Text
-                                    key={change.path}
-                                    size='sm'
-                                    color='secondary'
-                                >
-                                    {change.path}
-                                </Text>
-                            ))}
-                            {changes.length > NAMED_CHANGES && (
-                                <Text
-                                    size='sm'
-                                    color='secondary'
-                                >
-                                    and {String(changes.length - NAMED_CHANGES)} more
-                                </Text>
-                            )}
-                        </VStack>
-                        {CHANGE_CHOICES.map(choice => (
-                            <SelectableCard
-                                key={choice.title}
-                                label={choice.title}
-                                padding={3}
-                                isSelected={bring === choice.bring}
-                                onChange={() => {
-                                    setBring(choice.bring)
-                                }}
+                    <VStack gap={0}>
+                        {changes.slice(0, NAMED_CHANGES).map(change => (
+                            <Text
+                                key={change.path}
+                                size='sm'
+                                color='secondary'
                             >
-                                <VStack gap={1}>
-                                    <Text weight='medium'>{choice.title}</Text>
-                                    <Text
-                                        size='sm'
-                                        color='secondary'
-                                    >
-                                        {choice.detail}
-                                    </Text>
-                                </VStack>
-                            </SelectableCard>
+                                {change.path}
+                            </Text>
                         ))}
+                        {changes.length > NAMED_CHANGES && (
+                            <Text
+                                size='sm'
+                                color='secondary'
+                            >
+                                and {String(changes.length - NAMED_CHANGES)} more
+                            </Text>
+                        )}
                     </VStack>
-                )}
-                {/*
-                 * The way out sits at the far end from the thing it is a way out of. A spacer rather
-                 * than a nested stack, which is what Astryx asks for.
-                 */}
+                    {CHANGE_CHOICES.map(choice => (
+                        <SelectableCard
+                            key={choice.title}
+                            label={choice.title}
+                            padding={3}
+                            isSelected={bring === choice.bring}
+                            onChange={() => {
+                                setBring(choice.bring)
+                            }}
+                        >
+                            <VStack gap={1}>
+                                <Text weight='medium'>{choice.title}</Text>
+                                <Text
+                                    size='sm'
+                                    color='secondary'
+                                >
+                                    {choice.detail}
+                                </Text>
+                            </VStack>
+                        </SelectableCard>
+                    ))}
+                </VStack>
                 <HStack
                     gap={2}
                     vAlign='center'
                 >
-                    <Button
-                        label='Skip planning'
-                        variant='secondary'
-                        onClick={() => {
-                            onSkip(ask, bring)
-                            close()
-                        }}
-                    />
                     <StackItem size='fill' />
                     <Button
                         label='Cancel'
@@ -194,12 +138,10 @@ export function NewTaskDialog({isOpen, onOpenChange, onPlan, onSkip}: NewTaskDia
                         onClick={close}
                     />
                     <Button
-                        label='Plan it'
+                        label='Create task'
                         variant='primary'
-                        isDisabled={ask.length === 0}
                         onClick={() => {
-                            if (ask.length === 0) return
-                            onPlan(ask, bring)
+                            onCreate(bring)
                             close()
                         }}
                     />

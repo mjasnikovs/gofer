@@ -2107,3 +2107,66 @@ fn a_project_whose_main_scene_is_not_a_scene_still_becomes_ready() {
         "a session on such a project must author scenes like any other"
     );
 }
+
+/// The scenes the editor is still holding, and writing them, both read out of the editor itself.
+///
+/// Gofer's `dirty` flag counts only the mutations Gofer made, so nothing anywhere knew about work a
+/// person did in the editor — and a merge stops that editor with `get_tree().quit()`, which neither
+/// asks nor saves. This is the answer that has to be true before a merge is allowed to be built on
+/// it: an edited scene is named, a saved one is not, and saving is confirmed by asking again rather
+/// than by `save_all_scenes` returning.
+#[test]
+fn the_editor_names_the_work_it_is_holding_and_writes_it_on_request() {
+    let mut session = Session::start();
+    let scene = "res://holding.tscn";
+
+    session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
+    session.mutate("scene.save", json!({}));
+    assert_eq!(
+        unsaved_scenes(&mut session),
+        Vec::<String>::new(),
+        "a scene just written to disk is not work the editor is holding"
+    );
+
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/holding", "name": "Marker", "type": "Marker2D"}),
+    );
+    assert_eq!(
+        unsaved_scenes(&mut session),
+        vec![scene.to_owned()],
+        "an edit that has not reached disk must be named"
+    );
+
+    let written = session.call("session.save_all_scenes", json!({}));
+    assert_eq!(
+        written["saved"],
+        json!([scene]),
+        "saving must answer with what it wrote: {written}"
+    );
+    assert_eq!(
+        unsaved_scenes(&mut session),
+        Vec::<String>::new(),
+        "and the editor must be holding nothing afterwards"
+    );
+    let on_disk = std::fs::read_to_string(session.worktree.join("holding.tscn"))
+        .expect("the saved scene must exist on disk");
+    assert!(
+        on_disk.contains("Marker2D"),
+        "the edit must be in the file, not just reported as saved: {on_disk}"
+    );
+}
+
+/// The scenes the editor says it is holding changes to, sorted so the assertion reads the same way
+/// twice.
+fn unsaved_scenes(session: &mut Session) -> Vec<String> {
+    let answer = session.call("session.get_unsaved_scenes", json!({}));
+    let mut scenes: Vec<String> = answer["scenes"]
+        .as_array()
+        .expect("scenes array")
+        .iter()
+        .map(|scene| scene.as_str().expect("scene path").to_owned())
+        .collect();
+    scenes.sort();
+    scenes
+}

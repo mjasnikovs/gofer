@@ -1,7 +1,7 @@
 import {Channel} from '@tauri-apps/api/core'
 import {invoke, isTauri, listen} from './desktop'
 import {isBriefEvent} from '../models/brief'
-import type {AiStreamPayload} from '../models/chat'
+import type {AiStreamPayload, ChatAttachment} from '../models/chat'
 import type {BriefEvent, BriefRun} from '../models/brief'
 
 /**
@@ -17,7 +17,13 @@ import type {BriefEvent, BriefRun} from '../models/brief'
  * rejection: both are endings the run reported for itself, and both arrive as events first.
  */
 export async function runTaskBrief(
-    request: Readonly<{requestId: number; taskId: string; prompt: string}>
+    request: Readonly<{
+        requestId: number
+        taskId: string
+        prompt: string
+        /** The pictures the ask came with, already saved. The phases are shown them by name. */
+        attachments: readonly ChatAttachment[]
+    }>
 ): Promise<void> {
     const stream = new Channel<AiStreamPayload>()
     await invoke('run_task_brief', {request, stream})

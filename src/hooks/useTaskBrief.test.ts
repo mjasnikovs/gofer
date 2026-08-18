@@ -1,11 +1,12 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {act, renderHook} from '@testing-library/react'
+import type {RenderHookResult} from '@testing-library/react'
 import {useTaskBrief} from './useTaskBrief'
-import {clearStagedTaskStarts, stageTaskStart} from '../services/task-start'
 import {clearTurnActivity, isTurnRunning} from '../services/turn-activity'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 import {flush} from '../test/flush'
 import type {BriefEvent} from '../models/brief'
+import type {ChatAttachment} from '../models/chat'
 
 const tauri = createDesktopFake()
 
@@ -31,70 +32,42 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-    clearStagedTaskStarts()
     clearTurnActivity()
     removeDesktopFake()
     vi.restoreAllMocks()
     deliver = () => undefined
 })
 
-const mount = (taskId: string | undefined, isChatLoaded = true, isDraftLoaded = true) => {
-    const startTurn = vi.fn<(prompt: string) => void>()
-    const onDraft = vi.fn<(prompt: string) => void>()
+type Brief = ReturnType<typeof useTaskBrief>
+
+const mount = (taskId: string | undefined) => {
+    const startTurn = vi.fn<(prompt: string, attachments: readonly ChatAttachment[]) => void>()
     const onError = vi.fn<(message: string) => void>()
-    const view = renderHook(
-        (props: {isChatLoaded: boolean; isDraftLoaded: boolean}) =>
-            useTaskBrief({
-                taskId,
-                ...props,
-                onStartTurn: startTurn,
-                onDraft,
-                onError
-            }),
-        {initialProps: {isChatLoaded, isDraftLoaded}}
-    )
-    return {startTurn, onDraft, onError, view}
+    const view = renderHook(() => useTaskBrief({taskId, onStartTurn: startTurn, onError}))
+    return {startTurn, onError, view}
 }
 
-describe('what a new task does when it opens', () => {
-    /*
-     * Skip planning is a way out of the dialog, not a second way to send a message.
-     *
-     * The user pressed it to go and type, so the ask lands in the composer and nothing is sent. A
-     * turn started here would take the decision back off them the instant they made it.
-     */
-    it('puts a skipped task’s ask in the composer, sends nothing, and plans nothing', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'draft'})
-        const {startTurn, onDraft} = mount('task-1')
-        await flush()
-
-        expect(onDraft).toHaveBeenCalledWith('add a pause menu')
-        expect(startTurn).not.toHaveBeenCalled()
-        expect(tauri.invoke).not.toHaveBeenCalledWith('run_task_brief', expect.anything())
+/** What the composer's plan control does: hands the typed ask over instead of sending it. */
+const plan = async (
+    view: RenderHookResult<Brief, unknown>,
+    prompt = 'add a pause menu'
+): Promise<void> => {
+    act(() => {
+        view.result.current.startPlan(prompt)
     })
+    await flush()
+}
 
-    /*
-     * A remembered value refuses every write until its own read has answered, so a draft handed
-     * over before then vanishes without a word — and the sentence the user typed into the dialog
-     * would simply not be in the composer when it appeared.
-     */
-    it('waits for the remembered draft to be read before writing into it', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'draft'})
-        const {onDraft, view} = mount('task-1', true, false)
-        await flush()
+/** The identifier the run registered itself under, which is the handle a cancellation needs. */
+const startedRequestId = (): number => {
+    const started = tauri.invoke.mock.calls.find(([command]) => command === 'run_task_brief')
+    return (started?.[1] as {request: {requestId: number}}).request.requestId
+}
 
-        expect(onDraft).not.toHaveBeenCalled()
-
-        view.rerender({isChatLoaded: true, isDraftLoaded: true})
-        await flush()
-
-        expect(onDraft).toHaveBeenCalledWith('add a pause menu')
-    })
-
-    it('runs the phases for a planned task', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        const {startTurn} = mount('task-1')
-        await flush()
+describe('starting a plan from the composer', () => {
+    it('runs the phases against what was typed', async () => {
+        const {startTurn, view} = mount('task-1')
+        await plan(view)
 
         expect(tauri.invoke).toHaveBeenCalledWith(
             'run_task_brief',
@@ -110,73 +83,66 @@ describe('what a new task does when it opens', () => {
         expect(startTurn).not.toHaveBeenCalled()
     })
 
-    /*
-     * Reading the stored conversation REPLACES what the runner holds, so a turn started before that
-     * read lands is thrown away when it does — the message vanished, the task kept the name "New
-     * task", and nothing reported a failure anywhere. A planned task never noticed, because its
-     * first message arrives minutes later.
-     */
-    it('waits for the conversation to be read before starting anything', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        const {view} = mount('task-1', false)
-        await flush()
-
-        expect(tauri.invoke).not.toHaveBeenCalledWith('run_task_brief', expect.anything())
-
-        view.rerender({isChatLoaded: true, isDraftLoaded: true})
-        await flush()
-
-        expect(tauri.invoke).toHaveBeenCalledWith('run_task_brief', expect.anything())
-    })
-
-    /*
-     * The draft's own read is the slower of the two: its key is not known until the chat has
-     * answered with the task. Holding a plan behind it would put a whole round trip in front of
-     * every planned task for a value the plan never touches.
-     */
-    it('starts a plan without waiting for the remembered draft', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        mount('task-1', true, false)
-        await flush()
-
-        expect(tauri.invoke).toHaveBeenCalledWith('run_task_brief', expect.anything())
-    })
-
-    // And the staged start is still there to act on, rather than consumed by the mount that could
-    // not use it.
-    it('does not consume the staged start while it cannot act on it', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        const first = mount('task-1', false)
-        await flush()
-        first.view.unmount()
-
-        const {view} = mount('task-1', true, true)
-        await flush()
-
-        expect(tauri.invoke).toHaveBeenCalledWith('run_task_brief', expect.anything())
-        expect(view.result.current.briefState).toBeDefined()
-    })
-
-    // A task opened from the sidebar was not made from the dialog, so it has nothing to do.
-    it('does nothing at all for a task nobody staged', async () => {
+    // A task nobody has pressed the control on has nothing to do, which is every task.
+    it('does nothing until the control is pressed', async () => {
         mount('task-1')
         await flush()
         expect(tauri.invoke).not.toHaveBeenCalledWith('run_task_brief', expect.anything())
     })
 
     it('does nothing while there is no task on screen', async () => {
-        stageTaskStart('task-1', {prompt: 'anything', mode: 'planned'})
-        mount(undefined)
-        await flush()
+        const {view} = mount(undefined)
+        await plan(view)
         expect(tauri.invoke).not.toHaveBeenCalledWith('run_task_brief', expect.anything())
+    })
+
+    /*
+     * Refused here rather than in the button, so the backend's own `brief_without_prompt` is never
+     * the thing the user sees.
+     */
+    it('refuses an ask that is only whitespace', async () => {
+        const {view} = mount('task-1')
+        await plan(view, '   ')
+
+        expect(tauri.invoke).not.toHaveBeenCalledWith('run_task_brief', expect.anything())
+        expect(view.result.current.isPlanStarted).toBe(false)
+    })
+
+    /*
+     * A task gets one opening move. The composer withholds the control once this is set, and a
+     * second press that slipped through must not begin a second fifteen-minute run.
+     */
+    it('says a plan has been started, and starts only one', async () => {
+        const {view} = mount('task-1')
+        expect(view.result.current.isPlanStarted).toBe(false)
+
+        await plan(view)
+        expect(view.result.current.isPlanStarted).toBe(true)
+
+        await plan(view, 'something else')
+        const runs = tauri.invoke.mock.calls.filter(([command]) => command === 'run_task_brief')
+        expect(runs).toHaveLength(1)
+    })
+
+    // The plan lives with the workspace that started it, and a workspace is remounted per task.
+    it('starts nothing on its own when the workspace remounts', async () => {
+        const {view} = mount('task-1')
+        await plan(view)
+        view.unmount()
+
+        const second = mount('task-1')
+        await flush()
+
+        expect(second.view.result.current.isPlanStarted).toBe(false)
+        const runs = tauri.invoke.mock.calls.filter(([command]) => command === 'run_task_brief')
+        expect(runs).toHaveLength(1)
     })
 })
 
 describe('a plan that is running', () => {
     it('shows what it is doing before the first phase starts', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         expect(view.result.current.briefState.isRunning).toBe(false)
         deliver({type: 'brief-started'})
@@ -192,9 +158,8 @@ describe('a plan that is running', () => {
      * it by name — a control offered, pressed, and then refused.
      */
     it('tells the rest of the window the agent is occupied', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {view} = mount('task-1')
-        await flush()
+        await plan(view)
         expect(isTurnRunning()).toBe(false)
 
         deliver({type: 'brief-started'})
@@ -213,9 +178,8 @@ describe('a plan that is running', () => {
     })
 
     it('follows the phases it reports', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         deliver({type: 'brief-started'})
         deliver({type: 'brief-phase-start', phase: 'research'})
@@ -233,14 +197,13 @@ describe('a plan that is running', () => {
      * message — and would leave a message in the transcript that no turn ever ran against.
      */
     it('sends the specification as the task’s first message', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        const {startTurn} = mount('task-1')
-        await flush()
+        const {startTurn, view} = mount('task-1')
+        await plan(view)
 
         deliver({type: 'brief-phase', phase: 'compose', field: 'spec', value: 'GOAL\nA menu.'})
         await flush()
 
-        expect(startTurn).toHaveBeenCalledWith('GOAL\nA menu.')
+        expect(startTurn).toHaveBeenCalledWith('GOAL\nA menu.', [])
     })
 
     /*
@@ -262,9 +225,8 @@ describe('a plan that is running', () => {
                 endRun = resolve
             })
         })
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        const {startTurn} = mount('task-1')
-        await flush()
+        const {startTurn, view} = mount('task-1')
+        await plan(view)
 
         deliver({type: 'brief-phase', phase: 'compose', field: 'spec', value: 'GOAL\nA menu.'})
         await flush()
@@ -274,7 +236,7 @@ describe('a plan that is running', () => {
         endRun()
         await flush()
 
-        expect(startTurn).toHaveBeenCalledWith('GOAL\nA menu.')
+        expect(startTurn).toHaveBeenCalledWith('GOAL\nA menu.', [])
     })
 
     /*
@@ -295,9 +257,8 @@ describe('a plan that is running', () => {
                 endRun = resolve
             })
         })
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {startTurn, view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         deliver({type: 'brief-started'})
         deliver({type: 'brief-phase-start', phase: 'compose'})
@@ -308,7 +269,7 @@ describe('a plan that is running', () => {
         endRun()
         await flush()
 
-        expect(startTurn).toHaveBeenCalledWith('GOAL\nA menu.')
+        expect(startTurn).toHaveBeenCalledWith('GOAL\nA menu.', [])
         expect(view.result.current.briefState.isRunning).toBe(false)
         // Nothing broke, so nothing is reported as broken. The panel is drawn on "running or
         // ended", so both have to be false for it to go.
@@ -325,9 +286,8 @@ describe('a plan that is running', () => {
                 endRun = resolve
             })
         })
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         deliver({type: 'brief-started'})
         deliver({type: 'brief-failed', phase: 'compose', reason: 'no verify block'})
@@ -342,9 +302,8 @@ describe('a plan that is running', () => {
 
     // Every phase announces its output. Only the last one is the thing the agent works from.
     it('sends nothing for the phases before the last', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        const {startTurn} = mount('task-1')
-        await flush()
+        const {startTurn, view} = mount('task-1')
+        await plan(view)
 
         deliver({type: 'brief-phase', phase: 'refine', field: 'refined', value: 'GOAL\nA menu.'})
         deliver({type: 'brief-phase', phase: 'research', field: 'research', value: 'FILES'})
@@ -358,9 +317,8 @@ describe('a plan that is running', () => {
      * agent cannot tell that the questions were never asked.
      */
     it('delivers nothing when the run stops or breaks', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {startTurn, view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         deliver({type: 'brief-started'})
         deliver({type: 'brief-phase', phase: 'refine', field: 'refined', value: 'GOAL'})
@@ -385,9 +343,8 @@ describe('a plan that is running', () => {
             if (command === 'run_task_brief') throw new Error('a turn is already running')
             return undefined
         })
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {onError, view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         expect(onError).toHaveBeenCalledWith(expect.stringContaining('a turn is already running'))
         expect(view.result.current.briefState.ended).toEqual({
@@ -403,9 +360,8 @@ describe('a plan that is running', () => {
      * replace "no verify block" with "the plan ended before it wrote a specification".
      */
     it('keeps the first ending it was told', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         deliver({type: 'brief-started'})
         deliver({type: 'brief-failed', phase: 'compose', reason: 'no verify block'})
@@ -425,13 +381,10 @@ describe('a plan that is running', () => {
      * follows the CHAT turn, which a brief never starts, so the only way out was closing the window.
      */
     it('can be stopped by the identifier it was started under', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {view} = mount('task-1')
-        await flush()
+        await plan(view)
 
-        const started = tauri.invoke.mock.calls.find(([command]) => command === 'run_task_brief')
-        const requestId = (started?.[1] as {request: {requestId: number}}).request.requestId
-
+        const requestId = startedRequestId()
         view.result.current.stopBrief()
         await flush()
 
@@ -449,14 +402,13 @@ describe('a plan that is running', () => {
     /*
      * The way out of a failed plan.
      *
-     * The task exists, is named after the ask, and has an empty chat — and the dialog that took the
-     * ask is long gone. Without this the only other thing to do with the task is delete it and type
-     * the same sentence again.
+     * The task exists, is named after the ask, and has an empty chat — and the composer was emptied
+     * when the plan took the ask. Without this the only other thing to do with the task is delete it
+     * and type the same sentence again.
      */
     it('can start the task from the ask the plan was going to work from', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {startTurn, view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         deliver({type: 'brief-started'})
         deliver({type: 'brief-failed', phase: 'compose', reason: 'no verify block'})
@@ -468,16 +420,54 @@ describe('a plan that is running', () => {
         })
         await flush()
 
-        expect(startTurn).toHaveBeenCalledWith('add a pause menu')
+        expect(startTurn).toHaveBeenCalledWith('add a pause menu', [])
         // The panel goes with the run it was reporting on; the task is an ordinary one from here.
         expect(view.result.current.briefState.ended).toBeUndefined()
     })
 
+    /*
+     * The pictures are part of the ask, so they follow it everywhere it goes.
+     *
+     * Three places, and it used to be none of them: the run that reads them, the turn its
+     * specification starts, and the ask handed back when the plan failed. A screenshot left in the
+     * drawer meant a fifteen-minute plan written about a sentence describing a screen nobody looked
+     * at, and a chat turn that then could not see it either.
+     */
+    it('carries the pictures the ask came with, however the plan ends', async () => {
+        const picture = {
+            id: '018f47aa-09d2-7b34-a2d3-8c4e6f123456',
+            name: 'menu.png',
+            mimeType: 'image/png',
+            size: 2
+        }
+        const {startTurn, view} = mount('task-1')
+        act(() => {
+            view.result.current.startPlan('why is this menu off centre', [picture])
+        })
+        await flush()
+
+        expect(tauri.invoke).toHaveBeenCalledWith(
+            'run_task_brief',
+            expect.objectContaining({
+                request: expect.objectContaining({attachments: [picture]}) as unknown
+            })
+        )
+
+        deliver({type: 'brief-started'})
+        deliver({type: 'brief-failed', phase: 'refine', reason: 'the model would not answer'})
+        await flush()
+        act(() => {
+            view.result.current.startWithoutPlan()
+        })
+        await flush()
+
+        expect(startTurn).toHaveBeenCalledWith('why is this menu off centre', [picture])
+    })
+
     // Once, so a second press cannot send the same ask twice.
     it('starts from the ask only once', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
         const {startTurn, view} = mount('task-1')
-        await flush()
+        await plan(view)
 
         act(() => {
             view.result.current.startWithoutPlan()
@@ -486,19 +476,5 @@ describe('a plan that is running', () => {
         await flush()
 
         expect(startTurn).toHaveBeenCalledTimes(1)
-    })
-
-    // The staged start is taken once, so a remount does not begin a fifteen-minute run again.
-    it('does not start again when the workspace remounts', async () => {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
-        const {view} = mount('task-1')
-        await flush()
-        view.unmount()
-
-        mount('task-1')
-        await flush()
-
-        const runs = tauri.invoke.mock.calls.filter(([command]) => command === 'run_task_brief')
-        expect(runs).toHaveLength(1)
     })
 })

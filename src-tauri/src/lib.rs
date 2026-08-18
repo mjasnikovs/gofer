@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
+use unsaved_work::UnsavedWork;
 use workspace::{chat_attachments_path, open_project_storage, project_storage};
 
 pub mod addon;
@@ -78,6 +79,7 @@ mod task_switch;
 /// The catalogue's parameter contract, checked against everything that reads it. Tests only.
 mod tool_drift;
 mod tool_params;
+mod unsaved_work;
 mod workers;
 mod workspace;
 
@@ -382,12 +384,19 @@ fn list_project_tasks(app: AppHandle) -> Result<Vec<TaskRecord>, CommandError> {
 }
 
 #[tauri::command(async)]
-fn merge_task_branch(app: AppHandle, task_id: String) -> Result<MergeTaskResult, CommandError> {
+fn merge_task_branch(
+    app: AppHandle,
+    task_id: String,
+    unsaved_work: Option<UnsavedWork>,
+) -> Result<MergeTaskResult, CommandError> {
     // Merging visits the base branch and comes back, so the files under the editor move twice. The
     // session is stopped first, which also takes Gofer's own two lines back out of `project.godot`
     // before anything is committed.
     let storage = project_storage(&app)?;
     refuse_during_turn()?;
+    // Before any of that: the stop is `get_tree().quit()`, which writes nothing. Work the editor is
+    // holding is settled here or the merge does not start. Absent means nobody has been asked yet.
+    unsaved_work::settle(unsaved_work.unwrap_or_default())?;
     let release = switch_for(&app);
     storage.tasks().merge(&task_id, &storage.switch(&release))
 }

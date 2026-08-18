@@ -9,7 +9,6 @@ import {createManualScheduler, immediateScheduler, setScheduler} from '../../ser
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush} from '../../test/flush'
 import {installBackend} from '../../test/backend'
-import {clearStagedTaskStarts, stageTaskStart} from '../../services/task-start'
 import type {BriefEvent} from '../../models/brief'
 import type {Backend, BackendAnswers} from '../../test/backend'
 
@@ -103,7 +102,6 @@ beforeEach(() => {
 
 afterEach(() => {
     cleanup()
-    clearStagedTaskStarts()
     removeDesktopFake()
     vi.clearAllMocks()
     briefListener = undefined
@@ -137,10 +135,17 @@ function storedTexts(chat: StoredChat | undefined) {
  * going to refuse. The only way out was closing the window.
  */
 describe('Workspace while a plan is running', () => {
-    /** Starts a planned task and reports what the brief was registered as. */
-    async function startPlan() {
-        stageTaskStart('task-1', {prompt: 'add a pause menu', mode: 'planned'})
+    /**
+     * Starts a plan the way the user does — type the ask, press the control beside Send — and
+     * reports what the brief was registered as.
+     */
+    async function startPlan(user: ReturnType<typeof userEvent.setup>) {
         render(<Workspace taskId='task-1' />)
+        await flush()
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.paste('add a pause menu')
+        await user.click(screen.getByRole('button', {name: 'Execute as plan'}))
         await flush()
         const started = tauri.invoke.mock.calls.find(([command]) => command === 'run_task_brief')
         const requestId = (started?.[1] as {request: {requestId: number}}).request.requestId
@@ -150,9 +155,43 @@ describe('Workspace while a plan is running', () => {
         return requestId
     }
 
+    /*
+     * The one moment the choice exists, and the only place it is offered.
+     *
+     * Planning reads the project and writes a specification for the agent to work from, which it can
+     * only do before there is a conversation to work from instead. Pressing Send is the other answer
+     * to the same question, so either press takes the control away.
+     */
+    it('offers the plan control until the first message, and never after', async () => {
+        const user = userEvent.setup()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        expect(await screen.findByRole('button', {name: 'Execute as plan'})).toBeInTheDocument()
+
+        await send(user, 'add a pause menu')
+
+        expect(screen.queryByRole('button', {name: 'Execute as plan'})).not.toBeInTheDocument()
+    })
+
+    // The ask goes with the plan. Left behind it would be a copy waiting to be sent a second time.
+    it('takes the ask out of the composer and plans it', async () => {
+        const user = userEvent.setup()
+        await startPlan(user)
+
+        expect(tauri.invoke).toHaveBeenCalledWith(
+            'run_task_brief',
+            expect.objectContaining({
+                request: expect.objectContaining({prompt: 'add a pause menu'}) as unknown
+            })
+        )
+        expect(tauri.invoke).not.toHaveBeenCalledWith('send_ai_message', expect.anything())
+        expect(screen.queryByRole('button', {name: 'Execute as plan'})).not.toBeInTheDocument()
+    })
+
     it('offers Stop, and stops the plan by the identifier it was started under', async () => {
         const user = userEvent.setup()
-        const requestId = await startPlan()
+        const requestId = await startPlan(user)
 
         expect(screen.getByText('Planning this task')).toBeInTheDocument()
         const stop = await screen.findByRole('button', {name: 'Stop'})
@@ -170,7 +209,7 @@ describe('Workspace while a plan is running', () => {
      */
     it('sends nothing while the plan runs', async () => {
         const user = userEvent.setup()
-        await startPlan()
+        await startPlan(user)
 
         await send(user, 'never mind, do this instead')
 
@@ -597,5 +636,86 @@ describe('Workspace game screenshots', () => {
         await flush()
 
         expect(captureButton()).toHaveAttribute('aria-disabled', 'true')
+    })
+})
+
+/*
+ * A picture is part of the ask, whichever way the ask is sent.
+ *
+ * Planning is the composer's other Send. A user who pastes a screenshot and presses Execute as plan
+ * has said "plan THIS", and every phase after refine reads text — so the picture has to reach the
+ * one worker that reads the raw ask, and the turn the specification starts, or it reaches nothing at
+ * all and the plan is written about a sentence describing a screen nobody looked at.
+ */
+describe('Workspace planning with a picture attached', () => {
+    /** A model that reads images, which is what offers the attach controls at all. */
+    const readsImages: BackendAnswers = {
+        load_settings: () => ({
+            settings: {
+                version: 1,
+                ai: {
+                    connectionType: 'openai-compatible',
+                    name: 'Local AI',
+                    baseUrl: 'http://127.0.0.1:8080/v1',
+                    model: 'local-model',
+                    api: 'openai-completions',
+                    input: ['text', 'image']
+                }
+            },
+            hasApiKey: true
+        })
+    }
+
+    beforeEach(() => {
+        server = installBackend(tauri, {answers: {...readsImages, send_ai_message: runTurn}})
+    })
+
+    /** Attaches the running game's own frame, which is one press and needs no file picker. */
+    async function attachPicture(user: ReturnType<typeof userEvent.setup>) {
+        await user.click(screen.getByRole('button', {name: 'Run Game'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Attach a game screenshot'}))
+        await flush()
+    }
+
+    it('plans the picture with the ask, and sends it with the specification', async () => {
+        const user = userEvent.setup()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await attachPicture(user)
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.paste('why is this menu off centre')
+        await user.click(screen.getByRole('button', {name: 'Execute as plan'}))
+        await flush()
+
+        // The bytes are on disk before the backend is asked to read them by id.
+        expect(tauri.invoke).toHaveBeenCalledWith(
+            'save_chat_attachment',
+            expect.anything() as unknown
+        )
+        const started = tauri.invoke.mock.calls.find(([command]) => command === 'run_task_brief')
+        const request = (started?.[1] as {request: {attachments?: readonly {name: string}[]}})
+            .request
+        expect(request.attachments?.map(attachment => attachment.name)).toEqual([
+            'game-screenshot.png'
+        ])
+
+        announceBrief({
+            type: 'brief-phase',
+            phase: 'compose',
+            field: 'spec',
+            value: 'GOAL\nCentre.'
+        })
+        await flush()
+
+        const turn = sent.at(-1)
+        expect(turn?.messages.at(-1)?.text).toBe('GOAL\nCentre.')
+        expect(
+            (
+                turn?.messages.at(-1) as {attachments?: readonly {name: string}[]} | undefined
+            )?.attachments?.map(attachment => attachment.name)
+        ).toEqual(['game-screenshot.png'])
     })
 })

@@ -31,6 +31,9 @@ import {ChatColumn} from './ChatColumn'
 import {InspectorWorkspace} from './InspectorWorkspace'
 import {MergeConflictDialog} from './MergeConflictDialog'
 import type {MergeConflictMode} from './MergeConflictDialog'
+import {UnsavedWorkDialog} from './UnsavedWorkDialog'
+import {unsavedScenes} from '../../models/unsaved-work'
+import type {UnsavedWork} from '../../models/unsaved-work'
 import {ToolApprovalDialog} from './ToolApprovalDialog'
 import {BriefProgress} from './BriefProgress'
 import {UserQuestionDialog} from './UserQuestionDialog'
@@ -49,7 +52,13 @@ type WorkspaceProps = Readonly<{
     /** Whether a task operation is running, which is when Merge must not be offered. */
     isTaskBusy?: boolean
     onTasksChanged?: () => void
-    onMergeTask?: () => Promise<void>
+    /**
+     * Merges the displayed task.
+     *
+     * The argument is the answer to the question the merge asks about unsaved Godot work. Left out,
+     * a merge that would lose it is refused and names the scenes instead.
+     */
+    onMergeTask?: (unsavedWork?: UnsavedWork) => Promise<void>
     /** Brings the project's branch into the task and answers what clashed. */
     onResolveMerge?: () => Promise<readonly string[]>
     /** Throws away an unfinished resolution merge and leaves the task as it was. */
@@ -139,6 +148,8 @@ export function Workspace({
     const [workspaceError, setWorkspaceError] = useState<string>()
     // The files a merge failure named, which is what the offer about them is drawn from.
     const [mergeOffered, setMergeOffered] = useState<MergeOffer>(NOTHING_TO_OFFER)
+    // The scenes the editor was holding when a merge was refused for them.
+    const [unsaved, setUnsaved] = useState<readonly string[]>([])
     const messageScrollRef = useRef<HTMLElement>(null)
 
     /** Everything that fails outside a turn reports here: the panels, the connection, the images. */
@@ -194,16 +205,11 @@ export function Workspace({
         isEmpty: value => value === ''
     })
     const draft = storedDraft ?? ''
-    // A task made from the new-task dialog does its opening move here: plan it and send the
-    // specification the four phases produce, or put the ask in the composer and send nothing.
-    // Placed below the draft because it writes into it, and a remembered value ignores every write
-    // made before its own read has landed.
-    const {briefState, stopBrief, startWithoutPlan} = useTaskBrief({
+    // Planning is the composer's other way to send a first message: the four phases run against
+    // what was typed, and their specification is the turn.
+    const {briefState, isPlanStarted, startPlan, stopBrief, startWithoutPlan} = useTaskBrief({
         taskId: openTaskId,
-        isChatLoaded,
-        isDraftLoaded: storedDraft !== undefined,
         onStartTurn: start,
-        onDraft: setDraft,
         onError: report
     })
     /*
@@ -252,40 +258,53 @@ export function Workspace({
         }
     }, [chatScroll.scrollIfLocked, hasConversation])
 
+    /**
+     * Puts the drawer's images on disk and answers with what names them from here on.
+     *
+     * Both of the composer's sends go through this, because both take the images with them: the
+     * bytes cross to the backend once and everything after it — the brief, the turn, the stored
+     * row — carries the metadata alone. The drawer is emptied here for the same reason the draft
+     * is emptied beside it: the images have been taken, and a copy left behind is a second send
+     * waiting to happen.
+     */
+    const takeAttachments = async (): Promise<readonly ChatAttachment[]> => {
+        const taken = draftAttachments
+        if (taken.length === 0) return []
+        await Promise.all(
+            taken.map(attachment =>
+                invoke('save_chat_attachment', {
+                    request: {
+                        attachment: {
+                            id: attachment.id,
+                            name: attachment.name,
+                            mimeType: attachment.mimeType,
+                            size: attachment.size
+                        },
+                        data: attachment.data
+                    }
+                })
+            )
+        )
+        addPreviews(
+            Object.fromEntries(taken.map(attachment => [attachment.id, attachment.previewUrl]))
+        )
+        setDraftAttachments([])
+        return taken.map(attachment => ({
+            id: attachment.id,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            size: attachment.size
+        }))
+    }
+
     const submitMessage = async (value: string) => {
         const prompt = value.trim()
         if ((!prompt && draftAttachments.length === 0) || isBusy || !isTauri()) return
         setIsSavingAttachments(true)
         setWorkspaceError(undefined)
         try {
-            await Promise.all(
-                draftAttachments.map(attachment =>
-                    invoke('save_chat_attachment', {
-                        request: {
-                            attachment: {
-                                id: attachment.id,
-                                name: attachment.name,
-                                mimeType: attachment.mimeType,
-                                size: attachment.size
-                            },
-                            data: attachment.data
-                        }
-                    })
-                )
-            )
-            addPreviews(
-                Object.fromEntries(
-                    draftAttachments.map(attachment => [attachment.id, attachment.previewUrl])
-                )
-            )
-            const attachments: readonly ChatAttachment[] = draftAttachments.map(attachment => ({
-                id: attachment.id,
-                name: attachment.name,
-                mimeType: attachment.mimeType,
-                size: attachment.size
-            }))
+            const attachments = await takeAttachments()
             setDraft('')
-            setDraftAttachments([])
             start(prompt, attachments)
         } catch (error) {
             setWorkspaceError(`The images could not be attached: ${commandErrorMessage(error)}`)
@@ -349,14 +368,28 @@ export function Workspace({
         [retry]
     )
 
-    const mergeTask = async () => {
+    /**
+     * Merges, and asks about anything the Godot editor is still holding.
+     *
+     * The first press answers nothing, so a merge that would throw unsaved scenes away comes back
+     * refused and naming them; the dialog then presses this again with what the user chose. Nothing
+     * has moved when that refusal arrives — the editor is still open with the work in it — so the
+     * error line is left alone and the dialog carries the message instead.
+     */
+    const mergeTask = async (unsavedWork?: UnsavedWork) => {
         if (!onMergeTask) return
         setWorkspaceError(undefined)
         setMergeOffered(NOTHING_TO_OFFER)
+        setUnsaved([])
         try {
-            await onMergeTask()
+            await onMergeTask(unsavedWork)
         } catch (error) {
             const failure = toCommandError(error)
+            const holding = unsavedScenes(failure)
+            if (holding.length > 0) {
+                setUnsaved(holding)
+                return
+            }
             setWorkspaceError(`The task could not be merged: ${failure.message}`)
             // Two merge failures have something left to try, and the backend says which files.
             // Everything else is a sentence and nothing to offer.
@@ -456,6 +489,31 @@ export function Workspace({
         }
     }
 
+    /**
+     * Hands the typed ask to the brief instead of to a turn.
+     *
+     * The composer is emptied, because the ask has been taken: the plan holds it from here, and a
+     * plan that fails offers it back rather than leaving a copy behind to be sent twice. The
+     * pictures go with it. A user who pastes a screenshot and presses this has said "plan THIS",
+     * and left in the drawer the picture reached neither the plan nor the turn the specification
+     * starts — the whole run was written about a sentence describing a screen nobody looked at.
+     */
+    const planMessage = async (value: string) => {
+        const prompt = value.trim()
+        if (!prompt || isBusy || !isTauri()) return
+        setIsSavingAttachments(true)
+        setWorkspaceError(undefined)
+        try {
+            const attachments = await takeAttachments()
+            setDraft('')
+            startPlan(prompt, attachments)
+        } catch (error) {
+            setWorkspaceError(`The images could not be attached: ${commandErrorMessage(error)}`)
+        } finally {
+            setIsSavingAttachments(false)
+        }
+    }
+
     const removeAttachment = useCallback((attachmentId: string) => {
         setDraftAttachments(previous => previous.filter(item => item.id !== attachmentId))
     }, [])
@@ -493,6 +551,7 @@ export function Workspace({
             attachClipboardImage,
             changeDraft: setDraft,
             editAttachment,
+            plan: planMessage,
             removeAttachment,
             selectAttachments,
             stop: isBriefRunning ? stopBrief : stop,
@@ -502,6 +561,9 @@ export function Workspace({
             canAttachImages: supportsImages && !isBusy && !isSavingAttachments && isTauri(),
             contextWindow: settings?.ai.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
             isSavingAttachments,
+            // The chat has to have been read before this can mean anything: an unread task reports
+            // no messages, which is the same shape as a task that genuinely has none.
+            isPlanOffered: isChatLoaded && !hasConversation && !isPlanStarted,
             isStreaming: isBusy,
             models,
             supportsImages,
@@ -568,6 +630,18 @@ export function Workspace({
                     <UserQuestionDialog
                         onAnswer={answerQuestion}
                         {...(questions[0] && {prompt: questions[0]})}
+                    />
+                    <UnsavedWorkDialog
+                        scenes={unsaved}
+                        onSave={() => {
+                            void mergeTask('save')
+                        }}
+                        onDiscard={() => {
+                            void mergeTask('discard')
+                        }}
+                        onDismiss={() => {
+                            setUnsaved([])
+                        }}
                     />
                     <MergeConflictDialog
                         conflicts={mergeOffered.paths}

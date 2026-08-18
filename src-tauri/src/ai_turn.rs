@@ -179,6 +179,13 @@ pub(crate) enum WorkerJob {
     Brief {
         /// The raw ask, as the user typed it when they made the task.
         prompt: String,
+        /// The pictures the ask came with, if any.
+        ///
+        /// Only the phase that reads the raw ask is shown them; every phase after it reads that
+        /// phase's text. That is the whole of the plumbing, and it is enough: a screenshot is
+        /// something the ask is ABOUT, so the worker sharpening the ask is the one that has to see
+        /// it, and what it writes down is what the rest of the run works from.
+        images: Vec<AiWorkerImage>,
         /// The project's tracked files, so four workers do not each spend steps discovering them.
         inventory: Option<String>,
     },
@@ -418,6 +425,12 @@ pub struct BriefRequest {
     pub request_id: u64,
     pub task_id: String,
     pub prompt: String,
+    /// The pictures the ask was written beside, already saved by `save_chat_attachment`.
+    ///
+    /// Defaulted, because a plan without one is the ordinary case and every request written before
+    /// this field existed means exactly that.
+    #[serde(default)]
+    pub attachments: Vec<ChatAttachment>,
 }
 
 /// Runs the four phases that produce a task's brief.
@@ -442,6 +455,10 @@ pub(crate) async fn run_brief(
             "A planned task needs something to plan.",
         ));
     }
+    // Held to the same bound a chat message is, and refused before a turn is begun: a request the
+    // run cannot serve should not first take the one provider operation away from everything else.
+    validate_brief_attachments(&request.attachments)
+        .map_err(CommandError::coded("brief_attachments_invalid"))?;
     let turn = AiTurn::begin(request.request_id, stream)?;
     tauri::async_runtime::spawn_blocking(move || {
         let turn = turn;
@@ -457,6 +474,7 @@ pub(crate) async fn run_brief(
             .display()
             .to_string();
         let inventory_root = workspace_path.clone();
+        let images = hydrate_chat_attachments(&app, &request.attachments)?;
 
         // Opened before the worker starts, so a run killed at its first phase still leaves a row
         // saying what was asked and how far it got.
@@ -483,6 +501,7 @@ pub(crate) async fn run_brief(
                 tools: crate::ai_tools::CATALOG,
                 job: WorkerJob::Brief {
                     prompt,
+                    images,
                     inventory: crate::git::tracked_files(std::path::Path::new(&inventory_root)),
                 },
             },
@@ -654,6 +673,26 @@ impl ChatAttachment {
     }
 }
 
+/// The pictures one ask may carry, whether it is sent or planned.
+///
+/// The same ceiling a chat message is held to, and named once so the two cannot drift: a plan is
+/// the first message of a task by another route, and a route that accepted more would be a way
+/// round the limit rather than a feature.
+const MAX_MESSAGE_ATTACHMENTS: usize = 5;
+
+/// The pictures a plan was asked about, checked before a turn is begun for it.
+fn validate_brief_attachments(attachments: &[ChatAttachment]) -> Result<(), String> {
+    if attachments.len() > MAX_MESSAGE_ATTACHMENTS {
+        return Err(format!(
+            "A plan cannot be asked about more than {MAX_MESSAGE_ATTACHMENTS} images"
+        ));
+    }
+    for attachment in attachments {
+        validate_chat_attachment(attachment)?;
+    }
+    Ok(())
+}
+
 fn validate_chat_attachment_id(id: &str) -> Result<(), String> {
     if id.is_empty()
         || id.len() > 64
@@ -677,6 +716,28 @@ fn read_chat_attachment_bytes(
         .map_err(|failure| failure.message)
 }
 
+/// The stored bytes of each attachment, as the worker wants them.
+///
+/// One reader for both jobs. A turn hydrates the attachments hanging off each message and a brief
+/// hydrates the ones hanging off its ask, and neither should own a second copy of "read it, then
+/// base64 it".
+fn hydrate_chat_attachments(
+    app: &AppHandle,
+    attachments: &[ChatAttachment],
+) -> Result<Vec<AiWorkerImage>, String> {
+    attachments
+        .iter()
+        .map(|attachment| {
+            validate_chat_attachment(attachment)?;
+            let bytes = read_chat_attachment_bytes(app, attachment)?;
+            Ok(AiWorkerImage {
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                mime_type: attachment.mime_type.clone(),
+            })
+        })
+        .collect()
+}
+
 fn hydrate_chat_messages(
     app: &AppHandle,
     messages: Vec<ChatMessageInput>,
@@ -684,18 +745,7 @@ fn hydrate_chat_messages(
     messages
         .into_iter()
         .map(|message| {
-            let images = message
-                .attachments
-                .iter()
-                .map(|attachment| {
-                    validate_chat_attachment(attachment)?;
-                    let bytes = read_chat_attachment_bytes(app, attachment)?;
-                    Ok(AiWorkerImage {
-                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                        mime_type: attachment.mime_type.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?;
+            let images = hydrate_chat_attachments(app, &message.attachments)?;
             Ok(AiWorkerMessage {
                 sender: message.sender,
                 text: message.text,
@@ -726,8 +776,13 @@ fn validate_chat_messages(
     }) {
         return Err("Chat messages must contain text or an image".to_owned());
     }
-    if messages.iter().any(|message| message.attachments.len() > 5) {
-        return Err("Chat messages cannot contain more than 5 images".to_owned());
+    if messages
+        .iter()
+        .any(|message| message.attachments.len() > MAX_MESSAGE_ATTACHMENTS)
+    {
+        return Err(format!(
+            "Chat messages cannot contain more than {MAX_MESSAGE_ATTACHMENTS} images"
+        ));
     }
     let mut total_text_bytes = 0_usize;
     for message in &messages {
@@ -1346,6 +1401,7 @@ mod tests {
         let request = AiWorkerRequest {
             job: WorkerJob::Brief {
                 prompt: "add a pause menu".to_owned(),
+                images: Vec::new(),
                 inventory: None,
             },
             ..worker_request()
@@ -1353,6 +1409,8 @@ mod tests {
         let encoded = serde_json::to_value(&request).expect("serialize the request");
         assert_eq!(encoded["mode"], serde_json::json!("brief"));
         assert_eq!(encoded["prompt"], serde_json::json!("add a pause menu"));
+        // Empty is still sent, so the worker reads a list either way rather than a list or nothing.
+        assert_eq!(encoded["images"], serde_json::json!([]));
 
         // A brief carries none of the turn's own fields — no transcript, no memory, and above
         // all no system prompt: its phases carry their own instructions, and the request used to
@@ -1365,6 +1423,34 @@ mod tests {
         let turn = serde_json::to_value(worker_request()).expect("serialize the request");
         assert_eq!(turn["mode"], serde_json::json!("turn"));
         assert!(turn.get("messages").is_some(), "{turn}");
+    }
+
+    /*
+     * The pictures the ask was written beside, spelled the way the worker reads them.
+     *
+     * A screenshot is what a plan is often ABOUT. Sent under a name the worker does not read, the
+     * phases run on the sentence alone — and nothing anywhere reports that the picture was dropped,
+     * because a missing key is `undefined` and every reader has a branch for that.
+     */
+    #[test]
+    fn a_brief_carries_the_pictures_its_ask_came_with() {
+        let request = AiWorkerRequest {
+            job: WorkerJob::Brief {
+                prompt: "why is this menu off centre".to_owned(),
+                images: vec![AiWorkerImage {
+                    data: "aGk=".to_owned(),
+                    mime_type: "image/png".to_owned(),
+                }],
+                inventory: None,
+            },
+            ..worker_request()
+        };
+
+        let encoded = serde_json::to_value(&request).expect("serialize the request");
+        assert_eq!(
+            encoded["images"],
+            serde_json::json!([{"data": "aGk=", "mimeType": "image/png"}])
+        );
     }
 
     /// Every turn-only field, spelled the way the worker reads it.
@@ -2017,6 +2103,34 @@ mod tests {
                 .contains("256 KiB")
         );
         assert!(validate_agent_messages(&Some(serde_json::json!({"role": "user"}))).is_err());
+    }
+
+    /*
+     * A plan is the first message of a task by another route, so it is held to the same ceiling.
+     *
+     * A route that took more pictures than Send does would not be a feature — it would be the way
+     * round the limit, reached by pressing the other button.
+     */
+    #[test]
+    fn a_plan_is_asked_about_no_more_pictures_than_a_message_carries() {
+        let five = vec![chat_attachment(); MAX_MESSAGE_ATTACHMENTS];
+        assert!(validate_brief_attachments(&five).is_ok());
+
+        let six = vec![chat_attachment(); MAX_MESSAGE_ATTACHMENTS + 1];
+        assert!(
+            validate_brief_attachments(&six)
+                .unwrap_err()
+                .contains("more than 5 images")
+        );
+
+        // And each of them is the same untrusted metadata a message's is, checked the same way.
+        let mut unsafe_id = chat_attachment();
+        unsafe_id.id = "../scene".to_owned();
+        assert!(
+            validate_brief_attachments(&[unsafe_id])
+                .unwrap_err()
+                .contains("ID is invalid")
+        );
     }
 
     #[test]

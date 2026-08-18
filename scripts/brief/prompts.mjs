@@ -58,7 +58,24 @@ const PRESERVE_EXISTING =
     + 'Never write a constraint that empties, replaces wholesale, or reduces an existing file to a '
     + 'fixed minimal set. Something already in the project is never scope creep.'
 
-export function refinePrompt(raw, {existingFiles, planContext} = {}) {
+/**
+ * Said when the ask comes with pictures, because this is the last step that can see them.
+ *
+ * Every phase after refine reads refine's text and nothing else. A screenshot that is not written
+ * down here is gone — and the model, asked for a self-contained statement, will otherwise write one
+ * that quietly assumes the reader is looking at the same screen it is.
+ */
+function picturesNote(count) {
+    if (!count) return ''
+    return (
+        `This task comes with ${String(count)} attached image${count === 1 ? '' : 's'}. They are `
+        + 'part of the task, not decoration. You are the only step that can see them: describe what '
+        + 'they show, in words, inside GOAL and CONSTRAINTS. Anything you leave in the picture is '
+        + 'lost.\n\n'
+    )
+}
+
+export function refinePrompt(raw, {existingFiles, planContext, pictures = 0} = {}) {
     return (
         'Rewrite one development task as an unambiguous, self-contained statement. You are preparing '
         + 'work for a Godot project. Read files if you need to; change nothing.\n\n'
@@ -72,6 +89,7 @@ export function refinePrompt(raw, {existingFiles, planContext} = {}) {
         + '- One per line: something you could not settle from the task text alone.\n'
         + '- Write "(none)" if there are none.\n\n'
         + 'Do not write code. Do not restate the task. Do not add sections.\n\n'
+        + picturesNote(pictures)
         + block(
             'PLAN CONTEXT — the other steps of this plan, which this task must NOT do:',
             planContext

@@ -14,6 +14,7 @@ import {Heading, Text} from '@astryxdesign/core/Text'
 import {Thumbnail} from '@astryxdesign/core/Thumbnail'
 import CameraIcon from '@heroicons/react/24/outline/CameraIcon'
 import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
+import MapIcon from '@heroicons/react/24/outline/MapIcon'
 import PhotoIcon from '@heroicons/react/24/outline/PhotoIcon'
 import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
 import {ImageScratchpad} from './ImageScratchpad'
@@ -357,6 +358,34 @@ function ComposerFooter() {
 }
 
 /**
+ * Plans the first message instead of sending it.
+ *
+ * Offered beside Send and only there, because that is the one moment the choice exists: planning
+ * reads the project and writes a specification for the agent to work from, and it can only do that
+ * before there is a conversation to work from instead. Pressing Send is the other answer to the same
+ * question, so either press takes the control away — a task gets one opening move, not two.
+ *
+ * `secondary`, because Send is the primary action here and stays it. The plan is the longer road and
+ * the user has to mean it; nothing about the screen should make it the press they fall into.
+ */
+function PlanButton() {
+    const {state, actions, meta} = useComposer()
+    return (
+        <Button
+            label='Execute as plan'
+            variant='secondary'
+            size='md'
+            icon={<Icon icon={MapIcon} />}
+            isDisabled={meta.isStreaming || meta.isSavingAttachments || !state.draft.trim()}
+            tooltip='Read the project and write a specification first. Takes several minutes.'
+            onClick={() => {
+                void actions.plan(state.draft)
+            }}
+        />
+    )
+}
+
+/**
  * One attribute corrected on Astryx's own editable element, because a trigger changes its role.
  *
  * `ChatComposerInput` writes `aria-multiline="true"` on the editable and then, when it is given
@@ -441,6 +470,7 @@ export function WorkspaceComposer() {
                         }}
                     />
                 }
+                {...(meta.isPlanOffered && {sendActions: <PlanButton />})}
                 sendButton={
                     <ChatSendButton
                         isStopShown={meta.isStreaming}

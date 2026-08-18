@@ -211,3 +211,70 @@ test('a brief with nothing to plan never starts', async () => {
     )
     assert.deepEqual(events, [])
 })
+
+/*
+ * A picture pasted with the ask is part of the ask.
+ *
+ * Only refine is shown it, and that is the design rather than a shortcut: the three phases after it
+ * read the text it wrote, so the step that reads the raw ask is the only one that can look at what
+ * the ask is about. It is also the only step that can write down what it saw — see `picturesNote`.
+ */
+test('the pictures the ask came with reach the phase that reads the ask', async () => {
+    const world = worldSaying(SPEC)
+    world.createModelContext = () => ({
+        models: {},
+        model: 'fake',
+        subagent: {model: {input: ['text', 'image']}, thinkingLevel: 'none'},
+        streamOptions: {}
+    })
+    const shown = []
+    world.runSubagentOutcome = async ({prompt, images}) => {
+        shown.push({images, prompt})
+        return {kind: 'ok', text: SPEC, usage: {input: 10, output: 5}}
+    }
+
+    const {promise} = run({world, images: [{data: 'aGk=', mimeType: 'image/png'}]})
+    await promise
+
+    const withPictures = shown.filter(call => call.images.length > 0)
+    assert.equal(withPictures.length, 1, 'exactly one worker is shown the pictures')
+    assert.deepEqual(withPictures[0].images, [{type: 'image', data: 'aGk=', mimeType: 'image/png'}])
+    // And it is told they are there, because nothing after it can see them.
+    assert.match(withPictures[0].prompt, /1 attached image/u)
+})
+
+/*
+ * A model that cannot read a picture is not handed one.
+ *
+ * The sub-agent's model is the user's own choice and need not be the model the composer offered the
+ * paperclip for. A text-only model does not ignore an image — the provider refuses the request — so
+ * an unchecked picture would end the first phase of a fifteen-minute run. Said out loud, because a
+ * plan written without the screenshot it was asked about is wrong in a way only the user can see.
+ */
+test('a plan whose model cannot read a picture says so instead of failing', async () => {
+    const world = worldSaying(SPEC)
+    world.createModelContext = () => ({
+        models: {},
+        model: 'fake',
+        subagent: {model: {input: ['text']}, thinkingLevel: 'none'},
+        streamOptions: {}
+    })
+    const shown = []
+    world.runSubagentOutcome = async ({images}) => {
+        shown.push(images)
+        return {kind: 'ok', text: SPEC, usage: {input: 10, output: 5}}
+    }
+
+    const {events, promise} = run({world, images: [{data: 'aGk=', mimeType: 'image/png'}]})
+    await promise
+
+    assert.ok(
+        shown.every(images => images.length === 0),
+        'no worker is handed a picture its model cannot read'
+    )
+    const logs = events.filter(event => event.type === 'brief-log')
+    assert.ok(
+        logs.some(event => /cannot read images/u.test(event.message)),
+        `expected the run to say the pictures were left out, got ${JSON.stringify(logs)}`
+    )
+})

@@ -588,6 +588,7 @@ export function eventProgress(emit, type, extra = {}) {
  */
 async function attemptSubagent({
     prompt,
+    images = [],
     systemPrompt = CHILD_SYSTEM_PROMPT,
     toolNames = SUBAGENT_TOOL_NAMES,
     workspacePath,
@@ -694,7 +695,7 @@ async function attemptSubagent({
 
     try {
         silence.start()
-        await agent.prompt(prompt)
+        await agent.prompt(prompt, images)
         // Asked before anything else, and never retried: a stopped turn is the user's decision, not
         // a fault, and asking again would spend the machine they just asked to stop spending.
         if (signal?.aborted) throw new SubagentStopped('the turn was stopped')
@@ -824,6 +825,13 @@ function isWorthAnotherAttempt(failure, model) {
  */
 export async function runSubagentOutcome({
     prompt,
+    /**
+     * The pictures the ask is about, as `{type, data, mimeType}` beside the text.
+     *
+     * Empty for every caller but one. A brief's refine worker is asked about a screenshot the user
+     * pasted, and a picture cannot be described into a prompt by the code passing it along.
+     */
+    images = [],
     systemPrompt = CHILD_SYSTEM_PROMPT,
     toolNames = SUBAGENT_TOOL_NAMES,
     workspacePath,
@@ -855,6 +863,7 @@ export async function runSubagentOutcome({
                 kind: 'ok',
                 ...(await attemptSubagent({
                     prompt,
+                    images,
                     systemPrompt,
                     toolNames,
                     workspacePath,

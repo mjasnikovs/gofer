@@ -19,6 +19,8 @@
         {"command": "session.undo", "handler": "_undo"},
         {"command": "session.redo", "handler": "_redo"},
         {"command": "session.answer_dialog", "handler": "_session_answer_dialog"},
+        {"command": "session.get_unsaved_scenes", "handler": "_session_unsaved_scenes"},
+        {"command": "session.save_all_scenes", "handler": "_session_save_all_scenes"},
         {"command": "project.get_settings", "handler": "_project_settings"},
         {"command": "project.search_settings", "handler": "_project_search_settings"},
         {"command": "project.get_setting", "handler": "_project_get_setting"},

@@ -12,6 +12,7 @@ import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import type {PendingChange, TaskSummary} from '../models/app'
 import type {BriefEvent, BriefRun, UserQuestionPrompt, UserQuestionSettled} from '../models/brief'
 import type {HealthRemedyRequest, HealthReport} from '../models/health'
+import type {UnsavedWork} from '../models/unsaved-work'
 import type {
     DeleteWorkspacePathRequest,
     EditWorkspaceFileRequest,
@@ -190,7 +191,7 @@ export type DesktopCommandMap = Readonly<{
         void
     >
     logout_chatgpt: CommandSpec<undefined, void>
-    merge_task_branch: CommandSpec<{taskId: string}, unknown>
+    merge_task_branch: CommandSpec<{taskId: string; unsavedWork?: UnsavedWork}, unknown>
     move_workspace_path: CommandSpec<{request: MoveWorkspacePathRequest}, void>
     open_script_document: CommandSpec<{request: OpenScriptRequest}, ScriptDocument>
     pending_project_changes: CommandSpec<undefined, readonly PendingChange[]>

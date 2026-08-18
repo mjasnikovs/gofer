@@ -1,4 +1,18 @@
 import '@testing-library/jest-dom/vitest'
+import {noInterval, setIntervalScheduler} from '../services/clock'
+
+/*
+ * No poll comes round on its own, in any test, unless that test asks for one.
+ *
+ * A repeating timer is not a delay a test can wait out — it fires again, and what it does the
+ * second time depends on how long everything else took. The session reconcile is the one that bit:
+ * it runs every second, and on a machine busy enough for a test to spend a second between rendering
+ * a panel and clicking it, the poll had already turned the panel offline and disabled the control
+ * the click was aimed at. Nothing in the test said so, and it passed alone every time.
+ *
+ * A test that wants the second tick says so with `setIntervalScheduler`.
+ */
+setIntervalScheduler(noInterval)
 
 class ResizeObserverStub implements ResizeObserver {
     disconnect() {

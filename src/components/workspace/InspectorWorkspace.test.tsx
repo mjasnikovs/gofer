@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {act, cleanup, render, screen, waitFor, within} from '@testing-library/react'
+import {act, cleanup, render, screen, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {InspectorWorkspace} from './InspectorWorkspace'
@@ -7,9 +7,15 @@ import {ChatReferenceContext} from '../../hooks/useChatReferences'
 import {RECONCILE_MS} from '../../hooks/useGodotSession'
 import type {ChatReference} from '../../utils/chat-references'
 import type {MonacoStubState} from '../../test/monaco-stub'
-import {immediateScheduler, setScheduler} from '../../services/clock'
+import {
+    immediateScheduler,
+    noInterval,
+    setIntervalScheduler,
+    setScheduler,
+    timerInterval
+} from '../../services/clock'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
-import {flush} from '../../test/flush'
+import {flush, flushUntil} from '../../test/flush'
 import {FRAME, ICON_PNG, MAIN_SCENE, SCRIPT, installBackend} from '../../test/backend'
 import type {BackendOptions} from '../../test/backend'
 
@@ -131,6 +137,9 @@ beforeEach(() => {
      */
     setScheduler(immediateScheduler)
     installDesktopFake(tauri)
+    // The setup file leaves every poll switched off; the two tests below that are ABOUT the tick
+    // turn it back on for themselves. Restated here because `afterEach` restores it.
+    setIntervalScheduler(noInterval)
     narrowViewport(false)
     editor.state?.reset()
 })
@@ -142,6 +151,18 @@ afterEach(() => {
     vi.useRealTimers()
     vi.clearAllMocks()
 })
+
+/**
+ * Turns the session reconcile back on, for the two tests whose subject IS the tick.
+ *
+ * Every other test runs with no poll at all — see `src/test/setup.ts`. Here the interval is put
+ * back on Vitest's fake clock, so the tick happens when the test says it does rather than when the
+ * machine gets round to it.
+ */
+function driveTheTick() {
+    vi.useFakeTimers({shouldAdvanceTime: true})
+    setIntervalScheduler(timerInterval)
+}
 
 describe('InspectorWorkspace', () => {
     it('frames the explorer, centre, inspector, and bottom regions', async () => {
@@ -188,7 +209,7 @@ describe('InspectorWorkspace', () => {
      * only thing standing between the death and the screen is one tick of the reconcile.
      */
     it('stops presenting an editor whose process is gone, within one tick', async () => {
-        vi.useFakeTimers({shouldAdvanceTime: true})
+        driveTheTick()
         const server = backend()
         const user = userEvent.setup()
         await renderWorkspace()
@@ -246,7 +267,7 @@ describe('InspectorWorkspace', () => {
      * brought up was on screen, and the workspace still offered to start one, until a reload.
      */
     it('picks up the session it did not start itself', async () => {
-        vi.useFakeTimers({shouldAdvanceTime: true})
+        driveTheTick()
         const server = backend()
         await renderWorkspace()
 
@@ -294,11 +315,11 @@ describe('InspectorWorkspace', () => {
         await user.click(startSessionButton())
 
         // The second subscription is the event worth waiting on, and it lands behind the start
-        // call rather than with it. A single flush was betting one macrotask covers that chain,
-        // which it does not once the suite is loaded enough to delay the click's own dispatch.
-        await waitFor(() => {
-            expect(subscriptions()).toBe(2)
-        })
+        // call rather than with it. One flush was betting a single macrotask covers that chain; a
+        // `waitFor` then bet a 1000 ms budget on it, which a loaded suite is exactly what defeats.
+        // Flushed until it lands instead: as many macrotasks as the chain has links, and no clock.
+        await flushUntil(() => subscriptions() === 2)
+        expect(subscriptions()).toBe(2)
     })
 
     /**
@@ -322,11 +343,12 @@ describe('InspectorWorkspace', () => {
             })
         )
 
-        // The read reaching the stopped session is the event worth waiting on. A fixed flush was
-        // waiting a fixed amount instead, and under a loaded suite the click had not dispatched yet.
-        await waitFor(() => {
-            expect(server.log.calls.length).toBeGreaterThan(before)
-        })
+        // The read reaching the stopped session is the event worth waiting on, and it is a chain
+        // rather than a moment: the click, the read it starts, and the answer that comes back
+        // saying the session is gone. Flushed until it lands, so the wait is counted in macrotasks
+        // rather than in milliseconds a loaded machine spends elsewhere.
+        await flushUntil(() => server.log.calls.length > before)
+        expect(server.log.calls.length).toBeGreaterThan(before)
         await act(async () => undefined)
         expect(screen.queryByText('Player')).not.toBeInTheDocument()
         expect(screen.queryByText('The scene tree could not be read')).not.toBeInTheDocument()

@@ -30,7 +30,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:c3fa6b6601d7f517
+// GENERATED-BEGIN command-names sha256:83ec7404f57dd9d3
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -38,6 +38,8 @@ export type GodotCommandName =
     | 'session.undo'
     | 'session.redo'
     | 'session.answer_dialog'
+    | 'session.get_unsaved_scenes'
+    | 'session.save_all_scenes'
     | 'project.get_settings'
     | 'project.search_settings'
     | 'project.get_setting'

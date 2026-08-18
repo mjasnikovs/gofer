@@ -119,14 +119,14 @@ afterEach(() => {
 })
 
 /**
- * Makes a task the way the sidebar does, without planning it: open the dialog, skip the plan.
+ * Makes a task the way the sidebar does.
  *
- * Skipping is the path that opens a chat, which is what everything below is about. The dialog is
- * mounted only while it is open, so its own title never competes with the control that opens it.
+ * One press. The dialog only exists to ask about files loose in the checkout, and the fake backend
+ * below reports none — so with nothing to ask, New task makes one on the spot and opens its chat.
  */
 const createTask = async () => {
     await userEvent.click(screen.getByText('New task'))
-    await userEvent.click(screen.getByRole('button', {name: 'Skip planning'}))
+    await flush()
 }
 
 describe('application router', () => {
@@ -378,6 +378,70 @@ describe('the application shell', () => {
         expect(prompt).toContain('scenes/Game.tscn')
         expect(prompt).toContain('scripts/game.gd')
         expect(prompt).toContain('<<<<<<<')
+    })
+
+    /**
+     * The warning the merge never gave.
+     *
+     * Merging stops the Godot editor, and the stop is the editor's own quit — it saves nothing and
+     * asks nothing. A user painting a tilemap pressed Merge and lost the work with no warning
+     * anywhere. The backend now refuses that merge and names the scenes; this is the chain from
+     * there to the editor writing them and the merge going through.
+     */
+    it('asks about work the editor is holding and saves it before merging', async () => {
+        answerAsDesktop()
+        const answer = tauri.invoke.getMockImplementation()
+        let asked = false
+        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
+            if (command === 'merge_task_branch' && !asked) {
+                asked = true
+                throw coded('godot_unsaved_scenes', 'The Godot editor is still holding changes', {
+                    scenes: ['res://levels/forest.tscn']
+                })
+            }
+            return answer?.(command, arguments_)
+        })
+        await openAt('/tasks/task-1')
+
+        await userEvent.click(screen.getByRole('button', {name: 'Merge task'}))
+        await flush()
+
+        // Named, not counted: which scene is unsaved is what decides the answer.
+        expect(screen.getByText(/res:\/\/levels\/forest\.tscn/u)).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', {name: 'Save and merge'}))
+        await flush()
+
+        expect(tauri.invoke).toHaveBeenCalledWith('merge_task_branch', {
+            taskId: 'task-1',
+            unsavedWork: 'save'
+        })
+    })
+
+    /** The other answer, which is the one that loses the work — so it has to be the user's. */
+    it('merges without saving when that is what the user chose', async () => {
+        answerAsDesktop()
+        const answer = tauri.invoke.getMockImplementation()
+        let asked = false
+        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
+            if (command === 'merge_task_branch' && !asked) {
+                asked = true
+                throw coded('godot_unsaved_scenes', 'The Godot editor is still holding changes', {
+                    scenes: ['res://levels/forest.tscn']
+                })
+            }
+            return answer?.(command, arguments_)
+        })
+        await openAt('/tasks/task-1')
+
+        await userEvent.click(screen.getByRole('button', {name: 'Merge task'}))
+        await flush()
+        await userEvent.click(screen.getByRole('button', {name: 'Merge without saving'}))
+        await flush()
+
+        expect(tauri.invoke).toHaveBeenCalledWith('merge_task_branch', {
+            taskId: 'task-1',
+            unsavedWork: 'discard'
+        })
     })
 
     /** A failure that is not a conflict has nothing to offer, so nothing is offered. */

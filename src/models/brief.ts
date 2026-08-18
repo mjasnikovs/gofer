@@ -8,14 +8,6 @@
  */
 
 /**
- * How a new task opens.
- *
- * `planned` runs the four phases and makes their specification the first message. `draft` puts the
- * ask in the composer and sends nothing, which is the task the user is about to type into.
- */
-export type TaskMode = 'planned' | 'draft'
-
-/**
  * The phases, in the order they run.
  *
  * Hand-written here and reconciled against `scripts/brief/catalogue.mjs` by

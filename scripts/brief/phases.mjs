@@ -69,6 +69,11 @@ async function ask(phase, deps, spec) {
 /**
  * The raw ask, sharpened into a GOAL and CONSTRAINTS the later phases can scope by.
  *
+ * The one phase shown the pictures the ask came with, because it is the one that reads the ask
+ * itself — the three after it read what this one wrote. That is enough: a screenshot is something
+ * the ask is ABOUT, and what this phase writes down about it is what the rest of the run works
+ * from.
+ *
  * Kept even though it costs a whole model call, because the three phases after it read a shape rather
  * than a sentence: the research workers bound themselves by the GOAL, and `scopedGoal` cuts the
  * tooling worker's view at its first bullet. Handed a one-line ask instead, they have nothing to
@@ -78,12 +83,15 @@ async function ask(phase, deps, spec) {
  * so a refine that could not settle is better replaced by the raw text than allowed to end the run.
  */
 export async function refine(raw, deps = {}) {
+    const pictures = deps.images ?? []
     const verdict = await ask('refine', deps, {
         label: 'refine',
         toolNames: ['read'],
+        images: pictures,
         prompt: refinePrompt(raw, {
             existingFiles: deps.existingFiles,
-            planContext: deps.planContext
+            planContext: deps.planContext,
+            pictures: pictures.length
         })
     })
     if (verdict.kind === 'ok') return verdict.text

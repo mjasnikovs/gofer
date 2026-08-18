@@ -577,7 +577,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
     if declared.has("_gofer_error"):
         return declared
 
-# GENERATED-BEGIN dispatch-table sha256:d0e6f1004a2760b5
+# GENERATED-BEGIN dispatch-table sha256:3a410dce9fbcd6f9
     match command:
         "session.get_state":
             return _session_state()
@@ -591,6 +591,10 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _redo()
         "session.answer_dialog":
             return _session_answer_dialog(params)
+        "session.get_unsaved_scenes":
+            return _session_unsaved_scenes()
+        "session.save_all_scenes":
+            return _session_save_all_scenes()
         "project.get_settings":
             return _project_settings()
         "project.search_settings":
@@ -1300,6 +1304,33 @@ func _session_state() -> Dictionary:
 func _session_quit() -> Dictionary:
     _quit_countdown = 2
     return {"quitting": true}
+
+## The scenes the editor is holding changes to that are not on disk.
+##
+## The editor's own answer, not Gofer's. `_scene_dirty` counts the mutations Gofer made, so a scene
+## a person painted a tilemap onto is clean by it, and every path that stops the editor — a task
+## switch, a merge — threw that work away without a word.
+func _session_unsaved_scenes() -> Dictionary:
+    return {"scenes": Array(EditorInterface.get_unsaved_scenes())}
+
+## Writes every open scene the editor is holding changes to, and answers with what it wrote.
+##
+## `save_all_scenes` returns nothing, so what actually landed is read back out of the editor rather
+## than assumed: a scene still unsaved afterwards is the one case a caller about to move the
+## checkout must not be told went fine.
+func _session_save_all_scenes() -> Dictionary:
+    var before := Array(EditorInterface.get_unsaved_scenes())
+    EditorInterface.save_all_scenes()
+    var left := Array(EditorInterface.get_unsaved_scenes())
+    if not left.is_empty():
+        return Params.error(
+            "scene_save_failed",
+            "The editor still holds unsaved changes to %s after saving every open scene."
+            % ", ".join(PackedStringArray(left)),
+            {"scenes": left}
+        )
+    _scene_dirty = false
+    return {"saved": before}
 
 ## Presses a button on the dialog the editor is waiting on, exactly as a person would.
 ##

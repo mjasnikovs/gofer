@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useMemo, useReducer, useRef} from 'react'
-import {wait} from '../services/clock'
+import {repeat, wait} from '../services/clock'
 import {isTauri, listen} from '../services/desktop'
 import {
     callGodot,
@@ -158,6 +158,13 @@ export function useGodotSession({onError}: GodotSessionOptions): EditorSession {
      * window's back, and the copy said offline over a running editor until the renderer reloaded.
      * Asking on a tick is also how an editor that exited on its own is noticed: `get_session` is
      * where Rust looks for that, and it only looks when it is called.
+     *
+     * The tick comes from the shared clock rather than from `setInterval`, like every other delay
+     * in Gofer. It was the one poll that did not, and a real one-second timer inside a test is a
+     * race the test cannot see: a panel that had been offline for a whole second by the time a
+     * click landed disabled the control the click was aimed at, and the test failed on how busy
+     * the machine was. The first reconcile is called here rather than left to the tick, so a test
+     * still discovers the session it starts without asking for a poll at all.
      */
     useEffect(() => {
         if (!isTauri()) return
@@ -184,10 +191,10 @@ export function useGodotSession({onError}: GodotSessionOptions): EditorSession {
         }
 
         void reconcile()
-        const timer = setInterval(() => void reconcile(), RECONCILE_MS)
+        const stopReconciling = repeat(() => void reconcile(), RECONCILE_MS)
         return () => {
             isCancelled = true
-            clearInterval(timer)
+            stopReconciling()
         }
     }, [subscribe])
 

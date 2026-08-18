@@ -1322,25 +1322,51 @@ mod tests {
 
     #[test]
     fn correlates_out_of_order_responses() {
-        let server = start_fake_server(|message, writer| {
+        /*
+         * The stack trace request, held until the one that overtakes it has been sent.
+         *
+         * A response cannot arrive out of order until the request it overtakes exists. This used to
+         * answer `threads` the moment `stackTrace` arrived, guessing the sequence number the client
+         * was about to use — so on a loaded machine the reply reached the reader before
+         * `start_request` had registered anything under it, the reader dropped it as a response to
+         * a timed-out request, which is exactly what it looks like, and the test spent its two
+         * seconds waiting for a reply that had already been thrown away.
+         */
+        let mut stashed_trace: Option<u64> = None;
+        let server = start_fake_server(move |message, writer| {
             match message["command"].as_str().unwrap_or_default() {
                 "initialize" => handshake_handler(message, writer),
-                // Answer threads first, then the stashed stackTrace with its older seq.
                 "stackTrace" => {
+                    stashed_trace = message["seq"].as_u64();
+                    FakeAction::Ignore
+                }
+                // Both replies once both requests are in, newest first: the older stackTrace is
+                // answered last and has to be correlated by its sequence number rather than by
+                // arrival.
+                "threads" => {
                     let threads = json!({
                         "seq": 901,
                         "type": "response",
-                        "request_seq": message["seq"].as_u64().expect("seq") + 1,
+                        "request_seq": message["seq"].as_u64().expect("seq"),
                         "command": "threads",
                         "success": true,
                         "body": {"threads": [{"id": 1, "name": "Main"}]}
                     });
                     write_message(writer, &threads).expect("write threads reply");
-                    FakeAction::Result(json!({"stackFrames": [
-                        {"id": 10, "name": "_tick", "line": 9, "column": 2,
-                         "source": {"path": "/project/scripts/main.gd"}},
-                        {"id": 11, "name": "_process", "line": 6, "column": 2}
-                    ]}))
+                    let trace = json!({
+                        "seq": 902,
+                        "type": "response",
+                        "request_seq": stashed_trace.expect("the stack trace request arrived first"),
+                        "command": "stackTrace",
+                        "success": true,
+                        "body": {"stackFrames": [
+                            {"id": 10, "name": "_tick", "line": 9, "column": 2,
+                             "source": {"path": "/project/scripts/main.gd"}},
+                            {"id": 11, "name": "_process", "line": 6, "column": 2}
+                        ]}
+                    });
+                    write_message(writer, &trace).expect("write stack trace reply");
+                    FakeAction::Ignore
                 }
                 _ => FakeAction::Ignore,
             }

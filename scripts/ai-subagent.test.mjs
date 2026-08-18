@@ -466,6 +466,36 @@ test('each ending names its cause as a tag', async context => {
     assert.match(overran.reason, /used all 3 of its steps/u)
 })
 
+/*
+ * A delegation can be asked about a picture.
+ *
+ * One caller needs it — a brief's refine worker, asked about the screenshot the user pasted with the
+ * ask — and a picture is the one thing the code passing an ask along cannot describe for it. Pinned
+ * on the request rather than on the call, because what matters is that the image reaches the model
+ * as content beside the text and not as a parameter something quietly dropped.
+ */
+test('a delegation is asked about the pictures it was given', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const models = scriptedModels([{text: 'the menu is off centre'}])
+
+    const outcome = await runSubagentOutcome({
+        progress: noProgress,
+        prompt: 'What is wrong with this screen?',
+        images: [{type: 'image', data: 'aGk=', mimeType: 'image/png'}],
+        workspacePath: workspace.path,
+        models,
+        model
+    })
+
+    assert.equal(outcome.kind, 'ok')
+    const asked = models.contexts[0].messages.at(-1)
+    assert.deepEqual(asked.content, [
+        {type: 'text', text: 'What is wrong with this screen?'},
+        {type: 'image', data: 'aGk=', mimeType: 'image/png'}
+    ])
+})
+
 test('an answered delegation still reports what it cost', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)

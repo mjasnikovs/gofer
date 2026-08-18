@@ -2,43 +2,28 @@ import {useCallback, useEffect, useRef, useState} from 'react'
 import {EMPTY_BRIEF_STATE, SPECIFICATION_FIELD, applyBriefEvent, endBriefRun} from '../models/brief'
 import {invoke} from '../services/desktop'
 import {runTaskBrief, watchBrief} from '../services/brief'
-import {peekTaskStart, takeTaskStart} from '../services/task-start'
 import {setTurnRunning} from '../services/turn-activity'
 import {commandErrorMessage} from '../utils/command-error'
 import type {BriefState} from '../models/brief'
+import type {ChatAttachment} from '../models/chat'
+
+/** What a plan was asked to work from: the sentence, and the pictures beside it. */
+type PlannedAsk = Readonly<{prompt: string; attachments: readonly ChatAttachment[]}>
 
 type TaskBriefOptions = Readonly<{
     /** The task this workspace is drawing, or nothing while there is none. */
     taskId?: string | undefined
-    /**
-     * Whether the task's stored conversation has been read yet.
-     *
-     * Load-bearing, not a nicety. Reading the chat REPLACES what the runner holds, so a turn started
-     * before the read lands is thrown away when it does — the message vanishes, the task keeps the
-     * name "New task", and nothing anywhere reports a failure.
-     */
-    isChatLoaded: boolean
-    /**
-     * Whether the task's remembered draft has been read yet.
-     *
-     * The same rule, on the other value this touches. A remembered value refuses every write until
-     * its own read has answered, so a draft handed over before then is dropped without a word — and
-     * the ask the user typed into the dialog would simply not be there when the composer appeared.
-     */
-    isDraftLoaded: boolean
     /** Sends the task's first message. The brief's output goes through the same path a user does. */
-    onStartTurn: (prompt: string) => void
-    /** Puts the dialog's ask in the composer, unsent. What "Skip planning" leaves behind. */
-    onDraft: (prompt: string) => void
+    onStartTurn: (prompt: string, attachments: readonly ChatAttachment[]) => void
     onError: (message: string) => void
 }>
 
 /**
- * Runs a newly created task's opening move, and shows a brief while one is running.
+ * Runs a task's brief, and shows one while it runs.
  *
- * Two modes reach this from the new-task dialog. A planned task runs the four phases first, and its
- * first message is their output. A skipped one puts the ask in the composer and sends nothing — the
- * user pressed Skip planning to go and type, so the last thing to do is type for them.
+ * The ask comes from the composer, because that is where the user writes. Planning is an alternative
+ * way to send the first message and nothing more: press it instead of Send and the four phases run
+ * against what was typed, then their specification is sent as the turn.
  *
  * The specification is delivered through the same `start` a typed message goes through, and not by
  * writing a chat row directly. Writing the row would show the spec twice — the turn runner appends
@@ -52,55 +37,37 @@ type TaskBriefOptions = Readonly<{
  * why the run announces itself: the panel has to appear before the first phase does, because proving
  * every tool is reachable happens first and takes long enough to look like nothing happening.
  */
-export function useTaskBrief({
-    taskId,
-    isChatLoaded,
-    isDraftLoaded,
-    onStartTurn,
-    onDraft,
-    onError
-}: TaskBriefOptions) {
+export function useTaskBrief({taskId, onStartTurn, onError}: TaskBriefOptions) {
     const [briefState, setBriefState] = useState<BriefState>(EMPTY_BRIEF_STATE)
+    /*
+     * The ask a plan was asked for, which is also the record that one was asked for at all.
+     *
+     * State rather than a ref because it is what the effect below runs on, and because the composer
+     * withholds the plan control once it is set. It is never cleared: a task gets one plan, and the
+     * control that would start a second is gone by the time this holds anything.
+     *
+     * The pictures are part of the ask, not a decoration on it: the phases read them, and so does
+     * the turn the specification starts. They are already on disk by the time they arrive here —
+     * what this holds is what names them.
+     */
+    const [asked, setAsked] = useState<PlannedAsk>()
     // The identifier the backend registered this run under, which is the only handle a cancellation
     // has. A brief is an AI turn precisely so Stop can reach it, and Stop reaches a turn by its id.
     const requestId = useRef(0)
     /** The ask this run was started from, which is what a failed plan is restarted with. */
-    const askedFor = useRef('')
-    // Held in refs so the effect below depends on the task alone. Without this a re-render that
+    const askedFor = useRef<PlannedAsk | undefined>(undefined)
+    // Held in refs so the effect below depends on the run alone. Without this a re-render that
     // rebuilds either callback would tear down the watcher mid-run and start the brief a second
     // time — a fifteen-minute run, begun twice, because something unrelated re-rendered.
     const startTurn = useRef(onStartTurn)
-    const draft = useRef(onDraft)
     const report = useRef(onError)
     useEffect(() => {
         startTurn.current = onStartTurn
-        draft.current = onDraft
         report.current = onError
-    }, [onStartTurn, onDraft, onError])
-
-    /*
-     * A skipped task's ask, put in the composer once the composer can hold it.
-     *
-     * Its own effect rather than a branch of the plan's, because the two wait on different reads and
-     * an effect re-runs when anything it waits on changes. Joined, the draft's read landing mid-plan
-     * tore down the brief's own subscription and the panel went blank for the rest of the run.
-     */
-    useEffect(() => {
-        if (!taskId || !isDraftLoaded) return
-        // Peeked rather than taken: a plan waits on the chat instead, and taking its start here
-        // would drop it.
-        if (peekTaskStart(taskId)?.mode !== 'draft') return
-        const staged = takeTaskStart(taskId)
-        if (staged) draft.current(staged.prompt)
-    }, [taskId, isDraftLoaded])
+    }, [onStartTurn, onError])
 
     useEffect(() => {
-        // Asked before the staged start is taken, so a mount that is not ready to act on it leaves
-        // it where it is rather than consuming it and dropping it.
-        if (!taskId || !isChatLoaded) return
-        if (peekTaskStart(taskId)?.mode !== 'planned') return
-        const staged = takeTaskStart(taskId)
-        if (!staged) return
+        if (!taskId || asked === undefined) return undefined
 
         let isCancelled = false
         let dispose: (() => void) | undefined
@@ -119,7 +86,10 @@ export function useTaskBrief({
             if (isCancelled || !hasEnded || specification === undefined) return
             const prompt = specification
             specification = undefined
-            startTurn.current(prompt)
+            // The pictures the plan was asked about go with the turn it produced. The agent is
+            // about to do the work the specification describes, and the specification is prose
+            // written by a model that could see the screen it is about.
+            startTurn.current(prompt, asked.attachments)
         }
 
         // Subscribed before the run starts, so the first event cannot land before anything is
@@ -140,12 +110,17 @@ export function useTaskBrief({
         })
 
         // Kept so a failed plan is not a dead end: the ask is the one thing the user would want
-        // back, and by the time a run has failed the dialog that took it is long gone. A ref rather
-        // than state, because nothing renders it — the button that uses it appears with the ending,
-        // which is a state change of its own.
-        askedFor.current = staged.prompt
+        // back, and the composer was emptied when the plan took it. A ref rather than state,
+        // because nothing renders it — the button that uses it appears with the ending, which is a
+        // state change of its own.
+        askedFor.current = asked
         requestId.current = Date.now()
-        void runTaskBrief({requestId: requestId.current, taskId, prompt: staged.prompt})
+        void runTaskBrief({
+            requestId: requestId.current,
+            taskId,
+            prompt: asked.prompt,
+            attachments: asked.attachments
+        })
             .catch((error: unknown) => {
                 if (isCancelled) return
                 const reason = commandErrorMessage(error)
@@ -176,7 +151,19 @@ export function useTaskBrief({
             isCancelled = true
             dispose?.()
         }
-    }, [taskId, isChatLoaded])
+    }, [taskId, asked])
+
+    /**
+     * Plans the ask instead of sending it.
+     *
+     * What the composer's plan control does. An empty ask is refused here rather than in the
+     * button, so the backend's own refusal for one is never the thing the user sees.
+     */
+    const startPlan = useCallback((prompt: string, attachments: readonly ChatAttachment[] = []) => {
+        const ask = prompt.trim()
+        if (!ask) return
+        setAsked(previous => previous ?? {prompt: ask, attachments})
+    }, [])
 
     /**
      * Stops a running brief, the same way Stop stops a turn — because it is one.
@@ -193,13 +180,14 @@ export function useTaskBrief({
      * Starts the task from the ask the plan was going to work from.
      *
      * The way out of a plan that failed. The task exists and is named, its chat is empty, and the
-     * dialog that took the ask is long gone — so without this the only thing left to do with the
-     * task is delete it and type the same sentence again.
+     * composer was emptied when the plan took the ask — so without this the only thing left to do
+     * with the task is delete it and type the same sentence again.
      */
     const startWithoutPlan = useCallback(() => {
-        if (!askedFor.current) return
-        startTurn.current(askedFor.current)
-        askedFor.current = ''
+        const ask = askedFor.current
+        if (!ask) return
+        startTurn.current(ask.prompt, ask.attachments)
+        askedFor.current = undefined
         // The panel goes with the run it was reporting on: the task is an ordinary one from here.
         setBriefState(EMPTY_BRIEF_STATE)
     }, [])
@@ -218,5 +206,5 @@ export function useTaskBrief({
         }
     }, [briefState.isRunning])
 
-    return {briefState, stopBrief, startWithoutPlan}
+    return {briefState, isPlanStarted: asked !== undefined, startPlan, stopBrief, startWithoutPlan}
 }

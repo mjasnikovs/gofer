@@ -109,6 +109,23 @@ export function searchConfigured(settings, braveApiKey) {
 }
 
 /**
+ * Can this model be shown a picture?
+ *
+ * Read off the model rather than assumed, because a model that cannot is not lenient about it: the
+ * provider refuses the whole request, so an unchecked image ends the phase rather than going
+ * unnoticed in it. A model that says nothing about its inputs is taken at its word — no claim to
+ * read images is not a claim to read them.
+ */
+export function readsImages(model) {
+    return Array.isArray(model?.input) && model.input.includes('image')
+}
+
+/** The backend's `{data, mimeType}` pairs, as the content blocks a prompt carries. */
+export function asImageContent(images) {
+    return images.map(image => ({type: 'image', data: image.data, mimeType: image.mimeType}))
+}
+
+/**
  * What the phases spend, added up.
  *
  * Reported on its own event rather than folded into the turn's usage, and the reason is worth
@@ -153,6 +170,7 @@ export async function runBrief({
     sessionId,
     workspacePath,
     prompt,
+    images = [],
     inventory,
     existingFiles,
     planContext,
@@ -180,6 +198,24 @@ export async function runBrief({
     // has a task with an empty chat and nothing saying why, which is the same thing a broken run
     // looks like. It is also the only event that arrives before the first phase can fail.
     emit({type: 'brief-started'})
+    /*
+     * The pictures the ask came with, if the model answering the phases can read one.
+     *
+     * The sub-agent's model is the user's own choice and need not be the model the composer offered
+     * the paperclip for. Sent to a text-only model the images are not ignored — the provider refuses
+     * the request, and that refusal would end the first phase of a fifteen-minute run. Said out
+     * loud when they are dropped, because a plan written without the screenshot it was asked about
+     * is wrong in a way only the user can see.
+     */
+    const pictures = readsImages(subagent.model) ? asImageContent(images) : []
+    if (images.length > 0 && pictures.length === 0) {
+        emit({
+            type: 'brief-log',
+            message:
+                `the plan's model cannot read images, so the ${String(images.length)} attached `
+                + 'to the ask were left out of it'
+        })
+    }
     const canSearch = searchConfigured(settings, braveApiKey)
     const childDeps = {domains, host, braveApiKey, searchProvider: settings?.web?.searchProvider}
 
@@ -194,7 +230,7 @@ export async function runBrief({
      * One worker. Every phase reaches a model only through here, so the bounds, the model choice and
      * the accounting are decided once instead of per phase.
      */
-    const runWorker = async ({label, prompt: text, toolNames}) => {
+    const runWorker = async ({label, prompt: text, toolNames, images: pictures = []}) => {
         emit({type: 'brief-worker', label})
         const outcome = await world.runSubagentOutcome({
             // The panel's live line, produced by the delegation rather than by this loop. Nothing
@@ -203,6 +239,7 @@ export async function runBrief({
             // the catalogue owns and which worker it is about.
             progress: eventProgress(emit, 'brief-worker-step', {label}),
             prompt: appendNoThink(text),
+            images: pictures,
             toolNames,
             workspacePath,
             models,
@@ -219,6 +256,12 @@ export async function runBrief({
 
     const deps = {
         runWorker,
+        // Shown to the one phase that reads the raw ask, and only if the model answering it can
+        // read a picture at all: the sub-agent's model is the user's own choice and need not be the
+        // one the composer offered the paperclip for. Sent to a text-only model, the images are not
+        // ignored — the provider refuses the request, and the refusal ends the first phase of a
+        // fifteen-minute run.
+        images: pictures,
         inventory,
         existingFiles,
         planContext,

@@ -33,6 +33,7 @@ import {
     activateTask,
     createTaskActions,
     isTaskOperationRunning,
+    listPendingChanges,
     listTasks,
     watchTaskOperation
 } from '../services/task-actions'
@@ -42,9 +43,9 @@ import {NewTaskDialog} from '../components/workspace/NewTaskDialog'
 import {toSideNavLayout} from '../models/ui-state'
 import {SIDE_NAV_KEY} from '../services/ui-state'
 import {useRememberedValue} from '../hooks/useRememberedValue'
-import type {Page, TaskSummary} from '../models/app'
+import type {Page, PendingChange, TaskSummary} from '../models/app'
 import type {TaskDestination} from '../services/task-actions'
-import type {TaskStart} from '../services/task-start'
+import type {UnsavedWork} from '../models/unsaved-work'
 
 type ApplicationContextValue = Readonly<{
     prepareModels: () => void
@@ -134,7 +135,13 @@ function Application() {
      * remount it exists to prevent.
      */
     const [lastTaskId, setLastTaskId] = useState(selectedTaskId)
-    const [isNewTaskOpen, setIsNewTaskOpen] = useState(false)
+    /*
+     * The loose files the new-task dialog is open about, or nothing while it is closed.
+     *
+     * One value rather than a flag beside a list: the dialog is only ever open because there are
+     * files to ask about, so "which files" and "is it open" are the same fact.
+     */
+    const [pendingChanges, setPendingChanges] = useState<readonly PendingChange[]>([])
     if (selectedTaskId && selectedTaskId !== lastTaskId) setLastTaskId(selectedTaskId)
     const workspaceTaskId = selectedTaskId ?? lastTaskId
     const displayedTask =
@@ -199,11 +206,30 @@ function Application() {
      * and it stops offering the control while it lasts.
      */
     const newTask = useCallback(
-        (start: TaskStart | undefined, bringChanges: boolean) => {
-            void tasksActions.create(start, bringChanges).catch(() => undefined)
+        (bringChanges: boolean) => {
+            void tasksActions.create(bringChanges).catch(() => undefined)
         },
         [tasksActions]
     )
+    /**
+     * Makes a task, asking about loose files first only when there are any.
+     *
+     * The dialog exists for that one question and nothing else, so a clean checkout skips it: the
+     * task is made on the press and its composer is what the user types into. The read is what
+     * decides, and a read that fails is treated as a clean checkout — refusing to make a task
+     * because Git could not be listed would be a worse answer than making one.
+     */
+    const startNewTask = useCallback(() => {
+        void listPendingChanges()
+            .catch(() => [])
+            .then(pending => {
+                if (pending.length === 0) {
+                    newTask(false)
+                    return
+                }
+                setPendingChanges(pending)
+            })
+    }, [newTask])
     /*
      * Opening, creating, deleting and merging a task each move the project's one checkout, and each
      * stops the Godot editor before they do — a quit request and a wait of up to ten seconds. The
@@ -225,7 +251,7 @@ function Application() {
      */
     const isAnswering = useSyncExternalStore(watchTurn, isTurnRunning, isTurnRunning)
     const mergeDisplayedTask = useCallback(
-        () => tasksActions.merge(displayedTask),
+        (unsavedWork?: UnsavedWork) => tasksActions.merge(displayedTask, unsavedWork),
         [displayedTask, tasksActions]
     )
     const resolveDisplayedMerge = useCallback(
@@ -282,9 +308,7 @@ function Application() {
                         sideNav={sideNav}
                         onSideNavChange={changeSideNav}
                         onNavigate={navigateToPage}
-                        onNewTask={() => {
-                            setIsNewTaskOpen(true)
-                        }}
+                        onNewTask={startNewTask}
                         onOpenTask={openTask}
                         onDeleteTask={taskId => {
                             void tasksActions.remove(taskId)
@@ -321,21 +345,14 @@ function Application() {
                  * document — which is a real ambiguity for anything reading the screen, not only for
                  * a test.
                  */}
-                {isNewTaskOpen && (
+                {pendingChanges.length > 0 && (
                     <NewTaskDialog
                         isOpen
-                        onOpenChange={setIsNewTaskOpen}
-                        onPlan={(prompt, bringChanges) => {
-                            newTask({prompt, mode: 'planned'}, bringChanges)
+                        changes={pendingChanges}
+                        onOpenChange={isOpen => {
+                            if (!isOpen) setPendingChanges([])
                         }}
-                        /*
-                         * An empty ask stages nothing at all. Skipping with the box untouched is the
-                         * plain "new task" it looks like: the chat opens on an empty composer, and a
-                         * staged start holding an empty string would be a draft of nothing.
-                         */
-                        onSkip={(prompt, bringChanges) => {
-                            newTask(prompt ? {prompt, mode: 'draft'} : undefined, bringChanges)
-                        }}
+                        onCreate={newTask}
                     />
                 )}
             </AppShell>
