@@ -362,6 +362,23 @@ struct PiModel {
     max_tokens: u64,
     #[serde(default = "default_model_input")]
     input: Vec<String>,
+    /// Whether this model thinks. Absent means the provider answers for it.
+    #[serde(default)]
+    reasoning: Option<bool>,
+}
+
+/// What Pi's catalogue answers, as the two different questions Gofer asks of it.
+///
+/// A server names models Pi has never been told about — a llama.cpp host serves whatever file it
+/// was started with, under whatever path that file is at. Asking only the first question is what
+/// left such a model reported as unable to think, which took its reasoning menu down to `off` and
+/// left it there.
+#[derive(Debug, Default)]
+struct PiCatalog {
+    /// The models Pi names, with the facts it names them with.
+    models: Vec<AiModelOption>,
+    /// Whether a server takes a reasoning effort at all, by the base URL it is reached at.
+    servers: HashMap<String, bool>,
 }
 
 fn default_context_window() -> u64 {
@@ -572,6 +589,118 @@ pub(crate) fn docs_expansion_connection(
     })
 }
 
+/// What a model can do, as the catalogue answers it. Never a stored fact — always a derived one.
+///
+/// The line this draws is the whole point of the type. A model *owns* whether it reasons, whether
+/// it can be told how hard, what it accepts and what it is called. The user owns which model, at
+/// which level, in how big a window. Storing the first four is what let three separate copies of
+/// them drift, each written once at pick-time and never corrected: a settings file written before
+/// the catalogue could be read said `reasoning: false` about a model that thinks, and went on
+/// saying it forever, because nothing ever asked again.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ModelFacts {
+    /// Absent for a model the catalogue does not name: its name is then whatever it was called.
+    model_name: Option<String>,
+    reasoning: bool,
+    supports_reasoning_effort: bool,
+    /// Absent for the same reason. A server's declared reasoning says nothing about what a model
+    /// it has never described accepts, and answering `["text", "image"]` anyway would turn the
+    /// composer's image control on and ship pictures to a server that refuses them.
+    input: Option<Vec<String>>,
+}
+
+/// What the catalogue says about one model on one server, or nothing when it has no answer.
+///
+/// Nothing is not `false`. A server the catalogue has never heard of is a question it cannot
+/// answer, and answering it `false` anyway is exactly the mistake this replaces — so the caller
+/// keeps what it had rather than being told the model cannot think.
+fn model_facts(catalog: &PiCatalog, base_url: &str, model_id: &str) -> Option<ModelFacts> {
+    let server = catalog.servers.get(&server_key(base_url))?;
+    // A named model answers for itself. One the catalogue does not name — the file a llama.cpp host
+    // was started with, under that file's own path — gets its server's answer, which is the most
+    // that can honestly be said about it.
+    let known = catalog.models.iter().find(|model| model.id == model_id);
+    Some(ModelFacts {
+        model_name: known.map(|model| model.name.clone()),
+        reasoning: known.map_or(*server, |model| model.reasoning),
+        supports_reasoning_effort: known.map_or(*server, |model| model.supports_reasoning_effort),
+        input: known.map(|model| model.input.clone()),
+    })
+}
+
+/// Re-derives every model-owned fact in a settings file from the catalogue.
+///
+/// Called on every read and every save, so what is on disk is never the authority — it is a copy
+/// the next load overwrites. Only the local driver is resolvable here: Pi's `models.json` is a file
+/// on this machine, while ChatGPT's catalogue lives behind a sidecar process that a settings read
+/// cannot afford to start. The ChatGPT half keeps what it has and is refreshed by the model lister
+/// instead, which is the only other writer of these fields.
+fn resolve_model_facts(settings: &mut AiSettings, catalog: &PiCatalog) {
+    if matches!(settings.connection_type, AiConnectionType::OpenaiCompatible)
+        && let Some(facts) = model_facts(catalog, &settings.base_url, &settings.model)
+    {
+        if let Some(model_name) = facts.model_name {
+            settings.model_name = model_name;
+        }
+        settings.reasoning = facts.reasoning;
+        settings.supports_reasoning_effort = facts.supports_reasoning_effort;
+        if let Some(input) = facts.input {
+            settings.input = input;
+        }
+    }
+    if let Some(local) = settings.local.as_mut()
+        && let Some(facts) = model_facts(catalog, &local.base_url, &local.model)
+    {
+        if let Some(model_name) = facts.model_name {
+            local.model_name = model_name;
+        }
+        local.reasoning = facts.reasoning;
+        local.supports_reasoning_effort = facts.supports_reasoning_effort;
+        if let Some(input) = facts.input {
+            local.input = input;
+        }
+    }
+    // The sub-agent has no address of its own — it borrows the connection it names. So the server
+    // its model is resolved against is that connection's, not the parent's.
+    let local_base_url = settings
+        .local
+        .as_ref()
+        .map(|local| local.base_url.clone())
+        .or_else(|| {
+            matches!(settings.connection_type, AiConnectionType::OpenaiCompatible)
+                .then(|| settings.base_url.clone())
+        });
+    if let Some(child) = settings.subagent.connection.as_mut()
+        && matches!(child.connection_type, AiConnectionType::OpenaiCompatible)
+        && let Some(base_url) = local_base_url
+        && let Some(facts) = model_facts(catalog, &base_url, &child.model)
+    {
+        if let Some(model_name) = facts.model_name {
+            child.model_name = model_name;
+        }
+        child.reasoning = facts.reasoning;
+        child.supports_reasoning_effort = facts.supports_reasoning_effort;
+        if let Some(input) = facts.input {
+            child.input = input;
+        }
+    }
+    // The level a model that cannot think is asked at, re-applied: resolution can take reasoning
+    // away, and a level left pointing at nothing is what `validate_settings` already refuses.
+    if !settings.reasoning {
+        settings.thinking_level = "off".to_owned();
+    }
+    if let Some(local) = settings.local.as_mut()
+        && !local.reasoning
+    {
+        local.thinking_level = "off".to_owned();
+    }
+    if let Some(child) = settings.subagent.connection.as_mut()
+        && !child.reasoning
+    {
+        child.thinking_level = "off".to_owned();
+    }
+}
+
 fn profile_of(settings: &AiSettings) -> AiConnectionProfile {
     AiConnectionProfile {
         name: settings.name.clone(),
@@ -746,17 +875,42 @@ pub(crate) async fn list_ai_models_with(
     let models = response.json::<ModelsResponse>().await.map_err(|error| {
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
-    let catalog = pi_model_catalog().unwrap_or_default();
-    Ok(models
-        .data
+    Ok(local_model_options(
+        models.data,
+        &pi_catalog().unwrap_or_default(),
+        &settings.ai,
+    ))
+}
+
+/// What a local server's models endpoint means, read through Pi's catalogue.
+///
+/// A separate function because the catalogue it reads is a file in the user's home, and a test that
+/// went through the network call would answer differently on every machine.
+///
+/// Two facts come from two places. What a *named* model can do is the catalogue's answer. What an
+/// unnamed one can do is its *server's* answer — llama.cpp reports the file it was started with,
+/// under that file's own path, which is almost never the id Pi names the same model by. Falling
+/// back to `false` instead is what wrote `reasoning: false` into settings for a model that thinks,
+/// and left its reasoning menu offering nothing but `off`.
+fn local_model_options(
+    remote: Vec<Model>,
+    catalog: &PiCatalog,
+    ai: &AiSettings,
+) -> Vec<AiModelOption> {
+    let server_reasoning = catalog
+        .servers
+        .get(&server_key(&ai.base_url))
+        .copied()
+        .unwrap_or(false);
+    remote
         .into_iter()
         .map(|remote| {
-            let known = catalog.iter().find(|model| model.id == remote.id);
+            let known = catalog.models.iter().find(|model| model.id == remote.id);
             let context_window = remote
                 .meta
                 .and_then(|meta| meta.n_ctx)
                 .or_else(|| known.map(|model| model.context_window))
-                .unwrap_or(settings.ai.context_window);
+                .unwrap_or(ai.context_window);
             AiModelOption {
                 id: remote.id.clone(),
                 name: known
@@ -766,16 +920,18 @@ pub(crate) async fn list_ai_models_with(
                 max_tokens: known
                     .map(|model| model.max_tokens)
                     .unwrap_or(context_window),
-                reasoning: known.map(|model| model.reasoning).unwrap_or(false),
+                reasoning: known
+                    .map(|model| model.reasoning)
+                    .unwrap_or(server_reasoning),
                 supports_reasoning_effort: known
                     .map(|model| model.supports_reasoning_effort)
-                    .unwrap_or(false),
+                    .unwrap_or(server_reasoning),
                 input: known
                     .map(|model| model.input.clone())
-                    .unwrap_or_else(|| settings.ai.input.clone()),
+                    .unwrap_or_else(|| ai.input.clone()),
             }
         })
-        .collect())
+        .collect()
 }
 
 fn check_chatgpt_credential() -> Result<(), String> {
@@ -863,7 +1019,17 @@ fn read_settings_from_paths(path: &Path, pi: Option<&Path>) -> Result<GoferSetti
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let settings = serde_json::from_str(&contents)
         .map_err(|error| format!("Gofer settings in {} are invalid: {error}", path.display()))?;
-    validate_settings(settings)
+    let mut settings = validate_settings(settings)?;
+    // After validation rather than inside it, because the catalogue is a file on this machine and
+    // `validate_settings` is the pure half — the half a test can drive without one. This is the
+    // funnel every read passes through, so what is on disk is never the authority on what a model
+    // can do. It is a copy, and this is where the copy is replaced.
+    resolve_model_facts(
+        &mut settings.ai,
+        &pi.and_then(|path| pi_catalog_from_path(path).ok())
+            .unwrap_or_default(),
+    );
+    Ok(settings)
 }
 
 fn pi_models_path() -> Result<PathBuf, String> {
@@ -872,31 +1038,63 @@ fn pi_models_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "The home directory could not be resolved".to_owned())
 }
 
-fn pi_model_catalog() -> Result<Vec<AiModelOption>, String> {
+fn pi_catalog() -> Result<PiCatalog, String> {
     let path = pi_models_path()?;
-    pi_model_catalog_from_path(&path)
+    pi_catalog_from_path(&path)
 }
 
-fn pi_model_catalog_from_path(path: &Path) -> Result<Vec<AiModelOption>, String> {
+fn pi_catalog_from_path(path: &Path) -> Result<PiCatalog, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let configured: PiModelsFile = serde_json::from_str(&contents)
         .map_err(|error| format!("Pi models in {} are invalid: {error}", path.display()))?;
-    Ok(configured
-        .providers
-        .values()
-        .flat_map(|provider| {
-            provider.models.iter().map(|model| AiModelOption {
-                id: model.id.clone(),
-                name: model.name.clone(),
-                context_window: model.context_window,
-                max_tokens: model.max_tokens,
-                reasoning: provider.compat.supports_reasoning_effort,
-                supports_reasoning_effort: provider.compat.supports_reasoning_effort,
-                input: model.input.clone(),
+    Ok(PiCatalog {
+        models: configured
+            .providers
+            .values()
+            .flat_map(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .map(|model| pi_model_option(provider, model))
             })
-        })
-        .collect())
+            .collect(),
+        servers: configured
+            .providers
+            .values()
+            .map(|provider| {
+                (
+                    server_key(&provider.base_url),
+                    provider.compat.supports_reasoning_effort,
+                )
+            })
+            .collect(),
+    })
+}
+
+/// One Pi model as Gofer describes a model.
+///
+/// Reasoning is the model's own answer, not the provider's. The provider only says whether the
+/// server accepts an effort to be named — a model that does not think has no effort to name, so the
+/// two are combined rather than copied.
+fn pi_model_option(provider: &PiProvider, model: &PiModel) -> AiModelOption {
+    let reasoning = model
+        .reasoning
+        .unwrap_or(provider.compat.supports_reasoning_effort);
+    AiModelOption {
+        id: model.id.clone(),
+        name: model.name.clone(),
+        context_window: model.context_window,
+        max_tokens: model.max_tokens,
+        reasoning,
+        supports_reasoning_effort: reasoning && provider.compat.supports_reasoning_effort,
+        input: model.input.clone(),
+    }
+}
+
+/// How two base URLs are compared: the same way the settings are stored, minus the trailing slash.
+fn server_key(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_owned()
 }
 
 fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
@@ -904,6 +1102,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
     let configured: PiModelsFile = serde_json::from_str(&contents).ok()?;
     let provider = configured.providers.values().next()?;
     let model = provider.models.first()?;
+    let known = pi_model_option(provider, model);
     Some(GoferSettings {
         version: SETTINGS_VERSION,
         ai: AiSettings {
@@ -915,8 +1114,8 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             model_name: model.name.clone(),
             context_window: model.context_window,
             max_tokens: model.max_tokens,
-            reasoning: provider.compat.supports_reasoning_effort,
-            supports_reasoning_effort: provider.compat.supports_reasoning_effort,
+            reasoning: known.reasoning,
+            supports_reasoning_effort: known.supports_reasoning_effort,
             input: model.input.clone(),
             thinking_level: default_thinking_level(),
             max_retries: default_max_retries(),
@@ -2027,23 +2226,296 @@ mod tests {
         )
         .expect("write Pi models");
 
-        let catalog = pi_model_catalog_from_path(&path).expect("Pi catalog");
-        assert_eq!(catalog.len(), 1);
-        assert_eq!(catalog[0].name, "Vision Model");
-        assert!(catalog[0].reasoning);
-        assert_eq!(catalog[0].input, ["text", "image"]);
+        let catalog = pi_catalog_from_path(&path).expect("Pi catalog");
+        assert_eq!(catalog.models.len(), 1);
+        assert_eq!(catalog.models[0].name, "Vision Model");
+        assert!(catalog.models[0].reasoning);
+        assert_eq!(catalog.models[0].input, ["text", "image"]);
+        // Read back without the trailing slash, because that is how the settings store a base URL.
+        assert_eq!(
+            catalog.servers.get("http://127.0.0.1:11434/v1"),
+            Some(&true)
+        );
         let defaults = default_settings_from_pi_path(&path).expect("Pi defaults");
         assert_eq!(defaults.ai.model, "vision-model");
         assert_eq!(defaults.ai.context_window, 8_192);
         assert!(defaults.ai.supports_reasoning_effort);
 
         fs::write(&path, "not-json").expect("write invalid Pi models");
-        assert!(
-            pi_model_catalog_from_path(&path)
-                .unwrap_err()
-                .contains("invalid")
-        );
+        assert!(pi_catalog_from_path(&path).unwrap_err().contains("invalid"));
         assert!(default_settings_from_pi_path(&path).is_none());
+    }
+
+    /// The catalogue answers for the model, not for the server it happens to sit behind.
+    ///
+    /// A provider that takes a reasoning effort does not make every model under it a thinking one,
+    /// and a model that cannot think has no effort to be asked at. Both halves used to be copied
+    /// straight off the provider, which reported a plain model as one with seven reasoning levels.
+    #[test]
+    fn a_model_answers_for_its_own_reasoning() {
+        let directory = TempDir::new().expect("temporary Pi settings");
+        let path = directory.path().join("models.json");
+        fs::write(
+            &path,
+            r#"{
+                "providers": {
+                    "local": {
+                        "baseUrl": "http://127.0.0.1:8080/v1/",
+                        "compat": {"supportsReasoningEffort": true},
+                        "models": [
+                            {"id": "thinker", "name": "Thinker", "reasoning": true},
+                            {"id": "plain", "name": "Plain", "reasoning": false}
+                        ]
+                    },
+                    "dumb-server": {
+                        "baseUrl": "http://127.0.0.1:9090/v1",
+                        "models": [{"id": "hopeful", "name": "Hopeful", "reasoning": true}]
+                    }
+                }
+            }"#,
+        )
+        .expect("write Pi models");
+
+        let catalog = pi_catalog_from_path(&path).expect("Pi catalog");
+        let model = |id: &str| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .expect("catalogued model")
+                .clone()
+        };
+        assert!(model("thinker").reasoning);
+        assert!(model("thinker").supports_reasoning_effort);
+        assert!(!model("plain").reasoning);
+        assert!(!model("plain").supports_reasoning_effort);
+        // A thinking model on a server that cannot be told an effort still thinks. It just cannot
+        // be told how hard, which is what leaves its level at `off`.
+        assert!(model("hopeful").reasoning);
+        assert!(!model("hopeful").supports_reasoning_effort);
+        assert_eq!(catalog.servers.get("http://127.0.0.1:8080/v1"), Some(&true));
+        assert_eq!(
+            catalog.servers.get("http://127.0.0.1:9090/v1"),
+            Some(&false)
+        );
+    }
+
+    /// The regression: a served model Pi has never named still gets its server's answer.
+    ///
+    /// llama.cpp reports the file it was started with — `/models/Qwen3.8-27B-NVFP4.gguf` — while
+    /// Pi's catalogue names the same model `Qwen3.8-27B-UD-Q4_K_XL.gguf`. The ids do not match, and
+    /// an unmatched model used to be reported as unable to think. That wrote `reasoning: false`
+    /// into the settings file, which took the reasoning menu down to `off` and left it there.
+    #[test]
+    fn an_unnamed_local_model_inherits_what_its_server_can_do() {
+        let directory = TempDir::new().expect("temporary Pi settings");
+        let path = directory.path().join("models.json");
+        fs::write(
+            &path,
+            r#"{
+                "providers": {
+                    "local": {
+                        "baseUrl": "http://127.0.0.1:8080/v1",
+                        "compat": {"supportsReasoningEffort": true},
+                        "models": [{
+                            "id": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+                            "name": "Qwen3.8 27B",
+                            "reasoning": true,
+                            "contextWindow": 120064,
+                            "maxTokens": 120064
+                        }]
+                    }
+                }
+            }"#,
+        )
+        .expect("write Pi models");
+        let catalog = pi_catalog_from_path(&path).expect("Pi catalog");
+        let ai = settings("http://127.0.0.1:8080/v1", "/models/Qwen3.8-27B-NVFP4.gguf").ai;
+
+        let served = local_model_options(
+            vec![
+                Model {
+                    id: "/models/Qwen3.8-27B-NVFP4.gguf".to_owned(),
+                    meta: Some(ModelMeta {
+                        n_ctx: Some(120_064),
+                    }),
+                },
+                Model {
+                    id: "Qwen3.8-27B-UD-Q4_K_XL.gguf".to_owned(),
+                    meta: None,
+                },
+            ],
+            &catalog,
+            &ai,
+        );
+
+        // The file the server was started with: not in the catalogue, and it thinks anyway.
+        assert_eq!(served[0].id, "/models/Qwen3.8-27B-NVFP4.gguf");
+        assert!(served[0].reasoning);
+        assert!(served[0].supports_reasoning_effort);
+        assert_eq!(served[0].context_window, 120_064);
+        // The one Pi does name is unaffected: its own answer, not its server's.
+        assert!(served[1].reasoning);
+        assert_eq!(served[1].name, "Qwen3.8 27B");
+
+        // And a server Pi says nothing about grants nothing. Silence is not a capability.
+        let elsewhere = settings("http://127.0.0.1:9999/v1", "mystery.gguf").ai;
+        let unknown = local_model_options(
+            vec![Model {
+                id: "mystery.gguf".to_owned(),
+                meta: None,
+            }],
+            &catalog,
+            &elsewhere,
+        );
+        assert!(!unknown[0].reasoning);
+        assert!(!unknown[0].supports_reasoning_effort);
+    }
+
+    /// The whole point of the resolver: nothing on disk is the authority on what a model can do.
+    ///
+    /// This is the shape the user hit. A settings file written before the catalogue could be read
+    /// says `reasoning: false` in three separate places — the flat fields, the saved local profile,
+    /// and the sub-agent's own connection — about a model that reasons. Each was copied once at
+    /// pick-time and nothing ever asked again, so all three reasoning menus offered `off` and
+    /// nothing else, permanently. A read now re-derives all three.
+    #[test]
+    fn every_stored_copy_of_a_model_fact_is_replaced_on_read() {
+        let directory = TempDir::new().expect("temporary directory");
+        let pi = directory.path().join("models.json");
+        fs::write(
+            &pi,
+            r#"{
+                "providers": {
+                    "local": {
+                        "baseUrl": "http://127.0.0.1:8080/v1",
+                        "compat": {"supportsReasoningEffort": true},
+                        "models": [{"id": "named.gguf", "name": "Named", "reasoning": true}]
+                    }
+                }
+            }"#,
+        )
+        .expect("write Pi models");
+
+        let path = directory.path().join("settings.json");
+        let mut stale = settings("http://127.0.0.1:8080/v1", "/models/served.gguf");
+        stale.ai.reasoning = false;
+        stale.ai.supports_reasoning_effort = false;
+        stale.ai.thinking_level = "off".to_owned();
+        stale.ai.subagent.connection = Some(SubagentConnection {
+            connection_type: AiConnectionType::OpenaiCompatible,
+            model: "/models/served.gguf".to_owned(),
+            model_name: "/models/served.gguf".to_owned(),
+            context_window: 120_064,
+            max_tokens: 120_064,
+            reasoning: false,
+            supports_reasoning_effort: false,
+            input: vec!["text".to_owned()],
+            thinking_level: "off".to_owned(),
+        });
+        fs::write(
+            &path,
+            serde_json::to_string(&stale).expect("serialize settings"),
+        )
+        .expect("write settings");
+
+        let loaded = read_settings_from_paths(&path, Some(&pi)).expect("read settings");
+
+        // The flat fields.
+        assert!(loaded.ai.reasoning);
+        assert!(loaded.ai.supports_reasoning_effort);
+        // The saved local profile.
+        let local = loaded.ai.local.as_ref().expect("local profile");
+        assert!(local.reasoning);
+        assert!(local.supports_reasoning_effort);
+        // And the sub-agent's own connection, which is the copy that outlived the other two.
+        let child = loaded
+            .ai
+            .subagent
+            .connection
+            .as_ref()
+            .expect("sub-agent connection");
+        assert!(child.reasoning);
+        assert!(child.supports_reasoning_effort);
+
+        // What the user owns is untouched. Only what the model decides is re-derived.
+        assert_eq!(loaded.ai.model, "/models/served.gguf");
+        assert_eq!(loaded.ai.context_window, stale.ai.context_window);
+        // And what the catalogue does not know, it does not answer. A server's declared reasoning
+        // says nothing about what a model it has never described accepts, so the stored input
+        // stands — inventing `["text", "image"]` here turns the composer's image control on and
+        // ships pictures to a server that refuses them.
+        assert_eq!(loaded.ai.input, stale.ai.input);
+        assert_eq!(loaded.ai.model_name, stale.ai.model_name);
+    }
+
+    /// A model the catalogue names answers for itself, even when its server would say otherwise.
+    #[test]
+    fn resolution_takes_a_level_away_from_a_model_that_cannot_think() {
+        let directory = TempDir::new().expect("temporary directory");
+        let pi = directory.path().join("models.json");
+        fs::write(
+            &pi,
+            r#"{
+                "providers": {
+                    "local": {
+                        "baseUrl": "http://127.0.0.1:8080/v1",
+                        "compat": {"supportsReasoningEffort": true},
+                        "models": [{"id": "plain.gguf", "name": "Plain", "reasoning": false}]
+                    }
+                }
+            }"#,
+        )
+        .expect("write Pi models");
+
+        let path = directory.path().join("settings.json");
+        let mut stale = settings("http://127.0.0.1:8080/v1", "plain.gguf");
+        stale.ai.reasoning = true;
+        stale.ai.supports_reasoning_effort = true;
+        stale.ai.thinking_level = "high".to_owned();
+        fs::write(
+            &path,
+            serde_json::to_string(&stale).expect("serialize settings"),
+        )
+        .expect("write settings");
+
+        let loaded = read_settings_from_paths(&path, Some(&pi)).expect("read settings");
+
+        assert!(!loaded.ai.reasoning);
+        assert!(!loaded.ai.supports_reasoning_effort);
+        // A level pointing at nothing is not left standing.
+        assert_eq!(loaded.ai.thinking_level, "off");
+        assert_eq!(loaded.ai.model_name, "Plain");
+    }
+
+    /// Silence is not an answer. A catalogue that says nothing leaves the stored copy alone.
+    ///
+    /// This is the half that must not regress: a ChatGPT connection has no entry in Pi's file, and
+    /// resolving it to `false` would take the reasoning away from every model that has one.
+    #[test]
+    fn a_catalogue_with_no_answer_changes_nothing() {
+        let directory = TempDir::new().expect("temporary directory");
+        let pi = directory.path().join("models.json");
+        fs::write(&pi, r#"{"providers": {}}"#).expect("write Pi models");
+
+        let path = directory.path().join("settings.json");
+        let mut stored = settings("http://127.0.0.1:8080/v1", "thinker.gguf");
+        stored.ai.reasoning = true;
+        stored.ai.supports_reasoning_effort = true;
+        stored.ai.thinking_level = "high".to_owned();
+        fs::write(
+            &path,
+            serde_json::to_string(&stored).expect("serialize settings"),
+        )
+        .expect("write settings");
+
+        let loaded = read_settings_from_paths(&path, Some(&pi)).expect("read settings");
+
+        assert!(loaded.ai.reasoning);
+        assert_eq!(loaded.ai.thinking_level, "high");
+        // And the ChatGPT profile, which Pi's file never describes, keeps everything it had.
+        assert!(loaded.ai.chatgpt.reasoning);
+        assert!(loaded.ai.chatgpt.supports_reasoning_effort);
     }
 
     #[test]

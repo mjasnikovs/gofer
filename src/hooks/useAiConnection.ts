@@ -2,7 +2,7 @@ import {useCallback, useEffect, useRef, useState} from 'react'
 import {defer} from '../services/clock'
 import {invoke, isTauri, listen} from '../services/desktop'
 import {commandErrorMessage} from '../utils/command-error'
-import {applyModelSelection, normalizeSettings} from '../models/settings'
+import {adoptModelReasoning, applyModelSelection, normalizeSettings} from '../models/settings'
 import type {AiModelOption, AiSettings, GoferSettings, ThinkingLevel} from '../models/settings'
 
 export type ConnectionState = 'connecting' | 'connected' | 'offline'
@@ -17,7 +17,8 @@ type AiConnectionOptions = Readonly<{
  *
  * When the server offers exactly one model and it is not the configured one, that model is
  * adopted automatically — a llama.cpp host usually serves a single model whose id the user has
- * no reason to type by hand.
+ * no reason to type by hand. When it *is* the configured one, what the catalogue says it can think
+ * is adopted instead. See `adoptModelReasoning` for why only that.
  */
 export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
     const [settings, setSettings] = useState<GoferSettings>()
@@ -78,6 +79,29 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
         [saveSettings]
     )
 
+    /**
+     * Brings the saved settings up to date with the catalogue the server just answered with.
+     *
+     * Two cases, and the second is the one that was missing. A configured model the server does not
+     * serve is replaced, when there is exactly one to replace it with. A configured model the
+     * server *does* serve has its facts re-read, because those facts came from a catalogue that may
+     * not have been readable the first time — or may not have named this model at all.
+     */
+    const reconcileModel = useCallback(
+        async (available: readonly AiModelOption[], loaded: GoferSettings) => {
+            const configured = available.find(model => model.id === loaded.ai.model)
+            if (!configured) {
+                const onlyModel = available.length === 1 ? available[0] : undefined
+                if (onlyModel) await applyModel(onlyModel, loaded)
+                return
+            }
+            const ai = adoptModelReasoning(loaded.ai, configured)
+            if (ai === loaded.ai) return
+            await saveSettings({...loaded, ai}, "The model's reasoning support could not be saved")
+        },
+        [applyModel, saveSettings]
+    )
+
     const connect = useCallback(async () => {
         if (!isTauri()) return
         await Promise.resolve()
@@ -89,18 +113,12 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
             setSettings(loadedSettings)
             const available = await listModels(loadedSettings)
             setConnectionState('connected')
-            if (
-                available.length === 1
-                && !available.some(model => model.id === loadedSettings.ai.model)
-            ) {
-                const onlyModel = available[0]
-                if (onlyModel) await applyModel(onlyModel, loadedSettings)
-            }
+            await reconcileModel(available, loadedSettings)
         } catch (error) {
             setConnectionState('offline')
             onError(`Local AI is unavailable: ${commandErrorMessage(error)}`)
         }
-    }, [applyModel, listModels, onConnected, onError])
+    }, [listModels, onConnected, onError, reconcileModel])
 
     // Deferred to after the render rather than run inside it, so a mount and its StrictMode double
     // collapse into one connection attempt instead of two.

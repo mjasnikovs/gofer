@@ -1,5 +1,7 @@
 import {describe, expect, it} from 'vitest'
 import {
+    adoptModelReasoning,
+    adoptSubagentReasoning,
     apiKeyUpdate,
     applySubagentModel,
     cacheStateLabel,
@@ -166,6 +168,137 @@ describe('the sub-agent connection', () => {
         expect(smaller.thinkingLevel).toBe('off')
         // And the connection it is served by is the child's own, untouched by the model.
         expect(smaller.connectionType).toBe('openai-codex')
+    })
+})
+
+describe('adoptModelReasoning', () => {
+    /*
+     * The regression. A local server names its model after the file it was started with, which is
+     * not the id Pi's catalogue names the same model by, so `reasoning: false` was written to the
+     * settings file and the reasoning menu offered `off` and nothing else — forever, because
+     * nothing ever re-read the model's facts once it was the chosen one.
+     */
+    it('turns a level on for a model that turns out to reason', () => {
+        const ai = normalizeSettings(stored).ai
+        expect(ai.reasoning).toBe(false)
+
+        const adopted = adoptModelReasoning(ai, {
+            id: 'local-model',
+            name: 'Local model',
+            contextWindow: 8_192,
+            maxTokens: 4_096,
+            reasoning: true,
+            supportsReasoningEffort: true,
+            input: ['text']
+        })
+
+        expect(adopted.reasoning).toBe(true)
+        expect(adopted.supportsReasoningEffort).toBe(true)
+        expect(adopted.local?.reasoning).toBe(true)
+        // What the user typed is theirs. Only what the model decides is re-read.
+        expect(adopted.contextWindow).toBe(ai.contextWindow)
+        expect(adopted.model).toBe('local-model')
+    })
+
+    it('takes the level away from a model that turns out not to', () => {
+        const ai = {
+            ...normalizeSettings(stored).ai,
+            reasoning: true,
+            thinkingLevel: 'high'
+        } as const
+        const adopted = adoptModelReasoning(ai, {
+            id: 'local-model',
+            name: 'Local model',
+            contextWindow: 8_192,
+            maxTokens: 4_096,
+            reasoning: false,
+            supportsReasoningEffort: false,
+            input: ['text']
+        })
+
+        expect(adopted.reasoning).toBe(false)
+        expect(adopted.thinkingLevel).toBe('off')
+        expect(adopted.local?.thinkingLevel).toBe('off')
+    })
+
+    it('is the same object when the catalogue says what the settings already said', () => {
+        const ai = normalizeSettings(stored).ai
+
+        expect(
+            adoptModelReasoning(ai, {
+                id: 'local-model',
+                name: 'Local model',
+                contextWindow: 8_192,
+                maxTokens: 4_096,
+                reasoning: false,
+                supportsReasoningEffort: false,
+                input: ['text']
+            })
+        ).toBe(ai)
+    })
+})
+
+describe('adoptSubagentReasoning', () => {
+    /** The third copy, and the one that outlived the other two. Same rule, same reason. */
+    it('turns a level on for a sub-agent model that turns out to reason', () => {
+        const ai = normalizeSettings(stored).ai
+        const connection = startSubagentConnection(ai, 'openai-compatible')
+        if (!connection) throw new Error('the local connection')
+        expect(connection.reasoning).toBe(false)
+
+        const adopted = adoptSubagentReasoning(connection, {
+            id: 'local-model',
+            name: 'Local model',
+            contextWindow: 8_192,
+            maxTokens: 4_096,
+            reasoning: true,
+            supportsReasoningEffort: true,
+            input: ['text']
+        })
+
+        expect(adopted.reasoning).toBe(true)
+        expect(adopted.supportsReasoningEffort).toBe(true)
+        // The connection it is served by is still the child's own, and its limits are untouched.
+        expect(adopted.connectionType).toBe('openai-compatible')
+        expect(adopted.contextWindow).toBe(connection.contextWindow)
+    })
+
+    it('takes the level away from a sub-agent model that turns out not to', () => {
+        const ai = normalizeSettings(stored).ai
+        const connection = startSubagentConnection(ai, 'openai-codex')
+        if (!connection) throw new Error('the ChatGPT connection')
+        expect(connection.thinkingLevel).toBe('high')
+
+        const adopted = adoptSubagentReasoning(connection, {
+            id: 'gpt-5.4-mini',
+            name: 'GPT-5.4 mini',
+            contextWindow: 272_000,
+            maxTokens: 128_000,
+            reasoning: false,
+            supportsReasoningEffort: false,
+            input: ['text']
+        })
+
+        expect(adopted.reasoning).toBe(false)
+        expect(adopted.thinkingLevel).toBe('off')
+    })
+
+    it('is the same object when the catalogue says what the connection already said', () => {
+        const ai = normalizeSettings(stored).ai
+        const connection = startSubagentConnection(ai, 'openai-codex')
+        if (!connection) throw new Error('the ChatGPT connection')
+
+        expect(
+            adoptSubagentReasoning(connection, {
+                id: 'gpt-5.6-terra',
+                name: 'GPT-5.6 Terra',
+                contextWindow: 272_000,
+                maxTokens: 128_000,
+                reasoning: true,
+                supportsReasoningEffort: true,
+                input: ['text', 'image']
+            })
+        ).toBe(connection)
     })
 })
 

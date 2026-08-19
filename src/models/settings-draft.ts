@@ -1,6 +1,8 @@
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import {commandErrorMessage} from '../utils/command-error'
 import {
+    adoptModelReasoning,
+    adoptSubagentReasoning,
     apiKeyUpdate,
     applyModelSelection,
     applySubagentModel,
@@ -138,10 +140,12 @@ export type SettingsAction =
     | Readonly<{type: 'ai-changed'; update: Partial<AiSettings>}>
     | Readonly<{type: 'ai-driver-chosen'; connectionType: AiSettings['connectionType']}>
     | Readonly<{type: 'model-chosen'; model: AiModelOption}>
+    | Readonly<{type: 'model-reconciled'; model: AiModelOption}>
     | Readonly<{type: 'models-listed'; models: readonly AiModelOption[]}>
     /** Which connection answers a delegation. No type at all is "whatever the parent uses". */
     | Readonly<{type: 'subagent-driver-chosen'; connectionType?: AiConnectionType | undefined}>
     | Readonly<{type: 'subagent-model-chosen'; model: AiModelOption}>
+    | Readonly<{type: 'subagent-model-reconciled'; model: AiModelOption}>
     | Readonly<{type: 'subagent-thinking-chosen'; thinkingLevel: ThinkingLevel}>
     | Readonly<{type: 'subagent-models-listed'; models: readonly AiModelOption[]}>
     | Readonly<{type: 'api-key-typed'; value: string}>
@@ -360,6 +364,19 @@ export function reduce(
             }
         }
 
+        /*
+         * The catalogue answering about the model that is already chosen.
+         *
+         * Only what the model itself decides — see `adoptModelReasoning`. The limits are left as
+         * they are, because a context window the user typed is an answer, not a stale copy.
+         */
+        case 'model-reconciled': {
+            if (!state.settings) return state
+            const ai = adoptModelReasoning(state.settings.ai, action.model)
+            if (ai === state.settings.ai) return state
+            return {...state, settings: {...state.settings, ai}}
+        }
+
         case 'models-listed':
             return {...state, availableModels: action.models}
 
@@ -399,6 +416,15 @@ export function reduce(
                     thinkingLevel: action.thinkingLevel
                 })
             }
+        }
+
+        /** The catalogue answering about the model the sub-agent already has. See the parent's. */
+        case 'subagent-model-reconciled': {
+            const chosen = state.settings?.ai.subagent.connection
+            if (!state.settings || !chosen) return state
+            const adopted = adoptSubagentReasoning(chosen, action.model)
+            if (adopted === chosen) return state
+            return {...state, settings: withSubagent(state.settings, adopted)}
         }
 
         case 'subagent-models-listed':

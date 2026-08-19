@@ -135,21 +135,38 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     )
     const subagentConnection = draft?.ai.subagent.connection
 
+    /*
+     * The driver's own catalogue, asked for once per driver.
+     *
+     * Both drivers, not only ChatGPT. The local one used to list nothing until the user pressed
+     * Test connection, which meant the page opened with no model picker and a reasoning menu drawn
+     * from whatever the file happened to say — including a `false` written before any catalogue had
+     * been read. Keyed on the driver rather than the address, because the address is a field the
+     * user is still typing.
+     */
     useEffect(() => {
-        if (draft?.ai.connectionType !== 'openai-codex') return
+        if (!draft) return
         if (modelsFor.current === draft.ai.connectionType) return
         modelsFor.current = draft.ai.connectionType
         const request = settingsRequest(state)
         if (!request) return
+        const isChatGpt = draft.ai.connectionType === 'openai-codex'
         void invoke('list_ai_models', {request})
             .then(models => {
                 dispatch({type: 'models-listed', models})
-                if (!models.some(model => model.id === draft.ai.model) && models[0]) {
-                    dispatch({type: 'model-chosen', model: models[0]})
-                }
+                const configured = models.find(model => model.id === draft.ai.model)
+                // A model the server serves has its facts re-read, so the reasoning menu offers what
+                // this model can actually be asked. A model it does not serve is replaced only on
+                // ChatGPT, whose catalogue is the whole truth; a local Model ID is typed by hand and
+                // is not the page's to overwrite while a server is between models.
+                if (configured) dispatch({type: 'model-reconciled', model: configured})
+                else if (isChatGpt && models[0]) dispatch({type: 'model-chosen', model: models[0]})
             })
             .catch((error: unknown) => {
                 modelsFor.current = undefined
+                // A local server that is simply not running is not a settings failure, and saying so
+                // on every open would put a red banner in front of anyone who opens the page first.
+                if (!isChatGpt) return
                 dispatch({
                     type: 'noticed',
                     tab: 'ai',
@@ -178,6 +195,9 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         void invoke('list_ai_models', {request: {...request, settings: {...draft, ai}}})
             .then(models => {
                 dispatch({type: 'subagent-models-listed', models})
+                // The same re-read the parent gets: what the chosen model can actually be asked.
+                const chosen = models.find(model => model.id === subagentConnection.model)
+                if (chosen) dispatch({type: 'subagent-model-reconciled', model: chosen})
             })
             .catch((error: unknown) => {
                 subagentModelsFor.current = undefined

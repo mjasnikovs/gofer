@@ -389,7 +389,7 @@ export function selectAiDriver(ai: AiSettings, connectionType: AiConnectionType)
  * a model whose limits depend on which screen picked it.
  */
 export function applyModelSelection(ai: AiSettings, model: AiModelOption): AiSettings {
-    const selected = {
+    return withProfile({
         ...ai,
         model: model.id,
         modelName: model.name,
@@ -399,10 +399,41 @@ export function applyModelSelection(ai: AiSettings, model: AiModelOption): AiSet
         supportsReasoningEffort: model.supportsReasoningEffort,
         input: model.input,
         thinkingLevel: model.reasoning ? ai.thinkingLevel : 'off'
+    })
+}
+
+/**
+ * Re-reads what the configured model can think, off the catalogue the server just answered with.
+ *
+ * Not [`applyModelSelection`], because nothing was selected. The limits stay as they are — a
+ * context window typed by hand is the user's answer, and overwriting it on every reconnect would
+ * undo a setting nobody changed. Whether a model reasons is not theirs to type: it is the model's
+ * own fact, and a file that says no because the catalogue had never been read is a file whose
+ * reasoning menu offers `off` and nothing else, for as long as that model stays selected.
+ *
+ * Returns the settings unchanged when the catalogue says what they already said, so a connection
+ * that agrees costs no write.
+ */
+export function adoptModelReasoning(ai: AiSettings, model: AiModelOption): AiSettings {
+    if (
+        ai.reasoning === model.reasoning
+        && ai.supportsReasoningEffort === model.supportsReasoningEffort
+    ) {
+        return ai
     }
-    const profile = profileOf(selected)
+    return withProfile({
+        ...ai,
+        reasoning: model.reasoning,
+        supportsReasoningEffort: model.supportsReasoningEffort,
+        thinkingLevel: model.reasoning ? ai.thinkingLevel : 'off'
+    })
+}
+
+/** Mirrors the flat fields back into the driver's half of the saved pair. See `normalizeSettings`. */
+function withProfile(ai: AiSettings): AiSettings {
+    const profile = profileOf(ai)
     return {
-        ...selected,
+        ...ai,
         local: ai.connectionType === 'openai-compatible' ? profile : ai.local,
         chatgpt: ai.connectionType === 'openai-codex' ? profile : ai.chatgpt
     }
@@ -468,6 +499,32 @@ export function applySubagentModel(
         reasoning: model.reasoning,
         supportsReasoningEffort: model.supportsReasoningEffort,
         input: model.input,
+        thinkingLevel: model.reasoning ? connection.thinkingLevel : 'off'
+    }
+}
+
+/**
+ * The same re-read as [`adoptModelReasoning`], for the sub-agent's own model.
+ *
+ * It needs its own, because the child's connection is a different shape and its `reasoning` was
+ * copied from the parent's profile at the moment the child was first given a model of its own. A
+ * profile that said `false` then goes on saying `false` after the catalogue is corrected, which is
+ * how the sub-agent kept a reasoning menu offering nothing but `off`.
+ */
+export function adoptSubagentReasoning(
+    connection: SubagentConnection,
+    model: AiModelOption
+): SubagentConnection {
+    if (
+        connection.reasoning === model.reasoning
+        && connection.supportsReasoningEffort === model.supportsReasoningEffort
+    ) {
+        return connection
+    }
+    return {
+        ...connection,
+        reasoning: model.reasoning,
+        supportsReasoningEffort: model.supportsReasoningEffort,
         thinkingLevel: model.reasoning ? connection.thinkingLevel : 'off'
     }
 }

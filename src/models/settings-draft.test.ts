@@ -248,6 +248,56 @@ describe('editing the connection', () => {
         }
         expect(reduce(loaded, {type: 'model-chosen', model}).settings?.ai.thinkingLevel).toBe('off')
     })
+
+    /*
+     * The catalogue answering about the model the page already has chosen.
+     *
+     * The page used to list models for ChatGPT only, so a local connection opened with whatever the
+     * file said — including a `reasoning: false` written before any catalogue had been read — and
+     * its reasoning menu offered `off` and nothing else.
+     */
+    it('re-reads what the chosen model can think without touching what was typed', () => {
+        const model: AiModelOption = {
+            id: 'local-model',
+            name: 'Local model',
+            contextWindow: 4_096,
+            maxTokens: 1_024,
+            reasoning: true,
+            supportsReasoningEffort: true,
+            input: ['text']
+        }
+        const stale = apply(
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {
+                type: 'ai-changed',
+                update: {
+                    reasoning: false,
+                    supportsReasoningEffort: false,
+                    thinkingLevel: 'off',
+                    contextWindow: 999_999
+                }
+            }
+        )
+        const state = reduce(stale, {type: 'model-reconciled', model})
+
+        expect(state.settings?.ai.reasoning).toBe(true)
+        expect(state.settings?.ai.supportsReasoningEffort).toBe(true)
+        expect(state.settings?.ai.contextWindow).toBe(999_999)
+    })
+
+    it('leaves the draft alone when the catalogue agrees with it', () => {
+        const model: AiModelOption = {
+            id: 'local-model',
+            name: 'Local model',
+            contextWindow: 4_096,
+            maxTokens: 1_024,
+            reasoning: loaded.settings?.ai.reasoning ?? false,
+            supportsReasoningEffort: loaded.settings?.ai.supportsReasoningEffort ?? false,
+            input: ['text']
+        }
+
+        expect(reduce(loaded, {type: 'model-reconciled', model})).toBe(loaded)
+    })
 })
 
 describe('choosing the model the sub-agent answers with', () => {
