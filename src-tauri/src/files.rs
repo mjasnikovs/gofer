@@ -34,13 +34,19 @@ pub const MAX_RELATIVE_PATH_BYTES: usize = 1024;
 const MAX_WALK_DEPTH: usize = 32;
 const WATCH_POLL_SLICE: Duration = Duration::from_millis(50);
 /// Directories whose churn never concerns Monaco or the language server.
-const IGNORED_DIRECTORIES: [&str; 6] = [
+///
+/// `.gofer` is here for a second reason as well. The walk is what answers `godot_resource list`, so
+/// a directory it enters is a file the agent is told the project has. A live project's list came
+/// back two thirds Gofer's own compressed session logs, past the answer's size cap, to a model that
+/// had asked what was in the project.
+const IGNORED_DIRECTORIES: [&str; 7] = [
     ".git",
     ".godot",
     ".import",
     "node_modules",
     "target",
     "dist",
+    crate::workspace::PROJECT_DATA_DIRECTORY,
 ];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1338,6 +1344,11 @@ mod tests {
             .expect("create");
         workspace
             .write("node_modules/pkg/index.js", "ignored", None)
+            .expect("create");
+        // Gofer's own directory, which the agent's `godot_resource list` reads out of this walk. A
+        // live project answered that call with two hundred lines of its own session logs.
+        workspace
+            .write(".gofer/logs/session/turn.jsonl.zst", "ignored", None)
             .expect("create");
         let snapshot = scan(workspace.root());
         assert_eq!(snapshot.keys().collect::<Vec<_>>(), vec!["kept.gd"]);

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import {mkdir, mkdtemp, readdir, rm, writeFile} from 'node:fs/promises'
+import {mkdir, mkdtemp, readdir, readFile, rm, writeFile} from 'node:fs/promises'
 import {createServer} from 'node:http'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
@@ -15,6 +15,8 @@ import {
     normalizeToolCalls,
     toolResult
 } from './ai-host.mjs'
+import Ajv from 'ajv'
+
 import {probeTools} from './ai-reachability.mjs'
 import {createChildTools} from './ai-subagent.mjs'
 import {createAgentTools, retryDelay, runAgent} from './ai-provider.mjs'
@@ -699,42 +701,111 @@ test('domain tools carry the router catalog and forward every call', async () =>
 })
 
 /**
- * A domain whose every operation is alone advertises a list of exactly one.
+ * The two narrowings read differently, and neither one caps the list.
  *
- * `godot_session` is the whole of this case: seven operations, seven of them alone. Before this it
- * offered an unbounded `ops` array and refused the second entry from Rust — a shape the model had
- * to learn was a lie for one tool out of ten.
+ * `godot_session` used to advertise a list of exactly one, because all seven of its operations were
+ * marked alone. The mark meant two different things, and the schema said the stricter of them about
+ * both: a live project wrote `[stop, start]` and `[get_state, answer_dialog]` and was refused, for
+ * ordinary two-step requests the router walks in order. Only the debugger is exclusive now.
  */
-test('a domain that can never batch caps its list at one', () => {
-    const alone = [
-        {op: 'status', summary: 'Reports the session state.', alone: 'It takes no parameters.'},
+test('an exclusive operation and a once-only operation are advertised apart', () => {
+    const session = [
+        {
+            op: 'status',
+            summary: 'Reports the session state.',
+            alone: {scope: 'repeat', why: 'It takes no parameters.'}
+        },
         {
             op: 'undo',
             summary: 'Undoes the last operation.',
-            alone: 'One undo stack, walked in order.'
+            alone: {scope: 'repeat', why: 'One undo stack, walked in order.'}
         }
     ]
-    const mixed = [
-        {op: 'get_tree', summary: 'Returns the hierarchy.', alone: null},
-        {op: 'open', summary: 'Opens a scene.', alone: 'One scene is open at a time.'}
+    const debug = [
+        {op: 'threads', summary: 'Lists the threads.', alone: null},
+        {
+            op: 'continue',
+            summary: 'Resumes the debuggee.',
+            alone: {scope: 'exclusive', why: 'One debuggee, driven in order.'}
+        }
     ]
-    const [session, scene] = createGodotTools(
+    const [owned, driven] = createGodotTools(
         [
-            {name: 'godot_session', description: 'd', operations: alone},
-            {name: 'godot_scene', description: 'd', operations: mixed}
+            {name: 'godot_session', description: 'd', operations: session},
+            {name: 'godot_debug', description: 'd', operations: debug}
         ],
         {call: async () => ({})}
     )
 
-    assert.equal(session.parameters.properties.ops.maxItems, 1)
-    assert.match(session.parameters.properties.ops.description, /holds exactly one/u)
-    // Said once at the tool, so seven near-identical clauses stop repeating in the operation list.
-    assert.doesNotMatch(session.description, /only entry of its call/u)
+    // Nothing is capped: a list of two different operations is what `ops` is for.
+    assert.equal(owned.parameters.properties.ops.maxItems, undefined)
+    assert.equal(driven.parameters.properties.ops.maxItems, undefined)
 
-    // A domain with one batchable operation keeps the list open and names the lone ones.
-    assert.equal(scene.parameters.properties.ops.maxItems, undefined)
-    assert.match(scene.parameters.properties.ops.description, /only entry of their call: open/u)
-    assert.match(scene.description, /only entry of its call: One scene is open at a time\./u)
+    // A repeat operation is named as one that may not appear twice, never as one that must be alone.
+    assert.match(owned.parameters.properties.ops.description, /may not appear twice: status, undo/u)
+    assert.doesNotMatch(owned.parameters.properties.ops.description, /only entry of their call/u)
+    assert.match(owned.description, /not twice in one call: It takes no parameters\./u)
+
+    // An exclusive one keeps the stronger sentence, and only it.
+    assert.match(
+        driven.parameters.properties.ops.description,
+        /only entry of their call: continue/u
+    )
+    assert.doesNotMatch(driven.parameters.properties.ops.description, /may not appear twice/u)
+    assert.match(driven.description, /only entry of its call: One debuggee, driven in order\./u)
+})
+
+/**
+ * The domains as `createGodotTools` receives them, built from the declared parameter contract.
+ *
+ * The real catalogue is serialized by the Rust crate, which merges prose from `ai_tools.rs` with
+ * this file. Only the parameters and the narrowing reach the JSON schema — a summary is a sentence
+ * in the description — so reading them here costs no cargo build, and `check:command-surface` is
+ * what holds the two halves together.
+ */
+async function declaredDomains() {
+    const {operations} = JSON.parse(
+        await readFile(new URL('../protocol/schemas/v2/params.json', import.meta.url), 'utf8')
+    )
+    const domains = new Map()
+    for (const entry of operations) {
+        const operations = domains.get(entry.tool) ?? []
+        operations.push({
+            op: entry.op,
+            summary: `${entry.op}.`,
+            params: entry.params ?? [],
+            alone: entry.alone ?? null
+        })
+        domains.set(entry.tool, operations)
+    }
+    return [...domains].map(([name, operations]) => ({name, description: name, operations}))
+}
+
+/**
+ * Every distinct `ops` shape a model wrote across sixteen real tasks validates against the schema.
+ *
+ * `fixtures/recorded-tool-calls.json` is 712 calls from a live project reduced to their 93 distinct
+ * operation lists. The Rust gate has its own pass over the same file; this one is the layer above
+ * it, where the agent loop refuses a call before the router ever sees it.
+ */
+test('every recorded ops shape validates against the advertised schema', async () => {
+    const recorded = JSON.parse(
+        await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
+    )
+    const tools = createGodotTools(await declaredDomains(), {call: async () => ({})})
+    const validate = new Ajv({strict: false, allErrors: true})
+    let checked = 0
+    for (const recordedCase of recorded.cases) {
+        const tool = tools.find(candidate => candidate.name === recordedCase.tool)
+        assert.ok(tool, `${recordedCase.tool} is recorded and is not advertised`)
+        const check = validate.compile(tool.parameters)
+        assert.ok(
+            check({ops: recordedCase.ops}),
+            `${recordedCase.tool} ${JSON.stringify(recordedCase.ops.map(op => op.op))}: ${validate.errorsText(check.errors)}`
+        )
+        checked += 1
+    }
+    assert.ok(checked > 50, 'the fixture lost its cases')
 })
 
 /**

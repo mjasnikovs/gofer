@@ -1,9 +1,15 @@
 /**
  * Does the batching rule confuse the model?
  *
- * `godot_session` used to advertise an unbounded `ops` array while every one of its seven
- * operations has to be the only entry of its call. This measures whether a model took that offer,
- * and whether capping the array at one stops it.
+ * Superseded, and kept for the method rather than the result. It measured capping `godot_session`'s
+ * `ops` array at one, back when all seven of its operations were marked alone. That mark has since
+ * been split: `godot_session` is `repeat` throughout, so its operations may sit beside each other
+ * and the cap is gone. What this run showed — that a schema constraint moves a model where a
+ * sentence in the description does not — is why the split was made in the schema and the router
+ * rather than in the prompt.
+ *
+ * To measure the split itself, `BASELINE` has to move to the commit before it and the asks have to
+ * be pairs the new rule still refuses.
  *
  * before  `createGodotTools` at HEAD — unbounded array, one clause per lone operation
  * after   the working tree — `maxItems: 1` and one sentence at the tool

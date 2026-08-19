@@ -19,7 +19,10 @@ use tauri::{AppHandle, Manager, Runtime};
 const ENVIRONMENT_FILE_NAME: &str = "environment.json";
 const CHAT_ATTACHMENTS_DIRECTORY: &str = "chat-attachments";
 /// Where a project's own data lives, inside the project.
-const PROJECT_DATA_DIRECTORY: &str = ".gofer";
+///
+/// Public to the crate because the worktree walk has to skip it. It is Gofer's, not the project's:
+/// the database and the compressed session logs under it are not resources a Godot project has.
+pub(crate) const PROJECT_DATA_DIRECTORY: &str = ".gofer";
 
 /// The workspace folder and Godot executable the user chose in the health check.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

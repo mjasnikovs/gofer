@@ -131,7 +131,7 @@ export type GodotSceneTree = Readonly<{
     root: GodotNode | null
     /** The edited scene's revision, which every mutation has to send back as `expectedRevision`. */
     revision?: number | undefined
-    /** Only the runtime half truncates: a remote dump stops at 2048 nodes or 32 levels. */
+    /** Whether the walk stopped short of the whole tree, at the caller's bound or the addon's. */
     truncated?: boolean | undefined
 }>
 

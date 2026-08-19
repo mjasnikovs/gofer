@@ -23,6 +23,7 @@ use crate::godot_session::{self, LogQuery};
 use crate::godot_session_api::{self, CallGodotRequest, StartGodotSessionRequest};
 use crate::rag;
 use crate::script::{self, ScriptRequest};
+use crate::tool_params::Sharing;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Runtime};
@@ -122,11 +123,12 @@ impl Serialize for ToolDomain {
                     // nothing" from "nobody wrote the contract down yet".
                     "signature": params.map(crate::tool_params::signature),
                     "params": params,
-                    // Why this one has to be the only entry of its call, or null when a list may
-                    // hold it beside others. The model is told here rather than finding out from a
-                    // refusal: `ops` exists to save round trips, so learning its one rule by
+                    // How much of an `ops` list this one may share, and why, or null when it may
+                    // share all of one. The model is told here rather than finding out from a
+                    // refusal: `ops` exists to save round trips, so learning its narrowing by
                     // spending one is the wrong way round.
-                    "alone": crate::tool_params::alone_reason(self.name, operation.op),
+                    "alone": crate::tool_params::alone_rule(self.name, operation.op)
+                        .map(|(scope, why)| json!({"scope": scope, "why": why})),
                 })
             })
             .collect();
@@ -589,6 +591,14 @@ pub const CATALOG: &[ToolDomain] = &[
             ),
             operation("capture", "Captures a PNG frame."),
             operation(
+                "wait",
+                "Lets the game run on for a few frames, then answers with how many passed and how \
+                 long it took. This is how you wait for something the game does over time — a \
+                 tween, a timer, a unit walking somewhere — before capturing or inspecting it. \
+                 Never wait by running `sleep` in bash: that stops this process rather than \
+                 letting the game advance, and it costs a whole request to do nothing.",
+            ),
+            operation(
                 "get_monitors",
                 "Reads engine performance monitors. Without a list it answers with \
                  fps, memory_static and object_node_count. The rest are process_time, \
@@ -1034,12 +1044,20 @@ fn requested_operation(
     Ok(Requested { op, params })
 }
 
-/// Refuses a list holding an operation that has to be the only entry of its call.
+/// Refuses a list that asks an operation to share more of itself than it can.
 ///
-/// The sentence is the operation's own, from the table it is declared in, so the refusal says which
-/// of the two reasons it is: an operation with no parameters would be the same call twice over, and
-/// one that drives something the session owns exactly one of would have its second entry act on
-/// whatever the first entry left behind.
+/// Two refusals, because one sentence cannot be true of both. An `Exclusive` operation cannot share
+/// a call at all: it is the debugger, where the answer to one operation decides what the next one
+/// means. A `Repeat` operation may sit beside anything and may not appear twice — it takes no
+/// parameters to vary, or it drives what the session owns exactly one of, and `run_in_order` walks
+/// the list, so the second entry either answers the first one's question again or acts on what it
+/// left behind.
+///
+/// The reason `Repeat` is separate is what a live project measured. Ten calls across ten of sixteen
+/// tasks were refused for holding a lone operation, and not one of them repeated it: they were
+/// `[open, get_tree]`, `[capture, get_state]`, `[status, threads, stack_trace]` — ordinary two-step
+/// requests the router was already able to run. The old rule refused a list holding any lone
+/// operation, and told the model "a second one is the first one again" about two different ones.
 fn refuse_a_list_that_holds_a_lone_operation(
     domain: &ToolDomain,
     entries: &[Requested],
@@ -1048,21 +1066,46 @@ fn refuse_a_list_that_holds_a_lone_operation(
         return Ok(());
     }
     for (index, entry) in entries.iter().enumerate() {
-        let Some(reason) = crate::tool_params::alone_reason(domain.name, &entry.op) else {
+        let Some((scope, reason)) = crate::tool_params::alone_rule(domain.name, &entry.op) else {
             continue;
         };
-        return Err(ToolFailure {
-            code: "must_be_alone".to_owned(),
-            message: format!(
-                "{}.{} has to be the only entry of its call, and `ops[{index}]` is one of {}. \
-                 {reason} Send it as a list of one, and the rest as their own call.",
-                domain.name,
-                entry.op,
-                entries.len()
-            ),
-            retryable: false,
-            details: json!({"op": entry.op, "opIndex": index}),
-        });
+        match scope {
+            Sharing::Exclusive => {
+                return Err(ToolFailure {
+                    code: "must_be_alone".to_owned(),
+                    message: format!(
+                        "{}.{} has to be the only entry of its call, and `ops[{index}]` is one of \
+                         {}. {reason} Send it as a list of one, and the rest as their own call.",
+                        domain.name,
+                        entry.op,
+                        entries.len()
+                    ),
+                    retryable: false,
+                    details: json!({"op": entry.op, "opIndex": index}),
+                });
+            }
+            // Only a later twin is named. The first entry of a pair is the one the caller keeps,
+            // so pointing at it would ask for the wrong edit.
+            Sharing::Repeat => {
+                if let Some(again) = entries
+                    .iter()
+                    .skip(index + 1)
+                    .position(|later| later.op == entry.op)
+                {
+                    let again = index + 1 + again;
+                    return Err(ToolFailure {
+                        code: "op_repeated".to_owned(),
+                        message: format!(
+                            "{}.{} is in this call twice, at `ops[{index}]` and `ops[{again}]`. \
+                             {reason} Drop the second one; the rest of the list is fine.",
+                            domain.name, entry.op
+                        ),
+                        retryable: false,
+                        details: json!({"op": entry.op, "opIndex": again, "firstIndex": index}),
+                    });
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1497,6 +1540,25 @@ fn named_scripts(params: &Value) -> Result<(Vec<String>, bool), ToolFailure> {
 }
 
 /// One answer for a single path, `{"files": […]}` for a list.
+/// How much script text one `open` call answers with before it starts withholding.
+///
+/// The worker holds a tool result at 24,000 characters and slices it there, mid-file. Ten of
+/// thirty-two `open` calls in a live project hit that, and the file cut in half was the last one
+/// named — after which an `edit` anchored on text the model had been shown only part of failed with
+/// `anchor_not_found`. A budget answers instead with whole files and a note about the rest, which
+/// is a thing the model can act on.
+const OPEN_TEXT_BUDGET: usize = 16_000;
+
+/// Whether this file's text is the one an `open` call stops carrying.
+///
+/// The first file is answered however large it is. A budget that could withhold everything would
+/// turn `open scripts/main.gd` — one file, larger than the budget on its own — into a call that
+/// says only how big it is, and there is no smaller call to fall back to. Truncation is the worse
+/// failure of the two, but it is only worse when the model has somewhere else to go.
+fn withholds_the_text(spent: usize, text_bytes: usize, first: bool) -> bool {
+    !first && spent + text_bytes > OPEN_TEXT_BUDGET
+}
+
 fn one_or_many(mut answers: Vec<Value>, batched: bool) -> Value {
     if batched {
         return json!({"files": answers});
@@ -1541,6 +1603,7 @@ fn script_domain<R: Runtime>(
         "open" => {
             let (paths, batched) = named_scripts(&params)?;
             let mut answers = Vec::with_capacity(paths.len());
+            let mut spent = 0usize;
             for path in paths {
                 // Opening a script that has not been written yet is the commonest thing an agent
                 // does wrong here, because the catalog tells it to open a script before querying
@@ -1564,7 +1627,27 @@ fn script_domain<R: Runtime>(
                         }
                     },
                 )?;
-                answers.push(reconciled(app, to_value(document)));
+                // Every file is opened, because opening is what tells the language server the
+                // document exists — the text is what the budget withholds, never the open itself.
+                let text_bytes = document.text.len();
+                let answered = if withholds_the_text(spent, text_bytes, answers.is_empty()) {
+                    // No `hash`. It is what `reconciled` records in the read ledger, and the
+                    // ledger is the hash a later `save` is given as its `expectedHash` — so
+                    // answering with one here would let the model replace a whole file out of text
+                    // it was never shown. Without it the save is refused as a conflict, which is
+                    // the true answer: read the file, then write it.
+                    json!({
+                        "path": document.path,
+                        "bytes": document.bytes,
+                        "version": document.version,
+                        "omitted": "This call had no room left for the text. It is open; ask for it \
+                                    on its own before writing to it.",
+                    })
+                } else {
+                    spent += text_bytes;
+                    to_value(document)
+                };
+                answers.push(reconciled(app, answered));
             }
             Ok(one_or_many(answers, batched))
         }
@@ -1719,13 +1802,23 @@ fn docs_domain<R: Runtime>(
 /// Sends one addon command through the same session API the renderer's `call_godot` uses.
 /// `expectedRevision` and `timeoutMs` are lifted out of the parameters: every scene mutation
 /// carries a revision, and the wire format keeps it beside the command rather than inside it.
-/// The runtime failures that mean the game is not going to answer this call or any other.
+/// The runtime failures that mean the game is not answering, whatever the reason turns out to be.
 ///
 /// Every one of them is the addon reporting a state of the process rather than a fault in the
-/// request: the game is paused at an error, or it is gone, or it stopped answering. All three are
-/// worth the same treatment, because in all three the model's next question is the same one.
-const GAME_IS_NOT_ANSWERING: [&str; 3] =
-    ["runtime_broke", "runtime_not_running", "runtime_timeout"];
+/// request: the game is paused at an error, it is gone, it stopped answering, or it is up and its
+/// helper has not loaded. All four are worth the same treatment, because in all four the model's
+/// next question is the same one, and the answer is in the editor's output either way.
+///
+/// `runtime_slow_start` is here for a failure that looks like patience and is not: a parse error in
+/// the addon's own runtime script leaves the game running and its helper never loading, so the
+/// launch times out while the editor is still playing, for ever. Without the output the message
+/// reads as "wait a little longer", and there is nothing to wait for.
+const GAME_IS_NOT_ANSWERING: [&str; 4] = [
+    "runtime_broke",
+    "runtime_not_running",
+    "runtime_slow_start",
+    "runtime_timeout",
+];
 
 /// Puts the error that ended the game into the failure the model is about to read.
 ///
@@ -2665,32 +2758,86 @@ mod tests {
         assert_eq!(failure.details["opIndex"], Value::Null);
     }
 
-    /// The thirty-five operations a list cannot hold beside another, and why.
+    /// A batched `open` answers with whole files and a note, never with one cut in half.
+    ///
+    /// The worker slices a tool result at 24,000 characters. Ten of thirty-two `open` calls in a
+    /// live project reached that, always in the last file named, and an `edit` anchored on the text
+    /// the model had been shown half of then failed with `anchor_not_found`.
     #[test]
-    fn an_operation_that_has_to_be_alone_is_refused_in_a_list_and_run_on_its_own() {
-        let app = unattended_app();
-        let failure = dispatch(
-            app.handle(),
-            calls(
-                "godot_scene",
-                &[
-                    ("open", json!({"path": "res://a.tscn"})),
-                    ("open", json!({"path": "res://b.tscn"})),
-                ],
-            ),
-        )
-        .expect_err("one scene is open at a time");
-        assert_eq!(failure.code, "must_be_alone");
-        assert_eq!(failure.details["opIndex"], json!(0));
-        // The sentence is the operation's own, so the refusal says which of the two reasons it is.
+    fn a_batched_open_stops_carrying_text_before_the_worker_cuts_it() {
+        // One file is answered whatever it weighs: there is no smaller call to be sent instead.
+        assert!(!withholds_the_text(0, OPEN_TEXT_BUDGET * 4, true));
+
+        // Files keep coming while the budget holds, and stop at the one that would overrun it.
+        assert!(!withholds_the_text(OPEN_TEXT_BUDGET - 1, 1, false));
+        assert!(withholds_the_text(OPEN_TEXT_BUDGET - 1, 2, false));
+
+        // The two files a live project opened together, at the sizes it opened them: 22,752 and
+        // 6,671 bytes, which the worker answered as one 24,031-character slice.
+        assert!(!withholds_the_text(0, 22_752, true));
+        assert!(withholds_the_text(22_752, 6_671, false));
+
+        // And the budget leaves the answer inside the worker's cap once the JSON around it is
+        // counted — path, hash and version ride along with every file.
+        const { assert!(OPEN_TEXT_BUDGET < 24_000) };
+    }
+
+    /// The gate on its own, given a list of operation names.
+    ///
+    /// Called directly rather than through `dispatch`, because the parameters are not what it
+    /// reads: they are checked one entry earlier, and threading a valid set through thirty-five
+    /// operations would test that checker instead of this one.
+    fn gate(tool: &str, ops: &[&str]) -> Result<(), ToolFailure> {
+        let domain = CATALOG
+            .iter()
+            .find(|domain| domain.name == tool)
+            .expect("a catalogue domain");
+        let entries: Vec<Requested> = ops
+            .iter()
+            .map(|op| Requested {
+                op: (*op).to_owned(),
+                params: json!({}),
+            })
+            .collect();
+        refuse_a_list_that_holds_a_lone_operation(domain, &entries)
+    }
+
+    /// The two narrowings, each refused in its own words, and neither one costing a list that is
+    /// merely two steps long.
+    #[test]
+    fn a_repeated_operation_is_refused_and_a_two_step_list_is_not() {
+        // `Repeat`: the same operation twice. The later twin is the one named, because the first is
+        // the one the caller keeps.
+        let failure = gate("godot_scene", &["open", "open"]).expect_err("one scene is open");
+        assert_eq!(failure.code, "op_repeated");
+        assert_eq!(failure.details["opIndex"], json!(1));
+        assert_eq!(failure.details["firstIndex"], json!(0));
+        // The sentence is the operation's own, so the refusal says which narrowing it is.
         assert!(
             failure.message.contains("One scene is open at a time"),
             "{}",
             failure.message
         );
 
-        // Alone means alone in a list, not refused: the same operation as a list of one reaches the
-        // handler, which reports the missing session rather than the list.
+        // The same operation beside a different one is an ordinary two-step request, and the whole
+        // point of `ops`.
+        gate("godot_scene", &["open", "get_tree"]).expect("open then read the tree");
+        gate("godot_runtime", &["capture", "get_state"]).expect("a frame and the state");
+        gate("godot_debug", &["status", "threads"]).expect("two reads of the debuggee");
+
+        // `Exclusive`: the debugger refuses to share a call at all, whatever the other entry is.
+        let failure = gate("godot_debug", &["continue", "threads"]).expect_err("one debuggee");
+        assert_eq!(failure.code, "must_be_alone");
+        assert_eq!(failure.details["opIndex"], json!(0));
+        assert!(
+            failure.message.contains("One debuggee, driven in order"),
+            "{}",
+            failure.message
+        );
+
+        // Narrowed is not refused. A list of one passes the gate whatever its scope, and reaching
+        // the handler is what proves the gate is wired into `dispatch` at all.
+        let app = unattended_app();
         let failure = dispatch(
             app.handle(),
             call("godot_scene", "open", json!({"path": "res://a.tscn"})),
@@ -2698,8 +2845,7 @@ mod tests {
         .expect_err("no session is active");
         assert_eq!(failure.code, "session_not_active");
 
-        // Every operation the table names is one the catalogue offers, and every one of them is
-        // either parameterless or drives something the session owns exactly one of.
+        // Every operation the table names is one the catalogue offers.
         for entry in crate::tool_params::ALONE {
             assert!(
                 CATALOG.iter().any(|domain| domain.name == entry.domain
@@ -2711,61 +2857,144 @@ mod tests {
         }
     }
 
-    /// Every pair below was written by a model against the unbounded `ops` array `godot_session`
-    /// used to advertise, one per ordinary two-step request. A local Qwen3.6-27B took the offer on
-    /// four of four asks; capping the array at one took it to zero of four. The cap lives in the
-    /// schema, so this pins the layer under it: whatever a caller sends, the router still names the
-    /// operation, its index, and the reason.
+    /// Every narrowed operation, refused when it is asked for what its scope does not allow, and
+    /// allowed the other shape.
+    ///
+    /// Generated from the table rather than listed, so an operation added to it is covered the day
+    /// it lands, and one whose scope changes is covered in its new sense.
     #[test]
-    fn the_session_pairs_a_model_wrote_are_each_refused_by_name() {
-        let app = unattended_app();
-        let recorded = [
-            // "Start the Godot editor session, then report its status."
-            (
-                "start",
-                json!({}),
-                "status",
-                json!({}),
-                "There is one editor session",
-            ),
-            // "Undo the last two editor operations."
-            ("undo", json!({}), "undo", json!({}), "One undo stack"),
-            // "The editor is blocked on a dialog. Read the session state, then press Discard."
-            (
-                "get_state",
-                json!({}),
-                "answer_dialog",
-                json!({"button": "Discard"}),
-                "It takes no parameters",
-            ),
-            // "Restart the editor session: stop it and start it again."
-            (
-                "stop",
-                json!({}),
-                "start",
-                json!({}),
-                "There is one editor session",
-            ),
-        ];
-        for (first, first_params, second, second_params, reason) in recorded {
-            let failure = dispatch(
-                app.handle(),
-                calls(
-                    "godot_session",
-                    &[(first, first_params), (second, second_params)],
-                ),
-            )
-            .expect_err("a lone operation cannot run beside another");
-            assert_eq!(failure.code, "must_be_alone", "{first} beside {second}");
-            // The first entry is the one named: it is the one the caller has to send on its own.
-            assert_eq!(failure.details["op"], json!(first));
-            assert_eq!(failure.details["opIndex"], json!(0));
-            assert!(
-                failure.message.contains(reason),
-                "{first} beside {second}: {}",
-                failure.message
+    fn every_narrowed_operation_is_refused_in_the_shape_its_scope_names() {
+        for entry in crate::tool_params::ALONE {
+            // An operation of the same domain to stand beside it. Any one will do: what the gate
+            // reads is the scope, not the neighbour.
+            let domain = CATALOG
+                .iter()
+                .find(|domain| domain.name == entry.domain)
+                .expect("a catalogue domain");
+            let neighbour = domain
+                .operations
+                .iter()
+                .map(|operation| operation.op)
+                .find(|op| *op != entry.op)
+                .expect("a domain offers more than one operation");
+
+            // Twice is refused whatever the scope. An exclusive operation is answered in its own
+            // words rather than as a repeat: sharing at all is what it cannot do, and a caller told
+            // to drop the second entry would send the first one beside something else next.
+            let twice = gate(entry.domain, &[entry.op, entry.op])
+                .expect_err("a narrowed operation is never allowed twice");
+            assert_eq!(
+                twice.code,
+                match entry.scope {
+                    Sharing::Repeat => "op_repeated",
+                    Sharing::Exclusive => "must_be_alone",
+                },
+                "{}.{}: {}",
+                entry.domain,
+                entry.op,
+                twice.message
             );
+            assert!(
+                twice.message.contains(entry.reason),
+                "{}.{} does not carry its own sentence: {}",
+                entry.domain,
+                entry.op,
+                twice.message
+            );
+
+            let beside = gate(entry.domain, &[entry.op, neighbour]);
+            match entry.scope {
+                Sharing::Repeat => {
+                    beside.unwrap_or_else(|failure| {
+                        panic!(
+                            "{}.{} may sit beside {neighbour}: {}",
+                            entry.domain, entry.op, failure.message
+                        )
+                    });
+                }
+                Sharing::Exclusive => {
+                    let failure = beside.expect_err("an exclusive operation shares nothing");
+                    assert_eq!(failure.code, "must_be_alone");
+                    assert_eq!(failure.details["op"], json!(entry.op));
+                    assert!(
+                        failure.message.contains(entry.reason),
+                        "{}.{}: {}",
+                        entry.domain,
+                        entry.op,
+                        failure.message
+                    );
+                }
+            }
         }
+    }
+
+    /// The four pairs a model wrote against `godot_session`, and what the router does with them now.
+    ///
+    /// They were written against the unbounded `ops` array the domain used to advertise, one per
+    /// ordinary two-step request, and every one of them was refused. Three of the four are two
+    /// different operations, which `run_in_order` has always been able to walk — so the refusal was
+    /// the defect, not the call. Only the pair that repeats one is still refused.
+    #[test]
+    fn the_session_pairs_a_model_wrote_run_unless_they_repeat_an_operation() {
+        // "Start the Godot editor session, then report its status."
+        gate("godot_session", &["start", "status"]).expect("start then report");
+        // "The editor is blocked on a dialog. Read the session state, then press Discard."
+        gate("godot_session", &["get_state", "answer_dialog"]).expect("read then press");
+        // "Restart the editor session: stop it and start it again."
+        gate("godot_session", &["stop", "start"]).expect("stop then start");
+
+        // "Undo the last two editor operations." One undo stack, walked in order: the second entry
+        // undoes whatever the first one left, which is not what the caller asked for.
+        let failure = gate("godot_session", &["undo", "undo"]).expect_err("one undo stack");
+        assert_eq!(failure.code, "op_repeated");
+        assert_eq!(failure.details["op"], json!("undo"));
+        assert!(
+            failure.message.contains("One undo stack"),
+            "{}",
+            failure.message
+        );
+    }
+
+    /// Every distinct `ops` shape a model wrote across sixteen real tasks, and not one refused.
+    ///
+    /// `fixtures/recorded-tool-calls.json` is 712 calls from a live project, reduced to the 93
+    /// distinct lists of operation names among them. Ten of those calls — eight shapes, marked
+    /// `refusedBefore` — were refused by the rule this replaced, and every one of them was two
+    /// different operations rather than a repeat. The fixture is the evidence, so the fixture is
+    /// the test: what a model actually sends is what the gate has to let through.
+    #[test]
+    fn no_shape_a_model_recorded_is_refused_by_the_gate() {
+        let recorded: Value = serde_json::from_slice(
+            &std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../fixtures/recorded-tool-calls.json"),
+            )
+            .expect("read the recorded calls"),
+        )
+        .expect("parse the recorded calls");
+        let cases = recorded["cases"].as_array().expect("recorded cases");
+        assert!(cases.len() > 50, "the fixture lost its cases");
+
+        let mut previously_refused = 0;
+        for case in cases {
+            let tool = case["tool"].as_str().expect("case tool");
+            let ops: Vec<&str> = case["ops"]
+                .as_array()
+                .expect("case ops")
+                .iter()
+                .map(|entry| entry["op"].as_str().expect("an op name"))
+                .collect();
+            if case["refusedBefore"].as_bool().unwrap_or(false) {
+                previously_refused += 1;
+            }
+            gate(tool, &ops).unwrap_or_else(|failure| {
+                panic!("{tool} {ops:?} was refused: {}", failure.message)
+            });
+        }
+        assert_eq!(
+            previously_refused, 8,
+            "the fixture no longer carries the shapes the old rule refused"
+        );
     }
 
     /// The regression this guard exists for. A live run met a parse error it could not fix, looked

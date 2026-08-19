@@ -341,23 +341,26 @@ function jsonSchemaOfEntry(operations) {
 export function createGodotTools(domains, host) {
     if (!Array.isArray(domains)) return []
     return domains.map(domain => {
-        const lone = domain.operations.filter(operation => operation.alone)
-        // A domain whose every operation is alone can never hold two, so the schema says so rather
-        // than offering a list and refusing the second entry. `godot_session` is the whole of this
-        // case today: seven operations, seven of them alone.
-        const neverBatches = lone.length === domain.operations.length && lone.length > 0
+        // Two narrowings, and they read differently to a caller. `exclusive` is an operation that
+        // cannot share a call at all; `repeat` is one that may sit beside anything and may not
+        // appear twice. Naming them together as "alone" is what produced ten refusals across ten
+        // of sixteen live tasks, every one of them a two-step list the router could already run.
+        const exclusive = domain.operations.filter(
+            operation => operation.alone?.scope === 'exclusive'
+        )
+        const once = domain.operations.filter(operation => operation.alone?.scope === 'repeat')
         return {
             name: domain.name,
             label: domain.name.replace(/_/gu, ' '),
             description: `${domain.description}\nOperations:\n${domain.operations
-                .map(
-                    operation =>
-                        `- ${operation.op}${signatureOf(operation)}: ${operation.summary}${
-                            operation.alone && !neverBatches ?
-                                ` (only entry of its call: ${operation.alone})`
-                            :   ''
-                        }`
-                )
+                .map(operation => {
+                    const narrowing =
+                        operation.alone?.scope === 'exclusive' ?
+                            ` (only entry of its call: ${operation.alone.why})`
+                        : operation.alone ? ` (not twice in one call: ${operation.alone.why})`
+                        : ''
+                    return `- ${operation.op}${signatureOf(operation)}: ${operation.summary}${narrowing}`
+                })
                 .join('\n')}`,
             parameters: {
                 type: 'object',
@@ -365,22 +368,20 @@ export function createGodotTools(domains, host) {
                     ops: {
                         type: 'array',
                         minItems: 1,
-                        // Capped rather than left open, so the one call the tool can take is the
-                        // one shape it advertises.
-                        ...(neverBatches ? {maxItems: 1} : {}),
                         description:
-                            neverBatches ?
-                                'The one operation to run, with its parameters beside its `op`.'
-                                + ' Every operation of this tool has to be the only entry of its'
-                                + ' call, so this list holds exactly one.'
-                            :   'The operations to run, in order, each with its parameters beside'
-                                + ' its `op`. One operation is a list of one; several run in this'
-                                + ' one call rather than one call each.'
-                                + (lone.length > 0 ?
-                                    ` These have to be the only entry of their call: ${lone
-                                        .map(operation => operation.op)
-                                        .join(', ')}.`
-                                :   ''),
+                            'The operations to run, in order, each with its parameters beside'
+                            + ' its `op`. One operation is a list of one; several run in this'
+                            + ' one call rather than one call each.'
+                            + (exclusive.length > 0 ?
+                                ` These have to be the only entry of their call: ${exclusive
+                                    .map(operation => operation.op)
+                                    .join(', ')}.`
+                            :   '')
+                            + (once.length > 0 ?
+                                ` These may sit beside others and may not appear twice: ${once
+                                    .map(operation => operation.op)
+                                    .join(', ')}.`
+                            :   ''),
                         items: jsonSchemaOfEntry(domain.operations)
                     }
                 },

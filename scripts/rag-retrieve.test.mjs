@@ -74,9 +74,11 @@ test('returns ranked passages stripped of vector and bounded by maxTextChars', a
 
     // `corpusVersion` rides along so a cached answer can be thrown away when the manual moves. It
     // is read from the installed package, so the value is whatever this checkout has.
+    // `pinned` says whether gofer-rag rescued this passage rather than ranking it, and rides along
+    // so the question of how often a rescue was the answer is a query rather than a guess.
     assert.deepEqual(response.passages, [
-        {text: 'a'.repeat(10), chapter: 'Tween', order: 3, score: 0.9},
-        {text: 'b', chapter: 'Animation', order: 7, score: 0.8}
+        {text: 'a'.repeat(10), chapter: 'Tween', order: 3, score: 0.9, pinned: false},
+        {text: 'b', chapter: 'Animation', order: 7, score: 0.8, pinned: false}
     ])
     assert.match(response.corpusVersion, /^\d+\.\d+\.\d+/u)
 })
@@ -153,10 +155,31 @@ test('passes cacheDir and disables model downloads to retrieve', async () => {
         }
     })
 
-    await handleLine(request())
+    await handleLine(request({maxPassages: 4}))
 
     assert.equal(receivedOptions.cacheDir, '/cache')
     assert.equal(receivedOptions.allowModelDownloads, false)
+    // The ceiling is asked for rather than sliced off afterwards. A title pin always sorts last, so
+    // `slice(0, n)` would take the rescues first; given the number, gofer-rag applies it before
+    // pinning and keeps room for one. The option exists from 0.2.0, and 0.1.3 throws on it — the
+    // package bump and this line are the same change.
+    assert.equal(receivedOptions.maxPassages, 4)
+})
+
+test('a rescued passage is reported as one', async () => {
+    const handleLine = createRetriever({
+        retrieve: fakeRetrieve([
+            {text: 'ranked', chapter: 'Tween', order: 1, score: 1.2},
+            {text: 'rescued', chapter: 'BoxMesh', order: 4, score: -2.1, pinned: true}
+        ])
+    })
+
+    const response = await handleLine(request())
+
+    assert.deepEqual(
+        response.passages.map(passage => passage.pinned),
+        [false, true]
+    )
 })
 
 test('rejects malformed requests and still returns an error shape', async () => {
@@ -215,7 +238,9 @@ test('runRetrieve drives input and output and reports input failures', async () 
     assert.equal(output.length, 1)
     assert.ok(output[0].startsWith(RESPONSE_PREFIX))
     const parsed = JSON.parse(output[0].slice(RESPONSE_PREFIX.length))
-    assert.deepEqual(parsed.passages, [{text: 'result', chapter: 'Input', order: 2, score: 0.95}])
+    assert.deepEqual(parsed.passages, [
+        {text: 'result', chapter: 'Input', order: 2, score: 0.95, pinned: false}
+    ])
 
     await runRetrieve({
         retrieve: fakeRetrieve([]),

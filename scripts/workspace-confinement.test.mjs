@@ -271,3 +271,63 @@ test('refuses a shell command that names what the editor owns', async context =>
     })
     assert.deepEqual(await tool.execute('3', {command: 'ls scenes'}), {command: 'ls scenes'})
 })
+
+test('refuses a shell command whose whole job is to wait', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+
+    // Thirteen of thirty shell calls in a live project were one of these, always between a change
+    // and a look at what it did.
+    for (const command of ['sleep 5', 'sleep 0.5', 'sleep 2 && ls scripts', 'ls; sleep 1'])
+        await assert.rejects(tool.execute('1', {command}), /godot_runtime wait/u)
+
+    // The word is not the rule: waiting on something else, or reading a file that is merely named
+    // for it, is an ordinary command.
+    for (const command of [
+        'timeout 5 ./run.sh',
+        'cat scripts/sleep.gd',
+        'grep -rn sleeper scripts'
+    ])
+        assert.deepEqual(await tool.execute('2', {command}), {command})
+})
+
+test('lets git read a scene it can only ever read', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+
+    // The command a live project sent, refused for naming a scene it could not have written to.
+    for (const command of [
+        'git diff --check && git diff --stat -- scripts/main.gd scripts/unit.gd main.tscn',
+        'git diff -- scenes/level_1.tscn',
+        'git log --oneline -- scenes/level_1.tscn',
+        'git show HEAD:project.godot',
+        'git blame scenes/level_1.tscn'
+    ])
+        assert.deepEqual(await tool.execute('1', {command}), {command})
+
+    // One writing part anywhere in the chain puts the whole command back under the ordinary rule,
+    // and a subcommand that is not on the list was never exempt.
+    for (const command of [
+        'git diff && sed -i "s/a/b/" scenes/level_1.tscn',
+        'git checkout -- scenes/level_1.tscn',
+        'git apply patch.diff && cat scenes/level_1.tscn',
+        'git status | tee scenes/level_1.tscn'
+    ])
+        await assert.rejects(tool.execute('2', {command}), /godot_scene|godot_project/u)
+
+    // Reading through git and writing through the shell is writing. A redirection is not an
+    // operator this used to split on, and a newline is not one either, so all four of these were
+    // exempted by the first version of this rule.
+    for (const command of [
+        'git show HEAD:project.godot > project.godot',
+        'git diff -- scenes/level_1.tscn > scenes/level_2.tscn',
+        'git log >> scenes/level_1.tscn',
+        'git status\nsed -i "s/a/b/" scenes/level_1.tscn'
+    ])
+        await assert.rejects(tool.execute('3', {command}), /godot_scene|godot_project/u)
+
+    // And git is not a way past the other rules: an absolute path is still an absolute path.
+    await assert.rejects(tool.execute('4', {command: 'git diff -- /etc/passwd'}), /absolute/u)
+})

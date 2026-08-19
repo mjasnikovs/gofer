@@ -79,11 +79,32 @@ if (listed.status !== 0) {
     process.stderr.write(listed.stderr ?? '')
     throw new Error('Could not list the Godot acceptance tests')
 }
+/**
+ * The one test that must start first, because nothing can be run after it.
+ *
+ * It waits out a launch deadline: 33s of a suite whose next-longest test is 18s. `--list` hands the
+ * tests over alphabetically, which put it near the end, and the five workers that finished before
+ * it then had nothing to do — the suite measured 67s without it and 97s with it, for 33s of work.
+ * Started first it costs nothing: 50 tests in 48s.
+ *
+ * Only this one. Ordering the six longest that way instead packed six real editors into six workers
+ * at the same moment, and under `npm run check` — where the Cargo lane is building beside them —
+ * two unrelated tests then failed waiting on a session view. A worker here is worth more than a
+ * core, which is why the pool is half the core count; front-loading the heaviest work undoes that.
+ */
+const STARTS_FIRST = 'a_launch_that_outlives_its_deadline_while_playing_says_the_game_is_up'
+
+/** That one test before every other, and the rest in the order `--list` gave them. */
+function longestFirst(one, other) {
+    return Number(other.endsWith(STARTS_FIRST)) - Number(one.endsWith(STARTS_FIRST))
+}
+
 const tests = listed.stdout
     .split('\n')
     .filter(line => line.endsWith(': test'))
     .map(line => line.slice(0, -': test'.length))
     .filter(name => name.includes(FILTER))
+    .sort(longestFirst)
 if (tests.length === 0) throw new Error('No Godot acceptance tests matched')
 
 function run(name) {

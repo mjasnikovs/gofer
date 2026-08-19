@@ -393,14 +393,39 @@ const CREDENTIAL_REQUEST_PREFIX: &str = "GOFER_AI_CREDENTIAL:";
 #[serde(rename_all = "camelCase")]
 pub struct GodotDocsQuery {
     pub question: String,
-    #[serde(default = "default_max_passages")]
-    pub max_passages: usize,
+    /// How many passages to keep, or `None` for the shipped default.
+    ///
+    /// Absent rather than defaulted, because a serde default cannot tell a caller who wrote the
+    /// same number from one who wrote nothing, and one of them has to win. The desktop Docs panel
+    /// names its own; the agent's `search` and `ask` do not.
+    #[serde(default)]
+    pub max_passages: Option<usize>,
     #[serde(default = "default_max_text_chars")]
     pub max_text_chars: usize,
 }
 
-fn default_max_passages() -> usize {
-    10
+/// How many passages a query gets when the caller names no number.
+///
+/// It used to be ten, which never bound anything: gofer-rag keeps five and pins up to three more,
+/// and 130 cached searches from a live project never returned more than six. So the cap was a cap
+/// in name only, and `godot_docs_search` was 23.5% of every byte the model read from a tool. Rank
+/// by rank across those searches the scores were 2.41, 1.58, 1.01, 0.50, 0.08, −1.20 — ranks four
+/// to six are 40% of all the bytes, at or below zero about half the time.
+///
+/// Four rather than three, and measured rather than read off that histogram. gofer-rag 0.2.0 takes
+/// the number as `maxPassages` and applies it before pinning, and replaying its 83 labelled eval
+/// questions through every ceiling on frozen pools gave: 5 keeps 99% of the bytes and loses
+/// nothing, 4 keeps 79% and loses nothing, 3 keeps 60% and loses two, 2 keeps 40% and loses six.
+/// Four is free; three is a trade worth making knowingly rather than by default.
+///
+/// One number for both operations. `ask` reads the same list to write prose from, and the two cases
+/// a ceiling of three costs are exactly the questions it would have had to abstain on — so what
+/// makes four safe for a search is what makes it safe for an ask.
+const DEFAULT_PASSAGES: usize = 4;
+
+/// How many passages this query gets: what it asked for, or the shipped default.
+fn passages_for(query: &GodotDocsQuery) -> usize {
+    query.max_passages.unwrap_or(DEFAULT_PASSAGES)
 }
 
 fn default_max_text_chars() -> usize {
@@ -414,6 +439,14 @@ pub struct RankedPassage {
     pub chapter: String,
     pub order: u32,
     pub score: f64,
+    /// Whether this passage is a rescue rather than a rank.
+    ///
+    /// gofer-rag pins the best chunk of a chapter the question named verbatim when the reranker
+    /// left it out, which is why a pin's mean score is below every kept rank's. Carried through and
+    /// stored so how often a pin was the passage that answered is a query over `docs_answers`
+    /// rather than a guess. Absent from an older cached row, which is what the option allows for.
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 /// One chapter an answer rested on, without its text.
@@ -584,11 +617,12 @@ pub fn retrieve_query_with(
     let mut stdin = child
         .take_stdin()
         .ok_or_else(|| "Could not write to the Gofer RAG retrieve worker".to_owned())?;
+    let max_passages = passages_for(&query);
     let request = RetrieveWorkerRequest {
         mode: if ask { "ask" } else { "search" },
         question: query.question,
         cache_dir: cache_path()?.display().to_string(),
-        max_passages: query.max_passages,
+        max_passages,
         max_text_chars: query.max_text_chars,
         connection,
     };
@@ -866,6 +900,7 @@ mod tests {
                     chapter: "Tween".to_owned(),
                     order: 1,
                     score: 1.0,
+                    pinned: None,
                 }],
                 ..GodotDocsResponse::default()
             }
@@ -1212,7 +1247,7 @@ mod tests {
         let result = retrieve_query_with(
             GodotDocsQuery {
                 question: "how do I tween?".to_owned(),
-                max_passages: 2,
+                max_passages: Some(2),
                 max_text_chars: 2000,
             },
             None,
@@ -1227,6 +1262,38 @@ mod tests {
 
         // SAFETY: tests own the process environment while they execute.
         unsafe { std::env::remove_var("GOFER_RAG_CACHE_DIR") };
+    }
+
+    /// The default is a measured number, and a caller who names one outranks it.
+    ///
+    /// It used to be ten, which bound nothing: gofer-rag keeps five and pins up to three more, and
+    /// 130 cached searches from a live project never returned more than six. So `godot_docs_search`
+    /// was 23.5% of every byte the model read from a tool. Four is what replaying gofer-rag's 83
+    /// labelled eval questions through every ceiling showed to be free — 79% of the bytes and no
+    /// case lost, where three costs two cases for another 19 points.
+    #[test]
+    fn the_passage_default_is_four_and_a_caller_who_names_one_outranks_it() {
+        let asked = |max_passages| GodotDocsQuery {
+            question: "how do I tween?".to_owned(),
+            max_passages,
+            max_text_chars: 2000,
+        };
+
+        // One number for both operations: an `ask` reads the same list to write prose from, and the
+        // cases a tighter ceiling costs are the ones it would have had to abstain on.
+        assert_eq!(passages_for(&asked(None)), 4);
+
+        // The desktop Docs panel names its own bound, and nothing here may override it.
+        assert_eq!(passages_for(&asked(Some(8))), 8);
+        assert_eq!(passages_for(&asked(Some(1))), 1);
+
+        // Absent is absent: a query that names nothing deserializes to `None` rather than to a
+        // number no caller wrote.
+        let parsed: GodotDocsQuery =
+            serde_json::from_value(serde_json::json!({"question": "how do I tween?"}))
+                .expect("parse a query");
+        assert_eq!(parsed.max_passages, None);
+        assert_eq!(passages_for(&parsed), 4);
     }
 
     #[test]
@@ -1247,7 +1314,7 @@ mod tests {
             retrieve_query_with(
                 GodotDocsQuery {
                     question: "x".to_owned(),
-                    max_passages: 1,
+                    max_passages: Some(1),
                     max_text_chars: 100,
                 },
                 None,
@@ -1263,7 +1330,7 @@ mod tests {
             retrieve_query_with(
                 GodotDocsQuery {
                     question: "x".to_owned(),
-                    max_passages: 1,
+                    max_passages: Some(1),
                     max_text_chars: 100,
                 },
                 None,

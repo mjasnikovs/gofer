@@ -70,7 +70,9 @@ describe('the explorer column', () => {
         await waitFor(() => {
             expect(screen.getByText('Player')).toBeInTheDocument()
         })
-        expect(call).toHaveBeenCalledWith('scene.get_tree', {})
+        // The panel names its own bound rather than taking the agent's default of 150 nodes,
+        // which is sized for a tool result rather than for someone looking at a tree.
+        expect(call).toHaveBeenCalledWith('scene.get_tree', {limit: 4096})
     })
 
     it('asks nothing of an editor that is not running, and offers to start one', () => {

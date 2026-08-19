@@ -239,7 +239,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 /// and repeating it here would be a second one. An operation absent from this table is not checked
 /// — absence means unchecked, never "takes nothing" — which is why a new operation that wants
 /// checking has to be added rather than merely written.
-// GENERATED-BEGIN op-params sha256:04fa8eb015b48c0e
+// GENERATED-BEGIN op-params sha256:e68d94ca984de323
 pub const TABLE: &[OpParams] = &[
     op("godot_session", "status", Answers::Rust, &[]),
     op("godot_session", "start", Answers::Rust, &[]),
@@ -299,7 +299,20 @@ pub const TABLE: &[OpParams] = &[
         "godot_scene",
         "get_tree",
         Answers::Addon("scene.get_tree"),
-        &[],
+        &[
+            noted(
+                opt("root", Text),
+                "The node to start from, as a path. The whole tree when it is absent.",
+            ),
+            noted(
+                opt("depth", Int),
+                "How many levels below the starting node to walk. Every level when it is absent.",
+            ),
+            noted(
+                opt("limit", Int),
+                "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest.",
+            ),
+        ],
     ),
     op(
         "godot_scene",
@@ -1135,7 +1148,20 @@ pub const TABLE: &[OpParams] = &[
         "godot_runtime",
         "get_tree",
         Answers::Addon("runtime.get_tree"),
-        &[],
+        &[
+            noted(
+                opt("root", Text),
+                "The node to start from, as a path. The whole tree when it is absent.",
+            ),
+            noted(
+                opt("depth", Int),
+                "How many levels below the starting node to walk. Every level when it is absent.",
+            ),
+            noted(
+                opt("limit", Int),
+                "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest.",
+            ),
+        ],
     ),
     op(
         "godot_runtime",
@@ -1157,6 +1183,21 @@ pub const TABLE: &[OpParams] = &[
         "capture",
         Answers::Addon("runtime.capture"),
         &[opt("source", Kind::Choice(&["game", "editor"]))],
+    ),
+    op(
+        "godot_runtime",
+        "wait",
+        Answers::Addon("runtime.wait"),
+        &[
+            noted(
+                opt("frames", Int),
+                "How many rendered frames to let pass. One when neither this nor `ms` is named.",
+            ),
+            noted(
+                opt("ms", Int),
+                "How long to let pass instead, in milliseconds. Held under ten seconds, which is what one request has.",
+            ),
+        ],
     ),
     op(
         "godot_runtime",
@@ -1184,7 +1225,7 @@ pub const TABLE: &[OpParams] = &[
             need("question", Text),
             noted(
                 hidden("maxPassages", Int),
-                "How many passages clear the relevance gate is the search's own decision, not a number the model can reason about — it keeps five and pins up to three more. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
+                "How many passages come back is not a number the model can reason about, so it is settled here at four. gofer-rag takes it as a ceiling and applies it before pinning a chapter the question named, so the rescue survives it; replaying its 83 labelled questions through every ceiling, four keeps 79% of the bytes and loses no case, where three loses two. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
             ),
             opt("maxTextChars", Int),
         ],
@@ -1197,7 +1238,7 @@ pub const TABLE: &[OpParams] = &[
             need("question", Text),
             noted(
                 hidden("maxPassages", Int),
-                "How many passages clear the relevance gate is the search's own decision, not a number the model can reason about — it keeps five and pins up to three more. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
+                "How many passages come back is not a number the model can reason about, so it is settled here at four. gofer-rag takes it as a ceiling and applies it before pinning a chapter the question named, so the rescue survives it; replaying its 83 labelled questions through every ceiling, four keeps 79% of the bytes and loses no case, where three loses two. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
             ),
             opt("maxTextChars", Int),
         ],
@@ -1205,213 +1246,267 @@ pub const TABLE: &[OpParams] = &[
 ];
 // GENERATED-END op-params
 
-/// One operation an `ops` list may not hold twice, and the sentence that says why.
+/// How much of an `ops` list one operation may share.
+///
+/// The default for an operation that declares neither is the whole list: it may appear beside
+/// anything, as often as the list names it, which is what `ops` exists for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sharing {
+    /// May sit beside other operations, and may not appear twice.
+    ///
+    /// The router runs a list in order, so a second entry of an operation that takes no parameters
+    /// answers the question the first one already answered, and a second entry of one driving what
+    /// the session owns exactly one of — the open scene, the running game, the undo stack, the
+    /// dialog — acts on whatever the first left behind.
+    Repeat,
+    /// Has to be the only entry of its call.
+    ///
+    /// The debugger, and only the debugger: each answer decides what the next operation means, so a
+    /// list written before the first answer arrived is a list written about a state that no longer
+    /// holds.
+    Exclusive,
+}
+
+/// One operation that may not share the whole of an `ops` list, and the sentence that says why.
 pub struct LoneOperation {
     pub domain: &'static str,
     pub op: &'static str,
+    pub scope: Sharing,
     pub reason: &'static str,
 }
 
-const fn only(domain: &'static str, op: &'static str, reason: &'static str) -> LoneOperation {
-    LoneOperation { domain, op, reason }
+const fn only(
+    domain: &'static str,
+    op: &'static str,
+    scope: Sharing,
+    reason: &'static str,
+) -> LoneOperation {
+    LoneOperation {
+        domain,
+        op,
+        scope,
+        reason,
+    }
 }
 
-/// The operations that have to be the only entry of their call.
+/// The operations that may not share the whole of an `ops` list.
 ///
 /// A tool call is a list, so a model that wants three inspections writes one call instead of three.
-/// Thirty-five operations cannot be listed that way. Two reasons, and the sentence says which: an
-/// operation with no parameters is the same call twice over, and one that drives something the
-/// session owns exactly one of — the open scene, the running game, the undo stack, the debuggee —
-/// would have its second entry act on whatever the first entry left behind.
+/// Thirty-five operations are narrower than that, in one of the two ways [`Sharing`] describes, and
+/// the sentence beside each says which.
 ///
 /// Generated from the row that declares the operation, like the parameters and the gate, so an
 /// operation cannot be listed here under a name the catalogue no longer offers.
-// GENERATED-BEGIN alone-operations sha256:fbb21cde74a8160c
+// GENERATED-BEGIN alone-operations sha256:c3b06b04fdcf5da4
 pub const ALONE: &[LoneOperation] = &[
     only(
         "godot_session",
         "status",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_session",
         "start",
+        Sharing::Repeat,
         "There is one editor session, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_session",
         "stop",
+        Sharing::Repeat,
         "There is one editor session, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_session",
         "get_state",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_session",
         "undo",
+        Sharing::Repeat,
         "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
     ),
     only(
         "godot_session",
         "redo",
+        Sharing::Repeat,
         "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
     ),
     only(
         "godot_session",
         "answer_dialog",
+        Sharing::Repeat,
         "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press.",
     ),
     only(
         "godot_scene",
         "list",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_scene",
         "open",
+        Sharing::Repeat,
         "One scene is open at a time, so a second one would act on whatever the first left open.",
     ),
     only(
         "godot_scene",
-        "get_tree",
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_scene",
         "save",
+        Sharing::Repeat,
         "One scene is open at a time, so a second one would act on whatever the first left open.",
     ),
     only(
         "godot_scene",
         "save_as",
+        Sharing::Repeat,
         "One scene is open at a time, so a second one would act on whatever the first left open.",
     ),
     only(
         "godot_scene",
         "reload",
+        Sharing::Repeat,
         "One scene is open at a time, so a second one would act on whatever the first left open.",
     ),
     only(
         "godot_project",
         "get_settings",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_project",
         "list_autoloads",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_project",
         "list_input_actions",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_project",
         "list_plugins",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_debug",
         "status",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_debug",
         "launch",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "attach",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_debug",
         "await_stop",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "threads",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_debug",
         "continue",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "pause",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "step_over",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "step_in",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "step_out",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "restart",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "terminate",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_debug",
         "disconnect",
+        Sharing::Exclusive,
         "One debuggee, driven in order: each answer decides what the next call means.",
     ),
     only(
         "godot_runtime",
         "run",
+        Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_runtime",
         "stop",
+        Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_runtime",
         "restart",
+        Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",
     ),
     only(
         "godot_runtime",
         "get_state",
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_runtime",
-        "get_tree",
+        Sharing::Repeat,
         "It takes no parameters, so a second one in the same call is the first one again.",
     ),
 ];
 // GENERATED-END alone-operations
 
-/// Why `domain.op` must be the only entry of its call, or `None` when a list may repeat it.
-pub fn alone_reason(domain: &str, op: &str) -> Option<&'static str> {
+/// How much of a list `domain.op` may share and why, or `None` when it may share all of one.
+pub fn alone_rule(domain: &str, op: &str) -> Option<(Sharing, &'static str)> {
     ALONE
         .iter()
         .find(|entry| entry.domain == domain && entry.op == op)
-        .map(|entry| entry.reason)
+        .map(|entry| (entry.scope, entry.reason))
 }
 
 /// `timeoutMs` is lifted out of the parameters by the router for every command, so it is accepted

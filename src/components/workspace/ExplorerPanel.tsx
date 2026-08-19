@@ -43,6 +43,19 @@ type ExplorerPanelProps = Readonly<{
 }>
 
 const MAX_LISTED_FILES = 400
+
+/**
+ * The addon's own ceiling on a scene-tree walk, from `MAX_TREE_NODES` in `plugin.gd`.
+ *
+ * A call naming nothing is answered with the agent's default of 150 nodes, kept small so a tool
+ * result survives the character cap the worker holds it to. A person looking at a tree has no such
+ * cap, so the panel asks for everything the addon will give — and says so when that is not all of
+ * it, because this walk was unbounded before the agent's default arrived.
+ */
+const MAX_TREE_NODES = 4096
+
+/** The bound this panel reads a scene tree under. */
+const WHOLE_TREE = {limit: MAX_TREE_NODES} as const
 /** Generated sidecars and imported artefacts are noise in a project explorer. */
 const HIDDEN_SUFFIXES = ['.import', '.uid', '.tmp']
 const HIDDEN_PREFIXES = ['.godot/', '.git/', 'addons/gofer/']
@@ -242,6 +255,27 @@ function fileItems(
  * what the editor would save, the other is what the game currently holds in memory, and conflating
  * them would make an inspector reading of a live node look like an editable property.
  */
+/**
+ * What a tree says when it stopped short of the whole scene.
+ *
+ * Both walks are bounded now — the running one always was, at the addon's own node ceiling, and the
+ * edited one gained a ceiling when the model's default arrived. A partial tree drawn as if it were
+ * whole is the one thing this panel must not do, and the addon already reports it.
+ */
+function truncatedNotice(truncated: boolean | undefined) {
+    if (truncated !== true) return null
+    return (
+        <VStack paddingInline={3}>
+            <Text
+                type='supporting'
+                color='secondary'
+            >
+                This scene is larger than one read answers with; the tree above stops short.
+            </Text>
+        </VStack>
+    )
+}
+
 export function ExplorerPanel({
     tab,
     onTabChange,
@@ -256,16 +290,14 @@ export function ExplorerPanel({
     const {call, state, sceneEpoch, runtimeEpoch} = useEditorSession()
     const isOffline = isSessionOffline(state)
 
-    const scene = useGodotReading(
-        'scene.get_tree',
-        {},
-        {when: tab === 'scene', follows: sceneEpoch}
-    )
-    const runtime = useGodotReading(
-        'runtime.get_tree',
-        {},
-        {when: tab === 'runtime', follows: runtimeEpoch}
-    )
+    const scene = useGodotReading('scene.get_tree', WHOLE_TREE, {
+        when: tab === 'scene',
+        follows: sceneEpoch
+    })
+    const runtime = useGodotReading('runtime.get_tree', WHOLE_TREE, {
+        when: tab === 'runtime',
+        follows: runtimeEpoch
+    })
 
     /**
      * "No game is running" arrives as an error code, and for this panel it is the ordinary state.
@@ -494,6 +526,7 @@ export function ExplorerPanel({
                                     items={sceneItems}
                                 />
                             :   null}
+                            {truncatedNotice(scene.data?.truncated)}
                         </PanelState>
                     ))}
                 {tab === 'runtime'
@@ -521,6 +554,7 @@ export function ExplorerPanel({
                                     items={runtimeItems}
                                 />
                             :   null}
+                            {truncatedNotice(runtime.data?.truncated)}
                         </PanelState>
                     ))}
                 {tab === 'files' && (

@@ -1,0 +1,1611 @@
+{
+    "source": "~/hub/spawn/.gofer/project.sqlite, 16 tasks, 2026-08-17 to 2026-08-19",
+    "calls": 712,
+    "cases": [
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "attach"
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "await_stop",
+                    "timeoutMs": 2000
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "continue",
+                    "threadId": 1
+                }
+            ],
+            "calls": 5,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "disconnect",
+                    "terminateDebuggee": true
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "expression": "active_units.size()",
+                    "frameId": 0,
+                    "op": "evaluate"
+                }
+            ],
+            "calls": 5,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "expression": "active_units[0].global_position",
+                    "frameId": 0,
+                    "op": "evaluate"
+                },
+                {
+                    "expression": "active_units[0].global_position.distance_to(active_units[1].global_position)",
+                    "frameId": 0,
+                    "op": "evaluate"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "pause"
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "stack_trace",
+                    "threadId": 1
+                }
+            ],
+            "calls": 5,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "status"
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "status"
+                },
+                {
+                    "op": "threads"
+                },
+                {
+                    "op": "stack_trace"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_debug",
+            "ops": [
+                {
+                    "op": "threads"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 SpriteFrames set_animation_speed method for setting a named animation's FPS"
+                }
+            ],
+            "calls": 10,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "ask",
+                    "question": "In Godot 4.7 GDScript Array, what does erase return and what method checks whether an array contains a value?"
+                },
+                {
+                    "op": "ask",
+                    "question": "In Godot 4.7 typed Array[Vector2], how can code access the last element while retaining Vector2 static type?"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 AnimatedSprite2D SpriteFrames resource properties animation names add_frame speed loop for a Sprite2D sprite sheet AtlasTexture region"
+                },
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 GDScript CanvasItem queue_redraw and Node2D _draw draw texture region"
+                },
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 GDScript Object has_method and call usage for optional damage method"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 AtlasTexture properties atlas and region and SpriteFrames add_frame use in GDScript"
+                },
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 AnimatedSprite2D frame_changed signal and frame property behavior"
+                },
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 Timer one_shot wait_time timeout start behavior in GDScript"
+                },
+                {
+                    "op": "ask",
+                    "question": "Godot 4.7 Node is_in_group and SceneTree get_nodes_in_group methods"
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 Array reduce GDScript Callable lambda syntax"
+                }
+            ],
+            "calls": 15,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 Node _physics_process processing callback priority process_mode documentation"
+                },
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 Engine get_frames_per_second documentation"
+                }
+            ],
+            "calls": 11,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 Camera2D enabled current viewport width height properties"
+                },
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 Control layout_mode full rect anchors ColorRect"
+                },
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 canvas_item shader SCREEN_TEXTURE no-op fragment shader"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_docs_search",
+            "ops": [
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 ConfigFile load save get_value set_value user:// persistent settings GDScript"
+                },
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 AudioServer get_bus_index set_bus_volume_db volume linear db"
+                },
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 DisplayServer window_set_mode window_get_mode Window mode fullscreen GDScript"
+                },
+                {
+                    "op": "search",
+                    "question": "Godot 4.7 BaseButton pressed signal button_pressed HSlider value_changed signal"
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_logs",
+            "ops": [
+                {
+                    "limit": 50,
+                    "minSeverity": "error",
+                    "op": "read"
+                }
+            ],
+            "calls": 35,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_logs",
+            "ops": [
+                {
+                    "limit": 100,
+                    "minSeverity": "error",
+                    "op": "read",
+                    "source": "editorError"
+                },
+                {
+                    "limit": 100,
+                    "minSeverity": "warning",
+                    "op": "read",
+                    "source": "editor"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "index": 2,
+                    "name": "Units",
+                    "op": "create",
+                    "parent": "/Main",
+                    "type": "Node2D"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "expectedRevision": 0,
+                    "nodes": [
+                        {
+                            "name": "AnimatedSprite2D",
+                            "parent": "/Soldier",
+                            "type": "AnimatedSprite2D"
+                        },
+                        {
+                            "name": "Muzzle",
+                            "parent": "/Soldier",
+                            "type": "Marker2D"
+                        }
+                    ],
+                    "op": "create_nodes"
+                }
+            ],
+            "calls": 6,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "node": "/Main/Bases",
+                    "op": "delete"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "limit": 1,
+                    "node": "/Main/Terrain",
+                    "op": "get_cells"
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "limit": 20,
+                    "node": "/Main/Terrain",
+                    "op": "get_cells"
+                },
+                {
+                    "node": "/Main/Terrain",
+                    "op": "inspect"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "node": "/Soldier",
+                    "op": "inspect"
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "node": "/Main/Terrain",
+                    "op": "inspect"
+                },
+                {
+                    "limit": 1000,
+                    "node": "/Main/Terrain",
+                    "op": "get_cells"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "node": "/Main/SpawnTarget",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/MovementTarget",
+                    "op": "inspect"
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "node": "/Main",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/TacticalOverlay",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/Terrain",
+                    "op": "inspect"
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "node": "/Main/HUD/FPSLabel",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/HUD/Spawn1000Button",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/Bases/RedBase",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/CursorTarget",
+                    "op": "inspect"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "node": "/Main/SpawnTarget",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/MovementTarget",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/SpawnTarget/Marker",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/MovementTarget/Marker",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/SpawnTarget/Label",
+                    "op": "inspect"
+                },
+                {
+                    "node": "/Main/MovementTarget/Label",
+                    "op": "inspect"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "expectedRevision": 0,
+                    "name": "AntiTank",
+                    "op": "instantiate",
+                    "parent": "/Main/Units",
+                    "path": "res://assets/Soldiers/soldier.tscn"
+                },
+                {
+                    "expectedRevision": 1,
+                    "name": "Assault",
+                    "op": "instantiate",
+                    "parent": "/Main/Units",
+                    "path": "res://assets/Soldiers/soldier.tscn"
+                },
+                {
+                    "expectedRevision": 2,
+                    "name": "Grenadier",
+                    "op": "instantiate",
+                    "parent": "/Main/Units",
+                    "path": "res://assets/Soldiers/soldier.tscn"
+                },
+                {
+                    "expectedRevision": 3,
+                    "name": "MachineGunner",
+                    "op": "instantiate",
+                    "parent": "/Main/Units",
+                    "path": "res://assets/Soldiers/soldier.tscn"
+                },
+                {
+                    "expectedRevision": 4,
+                    "name": "RadioOperator",
+                    "op": "instantiate",
+                    "parent": "/Main/Units",
+                    "path": "res://assets/Soldiers/soldier.tscn"
+                },
+                {
+                    "expectedRevision": 5,
+                    "name": "Sniper",
+                    "op": "instantiate",
+                    "parent": "/Main/Units",
+                    "path": "res://assets/Soldiers/soldier.tscn"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "name": "MovementTarget",
+                    "node": "/Main/CursorTarget",
+                    "op": "rename"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "cells": [
+                        {
+                            "atlas": [0, 13],
+                            "height": 36,
+                            "width": 64,
+                            "x": 0,
+                            "y": 0
+                        },
+                        {
+                            "atlas": [3, 1],
+                            "height": 2,
+                            "width": 58,
+                            "x": 3,
+                            "y": 16
+                        },
+                        {
+                            "atlas": [3, 1],
+                            "height": 27,
+                            "width": 2,
+                            "x": 30,
+                            "y": 3
+                        }
+                    ],
+                    "expectedRevision": 7,
+                    "node": "/Main/Terrain",
+                    "op": "set_cells"
+                }
+            ],
+            "calls": 6,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "expectedRevision": 0,
+                    "op": "set_properties",
+                    "properties": [
+                        {
+                            "node": "/StartMenu",
+                            "property": "anchor_right",
+                            "value": {
+                                "type": "float",
+                                "value": 1
+                            }
+                        },
+                        {
+                            "node": "/StartMenu",
+                            "property": "anchor_bottom",
+                            "value": {
+                                "type": "float",
+                                "value": 1
+                            }
+                        }
+                    ]
+                }
+            ],
+            "calls": 12,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_node",
+            "ops": [
+                {
+                    "expectedRevision": 0,
+                    "node": "/Effect",
+                    "op": "set_property",
+                    "property": "script",
+                    "value": {
+                        "type": "resource",
+                        "value": {
+                            "path": "res://assets/Effects/effect.gd"
+                        }
+                    }
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "name": "interface/editor/display/single_window_mode",
+                    "op": "get_editor_setting"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "name": "display/window/size/viewport_width",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/size/viewport_height",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/size/window_width_override",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/size/window_height_override",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/stretch/mode",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/stretch/aspect",
+                    "op": "get_setting"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "name": "application/config/version",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "application/run/main_scene",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/size/viewport_width",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/size/viewport_height",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/stretch/mode",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "display/window/stretch/scale_mode",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "rendering/2d/snap/snap_2d_transforms_to_pixel",
+                    "op": "get_setting"
+                },
+                {
+                    "name": "rendering/renderer/rendering_method",
+                    "op": "get_setting"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "op": "get_settings"
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "op": "search_editor_settings",
+                    "query": "run/window"
+                },
+                {
+                    "op": "search_editor_settings",
+                    "query": "game"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "op": "search_editor_settings",
+                    "query": "fixed size"
+                },
+                {
+                    "op": "search_editor_settings",
+                    "query": "embedded"
+                },
+                {
+                    "op": "search_editor_settings",
+                    "query": "stretch"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "name": "interface/editor/display/single_window_mode",
+                    "op": "set_editor_setting",
+                    "value": {
+                        "type": "bool",
+                        "value": true
+                    }
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_project",
+            "ops": [
+                {
+                    "name": "application/run/main_scene",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "string",
+                        "value": "res://main.tscn"
+                    }
+                },
+                {
+                    "name": "display/window/size/viewport_width",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "int",
+                        "value": 1280
+                    }
+                },
+                {
+                    "name": "display/window/size/viewport_height",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "int",
+                        "value": 720
+                    }
+                },
+                {
+                    "name": "display/window/stretch/mode",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "string",
+                        "value": "viewport"
+                    }
+                },
+                {
+                    "name": "display/window/stretch/scale_mode",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "string",
+                        "value": "integer"
+                    }
+                },
+                {
+                    "name": "rendering/2d/snap/snap_2d_transforms_to_pixel",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "bool",
+                        "value": true
+                    }
+                },
+                {
+                    "name": "rendering/renderer/rendering_method",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "string",
+                        "value": "gl_compatibility"
+                    }
+                },
+                {
+                    "name": "rendering/renderer/rendering_method.mobile",
+                    "op": "set_setting",
+                    "value": {
+                        "type": "string",
+                        "value": "gl_compatibility"
+                    }
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_resource",
+            "ops": [
+                {
+                    "op": "delete",
+                    "path": "scripts/base.gd"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_resource",
+            "ops": [
+                {
+                    "op": "describe_tileset",
+                    "path": "res://strategy_tileset.tres"
+                }
+            ],
+            "calls": 4,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_resource",
+            "ops": [
+                {
+                    "op": "list"
+                }
+            ],
+            "calls": 5,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_resource",
+            "ops": [
+                {
+                    "op": "rescan",
+                    "path": ["scripts/base.gd", "main.tscn"]
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "capture",
+                    "source": "game"
+                }
+            ],
+            "calls": 21,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "capture",
+                    "source": "game"
+                },
+                {
+                    "monitors": ["fps"],
+                    "op": "get_monitors"
+                }
+            ],
+            "calls": 6,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "capture",
+                    "source": "game"
+                },
+                {
+                    "op": "get_state"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "capture",
+                    "source": "game"
+                },
+                {
+                    "op": "get_tree"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "monitors": ["fps", "process_time"],
+                    "op": "get_monitors"
+                }
+            ],
+            "calls": 20,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "get_state"
+                }
+            ],
+            "calls": 11,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "get_tree"
+                }
+            ],
+            "calls": 12,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "get_tree"
+                },
+                {
+                    "monitors": [
+                        "fps",
+                        "process_time",
+                        "physics_time",
+                        "render_draw_calls_in_frame",
+                        "render_objects_in_frame",
+                        "render_primitives_in_frame",
+                        "memory_static"
+                    ],
+                    "op": "get_monitors"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "get_tree"
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/Main/Camera2D",
+                    "properties": ["enabled", "position"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/Main/PostProcessLayer/FullscreenOverlay",
+                    "properties": ["layout_mode", "anchors_preset", "material"]
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "events": [
+                        {
+                            "kind": "mouse_motion",
+                            "position": [0, 0],
+                            "relative": [0, 0]
+                        }
+                    ],
+                    "op": "input"
+                }
+            ],
+            "calls": 43,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "events": [
+                        {
+                            "kind": "mouse_motion",
+                            "position": [900, 500],
+                            "relative": [815, 436]
+                        }
+                    ],
+                    "op": "input"
+                },
+                {
+                    "monitors": [
+                        "fps",
+                        "process_time",
+                        "physics_time",
+                        "memory_static",
+                        "object_node_count",
+                        "object_count",
+                        "object_resource_count",
+                        "render_objects_in_frame",
+                        "render_primitives_in_frame",
+                        "render_draw_calls_in_frame"
+                    ],
+                    "op": "get_monitors"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "events": [
+                        {
+                            "button": "left",
+                            "kind": "mouse_button",
+                            "position": [85, 64],
+                            "pressed": true
+                        },
+                        {
+                            "button": "left",
+                            "kind": "mouse_button",
+                            "position": [85, 64],
+                            "pressed": false
+                        }
+                    ],
+                    "op": "input"
+                },
+                {
+                    "events": [
+                        {
+                            "kind": "mouse_motion",
+                            "position": [900, 500],
+                            "relative": [815, 436]
+                        }
+                    ],
+                    "op": "input"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "events": [
+                        {
+                            "button": "left",
+                            "kind": "mouse_button",
+                            "position": [650, 350],
+                            "pressed": true
+                        },
+                        {
+                            "button": "left",
+                            "kind": "mouse_button",
+                            "position": [650, 350],
+                            "pressed": false
+                        }
+                    ],
+                    "op": "input"
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main",
+                    "properties": ["status_text"]
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main",
+                    "properties": ["status_text"]
+                }
+            ],
+            "calls": 16,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/Units/Spider1",
+                    "properties": ["global_position", "velocity"]
+                },
+                {
+                    "op": "capture",
+                    "source": "game"
+                }
+            ],
+            "calls": 5,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/Units/Spider1",
+                    "properties": ["global_position", "velocity"]
+                },
+                {
+                    "events": [
+                        {
+                            "kind": "mouse_motion",
+                            "position": [900, 500],
+                            "relative": [250, 150]
+                        }
+                    ],
+                    "op": "input"
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main",
+                    "properties": ["script"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/Terrain",
+                    "properties": ["tile_map_data"]
+                }
+            ],
+            "calls": 10,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/Units/AntiTank",
+                    "properties": ["current_health", "state", "target"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/Units/Assault",
+                    "properties": ["current_health", "state", "target"]
+                },
+                {
+                    "op": "capture",
+                    "source": "game"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main",
+                    "properties": ["sustained_spawn_enabled"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/@Timer@2",
+                    "properties": ["time_left"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/HUD/FPSLabel",
+                    "properties": ["text"]
+                }
+            ],
+            "calls": 5,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/HUD/FPSLabel",
+                    "properties": ["text"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/SpawnTarget",
+                    "properties": ["global_position"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main/MovementTarget",
+                    "properties": ["global_position"]
+                },
+                {
+                    "op": "inspect_node",
+                    "path": "/root/Main",
+                    "properties": ["accepted_target_position", "sustained_spawn_enabled"]
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "restart"
+                }
+            ],
+            "calls": 23,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "run"
+                }
+            ],
+            "calls": 34,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_runtime",
+            "ops": [
+                {
+                    "op": "stop"
+                }
+            ],
+            "calls": 36,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "create",
+                    "path": "res://start_menu.tscn",
+                    "rootName": "StartMenu",
+                    "rootType": "Control"
+                }
+            ],
+            "calls": 5,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "create",
+                    "path": "res://assets/Projectiles/projectile.tscn",
+                    "rootName": "Projectile",
+                    "rootType": "Node2D"
+                },
+                {
+                    "op": "save"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "get_tree"
+                }
+            ],
+            "calls": 39,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "get_tree"
+                },
+                {
+                    "op": "save"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "list"
+                }
+            ],
+            "calls": 3,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "open",
+                    "path": "res://main.tscn"
+                }
+            ],
+            "calls": 9,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "open",
+                    "path": "res://main.tscn"
+                },
+                {
+                    "op": "get_tree"
+                }
+            ],
+            "calls": 2,
+            "refusedBefore": true
+        },
+        {
+            "tool": "godot_scene",
+            "ops": [
+                {
+                    "op": "save"
+                }
+            ],
+            "calls": 22,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "close",
+                    "path": ["scripts/main.gd", "scripts/unit.gd"]
+                },
+                {
+                    "op": "open",
+                    "path": ["scripts/unit.gd", "scripts/main.gd"]
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "diagnostics",
+                    "path": "scripts/main.gd",
+                    "timeoutMs": 3000
+                }
+            ],
+            "calls": 25,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "document_symbols",
+                    "path": "scripts/main.gd"
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "files": [
+                        {
+                            "edits": [
+                                {
+                                    "newText": "var route_failed := true\n",
+                                    "oldText": "var route_failed := false\n"
+                                }
+                            ],
+                            "path": "scripts/unit.gd"
+                        }
+                    ],
+                    "op": "edit"
+                }
+            ],
+            "calls": 54,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "files": [
+                        {
+                            "edits": [
+                                {
+                                    "newText": "\tvar row := int(float(index) / FORMATION_COLUMNS)",
+                                    "oldText": "\tvar row := index / FORMATION_COLUMNS"
+                                }
+                            ],
+                            "path": "scripts/main.gd"
+                        }
+                    ],
+                    "op": "edit"
+                },
+                {
+                    "op": "diagnostics",
+                    "path": ["scripts/main.gd", "scripts/unit.gd"],
+                    "timeoutMs": 1000
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "list"
+                }
+            ],
+            "calls": 6,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "open",
+                    "path": "scripts/unit.gd"
+                }
+            ],
+            "calls": 31,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "save",
+                    "path": "res://assets/Effects/effect.gd",
+                    "text": "class_name ImpactEffect\nextends Node2D\n\nconst BLOOD_SPLASH_TEXTURE := preload(\"res://assets/Effects/hit-spatters.png\")\nconst FRAME_SIZE := Vector2i(8, 8)\nconst LIFETIME_SECONDS := 2.0\n\nsignal finis..."
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "save",
+                    "path": "res://scripts/start_menu.gd",
+                    "text": "extends Control\n\nconst GAME_SCENE := \"res://main.tscn\"\nconst OPTIONS_SCENE := \"res://options_menu.tscn\"\n\n@onready var play_button: Button = $Center/PlayButton\n@onready var options_button: Button = ..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://scripts/options_menu.gd",
+                    "text": "extends Control\n\nconst START_MENU_SCENE := \"res://start_menu.tscn\"\nconst SETTINGS_PATH := \"user://menu_settings.cfg\"\n\n@onready var master_volume: HSlider = $Center/MasterVolume\n@onready var fullscr..."
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_script",
+            "ops": [
+                {
+                    "op": "save",
+                    "path": "res://assets/Effects/effect.gd",
+                    "text": "class_name ImpactEffect\nextends Node2D\n\n@export var effect_texture: Texture2D\n@export var frame_size := Vector2i(8, 8)\n@export_range(1.0, 60.0, 1.0, \"suffix: fps\") var frames_per_second := 18.0\n\nva..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Projectiles/projectile.gd",
+                    "text": "class_name SoldierProjectile\nextends Node2D\n\nconst IMPACT_EFFECT_SCENE := preload(\"res://assets/Effects/effect.tscn\")\n\n@export var projectile_texture: Texture2D\n@export var projectile_frame_size :=..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Soldiers/soldier.gd",
+                    "text": "class_name Soldier\nextends Node2D\n\nconst PROJECTILE_SCENE := preload(\"res://assets/Projectiles/projectile.tscn\")\nconst IDLE_ANIMATION: StringName = &\"idle\"\nconst ATTACKING_ANIMATION: StringName = &..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Soldiers/anti_tank.gd",
+                    "text": "class_name AntiTankSoldier\nextends Soldier\n\nfunc _init() -> void:\n\tattack_range = 260.0\n\tdirect_damage = 32.0\n\tsplash_radius = 30.0\n\tsplash_damage = 18.0\n\tattacks_per_second = 0.65\n\thealth = 150.0\n..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Soldiers/assault.gd",
+                    "text": "class_name AssaultSoldier\nextends Soldier\n\nfunc _init() -> void:\n\tattack_range = 150.0\n\tdirect_damage = 8.0\n\tsplash_radius = 0.0\n\tsplash_damage = 0.0\n\tattacks_per_second = 4.0\n\thealth = 100.0\n\tsold..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Soldiers/grenadier.gd",
+                    "text": "class_name GrenadierSoldier\nextends Soldier\n\nfunc _init() -> void:\n\tattack_range = 190.0\n\tdirect_damage = 14.0\n\tsplash_radius = 42.0\n\tsplash_damage = 20.0\n\tattacks_per_second = 0.9\n\thealth = 105.0\n..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Soldiers/machine_gunner.gd",
+                    "text": "class_name MachineGunnerSoldier\nextends Soldier\n\nfunc _init() -> void:\n\tattack_range = 175.0\n\tdirect_damage = 6.0\n\tsplash_radius = 0.0\n\tsplash_damage = 0.0\n\tattacks_per_second = 7.0\n\thealth = 125.0..."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Soldiers/radio_operator.gd",
+                    "text": "class_name RadioOperatorSoldier\nextends Soldier\n\nfunc _init() -> void:\n\tattack_range = 220.0\n\tdirect_damage = 11.0\n\tsplash_radius = 20.0\n\tsplash_damage = 7.0\n\tattacks_per_second = 1.5\n\thealth = 90...."
+                },
+                {
+                    "op": "save",
+                    "path": "res://assets/Soldiers/sniper.gd",
+                    "text": "class_name SniperSoldier\nextends Soldier\n\nfunc _init() -> void:\n\tattack_range = 320.0\n\tdirect_damage = 45.0\n\tsplash_radius = 0.0\n\tsplash_damage = 0.0\n\tattacks_per_second = 0.75\n\thealth = 80.0\n\tsold..."
+                }
+            ],
+            "calls": 1,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_session",
+            "ops": [
+                {
+                    "op": "get_state"
+                }
+            ],
+            "calls": 10,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_session",
+            "ops": [
+                {
+                    "op": "start"
+                }
+            ],
+            "calls": 8,
+            "refusedBefore": false
+        },
+        {
+            "tool": "godot_session",
+            "ops": [
+                {
+                    "op": "status"
+                }
+            ],
+            "calls": 33,
+            "refusedBefore": false
+        }
+    ]
+}

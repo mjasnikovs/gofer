@@ -277,6 +277,32 @@ mod tests {
         assert_eq!(answer["files"][0]["bytes"], 40);
     }
 
+    /// A file whose text was withheld leaves the ledger alone, so a later write is refused.
+    ///
+    /// `godot_script open` stops carrying text once a batched call has spent its budget, and it
+    /// answers with the path so the model knows what it is missing. Answering with the hash as well
+    /// would record the file as read: the next `save` is handed that hash as its `expectedHash`,
+    /// the workspace finds it current, and a whole file is replaced out of text nobody was shown.
+    #[test]
+    fn a_file_answered_without_its_text_is_not_recorded_as_read() {
+        let tree = root("reconcile-withheld");
+        remember(&tree, "kept.gd", "an-older-hash");
+
+        let answer = reconcile(
+            &tree,
+            serde_json::json!({"files": [
+                {"path": "kept.gd", "bytes": 12, "hash": "shown"},
+                {"path": "withheld.gd", "bytes": 900, "version": 3, "omitted": "no room left"},
+            ]}),
+        );
+
+        // The file that came with its text is recorded, as always.
+        assert_eq!(recall(&tree, "kept.gd").as_deref(), Some("shown"));
+        // The withheld one is not — not recorded now, and not refreshed from what it used to be.
+        assert_eq!(recall(&tree, "withheld.gd"), None);
+        assert_eq!(answer["files"][1]["omitted"], "no room left");
+    }
+
     /// A batch operation answers with a list of stamps rather than one, and every one is recorded.
     #[test]
     fn reconciling_reaches_every_entry_of_a_list_shaped_answer() {

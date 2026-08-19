@@ -112,6 +112,29 @@ describe('the squares the @ menu draws', () => {
         expect(request).toHaveBeenCalledTimes(2)
     })
 
+    /**
+     * The clear cannot cancel a request already in flight, so the answer has to notice it is stale.
+     * Without that check, a square fetched from the old branch landed in the cache *after* the
+     * clear, under a path whose file had changed — the exact thing the clear exists to prevent.
+     */
+    it('drops an answer that was already in flight when the checkout moved', async () => {
+        let answer: ((url: string) => void) | undefined
+        setThumbnailRequest(
+            () =>
+                new Promise<string | null>(resolve => {
+                    answer = resolve
+                })
+        )
+        requestThumbnail('sprites/player.png')
+        await flush()
+
+        clearThumbnails()
+        answer?.(SQUARE)
+        await settle()
+
+        expect(thumbnailFor('sprites/player.png')).toBeUndefined()
+    })
+
     it('answers undefined for a path nobody has asked about', () => {
         expect(thumbnailFor('sprites/unknown.png')).toBeUndefined()
     })

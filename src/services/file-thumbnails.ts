@@ -29,6 +29,13 @@ const waiting: string[] = []
  */
 const inFlight = new Set<string>()
 const listeners = new Set<() => void>()
+/**
+ * Which checkout the cache currently holds pictures of.
+ *
+ * Bumped by every clear. A request cannot be cancelled, so its answer checks this before it writes:
+ * one that started under the old branch is a picture of a file that is no longer at that path.
+ */
+let generation = 0
 
 function fetchThumbnail(path: string): Promise<string | null> {
     return invoke('read_workspace_thumbnail', {path})
@@ -52,6 +59,11 @@ export function clearThumbnails() {
     known.clear()
     waiting.length = 0
     inFlight.clear()
+    // A request already in flight cannot be cancelled, and its answer is a picture of the file the
+    // old branch had at that path. Counting the clears is what lets the answer notice it is stale:
+    // without it a fetch started before the switch landed in the cache after it, which is the exact
+    // thing this function exists to prevent.
+    generation += 1
     announce()
 }
 
@@ -71,16 +83,19 @@ function pump() {
         const path = waiting.shift()
         if (path === undefined || known.has(path)) continue
         inFlight.add(path)
+        const started = generation
+        const record = (url: string | null) => {
+            if (started === generation) known.set(path, url)
+        }
         void request(path)
-            .then(url => {
-                known.set(path, url)
-            })
+            .then(record)
             .catch(() => {
                 // A file the agent is half-way through writing, or one that will not decode. Either
                 // way the row shows its kind icon and the name is still there to pick.
-                known.set(path, null)
+                record(null)
             })
             .finally(() => {
+                // Dropped whatever the generation, so the slot is freed for the new branch's work.
                 inFlight.delete(path)
                 announce()
                 pump()

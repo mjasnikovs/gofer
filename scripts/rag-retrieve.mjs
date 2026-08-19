@@ -105,13 +105,23 @@ export function createRetriever({
             const chunks = await retrieve(request.question, {
                 cacheDir: request.cacheDir,
                 allowModelDownloads: false,
+                // Asked for rather than sliced off. A title pin always sorts last — it exists
+                // because that named chapter's chunk scored below everything the reranker kept —
+                // so `slice(0, n)` takes the rescues first, and the rescue is worth 95 to 98 of
+                // 100 on gofer-rag's own end-to-end set. Given the number, gofer-rag applies it
+                // before pinning and keeps room for one.
+                maxPassages: request.maxPassages,
                 complete
             })
             const passages = (chunks ?? []).slice(0, request.maxPassages).map(chunk => ({
                 text: String(chunk.text ?? '').slice(0, request.maxTextChars),
                 chapter: String(chunk.chapter ?? ''),
                 order: Number(chunk.order ?? 0),
-                score: Number(chunk.score ?? 0)
+                score: Number(chunk.score ?? 0),
+                // Whether this passage is a rescue rather than a rank. Carried through so the open
+                // question — how often a pin is what answered — is a query over `docs_answers`
+                // rather than a guess.
+                pinned: chunk.pinned === true
             }))
             const corpus = corpusVersion()
             if (request.mode === 'search') return {passages, corpusVersion: corpus}

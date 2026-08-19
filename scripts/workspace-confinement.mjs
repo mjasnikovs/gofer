@@ -70,6 +70,57 @@ const WRITING_TOOLS = ['write', 'edit']
  */
 const EDITOR_OWNED_IN_SHELL = /\.(?:tscn|scn)(?![\w-])|(?:^|[\s"'/=])project\.godot(?![\w-])/u
 
+/**
+ * A command whose whole job is to wait.
+ *
+ * Thirteen of thirty shell calls in a live project were `sleep N`, always between a change and a
+ * look at what it did. The shell is the wrong place for it twice over: it pauses the agent while
+ * the game runs on unwatched, and every one of those is a whole round trip spent on nothing.
+ * `godot_runtime wait` runs inside the game and answers once the frames are actually rendered.
+ *
+ * Matched only where sleeping is the command — at the start, or after a separator — so `timeout 5
+ * ./run`, a script with the word in it, and `sleeper.gd` are all left alone.
+ */
+const SLEEPS = /(?:^|[;&|]\s*)sleep(?:\s|$)/u
+
+/**
+ * One `git` invocation that only ever reads.
+ *
+ * `EDITOR_OWNED_IN_SHELL` matches a scene's name wherever it appears, because a shell command does
+ * not say what it is doing to a path. That is right for `sed` and wrong for `git diff -- main.tscn`,
+ * which cannot write to anything: a live project sent exactly that and spent a turn rewriting it
+ * after the refusal. An allow-list rather than a looser pattern — every subcommand here has no
+ * writing form at all, so the guard stays as strict as it was for everything else.
+ */
+const READ_ONLY_GIT = /^\s*git\s+(?:diff|status|log|show|blame|ls-files)(?:\s|$)/u
+
+/**
+ * Every way a shell starts a second command, so a chain is judged part by part.
+ *
+ * A newline is one of them, and so is a redirection: `git log >> main.tscn` reads through git and
+ * writes through the shell, and `git status\nsed -i … a.tscn` is two commands with no operator
+ * between them. Both were exempted by a rule that split on `;`, `&`, `|` and their doubles alone.
+ */
+const COMMAND_BREAK = /\|\||&&|[;&|\n\r]/u
+
+/** A part that sends its output somewhere. Reading through git is exempt; writing is never. */
+const REDIRECTS = /[<>]/u
+
+/**
+ * Whether every part of this command reads through git and writes nothing.
+ *
+ * Judged part by part, because the command that was refused was two of them:
+ * `git diff --check && git diff --stat -- scripts/main.gd main.tscn`. One part that writes anywhere
+ * in a chain puts the whole command back under the ordinary rule, and a part that redirects writes
+ * whatever git just read.
+ */
+function readsOnlyThroughGit(command) {
+    const parts = command.split(COMMAND_BREAK).filter(part => part.trim() !== '')
+    return (
+        parts.length > 0 && parts.every(part => READ_ONLY_GIT.test(part) && !REDIRECTS.test(part))
+    )
+}
+
 function refuseEditorOwnedWrite(toolName, path) {
     if (!WRITING_TOOLS.includes(toolName)) return
     const owned = EDITOR_OWNED.find(entry => entry.matches(path))
@@ -190,7 +241,14 @@ function validateBashCommand(command) {
         )
     if (/(?:^|[;&|]\s*)cd(?:\s|$)/u.test(command))
         throw new Error('Shell commands cannot change the workspace directory')
-    if (EDITOR_OWNED_IN_SHELL.test(command))
+    if (SLEEPS.test(command))
+        throw new Error(
+            'Shell commands cannot sleep. Sleeping here stops this process while the game carries '
+                + 'on unobserved, and costs a whole request to do nothing. Let the game advance '
+                + 'with godot_runtime wait, which renders the frames before it answers — '
+                + '{"op": "wait", "frames": 30} or {"op": "wait", "ms": 500}.'
+        )
+    if (EDITOR_OWNED_IN_SHELL.test(command) && !readsOnlyThroughGit(command))
         throw new Error(
             'Shell commands cannot name a scene or project.godot. Read one with the read tool, '
                 + 'and change it with godot_scene, godot_node and godot_project, which write it '

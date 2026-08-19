@@ -20,6 +20,25 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 ## A tree dump larger than this risks the 1 MiB envelope cap; truncation is reported, never fatal.
 const MAX_TREE_NODES := 2048
 const MAX_TREE_DEPTH := 32
+## What a call that names no `limit` answers with.
+##
+## The envelope is not the binding cap. The worker bounds a tool result at 24,000 characters and
+## slices it there, mid-JSON, so a tree that overruns reaches the model as a fragment it cannot
+## parse and without the `truncated` flag that would have explained it. A live project's running
+## tree was 235,113 characters of 2,024 nodes — 116 per node, and 120 at the widest measured — so a
+## default of this many leaves the answer at roughly a fifth of that bound with the rest of the
+## envelope to spare. A caller that wants more says so, and `root` and `depth` are how it reads a
+## large tree a part at a time.
+const DEFAULT_TREE_NODES := 150
+
+## The longest a wait may hold its request open.
+##
+## One runtime request has twenty seconds before the editor answers it as a timeout, so a wait that
+## could outlast that would answer as a failure having done exactly what it was asked. Half of the
+## budget leaves the rest for the round trip.
+const MAX_WAIT_MS := 10000
+## Frames, capped so a frame count cannot outlast the same budget on a slow scene.
+const MAX_WAIT_FRAMES := 600
 
 ## The performance monitors the wire may name, mapped onto engine constants.
 const MONITORS := {
@@ -51,6 +70,9 @@ const MOUSE_BUTTONS := {
 
 var _tree_nodes_seen: int = 0
 var _tree_truncated: bool = false
+## The bounds of the walk in progress, taken from the call and held at the engine's own caps.
+var _tree_budget: int = MAX_TREE_NODES
+var _tree_depth: int = MAX_TREE_DEPTH
 
 func _ready() -> void:
     print("GOFER_RUNTIME_READY:%d" % PROTOCOL_VERSION)
@@ -89,7 +111,7 @@ func _serve(request: Dictionary) -> void:
     var result: Dictionary
     match op:
         "tree":
-            result = _op_tree()
+            result = _op_tree(params)
         "inspect":
             result = _op_inspect(params)
         "input":
@@ -98,6 +120,8 @@ func _serve(request: Dictionary) -> void:
             result = await _op_capture()
         "monitors":
             result = _op_monitors(params)
+        "wait":
+            result = await _op_wait(params)
         _:
             result = _failure("unknown_command", "Runtime operation '%s' is not implemented" % op)
     result["id"] = id
@@ -110,20 +134,38 @@ func _succeed(payload: Dictionary = {}) -> Dictionary:
 func _failure(code: String, message: String) -> Dictionary:
     return {"ok": false, "code": code, "message": message}
 
-## Dumps the live scene tree, root window first. Deep or wide trees are truncated rather than
-## allowed to grow a response past the 1 MiB envelope cap, which would sever the connection.
-func _op_tree() -> Dictionary:
+## Dumps the live scene tree from `root` down, `limit` nodes at most and `depth` levels at most.
+##
+## The default budget is what keeps `truncated` readable at all. The worker slices an oversized tool
+## result at a fixed character count with no regard for the JSON, and the flag is inside whatever it
+## cuts — so the answer is bounded here rather than explained after the fact.
+func _op_tree(params: Dictionary) -> Dictionary:
+    # Typed as `Node` rather than inferred: `get_tree().root` is a `Window`, and the lookup below
+    # answers with a `Node`. Inferring the first makes the second a parse error, which stops this
+    # whole script from loading and leaves every runtime call to time out.
+    var start: Node = get_tree().root
+    var from := str(params.get("root", ""))
+    if not from.is_empty():
+        start = get_tree().root.get_node_or_null(NodePath(from))
+        if start == null:
+            return _failure("node_not_found", "No running node at '%s'" % from)
+    var levels := int(params.get("depth", MAX_TREE_DEPTH))
+    # Cast rather than assigned: a JSON number reaches the addon as a float, and a typed
+    # assignment from one is a runtime error that takes the whole response with it.
+    var budget := int(params.get("limit", DEFAULT_TREE_NODES))
     _tree_nodes_seen = 0
     _tree_truncated = false
-    var root := _runtime_node_summary(get_tree().root, 0)
-    return _succeed({"root": root, "truncated": _tree_truncated})
+    _tree_budget = clampi(budget, 1, MAX_TREE_NODES)
+    _tree_depth = clampi(levels, 0, MAX_TREE_DEPTH)
+    var summary := _runtime_node_summary(start, 0)
+    return _succeed({"truncated": _tree_truncated, "root": summary})
 
 func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
     _tree_nodes_seen += 1
     var children: Array = []
-    if depth < MAX_TREE_DEPTH and _tree_nodes_seen < MAX_TREE_NODES:
+    if depth < _tree_depth and _tree_nodes_seen < _tree_budget:
         for child in node.get_children():
-            if _tree_nodes_seen >= MAX_TREE_NODES:
+            if _tree_nodes_seen >= _tree_budget:
                 _tree_truncated = true
                 break
             children.append(_runtime_node_summary(child, depth + 1))
@@ -138,6 +180,36 @@ func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
         "path": str(node.get_path()),
         "children": children,
     }
+
+## Lets the game run on, and answers with what actually passed.
+##
+## Waiting used to mean `sleep` in the agent's shell — thirteen of thirty bash calls in one live
+## project. That stops the agent's own process while the game keeps going, so it measures nothing,
+## and it costs a whole request to do nothing. This runs inside the game: the frames really are
+## rendered before the answer leaves, so a capture or an inspection after it sees the state the
+## wait was for.
+##
+## Both bounds are held at once. A frame count on a stalled scene would never arrive, and a
+## duration on a fast one would spin through thousands of frames, so whichever runs out first ends
+## the wait and the answer says which.
+func _op_wait(params: Dictionary) -> Dictionary:
+    var wanted_ms := clampi(int(params.get("ms", 0)), 0, MAX_WAIT_MS)
+    var wanted_frames := clampi(int(params.get("frames", 0)), 0, MAX_WAIT_FRAMES)
+    # Neither named is one frame: the commonest ask is simply "let this take effect".
+    if wanted_ms == 0 and wanted_frames == 0:
+        wanted_frames = 1
+    var started := Time.get_ticks_msec()
+    var deadline := started + (wanted_ms if wanted_ms > 0 else MAX_WAIT_MS)
+    var frames := 0
+    # The deadline bounds every wait; the frame count bounds only a wait that named one. Bounding an
+    # `ms` wait by frames as well ended it early on a fast display — 600 frames is 4.2 seconds at
+    # 144Hz, so `{"ms": 5000}` came back having waited four.
+    while Time.get_ticks_msec() < deadline:
+        if wanted_frames > 0 and frames >= wanted_frames:
+            break
+        await get_tree().process_frame
+        frames += 1
+    return _succeed({"frames": frames, "ms": Time.get_ticks_msec() - started})
 
 func _runtime_icon_class(node: Node) -> String:
     var script: Variant = node.get_script()

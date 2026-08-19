@@ -10,7 +10,8 @@
         "runtime.inspect_node",
         "runtime.input",
         "runtime.capture",
-        "runtime.get_monitors"
+        "runtime.get_monitors",
+        "runtime.wait"
     ],
     "commands": [
         {"command": "session.get_state", "handler": "_session_state"},

@@ -45,7 +45,7 @@ const GODOT_PROMPT: &str = r#"Godot engine (a Gofer-managed editor, reached thro
 - Search godot_docs_search before writing any Godot class, method, signal, property or constant, every time, including when the name feels obvious
 - Call godot_session status first, before any other godot_ tool, every time; start the session if it is offline
 - Every godot_ tool takes an ops list, so put everything you want from that tool now into one call: three inspections is one call of three entries, not three calls
-- Each entry names its op with its parameters beside it, and the entries run in order; a few operations have to be the only entry of their call, and their line says so
+- Each entry names its op with its parameters beside it, and the entries run in order; most ops may be repeated in one call, and the few that may not — along with the debugger's, which have to be the only entry of theirs — say so on their own line
 
 Editing the project:
 - Scenes and project.godot belong to the editor: change them with godot_scene, godot_node and godot_project, never by writing the file as text — the write, edit and bash tools refuse those paths

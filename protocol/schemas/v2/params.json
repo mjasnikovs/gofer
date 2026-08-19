@@ -3,7 +3,7 @@
     "$commandComment": "`command` is the addon command that answers the operation, and its absence \u2014 with `answeredBy: \"rust\"` in its place \u2014 means the operation never reaches the addon. Those are checked in Rust and deserialize into a typed request behind it; `every_rust_answered_operation_matches_its_request` holds this file to those structs.",
     "$acceptsComment": "`accepts` names a parameter the addon reads and the model is never told about. `scene` is the only one: every node command takes it and defaults it to the scene the editor already has open, so the desktop client passes it and the model has no reason to.",
     "$gatedComment": "`gated` is the sentence the user is shown before the agent may run this operation. Its absence means auto-allowed, so a new operation is allowed by default and has to be gated deliberately. It lives beside the parameters and the route because all three are facts about the same operation, and keeping the safety model in a table of its own meant a fifth place to look and a fifth thing to hold to the catalogue afterwards.",
-    "$aloneComment": "`alone` is the sentence a caller reads when it puts this operation in an `ops` list beside another. Every tool call is a list, so that a model wanting three inspections writes one call rather than three; these are the operations a list cannot hold twice, because they take no parameters to vary or because they drive something the session owns exactly one of — the open scene, the running game, the undo stack, the debuggee. Its absence means the operation may appear as often as a list names it.",
+    "$aloneComment": "`alone` narrows where an operation may sit in an `ops` list, and carries the sentence a caller reads when it gets that wrong. Every tool call is a list, so a model wanting three inspections writes one call rather than three. `scope: \"repeat\"` is the ordinary case: the operation may sit beside other operations, and may not appear twice, because it takes no parameters to vary or drives something the session owns exactly one of — the open scene, the running game, the undo stack, the dialog. The router runs a list in order, so a second one would only redo or undo the first. `scope: \"exclusive\"` is the debugger, where each answer decides what the next operation means, so the operation has to be the only entry of its call. Absence means the operation may appear as often as a list names it.",
     "$vocabularyComment": "`vocabularies` names a set of words a parameter accepts inside a structure, where `kind` cannot reach: `key` sits inside each entry of an `events` list. `accepted` is printed into the signature the model reads, because a generated signature is measurably more reliable than a sentence \u2014 see the note on `Kind` in tool_params.rs. `refused` is names the engine does not have, and it exists so `every_key_name_the_catalog_advertises_is_one_the_engine_knows` can prove the accepted list is meaningful rather than merely present. Both used to be written out twice, in English, inside two catalogue summaries, and read back out of the prose by a parser that split on the literal string \u201cAccepted: \u201d.",
     "vocabularies": {
         "godotKeyName": {
@@ -42,35 +42,50 @@
         {
             "tool": "godot_session",
             "op": "status",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "answeredBy": "rust"
         },
         {
             "tool": "godot_session",
             "op": "start",
-            "alone": "There is one editor session, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "There is one editor session, so a second one in the same call is the first one again."
+            },
             "params": [],
             "answeredBy": "rust"
         },
         {
             "tool": "godot_session",
             "op": "stop",
-            "alone": "There is one editor session, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "There is one editor session, so a second one in the same call is the first one again."
+            },
             "params": [],
             "answeredBy": "rust"
         },
         {
             "tool": "godot_session",
             "op": "get_state",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "session.get_state"
         },
         {
             "tool": "godot_session",
             "op": "undo",
-            "alone": "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One undo stack, walked in order: what the second call undoes depends on what the first one did."
+            },
             "params": [
                 {
                     "name": "expectedRevision",
@@ -85,7 +100,10 @@
         {
             "tool": "godot_session",
             "op": "redo",
-            "alone": "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One undo stack, walked in order: what the second call undoes depends on what the first one did."
+            },
             "params": [
                 {
                     "name": "expectedRevision",
@@ -100,7 +118,10 @@
         {
             "tool": "godot_session",
             "op": "answer_dialog",
-            "alone": "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press."
+            },
             "params": [
                 {
                     "name": "button",
@@ -114,14 +135,20 @@
         {
             "tool": "godot_scene",
             "op": "list",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "scene.list"
         },
         {
             "tool": "godot_scene",
             "op": "open",
-            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One scene is open at a time, so a second one would act on whatever the first left open."
+            },
             "params": [
                 {
                     "name": "path",
@@ -163,14 +190,35 @@
         {
             "tool": "godot_scene",
             "op": "get_tree",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
-            "params": [],
+            "params": [
+                {
+                    "name": "root",
+                    "kind": "text",
+                    "required": false,
+                    "note": "The node to start from, as a path. The whole tree when it is absent."
+                },
+                {
+                    "name": "depth",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many levels below the starting node to walk. Every level when it is absent."
+                },
+                {
+                    "name": "limit",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest."
+                }
+            ],
             "command": "scene.get_tree"
         },
         {
             "tool": "godot_scene",
             "op": "save",
-            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One scene is open at a time, so a second one would act on whatever the first left open."
+            },
             "params": [
                 {
                     "name": "expectedRevision",
@@ -185,7 +233,10 @@
         {
             "tool": "godot_scene",
             "op": "save_as",
-            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One scene is open at a time, so a second one would act on whatever the first left open."
+            },
             "params": [
                 {
                     "name": "path",
@@ -205,7 +256,10 @@
         {
             "tool": "godot_scene",
             "op": "reload",
-            "alone": "One scene is open at a time, so a second one would act on whatever the first left open.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One scene is open at a time, so a second one would act on whatever the first left open."
+            },
             "params": [
                 {
                     "name": "expectedRevision",
@@ -682,7 +736,10 @@
         {
             "tool": "godot_project",
             "op": "get_settings",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "project.get_settings"
         },
@@ -742,7 +799,10 @@
         {
             "tool": "godot_project",
             "op": "list_autoloads",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "project.list_autoloads"
         },
@@ -783,7 +843,10 @@
         {
             "tool": "godot_project",
             "op": "list_input_actions",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "project.list_input_actions"
         },
@@ -839,7 +902,10 @@
         {
             "tool": "godot_project",
             "op": "list_plugins",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "project.list_plugins"
         },
@@ -1488,7 +1554,10 @@
         {
             "tool": "godot_debug",
             "op": "status",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "answeredBy": "rust"
         },
@@ -1529,7 +1598,10 @@
         {
             "tool": "godot_debug",
             "op": "launch",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "playArgs",
@@ -1560,14 +1632,20 @@
         {
             "tool": "godot_debug",
             "op": "attach",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "answeredBy": "rust"
         },
         {
             "tool": "godot_debug",
             "op": "await_stop",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "threadId",
@@ -1585,7 +1663,10 @@
         {
             "tool": "godot_debug",
             "op": "threads",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "answeredBy": "rust"
         },
@@ -1645,7 +1726,10 @@
         {
             "tool": "godot_debug",
             "op": "continue",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "threadId",
@@ -1658,7 +1742,10 @@
         {
             "tool": "godot_debug",
             "op": "pause",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "threadId",
@@ -1671,7 +1758,10 @@
         {
             "tool": "godot_debug",
             "op": "step_over",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "threadId",
@@ -1684,7 +1774,10 @@
         {
             "tool": "godot_debug",
             "op": "step_in",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "threadId",
@@ -1697,7 +1790,10 @@
         {
             "tool": "godot_debug",
             "op": "step_out",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "threadId",
@@ -1710,21 +1806,30 @@
         {
             "tool": "godot_debug",
             "op": "restart",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [],
             "answeredBy": "rust"
         },
         {
             "tool": "godot_debug",
             "op": "terminate",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [],
             "answeredBy": "rust"
         },
         {
             "tool": "godot_debug",
             "op": "disconnect",
-            "alone": "One debuggee, driven in order: each answer decides what the next call means.",
+            "alone": {
+                "scope": "exclusive",
+                "why": "One debuggee, driven in order: each answer decides what the next call means."
+            },
             "params": [
                 {
                     "name": "terminateDebuggee",
@@ -1737,36 +1842,66 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "alone": "There is one running game, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "There is one running game, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "runtime.run"
         },
         {
             "tool": "godot_runtime",
             "op": "stop",
-            "alone": "There is one running game, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "There is one running game, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "runtime.stop"
         },
         {
             "tool": "godot_runtime",
             "op": "restart",
-            "alone": "There is one running game, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "There is one running game, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "runtime.restart"
         },
         {
             "tool": "godot_runtime",
             "op": "get_state",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
             "params": [],
             "command": "runtime.get_state"
         },
         {
             "tool": "godot_runtime",
             "op": "get_tree",
-            "alone": "It takes no parameters, so a second one in the same call is the first one again.",
-            "params": [],
+            "params": [
+                {
+                    "name": "root",
+                    "kind": "text",
+                    "required": false,
+                    "note": "The node to start from, as a path. The whole tree when it is absent."
+                },
+                {
+                    "name": "depth",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many levels below the starting node to walk. Every level when it is absent."
+                },
+                {
+                    "name": "limit",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many nodes to answer with, at most. The answer opens with `truncated`, which says whether it stopped early; a root or a depth is how you read the rest."
+                }
+            ],
             "command": "runtime.get_tree"
         },
         {
@@ -1812,6 +1947,25 @@
                 }
             ],
             "command": "runtime.capture"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "wait",
+            "params": [
+                {
+                    "name": "frames",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How many rendered frames to let pass. One when neither this nor `ms` is named."
+                },
+                {
+                    "name": "ms",
+                    "kind": "int",
+                    "required": false,
+                    "note": "How long to let pass instead, in milliseconds. Held under ten seconds, which is what one request has."
+                }
+            ],
+            "command": "runtime.wait"
         },
         {
             "tool": "godot_runtime",
@@ -1872,7 +2026,7 @@
                     "name": "maxPassages",
                     "kind": "int",
                     "required": false,
-                    "note": "How many passages clear the relevance gate is the search's own decision, not a number the model can reason about — it keeps five and pins up to three more. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
+                    "note": "How many passages come back is not a number the model can reason about, so it is settled here at four. gofer-rag takes it as a ceiling and applies it before pinning a chapter the question named, so the rescue survives it; replaying its 83 labelled questions through every ceiling, four keeps 79% of the bytes and loses no case, where three loses two. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
                     "hidden": true
                 },
                 {
@@ -1896,7 +2050,7 @@
                     "name": "maxPassages",
                     "kind": "int",
                     "required": false,
-                    "note": "How many passages clear the relevance gate is the search's own decision, not a number the model can reason about — it keeps five and pins up to three more. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
+                    "note": "How many passages come back is not a number the model can reason about, so it is settled here at four. gofer-rag takes it as a ceiling and applies it before pinning a chapter the question named, so the rescue survives it; replaying its 83 labelled questions through every ceiling, four keeps 79% of the bytes and loses no case, where three loses two. The desktop Docs panel sets its own bound, so the parameter stays accepted and unadvertised.",
                     "hidden": true
                 },
                 {

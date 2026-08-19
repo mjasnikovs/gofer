@@ -43,6 +43,13 @@ var _redo_depth: int = 0
 # Play mode is not a protocol readiness, so it is tracked apart from `_readiness`.
 var _playing: bool = false
 
+# The scene-tree walk in progress: how many nodes it has written, how many it may, how deep it may
+# go, and whether it stopped short of the whole tree.
+var _tree_nodes_seen: int = 0
+var _tree_truncated: bool = false
+var _tree_budget: int = MAX_TREE_NODES
+var _tree_depth: int = MAX_TREE_DEPTH
+
 # Requests waiting on the editor to switch scenes. `EditorInterface.open_scene_from_path` and
 # `reload_scene_from_path` only *ask* for the switch — the editor ignores the request outright
 # while it is busy with another one (an `is_changing_scene` guard GDScript cannot read). An answer
@@ -145,7 +152,7 @@ const RUNTIME_LAUNCH_TIMEOUT_MS := 30000
 const LAUNCH_KINDS: Array[String] = ["run", "run_frame"]
 
 ## The commands `_handle_request` routes to the runtime bridge instead of answering synchronously.
-# GENERATED-BEGIN runtime-commands sha256:283845705f503a66
+# GENERATED-BEGIN runtime-commands sha256:38d2a42461c858c7
 const RUNTIME_COMMANDS: Array[String] = [
     "runtime.run",
     "runtime.stop",
@@ -156,6 +163,7 @@ const RUNTIME_COMMANDS: Array[String] = [
     "runtime.input",
     "runtime.capture",
     "runtime.get_monitors",
+    "runtime.wait",
 ]
 # GENERATED-END runtime-commands
 
@@ -166,6 +174,22 @@ const GOFER_PLUGIN_NAME := "gofer"
 const GOFER_AUTOLOAD_NAME := "GoferRuntime"
 ## Search results are capped so a broad query cannot exceed the 1 MiB envelope limit.
 const MAX_SEARCH_RESULTS := 50
+
+## The bounds of a scene-tree dump, and what a call that names none answers with.
+##
+## The envelope is not the binding cap here. The worker holds a tool result at 24,000 characters and
+## slices it there, mid-JSON, so a tree that overruns reaches the model as a fragment it cannot
+## parse and without the flag that would have explained it. A live project's tree measured 116
+## characters a node, 120 at the widest, so the default leaves the answer at roughly a fifth of that
+## bound. A caller that wants more says so, and `root` and `depth` read a large tree a part at a
+## time.
+##
+## The ceiling is the Explorer panel's, not the model's. This walk had no bound at all before, so a
+## ceiling is a scene the panel used to draw whole and now would not; 4096 nodes is what the panel
+## asks for, and about 450KB, well inside the 1 MiB envelope that ends the session if it is passed.
+const MAX_TREE_NODES := 4096
+const MAX_TREE_DEPTH := 32
+const DEFAULT_TREE_NODES := 150
 
 ## One icon request covers a whole scene tree's worth of classes and no more, and each icon stays
 ## the size the editor draws it, so the batch stays far inside the envelope limit.
@@ -251,7 +275,7 @@ const MUTATING_COMMANDS: Array[String] = [
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:35ab49c9594d4a6e
+# GENERATED-BEGIN command-params sha256:244a41f4e15da36a
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.undo": {"required": [], "optional": []},
@@ -260,7 +284,7 @@ const COMMAND_PARAMS: Dictionary = {
     "scene.list": {"required": [], "optional": []},
     "scene.open": {"required": ["path"], "optional": []},
     "scene.create": {"required": ["path", "rootType"], "optional": ["rootName"]},
-    "scene.get_tree": {"required": [], "optional": []},
+    "scene.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
     "scene.save": {"required": [], "optional": []},
     "scene.save_as": {"required": ["path"], "optional": []},
     "scene.reload": {"required": [], "optional": []},
@@ -305,10 +329,11 @@ const COMMAND_PARAMS: Dictionary = {
     "runtime.stop": {"required": [], "optional": []},
     "runtime.restart": {"required": [], "optional": []},
     "runtime.get_state": {"required": [], "optional": []},
-    "runtime.get_tree": {"required": [], "optional": []},
+    "runtime.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
     "runtime.inspect_node": {"required": ["path"], "optional": ["properties"]},
     "runtime.input": {"required": ["events"], "optional": []},
     "runtime.capture": {"required": [], "optional": ["source"]},
+    "runtime.wait": {"required": [], "optional": ["frames", "ms"]},
     "runtime.get_monitors": {"required": [], "optional": ["monitors"]},
 }
 # GENERATED-END command-params
@@ -577,7 +602,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
     if declared.has("_gofer_error"):
         return declared
 
-# GENERATED-BEGIN dispatch-table sha256:3a410dce9fbcd6f9
+# GENERATED-BEGIN dispatch-table sha256:117f32d8ce50a2b5
     match command:
         "session.get_state":
             return _session_state()
@@ -644,7 +669,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
         "scene.reload":
             return _scene_reload(params)
         "scene.get_tree":
-            return _scene_tree()
+            return _scene_tree(params)
         "node.create":
             return _node_create(params)
         "node.create_nodes":
@@ -709,7 +734,7 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "session_playing",
-                "message": "The project is running and the scene cannot be mutated",
+                "message": "The project is running and the scene cannot be mutated. Stop it with godot_runtime stop, then send this again; the edited scene and the running game are separate, so stopping loses nothing the editor holds",
                 "retryable": true,
                 "readiness": "ready",
                 "details": {}
@@ -901,6 +926,8 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
             _runtime_forward(id, "input", params)
         "runtime.get_monitors":
             _runtime_forward(id, "monitors", params)
+        "runtime.wait":
+            _runtime_forward(id, "wait", params)
         _:
             # `RUNTIME_COMMANDS` and this match are two lists of the same commands. A command in
             # one and not the other would leave its caller waiting out the whole timeout for a
@@ -1115,6 +1142,11 @@ func _complete_runtime_response(payload: Dictionary) -> void:
 ## alone and then answered `runtime_timeout`, "The game did not answer in time", about a game that
 ## had been gone for half a minute. That reads as a slow machine, so the agent waits, and the
 ## parse error that caused it is never mentioned.
+##
+## The opposite case is answered apart from both. A launch whose deadline passes while the editor is
+## still playing is a game that started and is late, not one that failed, and a caller told it timed
+## out stops the game and starts another — which is the one action that turns a slow start into a
+## lost one.
 func _sweep_runtime_pending() -> void:
     if _runtime_pending.is_empty():
         return
@@ -1135,7 +1167,21 @@ func _sweep_runtime_pending() -> void:
             # about one that was never started.
             _respond_dialog_open(pending["id"], asking)
         elif int(pending["deadline"]) < now:
-            _respond_error(pending["id"], "runtime_timeout", "The game did not answer in time", true)
+            if launching and playing:
+                # The game is up; only its helper is late. Answered apart from a timeout because
+                # the two ask for opposite things. A live project met this nine times, and six of
+                # them were followed by a `get_state` reporting `running: true, runtimeReady: true`
+                # about the game the timeout had just described as unresponsive — after which the
+                # agent stopped it and ran it again, twice, throwing away a game that was working.
+                _respond_error(
+                    pending["id"],
+                    "runtime_slow_start",
+                    "The game is running and its helper has not answered yet. Read godot_runtime get_state rather than running it again; stopping it now would throw away a game that is still starting",
+                    true,
+                    {"running": true}
+                )
+            else:
+                _respond_error(pending["id"], "runtime_timeout", "The game did not answer in time", true)
         elif launching and not playing and pending.get("seen_playing", false):
             _respond_error(pending["id"], "runtime_not_running", "The game started and then stopped before it was ready; check the editor output for the error that ended it", true)
         elif pending["kind"] == "stop" and not playing:
@@ -3148,11 +3194,26 @@ func _sweep_scene_pending() -> void:
 ## The revision travels in the envelope for a mutating command, and `scene.get_tree` is not one —
 ## so without it here the one command documented as the source of `expectedRevision` answered
 ## without it, and an agent that read the tree before every mutation had no number to send.
-func _scene_tree() -> Dictionary:
+func _scene_tree(params: Dictionary) -> Dictionary:
     var root := _edited_root()
     if root == null:
-        return {"root": null, "revision": _scene_revision}
-    return {"root": _node_summary(root), "revision": _scene_revision}
+        return {"truncated": false, "root": null, "revision": _scene_revision}
+    var start := root
+    var from := str(params.get("root", ""))
+    if not from.is_empty():
+        start = _find_node(from)
+        if start == null:
+            return _node_not_found_error(from)
+    # Cast rather than assigned: a JSON number reaches the addon as a float, and a typed
+    # assignment from one is a runtime error that takes the whole response with it.
+    var budget := int(params.get("limit", DEFAULT_TREE_NODES))
+    var levels := int(params.get("depth", MAX_TREE_DEPTH))
+    _tree_nodes_seen = 0
+    _tree_truncated = false
+    _tree_budget = clampi(budget, 1, MAX_TREE_NODES)
+    _tree_depth = clampi(levels, 0, MAX_TREE_DEPTH)
+    var summary := _node_summary(start, 0)
+    return {"truncated": _tree_truncated, "root": summary, "revision": _scene_revision}
 
 func _node_create(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
@@ -4573,10 +4634,22 @@ func _node_path(node: Node) -> String:
     var relative := String(path).substr(String(root_path).length())
     return "/" + root.name + relative
 
-func _node_summary(node: Node) -> Dictionary:
+## One node and the part of its subtree the walk still has budget for.
+##
+## Bounded like the running tree's, and for the same reason: the answer used to be every node of
+## the edited scene however many there were, and the worker slices an oversized tool result at a
+## fixed character count, mid-JSON.
+func _node_summary(node: Node, depth: int) -> Dictionary:
+    _tree_nodes_seen += 1
     var children: Array[Dictionary] = []
-    for i in range(node.get_child_count()):
-        children.append(_node_summary(node.get_child(i)))
+    if depth < _tree_depth and _tree_nodes_seen < _tree_budget:
+        for i in range(node.get_child_count()):
+            if _tree_nodes_seen >= _tree_budget:
+                _tree_truncated = true
+                break
+            children.append(_node_summary(node.get_child(i), depth + 1))
+    elif node.get_child_count() > 0:
+        _tree_truncated = true
     return {
         "name": node.name,
         "type": node.get_class(),

@@ -48,6 +48,80 @@ fn paths(tree: &Value) -> Vec<String> {
     found
 }
 
+/// A tree larger than the answer's budget is bounded, flagged, and readable a part at a time.
+///
+/// The bound is not the addon's envelope. The worker holds a tool result at 24,000 characters and
+/// slices it there without regard for the JSON, so an oversized tree reached the model as a
+/// fragment it could not parse — and `truncated`, wherever it sits, is inside the part that was
+/// cut. One live call answered 235,113 characters about 2,024 running nodes; the model saw a tenth
+/// of it and then asked after nodes whose names it had guessed. The default is what keeps the flag
+/// readable, so the default is what this pins.
+#[test]
+fn a_tree_past_the_answers_budget_is_bounded_and_says_so() {
+    /// The worker's cap on a tool result, from `MAX_TOOL_TEXT_CHARS` in `scripts/ai-host.mjs`.
+    const WORKER_CAP: usize = 24_000;
+    /// What `DEFAULT_TREE_NODES` in the addon answers with when a call names no `limit`.
+    const DEFAULT_NODES: usize = 150;
+
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://wide.tscn", "rootType": "Node2D", "rootName": "Level"}),
+    );
+    // Past the default, so the walk has to stop inside the scene rather than at its end. Two
+    // hundred is what one create command carries.
+    let wide: Vec<Value> = (0..200)
+        .map(|index| json!({"parent": "/Level", "name": format!("Marker{index}"), "type": "Marker2D"}))
+        .collect();
+    session.mutate("node.create_nodes", json!({"nodes": wide}));
+
+    // A call naming nothing is bounded, and says it stopped.
+    let bounded = session.call("scene.get_tree", json!({}));
+    assert_eq!(
+        bounded["truncated"], true,
+        "a 201-node scene must report that the answer stopped short"
+    );
+    let counted = paths(&bounded).len();
+    assert!(
+        counted <= DEFAULT_NODES,
+        "the default answered with {counted} nodes"
+    );
+    let measured = serde_json::to_string(&bounded)
+        .expect("the tree serializes")
+        .len();
+    assert!(
+        measured < WORKER_CAP,
+        "the default answer is {measured} characters, past the worker's {WORKER_CAP}"
+    );
+
+    // `limit` is the caller's own bound, and a whole subtree fits under one.
+    let ten = session.call("scene.get_tree", json!({"limit": 10}));
+    assert!(paths(&ten).len() <= 10, "limit is the caller's own bound");
+    assert_eq!(ten["truncated"], true);
+
+    // `depth` reads the shape of a wide tree without its contents.
+    let shallow = session.call("scene.get_tree", json!({"depth": 0}));
+    assert_eq!(paths(&shallow), vec!["/Level".to_owned()]);
+    assert_eq!(shallow["truncated"], true, "the children were left out");
+
+    // `root` is how the rest is read: a leaf answers as itself, whole and untruncated.
+    let leaf = session.call("scene.get_tree", json!({"root": "/Level/Marker199"}));
+    assert_eq!(leaf["root"]["name"], "Marker199");
+    assert_eq!(
+        leaf["truncated"], false,
+        "a leaf is the whole of its subtree"
+    );
+
+    // A root the scene does not hold is named, not answered with an empty tree.
+    let missing = session
+        .try_call("scene.get_tree", json!({"root": "/Level/Nowhere"}), None)
+        .expect_err("a root that is not in the scene is refused");
+    assert!(
+        missing.contains("Nowhere"),
+        "the refusal has to name the node that is missing: {missing}"
+    );
+}
+
 /// The four scene commands answer from the file they wrote, not from the write they attempted.
 ///
 /// `EditorInterface.save_scene` returns OK for a save that put nothing on disk, which is how a

@@ -220,6 +220,62 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "the main scene must be running: {names:?}"
     );
 
+    // The same three bounds the edited tree takes, on the tree that actually overran them: a live
+    // project's running tree was 235,113 characters, and the worker cuts a tool result at 24,000.
+    let shallow = session.call("runtime.get_tree", json!({"depth": 0}));
+    assert!(
+        shallow["root"]["children"]
+            .as_array()
+            .expect("root children")
+            .is_empty(),
+        "depth 0 is the named node and nothing under it"
+    );
+    assert_eq!(shallow["truncated"], true, "the children were left out");
+    let one = session.call("runtime.get_tree", json!({"limit": 1}));
+    assert_eq!(one["truncated"], true, "a budget of one cannot hold a tree");
+    let probe = session.call("runtime.get_tree", json!({"root": "/root/RuntimeProbe"}));
+    assert_eq!(probe["root"]["name"], "RuntimeProbe");
+    assert!(
+        session
+            .error("runtime.get_tree", json!({"root": "/root/Nowhere"}), None)
+            .starts_with("node_not_found"),
+        "a root the game does not hold is named rather than answered with an empty tree"
+    );
+
+    // Waiting happens inside the game, so the frames really are rendered before the answer leaves.
+    // Thirteen of thirty bash calls in one live project were `sleep`, which stops the agent instead
+    // and lets the game run unobserved.
+    let waited = session.call("runtime.wait", json!({"frames": 5}));
+    assert_eq!(waited["frames"], 5, "{waited}");
+    let timed = session.call("runtime.wait", json!({"ms": 120}));
+    assert!(
+        timed["ms"].as_i64().expect("a wait reports its duration") >= 120,
+        "a wait named in milliseconds has to last them: {timed}"
+    );
+    // Both bounds are held, so a wait can never outlast the request carrying it.
+    let capped = session.call("runtime.wait", json!({"frames": 100_000, "ms": 150}));
+    assert!(
+        capped["frames"].as_i64().expect("frames") < 100_000,
+        "the duration has to end a frame count it outlives: {capped}"
+    );
+
+    // The edited scene cannot be mutated while the game is playing, and the refusal has to say
+    // which call clears that. It used to end at "cannot be mutated", which names no way forward:
+    // two live tasks met it and neither one stopped the game.
+    let playing = session.error(
+        "node.create",
+        json!({"parent": "/RuntimeProbe", "name": "Late", "type": "Marker2D"}),
+        None,
+    );
+    assert!(
+        playing.starts_with("session_playing"),
+        "a mutation during play must be refused as such: {playing}"
+    );
+    assert!(
+        playing.contains("godot_runtime stop"),
+        "the refusal has to name the call that clears it: {playing}"
+    );
+
     assert_eq!(label_text(&session), "presses: 0 (none)");
 
     // The step's done-criteria: an injected key press changes fixture state, and the response's
@@ -542,6 +598,59 @@ fn a_game_that_stops_at_an_error_ends_the_launch_waiting_on_it() {
     session.await_stopped();
     let after = session.call("runtime.get_state", json!({}));
     assert_eq!(after["broke"], false, "{after}");
+}
+
+/// An autoload that holds the main thread past the launch deadline without ever letting go of the
+/// process, which is what a game whose helper cannot load looks like from the editor: playing, and
+/// silent. A parse error in the addon's own runtime script produces exactly this.
+///
+/// Forty seconds is the launch deadline plus a margin. It is also the fallback: the process leaves
+/// on its own if the stop below cannot reach a main thread that is inside a `delay_msec`.
+const STALLING_AUTOLOAD: &str = "extends Node\n\nfunc _ready() -> void:\n\tOS.delay_msec(40000)\n";
+
+/// A launch that outlives its deadline while the editor is still playing says the game is up.
+///
+/// The opposite failure to the one above, and told apart from it on purpose. A live project met
+/// this nine times in one task; six were followed by a `get_state` reporting `running: true,
+/// runtimeReady: true` about the game the timeout had just described as unresponsive. The agent
+/// read "did not answer in time" as "dead", stopped the game and ran it again — twice throwing away
+/// a game that was working, at half a minute a cycle.
+#[test]
+fn a_launch_that_outlives_its_deadline_while_playing_says_the_game_is_up() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(worktree.join("scripts/stall.gd"), STALLING_AUTOLOAD)
+        .expect("write the autoload");
+    let project = worktree.join("project.godot");
+    // Gofer's own autoload is appended to `[autoload]`, so one written here runs ahead of it.
+    let configured = std::fs::read_to_string(&project).expect("read the fixture project")
+        + "\n[autoload]\n\nStall=\"*res://scripts/stall.gd\"\n";
+    std::fs::write(&project, configured).expect("write the project");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    let error = session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .expect_err("a helper that never announces must not answer as launched");
+
+    assert!(
+        error.starts_with("runtime_slow_start"),
+        "a game the editor is still playing must not be reported as one that did not answer: \
+         {error}\n--- editor output ---\n{}",
+        session.output()
+    );
+    assert!(
+        error.contains("get_state"),
+        "the failure has to name the call that reads the state instead of another launch: {error}"
+    );
+
+    // And the state it points at agrees: the game is there, its helper is not.
+    let state = session.call("runtime.get_state", json!({}));
+    assert_eq!(state["running"], true, "{state}");
+    assert_eq!(state["runtimeReady"], false, "{state}");
+
+    session.call("runtime.stop", json!({}));
 }
 
 /// An autoload that kills its own process the moment it is added, which is what a game that

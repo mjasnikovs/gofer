@@ -28,6 +28,7 @@ import {createWebFetchTool} from './ai-fetch.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
 import {createTranscript, withoutTrailingAnswer} from './ai-transcript.mjs'
 import {toolTarget} from './tool-target.mjs'
+import {withoutPackedLiterals} from './scene-text.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 
 const PROVIDER_ID = 'local'
@@ -348,7 +349,12 @@ function bindTool(tool, context) {
 export function createAgentTools(workspacePath, domains, host, extra = []) {
     const env = new NodeExecutionEnv({cwd: workspacePath})
     const context = {env}
-    const confined = [createReadTool(), createWriteTool(), createEditTool(), createBashTool()]
+    const confined = [
+        withoutPackedLiterals(createReadTool()),
+        createWriteTool(),
+        createEditTool(),
+        createBashTool()
+    ]
         .map(tool => confineTool(tool, workspacePath))
         .map(tool => bindTool(tool, context))
     return {

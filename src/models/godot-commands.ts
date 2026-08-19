@@ -25,12 +25,25 @@ export type GodotResult = Readonly<Record<string, unknown>>
 /** A command that takes nothing. Callers may still omit the argument entirely. */
 export type NoGodotParams = Readonly<Record<string, never>>
 
+/**
+ * How much of a scene tree one read asks for.
+ *
+ * All three are optional, and a call that names none is answered with the agent's default of 150
+ * nodes — small enough to survive the character cap on a tool result. The panels want the whole
+ * tree instead, so they name their own bound, the way the Docs panel names its own passage count.
+ */
+export type GodotTreeBounds = Readonly<{
+    root?: string | undefined
+    depth?: number | undefined
+    limit?: number | undefined
+}>
+
 export type GodotCommandSpec<Params extends GodotParams, Result extends GodotResult> = Readonly<{
     params: Params
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:83ec7404f57dd9d3
+// GENERATED-BEGIN command-names sha256:6d6fd71de1d0c829
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -95,6 +108,7 @@ export type GodotCommandName =
     | 'runtime.input'
     | 'runtime.capture'
     | 'runtime.get_monitors'
+    | 'runtime.wait'
 // GENERATED-END command-names
 
 /**
@@ -129,7 +143,7 @@ interface KnownGodotCommands {
         GodotClassIcons
     >
     'scene.open': GodotCommandSpec<Readonly<{path: string}>, GodotResult>
-    'scene.get_tree': GodotCommandSpec<NoGodotParams, GodotSceneTree>
+    'scene.get_tree': GodotCommandSpec<GodotTreeBounds, GodotSceneTree>
     'node.inspect': GodotCommandSpec<Readonly<{scene: string; node: string}>, GodotNodeDetails>
     'resource.rescan': GodotCommandSpec<
         Readonly<{path?: string}>,
@@ -139,7 +153,7 @@ interface KnownGodotCommands {
     'runtime.restart': GodotCommandSpec<NoGodotParams, GodotCapture>
     'runtime.stop': GodotCommandSpec<NoGodotParams, GodotRuntimeState>
     'runtime.get_state': GodotCommandSpec<NoGodotParams, GodotRuntimeState>
-    'runtime.get_tree': GodotCommandSpec<NoGodotParams, GodotSceneTree>
+    'runtime.get_tree': GodotCommandSpec<GodotTreeBounds, GodotSceneTree>
     'runtime.inspect_node': GodotCommandSpec<Readonly<{path: string}>, GodotNodeDetails>
     'runtime.capture': GodotCommandSpec<
         Readonly<{source?: 'game' | 'editor'}>,

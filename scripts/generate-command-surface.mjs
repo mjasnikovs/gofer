@@ -92,10 +92,17 @@ async function parameterCatalogue() {
             )
         // A blank sentence would refuse the call and say nothing about why, which is the failure the
         // whole file exists to make impossible. Absence is the default and means "may be repeated".
-        if ('alone' in entry && (typeof entry.alone !== 'string' || entry.alone.trim() === ''))
-            throw new Error(
-                `${path}: ${entry.tool} ${entry.op} is marked alone without a sentence saying why`
-            )
+        if ('alone' in entry) {
+            const {scope, why} = entry.alone ?? {}
+            if (!ALONE_SCOPES.includes(scope))
+                throw new Error(
+                    `${path}: ${entry.tool} ${entry.op} is marked alone with scope ${JSON.stringify(scope)}, not one of ${ALONE_SCOPES.join(', ')}`
+                )
+            if (typeof why !== 'string' || why.trim() === '')
+                throw new Error(
+                    `${path}: ${entry.tool} ${entry.op} is marked alone without a sentence saying why`
+                )
+        }
         for (const param of entry.params ?? []) {
             checkKind(path, entry, param)
             // A vocabulary nothing declares would print an empty list into the signature and say
@@ -116,6 +123,15 @@ async function parameterCatalogue() {
     }
     return {operations, vocabularies}
 }
+
+/**
+ * The scopes `alone` may declare.
+ *
+ * `repeat` refuses a second entry of the same operation and lets it sit beside others; `exclusive`
+ * refuses any other entry at all. Held to a list here so a typo in the source is a build failure
+ * rather than an operation that quietly stops being narrowed.
+ */
+const ALONE_SCOPES = ['repeat', 'exclusive']
 
 const KINDS = [
     'text',
@@ -367,23 +383,30 @@ function rustGated(operations) {
 }
 
 /**
- * The operations an `ops` list may not hold twice, keyed by the same (tool, op) as everything else.
+ * Where an operation may sit in an `ops` list, keyed by the same (tool, op) as everything else.
  *
  * Every tool call is a list now, so the model that wanted three inspections writes one call rather
- * than three. These are the ones a list cannot repeat: an operation with no parameters is the same
- * call twice, and one that drives something the session owns exactly one of — the open scene, the
- * running game, the undo stack, the debuggee — would have the second entry act on what the first
- * left behind. The sentence is the refusal, so it says which of those two it is.
+ * than three. Two narrowings, and the sentence is the refusal, so it says which one it is.
+ * `Repeat` is an operation a list may hold beside others but not twice: it takes no parameters to
+ * vary, or it drives something the session owns exactly one of — the open scene, the running game,
+ * the undo stack, the dialog — and the router runs a list in order, so a second entry would only
+ * redo or undo the first. `Exclusive` is the debugger, where each answer decides what the next
+ * operation means, so nothing may share its call.
  */
 function rustAlone(operations) {
     const rows = operations
         .filter(entry => entry.alone)
         .map(
             entry =>
-                `    only(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustString(entry.alone)}),\n`
+                `    only(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustScope(entry.alone.scope)}, ${rustString(entry.alone.why)}),\n`
         )
         .join('')
     return `pub const ALONE: &[LoneOperation] = &[\n${rows}];\n`
+}
+
+/** The `Sharing` variant for a declared scope. */
+function rustScope(scope) {
+    return `Sharing::${scope[0].toUpperCase()}${scope.slice(1)}`
 }
 
 function gdCommandParams(operations) {
