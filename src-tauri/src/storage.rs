@@ -23,7 +23,13 @@ const PROJECT_ID_KEY: &str = "project.id";
 /// The project's own agent prompt, absent while the project follows the shipped one.
 const AGENT_PROMPT_KEY: &str = "agent.system_prompt";
 const MEMORY_EMBEDDING_DIMENSIONS: usize = 1024;
-const MEMORY_EMBEDDING_MODEL: &str = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+/// Read from the worker that produces the vectors rather than written again here.
+///
+/// Two copies of this string had no compile-time tie. `memory_embeddings.model` is checked on write
+/// but the vector search never filters on it, and the backfill only finds rows with no embedding at
+/// all — so changing the model in one place would leave every old vector in `memory_vectors`,
+/// silently ranked in the same cosine search as the new ones.
+const MEMORY_EMBEDDING_MODEL: &str = crate::memory::MODEL;
 const MAX_STORED_CHAT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STORED_CHAT_MESSAGES: usize = 10_000;
 const MAX_STORED_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -740,11 +746,17 @@ impl ProjectStorage {
         Ok(self.workspace_path.clone())
     }
 
-    /// The branch a task's work merges into, decided once and kept.
+    /// The branch a task's work merges into, decided once and kept — while Git still has it.
     ///
     /// Read on every merge and every task deletion, so it must not depend on what is checked out at
     /// the time: by then the checkout is on a task branch, and a base read from `HEAD` would fold
     /// one task into another.
+    ///
+    /// Kept is not trusted. The recorded name is checked against the repository every time, because
+    /// a branch that has since been deleted or renamed is a name Git cannot resolve — and the
+    /// fallback for a base that names no commit is `HEAD`, which by then *is* the last task's
+    /// branch. That is precisely the folding this whole function exists to prevent, arriving
+    /// through the back door and saying nothing. A name Git has lost is re-derived instead.
     fn base_branch(&self) -> Result<String, CommandError> {
         let connection = self.connection()?;
         let recorded: Option<String> = connection
@@ -755,7 +767,10 @@ impl ProjectStorage {
             )
             .optional()
             .map_err(database_error)?;
-        if let Some(branch) = recorded.filter(|branch| !branch.is_empty()) {
+        if let Some(branch) = recorded
+            .filter(|branch| !branch.is_empty())
+            .filter(|branch| git::branch_exists(&self.workspace_path, branch))
+        {
             return Ok(branch);
         }
         drop(connection);
@@ -5826,6 +5841,40 @@ mod tests {
             .base_commit;
         assert_eq!(base, merged.merged_commit);
         assert_eq!(git_text(&workspace, &["rev-parse", "master"]), base);
+    }
+
+    /// The regression: a recorded base branch that Git has since lost must not fold two tasks.
+    ///
+    /// `base_branch` used to return the recorded name without asking whether it still existed.
+    /// `create_task_branch` falls back to `HEAD` for a base that names no commit, and `HEAD` by
+    /// then is whichever task was opened last — so deleting or renaming the base silently turned
+    /// every new task into a branch off another task's work. Exactly what this function's own
+    /// documentation says it exists to prevent, arriving through the back door.
+    #[test]
+    fn a_base_branch_git_has_lost_is_derived_again_rather_than_trusted() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        assert_eq!(storage.base_branch().expect("a base"), "master");
+
+        // The user renames their default branch, which is a thing Git lets them do at any time.
+        git_text(&workspace, &["branch", "-m", "master", "main"]);
+        assert!(!git::branch_exists(&workspace, "master"));
+
+        let derived = storage.base_branch().expect("a base");
+        assert_eq!(
+            derived, "main",
+            "a name Git cannot resolve is re-derived, not handed to the HEAD fallback"
+        );
+        assert!(
+            !derived.starts_with(git::TASK_BRANCH_PREFIX),
+            "and never a task branch, whatever happens to be checked out"
+        );
+
+        // And the new answer is what the next read gets, without re-deriving every time.
+        git_text(&workspace, &["branch", "stray"]);
+        assert_eq!(storage.base_branch().expect("a base"), "main");
     }
 
     /// Two switches at once must not meet inside Git.

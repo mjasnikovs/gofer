@@ -1889,8 +1889,17 @@ fn rpc<R: Runtime>(
     command: &str,
     mut params: Value,
 ) -> Result<Value, crate::godot_rpc::RpcError> {
-    let expected_revision =
-        take_u64(&mut params, "expectedRevision").or_else(|| remembered_revision(app));
+    let held = remembered_revision(app);
+    // Both halves or neither. A revision the router supplied is only meaningful beside the scene it
+    // was counted in, and a revision the caller supplied is theirs to be held to — the renderer
+    // names its own scene in `params` when it cares which.
+    let (expected_revision, expected_scene) = match take_u64(&mut params, "expectedRevision") {
+        Some(revision) => (Some(revision), None),
+        None => (
+            held.as_ref().map(|held| held.revision),
+            held.map(|held| held.scene),
+        ),
+    };
     let timeout_ms = take_u64(&mut params, "timeoutMs");
     let response = godot_session_api::call_godot(
         app,
@@ -1898,6 +1907,7 @@ fn rpc<R: Runtime>(
             command: command.to_owned(),
             params,
             expected_revision,
+            expected_scene,
             timeout_ms,
         },
     )?;
@@ -1914,7 +1924,9 @@ fn rpc<R: Runtime>(
 /// A caller that passed its own is left alone, exactly as `expectedHash` is: the renderer holds a
 /// view the router has no business overruling. Every addon answer that carries a revision is
 /// recorded, so this is the number the agent's own last read or write answered with.
-fn remembered_revision<R: Runtime>(app: &AppHandle<R>) -> Option<u64> {
+fn remembered_revision<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Option<crate::read_ledger::SceneRevision> {
     let workspace = crate::active_workspace(app).ok()?;
     crate::read_ledger::recall_revision(workspace.root())
 }
@@ -1925,8 +1937,14 @@ fn record_revision<R: Runtime>(app: &AppHandle<R>, answer: &Value) {
     let Some(revision) = answer.get("revision").and_then(Value::as_u64) else {
         return;
     };
+    // The scene the number counts, when the answer says. A read of the tree names it; a mutation
+    // reports only the revision, and the ledger keeps the scene it already had.
+    let scene = answer
+        .get("scene")
+        .and_then(Value::as_str)
+        .filter(|scene| !scene.is_empty());
     if let Ok(workspace) = crate::active_workspace(app) {
-        crate::read_ledger::remember_revision(workspace.root(), revision);
+        crate::read_ledger::remember_revision(workspace.root(), scene, revision);
     }
 }
 

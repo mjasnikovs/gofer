@@ -21,6 +21,8 @@ type Capture = Readonly<{
     frame: GodotFrame
     source: 'game' | 'editor'
     at: number
+    /** The editor session this picture is of. A session id never comes round again. */
+    sessionId: string | undefined
 }>
 
 /** The four controls this panel offers, named as the commands they send. */
@@ -45,7 +47,7 @@ function asFrame(frame: GodotFrame | undefined): GodotFrame | undefined {
  * might have missed it.
  */
 export function GameView() {
-    const {call, state} = useEditorSession()
+    const {call, session, state} = useEditorSession()
     const [taken, setTaken] = useState<Capture>()
     const [error, setError] = useState<GodotError>()
     const [isBusy, setIsBusy] = useState(false)
@@ -68,7 +70,8 @@ export function GameView() {
                     // A stop answers about the game, not with a picture of it, so it carries no
                     // frame at all — which the map now says, rather than leaving it to be read for.
                     const frame = 'frame' in result ? asFrame(result.frame) : undefined
-                    if (frame) setTaken({frame, source, at: Date.now()})
+                    if (frame)
+                        setTaken({frame, source, at: Date.now(), sessionId: session?.sessionId})
                     // A stop answers with nothing to show, so the last frame is cleared with it.
                     if (command === 'runtime.stop') setTaken(undefined)
                 })
@@ -93,9 +96,27 @@ export function GameView() {
      * first frame was retired by the run it is a picture of and the panel read "No frame captured"
      * over a game that was playing.
      *
-     * A capture of the editor viewport is not of a game at all, so nothing retires it.
+     * An editor capture is retired by the editor going away, which is a different question from
+     * whether a game is playing. It used to be retired by nothing at all: stop Godot after taking
+     * one and the Game tab went on showing a picture of a dead process, labelled `Editor`, with the
+     * time it was taken readable only in the image's alt text.
      */
-    const capture = taken?.source === 'game' && !isPlaying ? undefined : taken
+    /*
+     * An editor capture belongs to the editor that was running when it was taken.
+     *
+     * Compared by session rather than by "is the editor offline", because those are different
+     * questions: stopping Godot and starting it again would answer the second one no and bring a
+     * picture of the dead process back, still labelled `Editor` and still stamped with the moment
+     * it was taken. A session id never comes round again, so a capture from a session that has
+     * ended can never match one that is running. Nothing used to retire an editor capture at all.
+     */
+    const capture =
+        (
+            taken === undefined
+            || (taken.source === 'game' ? !isPlaying : taken.sessionId !== session?.sessionId)
+        ) ?
+            undefined
+        :   taken
 
     return (
         <VStack

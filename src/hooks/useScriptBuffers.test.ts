@@ -372,6 +372,40 @@ describe('script buffers', () => {
         expect(hook.result.current.diagnostics['player.gd']).toHaveLength(1)
     })
 
+    /*
+     * The regression: diagnostics accumulated per path and nothing ever removed one.
+     *
+     * `closeBuffer` dropped the tab and left the rows, so the bottom panel kept counting errors for
+     * a file that is not open — and for a file the agent had deleted, whose rows open nothing when
+     * clicked. Neither the close nor the external-change handler touched the map.
+     */
+    it("drops a closed file's diagnostics with its tab", async () => {
+        const server = backend()
+        const {hook} = await openPlayer()
+
+        await act(async () => {
+            server.publishDiagnostics({
+                path: 'player.gd',
+                version: 1,
+                diagnostics: [
+                    {
+                        range: {start: {line: 1, character: 0}, end: {line: 1, character: 4}},
+                        message: 'Unexpected token',
+                        severity: 1
+                    }
+                ]
+            })
+        })
+        expect(hook.result.current.diagnostics['player.gd']).toHaveLength(1)
+
+        act(() => {
+            hook.result.current.closeBuffer('player.gd')
+        })
+        await flush()
+
+        expect(hook.result.current.diagnostics['player.gd']).toBeUndefined()
+    })
+
     it('closes the document and drops the tab', async () => {
         const server = backend()
         const {hook} = await openPlayer()

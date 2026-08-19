@@ -188,6 +188,14 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
         (path: string) => {
             flushChange(path)
             dispatch({type: 'closed', path})
+            // The rows go with the tab. Diagnostics accumulated per path and were never pruned, so
+            // a file the agent deleted — or one the user simply closed — left a permanent error
+            // badge on the bottom panel with rows that open nothing when clicked.
+            setDiagnostics(previous => {
+                if (!(path in previous)) return previous
+                const {[path]: _closed, ...kept} = previous
+                return kept
+            })
             if (!isTauri()) return
             void closeScriptDocument(path).catch((error: unknown) => {
                 report(error, `${path} could not be closed`)

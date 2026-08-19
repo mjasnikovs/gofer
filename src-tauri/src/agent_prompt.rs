@@ -41,7 +41,7 @@ Guidelines:
 /// it is a confident Godot 3 name, written into a script, found minutes later by a scene that will
 /// not load. The date is what turns "search the docs" from advice into arithmetic the model can do.
 const GODOT_PROMPT: &str = r#"Godot engine (a Gofer-managed editor, reached through the godot_* tools):
-- Version {version} {channel}, released {released} — newer than your training data
+{engine}
 - Search godot_docs_search before writing any Godot class, method, signal, property or constant, every time, including when the name feels obvious
 - Call godot_session status first, before any other godot_ tool, every time; start the session if it is offline
 - Every godot_ tool takes an ops list, so put everything you want from that tool now into one call: three inspections is one call of three entries, not three calls
@@ -75,19 +75,68 @@ Approvals:
 /// The prompt Gofer ships for this catalog.
 pub fn default_prompt(tools: &[ToolDomain]) -> String {
     if tools.iter().any(|domain| domain.name.starts_with("godot_")) {
-        let godot = GODOT_PROMPT
-            .replace("{version}", crate::godot_session::REQUIRED_ENGINE_VERSION)
-            .replace("{channel}", crate::godot_session::REQUIRED_CHANNEL)
-            .replace("{released}", crate::godot_session::REQUIRED_ENGINE_RELEASED);
+        let godot = GODOT_PROMPT.replace("{engine}", &engine_line());
         return format!("{BASE_PROMPT}\n\n{godot}");
     }
     BASE_PROMPT.to_owned()
 }
 
+/// The one line of the prompt the user does not own: which engine this build is pinned to.
+///
+/// The prompt above interpolates this rather than repeating it, so the line the refresh has to
+/// recognise and the line the prompt writes are the same string. Two copies of that shape is one
+/// copy too many: the matcher would go on matching a line the prompt had stopped writing.
+const ENGINE_LINE: &str =
+    "- Version {version} {channel}, released {released} — newer than your training data";
+
+/// How the line is recognised in text somebody has edited: its opening and its closing claim.
+const ENGINE_LINE_START: &str = "- Version ";
+const ENGINE_LINE_END: &str = "newer than your training data";
+
+fn engine_line() -> String {
+    ENGINE_LINE
+        .replace("{version}", crate::godot_session::REQUIRED_ENGINE_VERSION)
+        .replace("{channel}", crate::godot_session::REQUIRED_CHANNEL)
+        .replace("{released}", crate::godot_session::REQUIRED_ENGINE_RELEASED)
+}
+
+/// Rewrites the pinned-engine line in a stored prompt to the engine this build actually runs.
+///
+/// `is_default` already refuses to store an unmodified prompt, so a project following the ship
+/// never freezes. A project that edited one word froze the whole text — including the version and
+/// the release date — and went on telling the model about an engine Gofer no longer launches. That
+/// is the exact failure the line exists to prevent, so the line is not the user's to keep: they own
+/// what they wrote, and the build owns which engine it is pinned to.
+fn refresh_engine_line(prompt: &str) -> String {
+    let current = engine_line();
+    // Split on `\n` rather than `lines()`, and rejoin on `\n`, so a prompt written with CRLF keeps
+    // its `\r` — `lines()` strips it and the rejoin would silently rewrite the whole file's endings.
+    // The replacement keeps the matched line's own indentation for the same reason: what the user
+    // wrote around this line is theirs, and only the claim itself is the build's.
+    prompt
+        .split('\n')
+        .map(|line| {
+            let carriage = line.ends_with('\r');
+            let body = if carriage {
+                &line[..line.len() - 1]
+            } else {
+                line
+            };
+            let trimmed = body.trim();
+            if !trimmed.starts_with(ENGINE_LINE_START) || !trimmed.ends_with(ENGINE_LINE_END) {
+                return line.to_owned();
+            }
+            let indent = &body[..body.len() - body.trim_start().len()];
+            format!("{indent}{current}{}", if carriage { "\r" } else { "" })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// What a turn sends: the project's own prompt, or the shipped one when the project stored none.
 pub fn resolve(stored: Option<&str>, tools: &[ToolDomain]) -> String {
     match stored {
-        Some(prompt) if !prompt.trim().is_empty() => prompt.to_owned(),
+        Some(prompt) if !prompt.trim().is_empty() => refresh_engine_line(prompt),
         _ => default_prompt(tools),
     }
 }
@@ -104,6 +153,48 @@ pub fn is_default(prompt: &str, tools: &[ToolDomain]) -> bool {
 mod tests {
     use super::*;
     use crate::ai_tools::CATALOG;
+
+    /// The regression: a customized prompt must not freeze the engine this build is pinned to.
+    ///
+    /// `is_default` stops an *unmodified* prompt from being stored, so a project following the ship
+    /// keeps up. A project that edited one word stored the whole text — including the version and
+    /// its release date — and went on telling the model about an engine Gofer no longer launches.
+    /// The comment above the line calls that failure by name: a confident Godot 3 method, written
+    /// into a script, found minutes later by a scene that will not load.
+    #[test]
+    fn a_customized_prompt_still_names_the_engine_this_build_pins() {
+        let customized = concat!(
+            "You are Gofer.\n",
+            "- Version 4.6.0 stable, released 2025-01-01 — newer than your training data\n",
+            "- My own rule, which is mine to keep\n"
+        );
+
+        let sent = resolve(Some(customized), CATALOG);
+
+        assert!(
+            sent.contains(crate::godot_session::REQUIRED_ENGINE_VERSION),
+            "the pinned engine has to reach the model: {sent}"
+        );
+        assert!(
+            sent.contains(crate::godot_session::REQUIRED_ENGINE_RELEASED),
+            "and so does the release date the model does arithmetic on: {sent}"
+        );
+        assert!(
+            !sent.contains("4.6.0"),
+            "the frozen version is gone: {sent}"
+        );
+        // Everything the user actually wrote is theirs, and is untouched.
+        assert!(sent.contains("You are Gofer."));
+        assert!(sent.contains("- My own rule, which is mine to keep"));
+        assert!(sent.ends_with('\n'), "the text's own shape survives");
+    }
+
+    /// A prompt with no engine line — a catalog without the Godot tools — is left exactly alone.
+    #[test]
+    fn a_prompt_that_names_no_engine_is_not_given_one() {
+        let plain = "You are Gofer.\n- One rule.";
+        assert_eq!(resolve(Some(plain), CATALOG), plain);
+    }
 
     #[test]
     fn the_godot_half_is_added_only_when_those_tools_are_offered() {

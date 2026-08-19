@@ -537,12 +537,13 @@ func _handle_request(envelope: Dictionary) -> void:
     var command: String = envelope.get("command", "")
     var params := envelope.get("params", {}) as Dictionary
     var expected_revision = envelope.get("expectedRevision", null)
+    var expected_scene: String = str(envelope.get("expectedScene", ""))
 
     if RUNTIME_COMMANDS.has(command):
         _handle_runtime_request(id, command, params)
         return
 
-    var result: Variant = _dispatch_command(command, params, expected_revision)
+    var result: Variant = _dispatch_command(command, params, expected_revision, expected_scene)
     if result is Dictionary and result.has("_gofer_error"):
         _respond_error_dict(id, result["_gofer_error"])
     elif result is Dictionary and result.has("_gofer_pending_scene"):
@@ -593,8 +594,14 @@ func _respond_error(id: String, code: String, message: String, retryable: bool, 
         "details": details,
     })
 
-func _dispatch_command(command: String, params: Dictionary, expected_revision: Variant) -> Dictionary:
+func _dispatch_command(command: String, params: Dictionary, expected_revision: Variant, expected_scene: String = "") -> Dictionary:
     if MUTATING_COMMANDS.has(command):
+        # Before the revision, because a revision only means anything inside one scene. The counter
+        # resets to zero on every scene change, so a caller holding zero for the scene it read
+        # matches a freshly opened different scene exactly — and used to be allowed to write to it.
+        var scene_check := _require_current_scene(expected_scene)
+        if scene_check.has("_gofer_error"):
+            return scene_check
         var check := _check_mutation_prerequisites(expected_revision)
         if check.has("_gofer_error"):
             return check
@@ -3194,10 +3201,14 @@ func _sweep_scene_pending() -> void:
 ## The revision travels in the envelope for a mutating command, and `scene.get_tree` is not one —
 ## so without it here the one command documented as the source of `expectedRevision` answered
 ## without it, and an agent that read the tree before every mutation had no number to send.
+##
+## The scene travels with it for the same reason. A revision only counts inside one scene, and this
+## is the read the tool description tells the model to make before every mutation — so a tree
+## answered without naming its scene left the router's guard with nothing to guard against.
 func _scene_tree(params: Dictionary) -> Dictionary:
     var root := _edited_root()
     if root == null:
-        return {"truncated": false, "root": null, "revision": _scene_revision}
+        return {"truncated": false, "root": null, "revision": _scene_revision, "scene": _current_scene_path}
     var start := root
     var from := str(params.get("root", ""))
     if not from.is_empty():
@@ -3213,7 +3224,12 @@ func _scene_tree(params: Dictionary) -> Dictionary:
     _tree_budget = clampi(budget, 1, MAX_TREE_NODES)
     _tree_depth = clampi(levels, 0, MAX_TREE_DEPTH)
     var summary := _node_summary(start, 0)
-    return {"truncated": _tree_truncated, "root": summary, "revision": _scene_revision}
+    return {
+        "truncated": _tree_truncated,
+        "root": summary,
+        "revision": _scene_revision,
+        "scene": _current_scene_path,
+    }
 
 func _node_create(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
@@ -4550,8 +4566,10 @@ func _node_properties(node: Node) -> Array:
 ## An omitted name means "whatever is open", which is what a caller that has just read the tree is
 ## asking for. Demanding it left the AI tools unusable: their catalog documents no `scene` parameter
 ## at all, so every authoring call arrived without one and was refused against the empty string.
-## `expectedRevision` still carries the real protection — a scene that changed under the caller is
-## refused whether or not it was named.
+## What names it is the router, not the model: the read ledger records the scene each revision was
+## counted in and sends it back on the next mutation. `expectedRevision` alone is not the real
+## protection it was once described as — the counter restarts at zero in every scene, so a caller
+## holding zero matched a scene it had never read.
 func _require_current_scene(scene: String) -> Dictionary:
     if scene.is_empty():
         return {}

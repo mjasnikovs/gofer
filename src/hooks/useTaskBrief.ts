@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
 import {EMPTY_BRIEF_STATE, SPECIFICATION_FIELD, applyBriefEvent, endBriefRun} from '../models/brief'
 import {invoke} from '../services/desktop'
-import {runTaskBrief, watchBrief} from '../services/brief'
+import {readTaskBrief, runTaskBrief, watchBrief} from '../services/brief'
 import {setTurnRunning} from '../services/turn-activity'
 import {commandErrorMessage} from '../utils/command-error'
 import type {BriefState} from '../models/brief'
@@ -51,6 +51,18 @@ export function useTaskBrief({taskId, onStartTurn, onError}: TaskBriefOptions) {
      * what this holds is what names them.
      */
     const [asked, setAsked] = useState<PlannedAsk>()
+    /**
+     * The task whose stored brief was read back, if one was found.
+     *
+     * The task rather than a flag, so it needs no clearing: this hook is not remounted per task —
+     * the workspace passes the open task into it — and a bare boolean that only ever turned on
+     * withheld the Plan control from the *next* task, which had never had one. Comparing against
+     * the task in hand answers that by construction.
+     *
+     * Separate from `asked` on purpose. `asked` is what a run is started from, and restoring it
+     * would start one; this is only what the composer needs in order to stop offering the control.
+     */
+    const [plannedTask, setPlannedTask] = useState<string>()
     // The identifier the backend registered this run under, which is the only handle a cancellation
     // has. A brief is an AI turn precisely so Stop can reach it, and Stop reaches a turn by its id.
     const requestId = useRef(0)
@@ -193,6 +205,38 @@ export function useTaskBrief({taskId, onStartTurn, onError}: TaskBriefOptions) {
     }, [])
 
     /*
+     * What the task already asked for, read back off disk.
+     *
+     * `briefState` and `asked` are both built from live events, so a restart or a switch away and
+     * back left them empty — and empty means "no plan was ever asked for", which is what puts the
+     * Plan control back in front of a task that has already run one. Pressing it re-ran all four
+     * phases: minutes of model time, several worker spawns, over a specification already stored.
+     *
+     * The row is written phase by phase precisely so it can say how far a run got. Nothing read it.
+     *
+     * What is restored is the *fact* that a plan was asked for, not the ask itself. Restoring the
+     * ask would start it: the run effect below is keyed on `asked`, so putting the old sentence
+     * back would re-run the four phases this is here to prevent.
+     */
+    useEffect(() => {
+        if (!taskId) return
+        let isCancelled = false
+        void readTaskBrief(taskId)
+            .then(run => {
+                if (isCancelled || !run) return
+                setPlannedTask(taskId)
+            })
+            .catch(() => {
+                // A brief that cannot be read is not a failure worth a banner: the cost of being
+                // wrong is one re-offered control, and saying so would put an error in front of
+                // every task that has never had a plan.
+            })
+        return () => {
+            isCancelled = true
+        }
+    }, [taskId])
+
+    /*
      * Said out loud, because the sidebar and the composer cannot see it.
      *
      * A brief holds the same single provider operation a chat turn does, so the same controls have
@@ -206,5 +250,11 @@ export function useTaskBrief({taskId, onStartTurn, onError}: TaskBriefOptions) {
         }
     }, [briefState.isRunning])
 
-    return {briefState, isPlanStarted: asked !== undefined, startPlan, stopBrief, startWithoutPlan}
+    return {
+        briefState,
+        isPlanStarted: asked !== undefined || plannedTask === taskId,
+        startPlan,
+        stopBrief,
+        startWithoutPlan
+    }
 }

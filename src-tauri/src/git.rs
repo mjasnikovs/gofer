@@ -585,6 +585,16 @@ pub fn base_branch_candidate(workspace_path: &Path) -> Option<String> {
     {
         return Some(branch);
     }
+    // The repository's own default, when it is a branch that exists. Ahead of the scan below
+    // because the scan answers with whichever non-task branch Git lists first — alphabetical, so a
+    // repository holding `bugfix` and `main` answers `bugfix`. That answer is then persisted as the
+    // project's base and kept, which matters now that a base Git has lost is re-derived here rather
+    // than only being chosen once, before any task existed.
+    if let Some(default) = configured_default_branch(&repository_root)
+        && branch_exists(&repository_root, &default)
+    {
+        return Some(default);
+    }
     // A branch that is actually in the repository beats a configured name that is not: the base is
     // what a deleted task's checkout has to be moved onto, and moving onto a name Git does not know
     // leaves the checkout on the branch being deleted, which Git then refuses to delete.
@@ -596,11 +606,25 @@ pub fn base_branch_candidate(workspace_path: &Path) -> Option<String> {
     {
         return Some(branch.to_owned());
     }
-    let default = git_text(&repository_root, &["config", "--get", "init.defaultBranch"])
+    Some(configured_default_branch(&repository_root).unwrap_or_else(|| "master".to_owned()))
+}
+
+/// What this repository calls its default branch, when it says. Never a guess that it exists.
+fn configured_default_branch(repository_root: &Path) -> Option<String> {
+    // `origin/HEAD` is what the remote itself says, and it survives a local rename. `init
+    // .defaultBranch` is only what new repositories are started with, so it is the weaker answer.
+    if let Ok(head) = git_text(
+        repository_root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) && let Some(branch) = head.trim().strip_prefix("origin/")
+        && !branch.is_empty()
+    {
+        return Some(branch.to_owned());
+    }
+    git_text(repository_root, &["config", "--get", "init.defaultBranch"])
         .ok()
+        .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "master".to_owned());
-    Some(default)
 }
 
 /// The prefix every task branch carries. Kept here so the base-branch guard can recognise one.

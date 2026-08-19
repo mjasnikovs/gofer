@@ -134,22 +134,41 @@ fn reconcile_in_place(root: &Path, entry: &mut Value) {
     fields.remove("version");
 }
 
-/// The revision each worktree's edited scene was last reported to be at.
-fn revisions() -> &'static Mutex<HashMap<PathBuf, u64>> {
-    static REVISIONS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+/// Which scene a remembered revision counts, and what it was last reported to be at.
+///
+/// The pair is the point. A revision on its own says nothing about which scene it belongs to, and
+/// the addon resets its counter to zero every time the edited scene changes — so a remembered zero
+/// for one scene matched a freshly opened *different* scene exactly, and the agent's next mutation
+/// went out unguarded and landed in the scene the user had just opened. Nothing said so.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneRevision {
+    pub scene: String,
+    pub revision: u64,
+}
+
+/// The scene and revision each worktree's editor was last reported at.
+fn revisions() -> &'static Mutex<HashMap<PathBuf, SceneRevision>> {
+    static REVISIONS: OnceLock<Mutex<HashMap<PathBuf, SceneRevision>>> = OnceLock::new();
     REVISIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Records the revision an answer reported for the edited scene.
-pub fn remember_revision(root: &Path, revision: u64) {
+/// Records the revision an answer reported, and the scene it counted.
+///
+/// An answer that names no scene keeps the scene already remembered: a mutation reports its
+/// revision on the envelope and names nothing, which is not the same as there being no scene.
+pub fn remember_revision(root: &Path, scene: Option<&str>, revision: u64) {
     if let Ok(mut held) = revisions().lock() {
-        held.insert(root.to_owned(), revision);
+        let scene = scene
+            .map(str::to_owned)
+            .or_else(|| held.get(root).map(|held| held.scene.clone()))
+            .unwrap_or_default();
+        held.insert(root.to_owned(), SceneRevision { scene, revision });
     }
 }
 
-/// The revision this agent was last told the edited scene is at, if it has ever been told.
-pub fn recall_revision(root: &Path) -> Option<u64> {
-    revisions().lock().ok()?.get(root).copied()
+/// The scene and revision this agent was last told about, if it has ever been told.
+pub fn recall_revision(root: &Path) -> Option<SceneRevision> {
+    revisions().lock().ok()?.get(root).cloned()
 }
 
 #[cfg(test)]
@@ -193,21 +212,21 @@ mod tests {
         assert_eq!(recall(&tree, "gone.gd"), None);
     }
 
-    /// The revision belongs to the worktree, not to a path, and a task that ends must not answer
-    /// for the one that reuses its directory — a stale number there refuses every mutation.
+    /// One record per worktree, and a task that ends must not answer for the one that reuses its
+    /// directory — a stale number there refuses every mutation.
     #[test]
     fn a_worktree_answers_with_the_revision_it_was_last_told() {
         let (one, two) = (root("rev-one"), root("rev-two"));
         assert_eq!(recall_revision(&one), None);
-        remember_revision(&one, 3);
-        remember_revision(&two, 11);
-        assert_eq!(recall_revision(&one), Some(3));
-        remember_revision(&one, 4);
-        assert_eq!(recall_revision(&one), Some(4));
-        assert_eq!(recall_revision(&two), Some(11));
+        remember_revision(&one, Some("res://a.tscn"), 3);
+        remember_revision(&two, Some("res://b.tscn"), 11);
+        assert_eq!(recall_revision(&one).map(|held| held.revision), Some(3));
+        remember_revision(&one, Some("res://a.tscn"), 4);
+        assert_eq!(recall_revision(&one).map(|held| held.revision), Some(4));
+        assert_eq!(recall_revision(&two).map(|held| held.revision), Some(11));
         forget_worktree(&one);
         assert_eq!(recall_revision(&one), None);
-        assert_eq!(recall_revision(&two), Some(11));
+        assert_eq!(recall_revision(&two).map(|held| held.revision), Some(11));
     }
 
     /// Zero is the revision a freshly opened scene is at, so it has to survive being recorded —
@@ -215,8 +234,35 @@ mod tests {
     #[test]
     fn revision_zero_is_a_record_like_any_other() {
         let tree = root("rev-zero");
-        remember_revision(&tree, 0);
-        assert_eq!(recall_revision(&tree), Some(0));
+        remember_revision(&tree, Some("res://main.tscn"), 0);
+        assert_eq!(recall_revision(&tree).map(|held| held.revision), Some(0));
+    }
+
+    /// The regression this pair exists for: a revision has to say which scene it counts.
+    ///
+    /// The addon resets its counter to zero whenever the edited scene changes. A ledger holding a
+    /// bare `0` for `a.tscn` therefore matched a freshly opened `b.tscn` exactly, the mutation's
+    /// guard passed, and the change landed in the scene the user had just opened. Nothing said so.
+    #[test]
+    fn a_revision_carries_the_scene_it_counts() {
+        let tree = root("rev-scene");
+        remember_revision(&tree, Some("res://a.tscn"), 0);
+        let held = recall_revision(&tree).expect("a recorded revision");
+        assert_eq!(held.scene, "res://a.tscn");
+        assert_eq!(held.revision, 0);
+
+        // A mutation reports its revision on the envelope and names no scene. That is not the same
+        // as there being no scene, so the one already recorded is kept.
+        remember_revision(&tree, None, 1);
+        let after = recall_revision(&tree).expect("a recorded revision");
+        assert_eq!(after.scene, "res://a.tscn");
+        assert_eq!(after.revision, 1);
+
+        // And a read of a different scene moves both halves together.
+        remember_revision(&tree, Some("res://b.tscn"), 0);
+        let switched = recall_revision(&tree).expect("a recorded revision");
+        assert_eq!(switched.scene, "res://b.tscn");
+        assert_eq!(switched.revision, 0);
     }
 
     /*

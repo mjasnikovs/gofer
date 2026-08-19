@@ -133,9 +133,59 @@ describe('starting a plan from the composer', () => {
         const second = mount('task-1')
         await flush()
 
-        expect(second.view.result.current.isPlanStarted).toBe(false)
         const runs = tauri.invoke.mock.calls.filter(([command]) => command === 'run_task_brief')
         expect(runs).toHaveLength(1)
+        // Nothing stored, so nothing to restore: a task that never had a plan is still offered one.
+        expect(second.view.result.current.isPlanStarted).toBe(false)
+    })
+
+    /*
+     * The regression: a brief is written to disk phase by phase, and nothing read it back.
+     *
+     * `isPlanStarted` was built from live events alone, so a restart — or switching away and back —
+     * put the Plan control in front of a task that had already run one. Pressing it re-ran all four
+     * phases against a specification that was already stored: minutes of model time, several worker
+     * spawns, for a result the database already held.
+     */
+    it('knows a plan was already asked for when the row on disk says so', async () => {
+        tauri.invoke.mockImplementation(async (command: string) => {
+            if (command === 'read_task_brief') {
+                return {
+                    taskId: 'task-1',
+                    status: 'ended',
+                    phase: 'compose',
+                    rawPrompt: 'add a pause menu',
+                    refined: null,
+                    research: null,
+                    qa: null,
+                    spec: 'a specification',
+                    reason: null
+                }
+            }
+            return undefined
+        })
+
+        const {view} = mount('task-1')
+        await flush()
+
+        expect(view.result.current.isPlanStarted).toBe(true)
+        // Restoring the ask must not restart the run it came from.
+        const runs = tauri.invoke.mock.calls.filter(([command]) => command === 'run_task_brief')
+        expect(runs).toHaveLength(0)
+    })
+
+    /** A brief that cannot be read is one re-offered control, not an error in front of the user. */
+    it('says nothing when the stored brief cannot be read', async () => {
+        tauri.invoke.mockImplementation(async (command: string) => {
+            if (command === 'read_task_brief') throw new Error('the database was busy')
+            return undefined
+        })
+
+        const {view, onError} = mount('task-1')
+        await flush()
+
+        expect(view.result.current.isPlanStarted).toBe(false)
+        expect(onError).not.toHaveBeenCalled()
     })
 })
 

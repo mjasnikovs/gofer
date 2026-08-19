@@ -464,10 +464,17 @@ fn plan_exclude(worktree: &Path, ledger: &Ledger) -> Option<GitExcludeRecord> {
         .join("info")
         .join("exclude");
     let path = file.display().to_string();
-    let present = fs::read_to_string(&file)
-        .unwrap_or_default()
-        .lines()
-        .any(|line| line.trim() == EXCLUDE_PATTERN);
+    // A file that cannot be read is not a file without the pattern. `unwrap_or_default` said it
+    // was, which recorded the pattern as Gofer's — and the last session to stop then deletes that
+    // line, and the marker beside it, out of a file the user wrote. A missing file genuinely has
+    // no pattern in it; anything else is a question that was not answered.
+    let present = match fs::read_to_string(&file) {
+        Ok(contents) => contents.lines().any(|line| line.trim() == EXCLUDE_PATTERN),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        // Claimed by nobody: Gofer will not write the pattern it cannot see, and will not delete a
+        // line it cannot prove it wrote.
+        Err(_) => return None,
+    };
     let owned = ledger.entries.iter().any(|entry| {
         entry
             .git_exclude

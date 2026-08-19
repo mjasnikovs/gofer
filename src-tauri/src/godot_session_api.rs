@@ -70,6 +70,9 @@ pub struct CallGodotRequest {
     pub params: Value,
     #[serde(default)]
     pub expected_revision: Option<u64>,
+    /// The scene that revision was read from. See `CallRequest::about`.
+    #[serde(default)]
+    pub expected_scene: Option<String>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
@@ -278,12 +281,62 @@ pub(crate) fn require_session_task_here() -> Result<(), RpcError> {
     require_session_task(&app)
 }
 
-static SESSION_TASK: Mutex<Option<String>> = Mutex::new(None);
+/// Which task the running editor session belongs to.
+///
+/// Three states, not two, and the third is the whole point. `Unknown` used to be spelled the same
+/// as `NoTask` — `storage.tasks().active().ok().flatten()` folds "the query failed" into "there is
+/// no task" — and `NoTask` is permissive, so one transient database error at session start
+/// disarmed the cross-task guard for the entire session. A question that could not be answered is
+/// not an answer. It is asked again.
+#[derive(Clone, Debug, PartialEq)]
+enum SessionOwner {
+    /// The owner could not be read when the session started. Resolved on first use.
+    Unknown,
+    /// Read successfully, and this project has no active task. Nothing to cross.
+    NoTask,
+    /// The task the session was started for.
+    Task(String),
+}
 
-fn remember_session_task(task_id: Option<String>) {
-    if let Ok(mut owner) = SESSION_TASK.lock() {
-        *owner = task_id;
+static SESSION_TASK: Mutex<SessionOwner> = Mutex::new(SessionOwner::NoTask);
+
+fn remember_session_task(task_id: Result<Option<String>, impl std::fmt::Debug>) {
+    let owner = match task_id {
+        Ok(Some(id)) => SessionOwner::Task(id),
+        Ok(None) => SessionOwner::NoTask,
+        Err(_) => SessionOwner::Unknown,
+    };
+    if let Ok(mut held) = SESSION_TASK.lock() {
+        *held = owner;
     }
+}
+
+/// Which task owns the running session's worktree, read from the task list rather than from the
+/// active task.
+///
+/// The fallback for an owner that could not be recorded when the session started. A worktree is
+/// one task's directory for the whole life of that task, so it identifies the owner without asking
+/// what the window is looking at now. Still `Unknown` when the list cannot be read either — the
+/// question stays open rather than being closed by a second failure.
+fn session_owner_by_worktree(storage: &ProjectStorage) -> SessionOwner {
+    let Some(info) = godot_session::current_info() else {
+        return SessionOwner::Unknown;
+    };
+    let Ok(tasks) = storage.tasks().list() else {
+        return SessionOwner::Unknown;
+    };
+    let session_worktree = Path::new(&info.worktree);
+    tasks
+        .into_iter()
+        .find(|task| {
+            task.worktree
+                .as_ref()
+                .is_some_and(|tree| Path::new(&tree.worktree_path) == session_worktree)
+        })
+        // A list that was read and matched nothing is an answer: this session is not running out of
+        // any task's worktree, so there is no task to cross. Only a list that could not be read at
+        // all leaves the question open.
+        .map_or(SessionOwner::NoTask, |task| SessionOwner::Task(task.id))
 }
 
 /// Refuses a call when the editor session belongs to a task the window has moved away from.
@@ -297,13 +350,44 @@ pub fn require_session_task<R: Runtime>(app: &AppHandle<R>) -> Result<(), RpcErr
     let Ok(owner) = SESSION_TASK.lock() else {
         return Ok(());
     };
-    let Some(session_task) = owner.clone() else {
-        return Ok(());
-    };
+    let held = owner.clone();
     drop(owner);
     // A storage that cannot be read is not evidence of a mismatch, so it is not treated as one.
     let Ok(storage) = project_storage(app) else {
         return Ok(());
+    };
+    // An owner nobody could read at session start is worked out now, from the session's own
+    // worktree — not from whichever task is active, which is the question being asked, not the
+    // answer. The worktree is what the session was started on and it does not move, so the
+    // task that owns that directory is still the task that owns the session.
+    let held = match held {
+        SessionOwner::Unknown => {
+            let resolved = session_owner_by_worktree(&storage);
+            // Only a definite answer is kept. Storing `Unknown` would cache the failure and refuse
+            // every call for the rest of the session — the same latching this whole change is
+            // about, one level up.
+            if resolved != SessionOwner::Unknown
+                && let Ok(mut slot) = SESSION_TASK.lock()
+            {
+                *slot = resolved.clone();
+            }
+            resolved
+        }
+        held => held,
+    };
+    let session_task = match held {
+        SessionOwner::Task(id) => id,
+        SessionOwner::NoTask => return Ok(()),
+        // Refused, not allowed. This is the guard's own principle applied to its own ignorance:
+        // answering out of a checkout nobody can name is exactly the failure it exists to stop,
+        // and "I could not tell" is not evidence that there is nothing to tell.
+        SessionOwner::Unknown => {
+            return Err(RpcError::new(
+                "session_owner_unknown",
+                "Gofer could not tell which task this editor session belongs to, so it will not \
+                 answer out of it. Restart the editor session to bind it to this task.",
+            ));
+        }
     };
     let Ok(active) = storage.tasks().active() else {
         return Ok(());
@@ -431,7 +515,7 @@ pub fn start_session<R: Runtime>(
             .unwrap_or_else(|_| GodotSettings::default().embed_game_window),
     }) {
         Ok(info) => {
-            remember_session_task(storage.tasks().active().ok().flatten());
+            remember_session_task(storage.tasks().active());
             start_run_logging(&storage, &info, &worktree);
             // Started with the session, not with a subscription, so what the editor becoming ready
             // obliges Gofer to do happens whether or not a window is listening for it.
@@ -710,7 +794,7 @@ fn end_session_with(end: SessionEnd<'_>, editor: &dyn EditorLifecycle) -> Result
     //    kept being forwarded from a session that was gone, and the next refusal named the task the
     //    dead editor had belonged to rather than the one the window is on.
     stop_event_subscription();
-    remember_session_task(None);
+    remember_session_task(Ok::<_, ()>(None));
     result
 }
 
@@ -809,6 +893,7 @@ pub fn call_godot<R: Runtime>(
     let response = rpc.call(
         RpcCallRequest::new(request.command, request.params)
             .expecting(request.expected_revision)
+            .about(request.expected_scene)
             .within(request.timeout_ms),
     )?;
     Ok(to_call_response(response))
@@ -1159,7 +1244,7 @@ mod tests {
             godot_session::bind(Some(Arc::new(godot_session::ExternalEditor::new(
                 session_info("session-guard", worktree),
             ))));
-            remember_session_task(Some(task_id.to_owned()));
+            remember_session_task(Ok::<_, ()>(Some(task_id.to_owned())));
             Self
         }
     }
@@ -1167,8 +1252,103 @@ mod tests {
     impl Drop for PlantedSession {
         fn drop(&mut self) {
             godot_session::bind(None);
-            remember_session_task(None);
+            remember_session_task(Ok::<_, ()>(None));
         }
+    }
+
+    /// The regression: an owner nobody could read at session start must not disarm the guard.
+    ///
+    /// `remember_session_task` used to be fed `storage.tasks().active().ok().flatten()`, which
+    /// spells a failed query and a genuinely task-less project the same way — and the task-less
+    /// spelling is permissive. One transient database error in that instant turned the cross-task
+    /// guard off for the whole session, silently. The unknown case is now asked again on first use.
+    #[test]
+    fn an_owner_that_could_not_be_read_is_asked_again_rather_than_assumed_absent() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = TempDir::new().expect("temporary directory");
+        let worktree = directory.path().join("worktree");
+        std::fs::create_dir(&worktree).expect("create worktree");
+        let storage = ProjectStorage::open(&directory.path().join("data"), &worktree)
+            .expect("open project storage");
+        let first = storage
+            .tasks()
+            .active()
+            .expect("read the active task")
+            .expect("opening the storage leaves a task active");
+        let app = tauri::test::mock_builder()
+            .build(crate::app_context())
+            .expect("build mock Tauri app");
+        app.manage(crate::storage::StorageSlot::new(Ok(storage.clone())));
+
+        let _planted = PlantedSession::new(&worktree, &first);
+        // The session started, but the question "whose is it?" failed at that moment.
+        remember_session_task(Err::<Option<String>, _>("the database was busy"));
+
+        // The window then moves to another task. A guard that had recorded the failure as "no
+        // task" would answer this happily, out of the first task's checkout.
+        let second = storage
+            .tasks()
+            .create(&storage.switch(&|_| Ok(())))
+            .expect("create a second task")
+            .task_id
+            .expect("the new task has an id");
+        assert_ne!(second, first);
+
+        // The owner is worked out from the session's own worktree rather than from whichever task
+        // is active — which is the question, not the answer. These tasks have no worktree of their
+        // own, so the list is read, nothing matches, and there is genuinely no task to cross.
+        assert_eq!(
+            session_owner_by_worktree(&storage),
+            SessionOwner::NoTask,
+            "a list that was read and matched nothing is an answer, not a failure"
+        );
+        require_session_task(app.handle())
+            .expect("a session that belongs to no task's worktree has nothing to cross");
+
+        // A definite answer is kept, so the question is asked once rather than on every call.
+        assert_eq!(
+            *SESSION_TASK.lock().expect("owner"),
+            SessionOwner::NoTask,
+            "the resolved answer replaces Unknown"
+        );
+
+        // And once the owner is known, the ordinary rules resume: the window has moved on.
+        remember_session_task(Ok::<_, ()>(Some(first.clone())));
+        let named = require_session_task(app.handle())
+            .expect_err("the window has moved to the second task");
+        assert_eq!(named.code, "session_other_task");
+        assert_eq!(named.details["taskId"], json!(first));
+    }
+
+    /// The half that must not be lost while fixing the latch.
+    ///
+    /// `Unknown` is the state where the question has no answer. What changed is only that it is not
+    /// *cached* as one — the next call asks again — and that "read the list, matched nothing"
+    /// stopped counting as unanswerable.
+    #[test]
+    fn an_unanswered_owner_is_not_written_down_as_absent() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let app = tauri::test::mock_builder()
+            .build(crate::app_context())
+            .expect("build mock Tauri app");
+        // No storage at all, so the owner can never be worked out.
+        godot_session::bind(Some(Arc::new(godot_session::ExternalEditor::absent())));
+        remember_session_task(Err::<Option<String>, _>("the database was busy"));
+
+        // Without storage the guard has nothing to compare against and says nothing, which is the
+        // pre-existing rule. What matters is that the failure was not written down as "no task".
+        assert!(require_session_task(app.handle()).is_ok());
+        assert_eq!(
+            *SESSION_TASK.lock().expect("owner"),
+            SessionOwner::Unknown,
+            "an unanswered question stays unanswered rather than caching itself as absent"
+        );
+        remember_session_task(Ok::<_, ()>(None));
+        godot_session::bind(None);
     }
 
     /// A call is refused when the session belongs to a task the window has moved away from, and
@@ -1202,9 +1382,9 @@ mod tests {
         // absent editor is bound rather than left unbound, because the supervisor's own answer
         // depends on whether some other test in this process left a real session behind.
         godot_session::bind(Some(Arc::new(godot_session::ExternalEditor::absent())));
-        remember_session_task(Some("some-other-task".to_owned()));
+        remember_session_task(Ok::<_, ()>(Some("some-other-task".to_owned())));
         require_session_task(app.handle()).expect("no session means nothing to refuse");
-        remember_session_task(None);
+        remember_session_task(Ok::<_, ()>(None));
 
         let _planted = PlantedSession::new(&worktree, &first);
         require_session_task(app.handle())
@@ -1344,7 +1524,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         for ending in ["stopped", "exited"] {
-            remember_session_task(Some("task-1".to_owned()));
+            remember_session_task(Ok::<_, ()>(Some("task-1".to_owned())));
             let editor = ScriptedEditor::stopping();
             let directory = TempDir::new().expect("temporary directory");
             let stager = AddonStager::new(directory.path().join(LEDGER_FILE_NAME));
@@ -1360,7 +1540,7 @@ mod tests {
             end_session_with(end, &editor).expect("an editor with nothing wrong ends cleanly");
 
             assert!(
-                SESSION_TASK.lock().expect("the session task").is_none(),
+                *SESSION_TASK.lock().expect("the session task") == SessionOwner::NoTask,
                 "a session that has ended cannot still own a task ({ending})"
             );
             assert!(

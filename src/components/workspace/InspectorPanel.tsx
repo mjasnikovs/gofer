@@ -137,7 +137,7 @@ export function InspectorPanel({
     const [editorQuery, setEditorQuery] = useState('')
     const settledProject = useDebounced(projectQuery)
     const settledEditor = useDebounced(editorQuery)
-    const {state, sceneEpoch} = useEditorSession()
+    const {state, sceneEpoch, runtimeEpoch} = useEditorSession()
     const isOffline = isSessionOffline(state)
 
     /*
@@ -151,22 +151,40 @@ export function InspectorPanel({
         {scene: scenePath, node: selection?.path ?? ''},
         {when: tab === 'node' && selection?.origin === 'edited', follows: sceneEpoch}
     )
+    // The running game's epoch, not the editor's. A runtime node's properties move when the game
+    // steps, and `debugPaused` is not a runtime state — so following the scene left the Node tab
+    // showing values frozen at the moment of selection, for as long as the pause lasted, with no
+    // refresh control to escape it. The mirror was just as wrong: an edit in the editor refetched
+    // a node from the game for nothing.
     const runtimeNode = useGodotReading(
         'runtime.inspect_node',
         {path: selection?.path ?? ''},
-        {when: tab === 'node' && selection?.origin === 'runtime', follows: sceneEpoch}
+        {when: tab === 'node' && selection?.origin === 'runtime', follows: runtimeEpoch}
     )
     const node = selection?.origin === 'runtime' ? runtimeNode : editedNode
 
+    /*
+     * Both follow the scene epoch, which is as close as this panel can currently get.
+     *
+     * Neither used to follow anything, so both defaulted to zero and were asked exactly once per
+     * tab visit — and this panel wires no refresh control, so there was no way to ask again short
+     * of leaving the tab. Following the scene at least refetches when the editor moves to another
+     * scene, which is the common case for a stale reading here.
+     *
+     * It is not the whole fix, and the difference is worth stating: `sceneEpoch` moves only on the
+     * addon's `scene.changed` event, so `project.set_autoload`, `project.set_input_action` and
+     * `editor.set_setting` still do not refetch these tables. Closing that needs an epoch a
+     * project or editor write moves, and the addon emits no event for either.
+     */
     const project = useGodotReading(
         'project.search_settings',
         {query: settledProject},
-        {when: tab === 'project'}
+        {when: tab === 'project', follows: sceneEpoch}
     )
     const editor = useGodotReading(
         'editor.search_settings',
         {query: settledEditor},
-        {when: tab === 'editor'}
+        {when: tab === 'editor', follows: sceneEpoch}
     )
 
     // Kept until the answer itself changes, for the same reason the columns are hoisted: a

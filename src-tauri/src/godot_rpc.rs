@@ -151,6 +151,8 @@ pub struct CallRequest {
     pub command: String,
     pub params: Value,
     pub expected_revision: Option<u64>,
+    /// The scene the caller's revision was read from. See [`CallRequest::about`].
+    pub expected_scene: Option<String>,
     pub timeout_ms: Option<u64>,
 }
 
@@ -162,6 +164,7 @@ impl CallRequest {
             command: command.into(),
             params,
             expected_revision: None,
+            expected_scene: None,
             timeout_ms: None,
         }
     }
@@ -169,6 +172,17 @@ impl CallRequest {
     /// Refuses the call unless the edited scene is still at this revision.
     pub fn expecting(mut self, revision: Option<u64>) -> Self {
         self.expected_revision = revision;
+        self
+    }
+
+    /// Refuses the call unless the editor is still editing this scene.
+    ///
+    /// A revision on its own does not say which scene it counts. The addon resets its counter to
+    /// zero every time the edited scene changes, so a caller holding revision zero for one scene
+    /// matches a freshly opened *different* scene exactly — and the mutation lands in it, silently.
+    /// Naming the scene is what closes that, and it is the caller's own last read that names it.
+    pub fn about(mut self, scene: Option<String>) -> Self {
+        self.expected_scene = scene;
         self
     }
 
@@ -327,6 +341,7 @@ impl RpcSession {
             command: "session.cancel".to_owned(),
             params: json!({"requestId": request_id}),
             expected_revision: None,
+            expected_scene: None,
             timeout_ms: Some(CANCEL_TIMEOUT_MS),
         });
     }
@@ -876,6 +891,9 @@ fn write_request(writer: &mut TcpStream, request: &CallRequest) -> Result<(), Rp
     });
     if let Some(revision) = request.expected_revision {
         envelope["expectedRevision"] = json!(revision);
+    }
+    if let Some(scene) = request.expected_scene.as_ref().filter(|s| !s.is_empty()) {
+        envelope["expectedScene"] = json!(scene);
     }
     write_envelope(writer, &envelope)
 }
