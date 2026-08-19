@@ -41,11 +41,23 @@ export function setThumbnailRequest(next: (path: string) => Promise<string | nul
     request = next
 }
 
-/** Empties the cache and the queue. For tests, so one file's paths do not leak into the next. */
-export function resetThumbnails() {
+/**
+ * Empties the cache and the queue.
+ *
+ * Called when the active task changes, which moves the one checkout onto another branch: the paths
+ * stay the same and the files behind them do not, so every square held is now a picture of
+ * something else.
+ */
+export function clearThumbnails() {
     known.clear()
     waiting.length = 0
     inFlight.clear()
+    announce()
+}
+
+/** `clearThumbnails`, plus the real backend call back. For tests. */
+export function resetThumbnails() {
+    clearThumbnails()
     listeners.clear()
     request = fetchThumbnail
 }

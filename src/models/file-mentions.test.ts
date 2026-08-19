@@ -31,9 +31,9 @@ describe('the entries an @ can offer', () => {
         )
     })
 
-    it('holds every file as well', () => {
+    it('holds every file worth naming', () => {
         const files = ENTRIES.filter(entry => !entry.isDirectory).map(entry => entry.path)
-        expect(files).toEqual(PROJECT)
+        expect(files).toEqual(PROJECT.filter(path => !path.endsWith('.uid')))
     })
 })
 
@@ -53,11 +53,7 @@ describe('ranking the entries an @ offers', () => {
     })
 
     it('ranks a name that holds the query below one that starts with it', () => {
-        expect(paths('enemy')).toEqual([
-            'scripts/enemy_base.gd',
-            'scripts/enemy_base.gd.uid',
-            'scripts/spawn_enemy.gd'
-        ])
+        expect(paths('enemy')).toEqual(['scripts/enemy_base.gd', 'scripts/spawn_enemy.gd'])
     })
 
     it('ranks an exact name above one that only starts with the query', () => {
@@ -80,12 +76,14 @@ describe('ranking the entries an @ offers', () => {
         )
     })
 
-    /* A `.uid` sidecar matches everything its script does, and is never the file anyone meant. */
-    it('puts the script above its sidecar', () => {
-        const ranked = paths('enemy_base.gd')
-        expect(ranked.indexOf('scripts/enemy_base.gd')).toBeLessThan(
-            ranked.indexOf('scripts/enemy_base.gd.uid')
-        )
+    /*
+     * `@.png` in a sprites folder answered with five files and five `.import` sidecars, which is
+     * half the menu spent on files Godot writes for itself and nobody ever names.
+     */
+    it('never offers a sidecar Godot generated', () => {
+        expect(paths('enemy_base.gd')).toEqual(['scripts/enemy_base.gd'])
+        expect(paths('uid')).toEqual([])
+        expect(paths('scripts/')).not.toContain('scripts/enemy_base.gd.uid')
     })
 
     it('offers a folder above a file beside it that matched as well', () => {
@@ -146,7 +144,6 @@ describe('a query that names a folder', () => {
         expect(paths('scripts/')).toEqual([
             'scripts/ui/',
             'scripts/enemy_base.gd',
-            'scripts/enemy_base.gd.uid',
             'scripts/game.gd',
             'scripts/spawn_enemy.gd',
             'scripts/ui/hud.gd'

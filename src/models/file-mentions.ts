@@ -21,6 +21,8 @@
  * Kept as plain functions over strings so the ranking is held to a test rather than to a screenshot.
  */
 
+import {isGeneratedSidecar} from './file-kinds'
+
 /** One offered entry: a file, or a folder derived from the files under it. */
 export type FileMention = Readonly<{
     /** The worktree-relative path. A folder carries no trailing slash here. */
@@ -42,7 +44,11 @@ function split(path: string, isDirectory: boolean): FileMention {
 }
 
 /**
- * Every file, plus every folder that holds one.
+ * Every file worth naming, plus every folder that holds one.
+ *
+ * Godot's own sidecars are dropped here (`isGeneratedSidecar`) — they are half the rows in an asset
+ * folder and none of the answers. The folders are still derived from the full listing, because a
+ * folder holding one is a folder holding the asset it belongs to.
  *
  * Built once per listing rather than per keystroke: a worktree of a few thousand files yields a few
  * hundred folders, and rebuilding that set on each letter is the difference between a menu that
@@ -59,7 +65,9 @@ export function mentionEntries(files: readonly string[]): readonly FileMention[]
     }
     const entries: FileMention[] = []
     for (const path of directories) entries.push(split(path, true))
-    for (const path of files) entries.push(split(path, false))
+    for (const path of files) {
+        if (!isGeneratedSidecar(path)) entries.push(split(path, false))
+    }
     return entries
 }
 

@@ -1,5 +1,6 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import {
+    clearThumbnails,
     requestThumbnail,
     resetThumbnails,
     setThumbnailRequest,
@@ -92,6 +93,23 @@ describe('the squares the @ menu draws', () => {
         requestThumbnail('sprites/other.png')
         await settle()
         expect(told).not.toHaveBeenCalled()
+    })
+
+    /*
+     * A task switch moves the one checkout onto another branch. The paths stay the same and the
+     * files behind them do not, so a square held over is a picture of something else.
+     */
+    it('forgets everything when the checkout moves', async () => {
+        const request = vi.fn().mockResolvedValue(SQUARE)
+        setThumbnailRequest(request)
+        requestThumbnail('sprites/player.png')
+        await settle()
+        expect(thumbnailFor('sprites/player.png')).toBe(SQUARE)
+        clearThumbnails()
+        expect(thumbnailFor('sprites/player.png')).toBeUndefined()
+        requestThumbnail('sprites/player.png')
+        await settle()
+        expect(request).toHaveBeenCalledTimes(2)
     })
 
     it('answers undefined for a path nobody has asked about', () => {

@@ -1,4 +1,5 @@
 import {invoke, isTauri} from './desktop'
+import {clearThumbnails} from './file-thumbnails'
 import {isPendingChange, isTaskSummary} from '../models/app'
 import type {PendingChange, TaskSummary} from '../models/app'
 import type {UnsavedWork} from '../models/unsaved-work'
@@ -118,11 +119,16 @@ export async function listTasks(): Promise<readonly TaskSummary[]> {
  * Ordering: this has to land before the workspace reads the chat, because `load_chat` answers about
  * whichever task is active. The router runs it as a route loader, which is what puts it before the
  * component mounting underneath.
+ *
+ * The `@` menu's thumbnails go with it. They are keyed by worktree-relative path and never expire,
+ * and a task switch moves the one checkout onto another branch — so every square held is now a
+ * picture of a different file at the same path.
  */
 export async function activateTask(taskId: string) {
     if (!isTauri()) return
     await whileRunning(async () => {
         await invoke('activate_chat_task', {taskId})
+        clearThumbnails()
     })
 }
 

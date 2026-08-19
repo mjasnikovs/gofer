@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {fileExtension, fileKind, hasThumbnail} from './file-kinds'
+import {fileExtension, fileKind, hasThumbnail, isGeneratedSidecar} from './file-kinds'
 
 describe('what a worktree file is', () => {
     it('names the kinds a Godot project is made of', () => {
@@ -31,6 +31,19 @@ describe('what a worktree file is', () => {
 
     it('ignores the case the extension was typed in', () => {
         expect(fileKind('sprites/Player.PNG', false)).toBe('image')
+    })
+})
+
+describe('what Godot wrote for itself', () => {
+    it('names the sidecars nobody mentions on purpose', () => {
+        expect(isGeneratedSidecar('assets/Effects/hit-sparks.png.import')).toBe(true)
+        expect(isGeneratedSidecar('scripts/player.gd.uid')).toBe(true)
+    })
+
+    it('leaves the file the sidecar belongs to alone', () => {
+        expect(isGeneratedSidecar('assets/Effects/hit-sparks.png')).toBe(false)
+        expect(isGeneratedSidecar('scripts/player.gd')).toBe(false)
+        expect(isGeneratedSidecar('project.godot')).toBe(false)
     })
 })
 
