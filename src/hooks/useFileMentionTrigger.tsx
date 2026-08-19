@@ -1,11 +1,7 @@
 import {useEffect, useMemo} from 'react'
 import type {ChatComposerTrigger} from '@astryxdesign/core/Chat'
-import {TypeaheadItem} from '@astryxdesign/core/Typeahead'
-import {Icon} from '@astryxdesign/core/Icon'
-import DocumentIcon from '@heroicons/react/24/outline/DocumentIcon'
-import FolderIcon from '@heroicons/react/24/outline/FolderIcon'
+import {FileMentionRow} from '../components/workspace/FileMentionRow'
 import {createFileMentionSource} from '../services/file-mentions'
-import type {FileMention} from '../models/file-mentions'
 
 /**
  * `@` names a file or a folder in the worktree, the way `pi`'s own `@` does.
@@ -19,8 +15,8 @@ import type {FileMention} from '../models/file-mentions'
  * the one after that is what lives inside that. Picking a file ends it. That is the browsing the
  * old menu had no way to do, because it was never offered a folder to step into.
  *
- * The row shows the name over the whole path, because a worktree holds `game.gd` three times and
- * only the path tells them apart.
+ * The row shows the file's kind — a thumbnail for a picture, an icon for everything else — over
+ * the folder holding it, because a worktree holds `game.gd` three times (`FileMentionRow`).
  *
  * The worktree is listed at mount rather than at the first `@`, because the menu can only stay off
  * its loading state while the source can answer without waiting (`services/file-mentions.ts`).
@@ -44,25 +40,7 @@ export function useFileMentionTrigger(): ChatComposerTrigger {
             searchSource: createFileMentionSource(),
             menuLabel: 'Workspace files and folders',
             emptySearchResultsText: 'No file or folder matches',
-            renderItem: item => {
-                const mention = item.auxiliaryData as FileMention | undefined
-                const isDirectory = mention?.isDirectory ?? false
-                return (
-                    <TypeaheadItem
-                        item={isDirectory ? {...item, label: `${item.label}/`} : item}
-                        icon={
-                            <Icon
-                                icon={isDirectory ? FolderIcon : DocumentIcon}
-                                size='sm'
-                                color='secondary'
-                            />
-                        }
-                        // What tells `hud.gd` from the other three. Empty at the worktree root,
-                        // where it would only repeat the name already on the row above it.
-                        description={mention?.directory ?? ''}
-                    />
-                )
-            },
+            renderItem: item => <FileMentionRow item={item} />,
             onSelect: item => {
                 // A folder's id carries the trailing slash, which is both the mark of a folder and
                 // the text that scopes the next search. One holding a space cannot be stepped into

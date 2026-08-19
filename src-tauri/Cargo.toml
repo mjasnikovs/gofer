@@ -47,7 +47,22 @@ lsp-types = "0.94"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-opener = "2"
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+# Every decoder the `@` menu's thumbnails need. A Godot project holds textures a browser cannot
+# open — .tga, .exr, .hdr, .dds — and re-encoding them here as PNG is what puts them on screen.
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+    "gif",
+    "bmp",
+    "ico",
+    "tga",
+    "tiff",
+    "qoi",
+    "hdr",
+    "exr",
+    "dds",
+] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

@@ -207,6 +207,8 @@ export type DesktopCommandMap = Readonly<{
     read_project_state: CommandSpec<{key: string}, string | null>
     read_task_brief: CommandSpec<{taskId: string}, BriefRun | null>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
+    // A small `data:` square for a worktree picture. `null` for every file that is not one.
+    read_workspace_thumbnail: CommandSpec<{path: string}, string | null>
     resolve_task_merge: CommandSpec<{taskId: string}, ResolveTaskMergeResult>
     respond_chatgpt_login: CommandSpec<{value: string}, void>
     respond_tool_approval: CommandSpec<{request: ToolApprovalRequest}, void>

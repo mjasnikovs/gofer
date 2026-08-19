@@ -1,0 +1,88 @@
+/**
+ * What a worktree file is, judged by its extension alone.
+ *
+ * The `@` menu draws twenty rows and a name on its own says little: `player.gd`, `player.tscn` and
+ * `player.png` read as one thing until something marks them apart. A kind is what the row's icon
+ * comes from, and — for a picture — what decides whether a thumbnail is worth asking for.
+ *
+ * The extension is the whole of the judgement. Nothing here opens a file: the menu re-ranks on
+ * every keystroke, and reading twenty files to find out what they are is not a thing to do between
+ * two letters.
+ */
+
+/** One of the shapes a row can take. `file` is the one with nothing better to say. */
+export type FileKind =
+    | 'folder'
+    | 'image'
+    | 'script'
+    | 'scene'
+    | 'resource'
+    | 'audio'
+    | 'font'
+    | 'text'
+    | 'config'
+    | 'file'
+
+/**
+ * Which extensions the Rust side will build a thumbnail for.
+ *
+ * It holds formats a browser cannot open — `.tga`, `.exr`, `.hdr`, `.dds` — because the square is
+ * decoded and re-encoded as a PNG before it ever reaches the webview. Kept in step with
+ * `is_thumbnail_extension` in `src-tauri/src/files.rs`; a mismatch costs a wasted IPC that answers
+ * `null`, never a wrong picture.
+ */
+const IMAGE: readonly string[] = [
+    'png',
+    'jpg',
+    'jpeg',
+    'webp',
+    'gif',
+    'bmp',
+    'ico',
+    'tga',
+    'tif',
+    'tiff',
+    'qoi',
+    'hdr',
+    'exr',
+    'dds',
+    'svg'
+]
+
+const BY_EXTENSION = new Map<string, FileKind>([
+    ...IMAGE.map(extension => [extension, 'image'] as const),
+    ...(['gd', 'cs', 'gdshader', 'glsl', 'shader'] as const).map(
+        extension => [extension, 'script'] as const
+    ),
+    ...(['tscn', 'scn', 'escn'] as const).map(extension => [extension, 'scene'] as const),
+    ...(['tres', 'res', 'material', 'theme', 'gdextension'] as const).map(
+        extension => [extension, 'resource'] as const
+    ),
+    ...(['wav', 'ogg', 'mp3', 'flac'] as const).map(extension => [extension, 'audio'] as const),
+    ...(['ttf', 'otf', 'woff', 'woff2', 'fnt'] as const).map(
+        extension => [extension, 'font'] as const
+    ),
+    ...(['md', 'txt', 'rst'] as const).map(extension => [extension, 'text'] as const),
+    ...(['godot', 'cfg', 'json', 'toml', 'yaml', 'yml', 'ini', 'import', 'uid'] as const).map(
+        extension => [extension, 'config'] as const
+    )
+])
+
+/** The part after the last dot, lowercased, or `''` for a name that has none. */
+export function fileExtension(path: string): string {
+    const name = path.slice(path.lastIndexOf('/') + 1)
+    const dot = name.lastIndexOf('.')
+    // A leading dot names the file — `.gitignore` is not an extension.
+    if (dot <= 0) return ''
+    return name.slice(dot + 1).toLowerCase()
+}
+
+export function fileKind(path: string, isDirectory: boolean): FileKind {
+    if (isDirectory) return 'folder'
+    return BY_EXTENSION.get(fileExtension(path)) ?? 'file'
+}
+
+/** Whether asking the backend for a thumbnail of this path is worth an IPC. */
+export function hasThumbnail(path: string, isDirectory: boolean): boolean {
+    return !isDirectory && IMAGE.includes(fileExtension(path))
+}

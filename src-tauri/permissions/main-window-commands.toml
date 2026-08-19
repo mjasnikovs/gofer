@@ -1,7 +1,7 @@
 [[permission]]
 identifier = "main-window-commands"
 description = "Allows the main window to use Gofer's user-facing application commands."
-# GENERATED-BEGIN allow-list sha256:b04eaf07fa623923
+# GENERATED-BEGIN allow-list sha256:5be3807ad09a17cb
 commands.allow = [
     "abandon_task_merge",
     "activate_chat_task",
@@ -44,6 +44,7 @@ commands.allow = [
     "read_project_state",
     "read_task_brief",
     "read_workspace_file",
+    "read_workspace_thumbnail",
     "resolve_task_merge",
     "respond_chatgpt_login",
     "respond_tool_approval",

@@ -7,6 +7,7 @@ import {useFileMentionTrigger} from './useFileMentionTrigger'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 import {installBackend} from '../test/backend'
 import {flush} from '../test/flush'
+import {resetThumbnails} from '../services/file-thumbnails'
 
 /**
  * Issue #3, second report: the `@` menu flickered and swallowed key presses.
@@ -30,8 +31,13 @@ const FILES = [
     {path: 'scripts/enemy_base.gd', bytes: 300},
     {path: 'scripts/ui/hud.gd', bytes: 150},
     {path: 'project.godot', bytes: 40},
-    {path: 'My Notes/plan.md', bytes: 60}
+    {path: 'My Notes/plan.md', bytes: 60},
+    {path: 'sprites/hero.png', bytes: 900},
+    {path: 'sprites/hero.tga', bytes: 900}
 ]
+
+const SQUARE = 'data:image/png;base64,AAAA'
+const THUMBNAILS = {'sprites/hero.png': SQUARE, 'sprites/hero.tga': SQUARE}
 
 function Composer({onSubmit}: {onSubmit: (value: string) => void}) {
     const [draft, setDraft] = useState('')
@@ -48,12 +54,14 @@ function Composer({onSubmit}: {onSubmit: (value: string) => void}) {
 
 /** The composer, mounted and left alone long enough for its file listing to arrive. */
 async function composer() {
-    installBackend(tauri, {files: FILES})
+    installBackend(tauri, {files: FILES, thumbnails: THUMBNAILS})
     const onSubmit = vi.fn<(value: string) => void>()
     render(<Composer onSubmit={onSubmit} />)
     await flush()
     return {onSubmit, editable: screen.getByRole('combobox'), user: userEvent.setup()}
 }
+
+const squares = () => [...screen.getByRole('listbox').querySelectorAll('img')]
 
 const rows = () =>
     within(screen.getByRole('listbox'))
@@ -69,6 +77,7 @@ describe('the @ menu', () => {
         cleanup()
         removeDesktopFake()
         tauri.invoke.mockReset()
+        resetThumbnails()
     })
 
     it('shows the matching files as they are typed, without a pass through "Searching…"', async () => {
@@ -122,6 +131,29 @@ describe('the @ menu', () => {
             'hud.gdscripts/ui'
         ])
         expect(editable).toHaveTextContent('@scripts/')
+    })
+
+    /*
+     * A name says nothing about what a file is, which is most of why the menu was hard to read.
+     * The square is fetched per row and cached outside React, because every row unmounts on every
+     * keystroke.
+     */
+    it('draws a picture beside a picture, and a kind icon beside everything else', async () => {
+        const {user, editable} = await composer()
+        await user.click(editable)
+        await user.type(editable, '@hero')
+        // The square carries an empty `alt`: the filename is already on the row, so repeating it
+        // is noise to a screen reader. That also puts it out of reach of `getByRole`.
+        await waitFor(() => {
+            expect(squares()).toHaveLength(2)
+        })
+        for (const square of squares()) expect(square.getAttribute('src')).toBe(SQUARE)
+
+        // A `.gd` has no square and no business asking for one.
+        await user.clear(editable)
+        await user.type(editable, '@player.gd')
+        await flush()
+        expect(squares()).toHaveLength(0)
     })
 
     /*

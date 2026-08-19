@@ -7,6 +7,8 @@
 //! changes made behind Gofer's back — by Godot, the user, or a confined shell command.
 
 use crate::paths;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -21,6 +23,13 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// Typed reads and writes are for text a human or a model edits, not for game assets.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// What a thumbnail will decode. A 4K texture sits well under this; a packed atlas may not, and
+/// the menu shows it an icon rather than spending a second and a gigabyte on a 16px square.
+const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// An SVG is handed to the webview verbatim, so the cap is on what is reasonable to inline.
+const MAX_SVG_BYTES: u64 = 256 * 1024;
+/// Twice the 16px the row draws, so the square stays sharp on a HiDPI screen.
+const THUMBNAIL_EDGE: u32 = 32;
 pub const MAX_RELATIVE_PATH_BYTES: usize = 1024;
 const MAX_WALK_DEPTH: usize = 32;
 const WATCH_POLL_SLICE: Duration = Duration::from_millis(50);
@@ -301,6 +310,50 @@ impl Workspace {
         })
     }
 
+    /// A `data:` URL small enough to draw beside a filename, or `None` when the file is not a
+    /// picture.
+    ///
+    /// The webview cannot open a worktree file — there is no asset protocol, and the CSP allows
+    /// `data:` and nothing else — so the square is built here. Anything the `image` crate decodes
+    /// becomes previewable, which covers the formats a browser refuses: `.tga`, `.exr`, `.hdr`,
+    /// `.dds`. SVG is the exception and needs no decoder; its own bytes are the picture.
+    ///
+    /// `None` is the answer for every ordinary reason a file has no preview — wrong extension, too
+    /// large, corrupt, half-written by the agent a moment ago. A picker is decoration on top of a
+    /// filename, and an error here would take the filename away too.
+    pub fn thumbnail(&self, relative: &str) -> Result<Option<String>, FileError> {
+        let path = self.resolve(relative)?;
+        let Ok(metadata) = fs::metadata(&path) else {
+            return Ok(None);
+        };
+        if !metadata.is_file() {
+            return Ok(None);
+        }
+        let extension = path
+            .extension()
+            .map(|value| value.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if extension == "svg" {
+            if metadata.len() > MAX_SVG_BYTES {
+                return Ok(None);
+            }
+            let Ok(bytes) = fs::read(&path) else {
+                return Ok(None);
+            };
+            return Ok(Some(format!(
+                "data:image/svg+xml;base64,{}",
+                STANDARD.encode(&bytes)
+            )));
+        }
+        if !is_thumbnail_extension(&extension) || metadata.len() > MAX_THUMBNAIL_SOURCE_BYTES {
+            return Ok(None);
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            return Ok(None);
+        };
+        Ok(encode_thumbnail(&bytes, &extension))
+    }
+
     /// Replaces a file atomically. `expected_hash` is the optimistic-concurrency token: `None`
     /// claims the file does not exist yet, and a hash claims the file still holds exactly that
     /// content.
@@ -543,6 +596,53 @@ fn collect(root: &Path, directory: &Path, depth: usize, snapshot: &mut Snapshot)
             },
         );
     }
+}
+
+/// The extensions worth handing to a decoder. The gate is on the name, not the content, so a
+/// `.blend` is never read to find out it is not a picture.
+fn is_thumbnail_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "webp"
+            | "gif"
+            | "bmp"
+            | "ico"
+            | "tga"
+            | "tif"
+            | "tiff"
+            | "qoi"
+            | "hdr"
+            | "exr"
+            | "dds"
+    )
+}
+
+/// Decodes, shrinks to [`THUMBNAIL_EDGE`], and re-encodes as a PNG `data:` URL.
+///
+/// The re-encode is what lets a `.tga` or an `.exr` reach the webview at all: whatever went in,
+/// a PNG comes out. A file that will not decode answers `None`.
+///
+/// The extension picks the decoder, and guessing is only the fallback. TGA carries no magic number
+/// at the front of the file, so `load_from_memory` cannot recognise one at all — the extension is
+/// the only thing that identifies it. Guessing still runs after, for the file that was saved as a
+/// PNG and named `.jpg`, which an asset pipeline does often enough.
+fn encode_thumbnail(bytes: &[u8], extension: &str) -> Option<String> {
+    let named = image::ImageFormat::from_extension(extension)
+        .and_then(|format| image::load_from_memory_with_format(bytes, format).ok());
+    let decoded = match named {
+        Some(image) => image,
+        None => image::load_from_memory(bytes).ok()?,
+    };
+    let small = decoded.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE);
+    let mut png = std::io::Cursor::new(Vec::new());
+    small.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        STANDARD.encode(png.into_inner())
+    ))
 }
 
 fn modified_ms(metadata: &fs::Metadata) -> u64 {
@@ -1124,6 +1224,109 @@ mod tests {
         workspace.delete("nested", None).expect("delete directory");
         workspace.delete("a.gd", Some(&stamp.hash)).expect("delete");
         assert!(!workspace.root().join("a.gd").exists());
+    }
+
+    /// A tiny picture in whatever format the test asks for, written into the worktree.
+    fn write_picture(workspace: &Workspace, relative: &str, format: image::ImageFormat) {
+        let picture = image::RgbaImage::from_pixel(64, 48, image::Rgba([12, 34, 56, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(picture)
+            .write_to(&mut bytes, format)
+            .expect("encode");
+        let path = workspace.resolve(relative).expect("resolve");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create directory");
+        }
+        fs::write(path, bytes.into_inner()).expect("write picture");
+    }
+
+    /// Every format the `@` menu offers a square for reaches the webview as a PNG `data:` URL.
+    ///
+    /// TGA is the one that matters here: no browser opens it, and it only has a preview at all
+    /// because it is decoded and re-encoded on this side.
+    #[test]
+    fn thumbnails_re_encode_every_decodable_picture_as_png() {
+        let (_directory, workspace) = workspace();
+        for (relative, format) in [
+            ("sprites/player.png", image::ImageFormat::Png),
+            ("sprites/tile.bmp", image::ImageFormat::Bmp),
+            ("sprites/terrain.tga", image::ImageFormat::Tga),
+        ] {
+            write_picture(&workspace, relative, format);
+            let square = workspace
+                .thumbnail(relative)
+                .expect("thumbnail")
+                .unwrap_or_else(|| panic!("{relative} has no square"));
+            assert!(square.starts_with("data:image/png;base64,"), "{relative}");
+            let decoded = STANDARD
+                .decode(square.trim_start_matches("data:image/png;base64,"))
+                .expect("base64");
+            let small = image::load_from_memory(&decoded).expect("decode square");
+            // 64x48 shrunk to fit a 32px box, aspect ratio kept.
+            assert_eq!((small.width(), small.height()), (32, 24), "{relative}");
+        }
+    }
+
+    /// SVG needs no decoder — its own bytes are the picture — so it is passed through untouched.
+    #[test]
+    fn thumbnails_hand_an_svg_through_unchanged() {
+        let (_directory, workspace) = workspace();
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg'/>";
+        workspace
+            .write("branding/logo.svg", svg, None)
+            .expect("write");
+        let square = workspace
+            .thumbnail("branding/logo.svg")
+            .expect("thumbnail")
+            .expect("square");
+        let prefix = "data:image/svg+xml;base64,";
+        assert!(square.starts_with(prefix));
+        assert_eq!(
+            String::from_utf8(
+                STANDARD
+                    .decode(square.trim_start_matches(prefix))
+                    .expect("base64")
+            )
+            .expect("utf8"),
+            svg
+        );
+    }
+
+    /// Every ordinary reason a file has no square answers `None`. A picker is decoration on top of
+    /// a filename, and an error here would take the filename away with it.
+    #[test]
+    fn thumbnails_answer_none_rather_than_failing() {
+        let (_directory, workspace) = workspace();
+        workspace
+            .write("scripts/player.gd", "extends Node", None)
+            .expect("write");
+        fs::create_dir_all(workspace.root().join("sprites")).expect("create directory");
+        fs::write(workspace.root().join("sprites/broken.png"), b"not a png").expect("write");
+        for relative in [
+            "scripts/player.gd",  // not a picture
+            "sprites/broken.png", // named like one, will not decode
+            "sprites/gone.png",   // never existed
+            "sprites",            // a directory
+        ] {
+            assert_eq!(
+                workspace.thumbnail(relative).expect("thumbnail"),
+                None,
+                "{relative}"
+            );
+        }
+    }
+
+    /// The path guard is the same one every other read uses, and it still refuses.
+    #[test]
+    fn thumbnails_refuse_a_path_outside_the_worktree() {
+        let (_directory, workspace) = workspace();
+        assert_eq!(
+            workspace
+                .thumbnail("../secret.png")
+                .expect_err("traversal")
+                .code,
+            "invalid_path"
+        );
     }
 
     #[test]

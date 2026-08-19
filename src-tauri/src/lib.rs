@@ -578,6 +578,18 @@ fn read_workspace_file(
     active_workspace(&app)?.read(&path)
 }
 
+/// A small `data:` URL for a worktree picture, or `None` when the file is not one.
+///
+/// Its own command rather than a field on the listing: the listing is every file in the worktree
+/// and the menu draws twenty of them, so the squares are fetched for what is on screen.
+#[tauri::command(async)]
+fn read_workspace_thumbnail(
+    app: AppHandle,
+    path: String,
+) -> Result<Option<String>, files::FileError> {
+    active_workspace(&app)?.thumbnail(&path)
+}
+
 #[tauri::command(async)]
 fn write_workspace_file(
     app: AppHandle,
@@ -1087,6 +1099,7 @@ pub fn run() {
         read_task_brief,
         read_project_state,
         read_workspace_file,
+        read_workspace_thumbnail,
         resolve_task_merge,
         respond_tool_approval,
         respond_user_question,

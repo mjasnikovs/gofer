@@ -84,6 +84,8 @@ export type BackendOptions = Readonly<{
     chat?: StoredChat
     /** The worktree listing, for a suite that needs different files in the explorer. */
     files?: readonly {path: string; bytes: number}[]
+    /** The `data:` squares `read_workspace_thumbnail` answers with, by path. */
+    thumbnails?: Readonly<Record<string, string>>
     /** The script the script commands serve. */
     script?: Readonly<{path: string; text: string}>
     /** Answers that replace the fake's own, by command name. */
@@ -301,6 +303,8 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
             // --- workspace files -------------------------------------------------------------
             case 'list_workspace_files':
                 return files
+            case 'read_workspace_thumbnail':
+                return options.thumbnails?.[payload['path'] as string] ?? null
             case 'watch_workspace_files':
                 channels.changes = payload['changes'] as Channels['changes']
                 return undefined
