@@ -66,7 +66,10 @@ export function createFileMentionSource(
         try {
             entries = mentionEntries((await list()).map(entry => entry.path))
         } catch {
-            entries = []
+            // A refresh that fails keeps the listing already in hand — a stale menu still answers,
+            // and emptying it mid-browse takes the file away for the whole reuse window. Only a
+            // first read that fails has nothing to fall back on.
+            entries ??= []
         }
         readAt = now()
         ranked = new Map()

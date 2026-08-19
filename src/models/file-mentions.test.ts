@@ -1,10 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {
-    FILE_MENTION_LIMIT,
-    mentionEntries,
-    rankFileMentions,
-    splitMentionPath
-} from './file-mentions'
+import {FILE_MENTION_LIMIT, mentionEntries, rankFileMentions} from './file-mentions'
 
 const PROJECT = [
     'project.godot',
@@ -14,6 +9,7 @@ const PROJECT = [
     'scripts/enemy_base.gd',
     'scripts/enemy_base.gd.uid',
     'scripts/game.gd',
+    'scripts/spawn_enemy.gd',
     'scripts/ui/hud.gd',
     'addons/vendor/pack/game.gd',
     'debug/debug_overlay.gd'
@@ -57,9 +53,15 @@ describe('ranking the entries an @ offers', () => {
     })
 
     it('ranks a name that holds the query below one that starts with it', () => {
-        const ranked = paths('overlay')
-        expect(ranked).toContain('debug/debug_overlay.gd')
-        expect(ranked.indexOf('debug/')).toBeLessThan(ranked.indexOf('debug/debug_overlay.gd'))
+        expect(paths('enemy')).toEqual([
+            'scripts/enemy_base.gd',
+            'scripts/enemy_base.gd.uid',
+            'scripts/spawn_enemy.gd'
+        ])
+    })
+
+    it('ranks an exact name above one that only starts with the query', () => {
+        expect(paths('debug')).toEqual(['debug/', 'debug/debug_overlay.gd'])
     })
 
     /* A hit that is only in the folders above the file is the weakest tier there is. */
@@ -86,8 +88,24 @@ describe('ranking the entries an @ offers', () => {
         )
     })
 
-    it('offers a folder above a file that matched as well', () => {
+    it('offers a folder above a file beside it that matched as well', () => {
         expect(paths('docs')[0]).toBe('docs/')
+    })
+
+    /*
+     * What `pi`'s flat +10 folder bonus gets wrong. A project with enough packages under `addons/`
+     * fills every row with folders from deep in the tree, and the file the user opens every day
+     * never appears. Depth has to outrank the folder preference for the menu to stay useful.
+     */
+    it('does not let deep folders push the nearby files off the list', () => {
+        const packages = Array.from(
+            {length: 30},
+            (_, index) => `addons/pack${String(index)}/plugin.gd`
+        )
+        const busy = mentionEntries([...PROJECT, ...packages])
+        const offered = rankFileMentions(busy, '').map(mention => mention.path)
+        expect(offered).toContain('project.godot')
+        expect(offered.indexOf('project.godot')).toBeLessThan(offered.indexOf('addons/pack0'))
     })
 
     it('drops an entry that does not hold the query at all', () => {
@@ -105,14 +123,15 @@ describe('ranking the entries an @ offers', () => {
         expect(FILE_MENTION_LIMIT).toBeGreaterThan(0)
     })
 
+    /* The row shows the directory under the name, and has nothing to show at the top level. */
     it('splits a path into the name and the directory holding it', () => {
-        expect(splitMentionPath('docs/TASK_CHECKLIST.md')).toEqual({
+        expect(ENTRIES.find(entry => entry.path === 'docs/TASK_CHECKLIST.md')).toEqual({
             path: 'docs/TASK_CHECKLIST.md',
             name: 'TASK_CHECKLIST.md',
             directory: 'docs',
             isDirectory: false
         })
-        expect(splitMentionPath('project.godot')).toEqual({
+        expect(ENTRIES.find(entry => entry.path === 'project.godot')).toEqual({
             path: 'project.godot',
             name: 'project.godot',
             directory: '',
@@ -129,6 +148,7 @@ describe('a query that names a folder', () => {
             'scripts/enemy_base.gd',
             'scripts/enemy_base.gd.uid',
             'scripts/game.gd',
+            'scripts/spawn_enemy.gd',
             'scripts/ui/hud.gd'
         ])
     })

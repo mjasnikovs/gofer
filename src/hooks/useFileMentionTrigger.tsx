@@ -57,15 +57,18 @@ export function useFileMentionTrigger(): ChatComposerTrigger {
                                 color='secondary'
                             />
                         }
-                        // The name alone does not tell `hud.gd` from the other three `hud.gd`.
-                        description={mention?.path ?? ''}
+                        // What tells `hud.gd` from the other three. Empty at the worktree root,
+                        // where it would only repeat the name already on the row above it.
+                        description={mention?.directory ?? ''}
                     />
                 )
             },
             onSelect: item => {
                 // A folder's id carries the trailing slash, which is both the mark of a folder and
-                // the text that scopes the next search.
-                if (item.id.endsWith('/')) {
+                // the text that scopes the next search. One holding a space cannot be stepped into
+                // at all, so it ends the mention the way a file does rather than leaving behind
+                // text the reopened menu will refuse and the agent cannot resolve.
+                if (item.id.endsWith('/') && !item.id.includes(' ')) {
                     reopenMenu()
                     return `@${item.id}`
                 }

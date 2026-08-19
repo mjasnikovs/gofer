@@ -87,4 +87,20 @@ describe('the search source behind an @ mention', () => {
         const source = createFileMentionSource(() => Promise.reject(new Error('no workspace')))
         expect(await source.search('anything')).toEqual([])
     })
+
+    /* One failed IPC mid-browse must not take the file away until the reuse window is out. */
+    it('keeps the listing it holds when a later read fails', async () => {
+        const list = vi
+            .fn()
+            .mockResolvedValueOnce(LISTING)
+            .mockRejectedValue(new Error('no workspace'))
+        let clock = 0
+        const source = createFileMentionSource(list, () => clock)
+        await source.search('task')
+        clock += 60_000
+        await source.search('task')
+        expect((await source.search('task')).map(entry => entry.id)).toEqual([
+            'docs/TASK_CHECKLIST.md'
+        ])
+    })
 })

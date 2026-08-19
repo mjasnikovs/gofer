@@ -11,7 +11,7 @@
  *   lives there. Without a `/` the whole worktree answers.
  * - **The score is four fixed tiers, not a fuzzy match.** An exact name beats a name that starts
  *   with the query, which beats a name that holds it, which beats a hit anywhere in the path.
- *   Folders take a bonus so they sort above files that scored the same.
+ *   What scored the same is ordered by how near it is, and a folder goes above a file beside it.
  *
  * The tiers replaced a subsequence match, which is the ranking the user called unintuitive: `@ge`
  * matched `addons/gut/enemy.gd`, so the rows moved for reasons the typist could not see. Tiers
@@ -35,17 +35,10 @@ export type FileMention = Readonly<{
 /** How many suggestions a menu shows before it stops being a menu and becomes a listing. */
 export const FILE_MENTION_LIMIT = 20
 
-/** What a folder scores over a file that matched exactly as well. */
-const DIRECTORY_BONUS = 10
-
 function split(path: string, isDirectory: boolean): FileMention {
     const cut = path.lastIndexOf('/')
     if (cut === -1) return {path, name: path, directory: '', isDirectory}
     return {path, name: path.slice(cut + 1), directory: path.slice(0, cut), isDirectory}
-}
-
-export function splitMentionPath(path: string): FileMention {
-    return split(path, false)
 }
 
 /**
@@ -102,23 +95,28 @@ function collect(
     const scored: {mention: FileMention; score: number; depth: number}[] = []
     for (const mention of entries) {
         const lower = mention.path.toLowerCase()
-        // A scoped query offers what is under the folder, never the folder itself.
-        if (base !== '' && (!lower.startsWith(base) || lower.length === base.length)) continue
+        // A scoped query offers what is under the folder. The folder itself is already excluded:
+        // `base` ends in `/` and no entry path carries one.
+        if (base !== '' && !lower.startsWith(base)) continue
         const rest = lower.slice(base.length)
         const found = score(mention.name.toLowerCase(), rest, needle)
         if (found === undefined) continue
-        scored.push({
-            mention,
-            score: found + (mention.isDirectory ? DIRECTORY_BONUS : 0),
-            depth: depth(rest)
-        })
+        scored.push({mention, score: found, depth: depth(rest)})
     }
-    // Ties break towards what is nearest and then towards the alphabet: `scripts/game.gd` before
-    // `addons/vendor/pack/game.gd`, and a folder's own listing in the order a listing is read in.
+    /*
+     * Ties break towards what is nearest, then towards folders, then towards the alphabet.
+     *
+     * Depth outranks the folder preference, and that ordering is the whole of it. `pi` scores a
+     * folder +10 outright, which reads fine until a project has thirty `addons/` packages: an empty
+     * query then fills all twenty rows with folders from anywhere in the tree and `project.godot`
+     * never appears. Sorting by depth first keeps the twenty rows to what is actually nearby, and
+     * the folder preference still puts `scripts/` above `main.tscn` where they sit side by side.
+     */
     scored.sort(
         (left, right) =>
             right.score - left.score
             || left.depth - right.depth
+            || Number(right.mention.isDirectory) - Number(left.mention.isDirectory)
             || left.mention.path.localeCompare(right.mention.path)
     )
     return scored.slice(0, limit).map(entry => entry.mention)

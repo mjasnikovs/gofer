@@ -29,7 +29,8 @@ const FILES = [
     {path: 'scripts/player.gd', bytes: 200},
     {path: 'scripts/enemy_base.gd', bytes: 300},
     {path: 'scripts/ui/hud.gd', bytes: 150},
-    {path: 'project.godot', bytes: 40}
+    {path: 'project.godot', bytes: 40},
+    {path: 'My Notes/plan.md', bytes: 60}
 ]
 
 function Composer({onSubmit}: {onSubmit: (value: string) => void}) {
@@ -94,10 +95,9 @@ describe('the @ menu', () => {
         const {user, editable} = await composer()
         await user.click(editable)
         await user.type(editable, '@')
-        expect(rows().slice(0, 2)).toEqual([
-            expect.stringContaining('docs/'),
-            expect.stringContaining('scripts/')
-        ])
+        expect(rows().slice(0, 3)).toEqual(['docs/', 'My Notes/', 'scripts/'])
+        // The files at the worktree root sit right under them, not below the whole tree.
+        expect(rows()).toContain('project.godot')
     })
 
     /*
@@ -113,15 +113,30 @@ describe('the @ menu', () => {
         await user.click(editable)
         await user.type(editable, '@scripts{Enter}')
         await waitFor(() => {
-            expect(rows()).toContain('hud.gdscripts/ui/hud.gd')
+            expect(rows()).toContain('hud.gdscripts/ui')
         })
         expect(rows()).toEqual([
-            'ui/scripts/ui',
-            'enemy_base.gdscripts/enemy_base.gd',
-            'player.gdscripts/player.gd',
-            'hud.gdscripts/ui/hud.gd'
+            'ui/scripts',
+            'enemy_base.gdscripts',
+            'player.gdscripts',
+            'hud.gdscripts/ui'
         ])
         expect(editable).toHaveTextContent('@scripts/')
+    })
+
+    /*
+     * Astryx's `findActiveTrigger` gives up at the first space, so `@My Notes/` could never be
+     * typed past and the reopened menu would find no trigger. Such a folder ends the mention
+     * instead, quoted, rather than leaving text behind that resolves to nothing.
+     */
+    it('ends the mention on a folder whose name holds a space', async () => {
+        const {user, editable, onSubmit} = await composer()
+        await user.click(editable)
+        await user.type(editable, '@my{Enter}')
+        await flush()
+        expect(screen.queryByRole('listbox')).toBeNull()
+        await user.keyboard('{Enter}')
+        expect(onSubmit).toHaveBeenCalledWith('@"My Notes/"')
     })
 
     it('keeps stepping, and ends on the file that is picked', async () => {
@@ -129,11 +144,11 @@ describe('the @ menu', () => {
         await user.click(editable)
         await user.type(editable, '@scripts{Enter}')
         await waitFor(() => {
-            expect(rows()[0]).toBe('ui/scripts/ui')
+            expect(rows()[0]).toBe('ui/scripts')
         })
         await user.keyboard('{Enter}')
         await waitFor(() => {
-            expect(rows()).toEqual(['hud.gdscripts/ui/hud.gd'])
+            expect(rows()).toEqual(['hud.gdscripts/ui'])
         })
         await user.keyboard('{Enter}')
         // The folder steps left plain text behind; only the file becomes a token.
