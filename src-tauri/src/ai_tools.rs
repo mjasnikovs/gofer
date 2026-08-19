@@ -3442,7 +3442,7 @@ mod tests {
         let _test = session_test_lock();
         given_the_session_printed(&[(
             godot_session::LogSource::Editor,
-            "Godot Engine v4.7.1.stable",
+            "Godot Engine v4.7.2.stable",
         )]);
 
         let carried = carrying_the_error_that_ended_the_game(addon_failure(

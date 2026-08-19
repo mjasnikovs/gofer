@@ -71,7 +71,7 @@ Every envelope carries `protocolVersion` (exactly `2`), `kind`, and `id` (1–12
 `token` is 64 lowercase hexadecimal characters. `client` reports `name`, `addonVersion`,
 `engineVersion`, an absolute `projectPath`, and `capabilities` drawn from the domain list below. The
 protocol checks the shape of `engineVersion`; the session supervisor is what rejects any engine that
-is not 4.7.1.
+is not 4.7.2.
 
 Gofer answers a handshake with a `response` whose `result` carries `sessionId`, `acceptedVersion`,
 `heartbeatIntervalMs`, and `limits`. A bad token is answered with an `unauthenticated` error and the

@@ -1056,7 +1056,7 @@ mod tests {
             rpc_address: "127.0.0.1:7000".to_owned(),
             lsp_port: 6005,
             dap_port: 6006,
-            godot_version: "4.7.1.stable".to_owned(),
+            godot_version: "4.7.2.stable".to_owned(),
             worktree: worktree.display().to_string(),
         }
     }
@@ -1077,7 +1077,7 @@ mod tests {
             .expect("open project storage");
 
         godot_session::clear_logs();
-        godot_session::append_log(LogSource::Editor, "Godot Engine v4.7.1.stable\n");
+        godot_session::append_log(LogSource::Editor, "Godot Engine v4.7.2.stable\n");
         // A blank line is what the engine prints between phases. Storage refuses an empty message,
         // so one of them must not be able to lose the batch it arrived in.
         godot_session::append_log(LogSource::Editor, "   \n");

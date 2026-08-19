@@ -464,7 +464,7 @@ fn unkillable_probe_script(port: u16) -> String {
 /// found at the Godot boundary — an answer describing something the editor has not done yet.
 ///
 /// The race was hunted and never observed. `EditorInterface.stop_playing_scene()` in the pinned
-/// 4.7.1 kills the game on the calling frame: probes with a three-second `_exit_tree`, with a
+/// 4.7.2 kills the game on the calling frame: probes with a three-second `_exit_tree`, with a
 /// per-frame heartbeat file, stopping at eight points across the boot, and bursting stop straight
 /// after run all found `is_playing_scene()` already false and the process already reaped. So
 /// there is no red-to-green step here to watch, and this test does not pretend otherwise.
@@ -723,7 +723,7 @@ const NOT_A_SCENE: &str = "extends Node\n\nfunc _ready() -> void:\n\tpass\n";
 ///
 /// The dialog is also invisible to `runtime.capture`: on a real desktop the editor's subwindows
 /// are native OS windows of their own, so the base control's viewport texture — the pixels that
-/// capture reads — is the editor *behind* the dialog. Verified on the pinned 4.7.1: the dialog
+/// capture reads — is the editor *behind* the dialog. Verified on the pinned 4.7.2: the dialog
 /// reports `is_embedded() == false` and a window id of its own.
 #[test]
 fn a_launch_the_editor_answers_with_a_question_reports_the_question() {

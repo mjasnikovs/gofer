@@ -484,7 +484,7 @@ func _project_path() -> String:
 
 ## Reports the engine as `major.minor.patch.channel`, which is the shape the protocol validates.
 ##
-## The `string` field of `Engine.get_version_info()` reads "4.7.1-stable (official)" — a display
+## The `string` field of `Engine.get_version_info()` reads "4.7.2-stable (official)" — a display
 ## string, not a version the handshake can carry.
 func _engine_version() -> String:
     var info := Engine.get_version_info()
@@ -797,7 +797,7 @@ func _editor_finished_starting() -> bool:
     # to play with "Selected scene ... is not a scene file". The session then waited for an open
     # that was never coming: `session.get_state` answered `importing` for as long as the editor
     # lived and every mutation was refused `not_ready`. `ResourceLoader.exists(path, "PackedScene")`
-    # is no defence — verified on the pinned 4.7.1, it answers true for a script. `get_file_type`
+    # is no defence — verified on the pinned 4.7.2, it answers true for a script. `get_file_type`
     # is the one that answers "GDScript".
     var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
     if main_scene.is_empty() or filesystem.get_file_type(main_scene) != "PackedScene":
@@ -806,7 +806,7 @@ func _editor_finished_starting() -> bool:
         _startup_open_settled_frames = 0
         return true
     # A scene the editor cannot build never arrives either, and it is a scene by every question
-    # that can be asked of it before it is loaded. Measured on the pinned 4.7.1, the editor opens
+    # that can be asked of it before it is loaded. Measured on the pinned 4.7.2, the editor opens
     # its startup scene on the very frame the first scan lands — even on a project padded with
     # four thousand resources — so a scene that is still missing frames later is not late.
     _startup_open_settled_frames += 1
@@ -1213,7 +1213,7 @@ func _editor_frame() -> Dictionary:
 ##
 ## Only the ones the editor did not draw itself. An embedded subwindow is painted into the main
 ## viewport, so it is already in the image; a native one — which is what the editor opens on a
-## desktop that has real windows, verified on the pinned 4.7.1 — is a viewport of its own that the
+## desktop that has real windows, verified on the pinned 4.7.2 — is a viewport of its own that the
 ## main texture knows nothing about.
 ##
 ## A window the editor put somewhere else entirely is dropped by the composite, and that is not a
@@ -1241,7 +1241,7 @@ func _window_overlays() -> Array:
 ## Asked of the two things that already know, rather than of the tree. A window is either embedded
 ## in a viewport, which the viewport lists, or it is a native window, which the display server
 ## lists and can name the node of. Walking the editor's own tree for them finds exactly the same
-## windows and costs 13 milliseconds a call across its 21,000 nodes — measured on the pinned 4.7.1
+## windows and costs 13 milliseconds a call across its 21,000 nodes — measured on the pinned 4.7.2
 ## against 6 microseconds for this — and both a launch sweep and every `session.get_state` ask.
 func _visible_windows() -> Array[Window]:
     var base := EditorInterface.get_base_control()
@@ -1397,7 +1397,7 @@ func _session_answer_dialog(params: Dictionary) -> Dictionary:
         if button.text != wanted:
             continue
         # The dialog connects its own handlers to each button's `pressed` signal, so emitting it is
-        # the same answer a click gives — verified against the pinned 4.7.1's "not a scene file"
+        # the same answer a click gives — verified against the pinned 4.7.2's "not a scene file"
         # confirmation, which closes on it.
         button.emit_signal("pressed")
         return {"answered": wanted, "dialog": asking}

@@ -912,12 +912,12 @@ mod tests {
         assert!(!is_absolute_path("1:/projects"));
         assert!(!is_absolute_path("C|/projects"));
         assert!(!is_absolute_path("C:projects"));
-        assert!(is_engine_version("4.7.1.stable"));
-        assert!(!is_engine_version("4.7.1.stable.custom"));
-        assert!(!is_engine_version("4.7.1"));
+        assert!(is_engine_version("4.7.2.stable"));
+        assert!(!is_engine_version("4.7.2.stable.custom"));
+        assert!(!is_engine_version("4.7.2"));
         assert!(!is_engine_version("4.7.x.stable"));
-        assert!(!is_engine_version("4.7.1.STABLE"));
-        assert!(!is_engine_version("4.7.1."));
+        assert!(!is_engine_version("4.7.2.STABLE"));
+        assert!(!is_engine_version("4.7.2."));
         assert!(!is_engine_version("4..1.stable"));
         assert!(is_domain_operation("scene.save_as"));
         assert!(!is_domain_operation("scene"));

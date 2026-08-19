@@ -36,7 +36,7 @@ Guidelines:
 /// against is not the model's to carry, and that stopping is an event a caller has to wait for.
 ///
 /// It opens with the pinned engine version and the date that release was published, because the
-/// engine is the one thing here a model thinks it already knows. 4.7.1 is newer than the training
+/// engine is the one thing here a model thinks it already knows. 4.7.2 is newer than the training
 /// data of every model this ships against, and the failure that produces is not an error message —
 /// it is a confident Godot 3 name, written into a script, found minutes later by a scene that will
 /// not load. The date is what turns "search the docs" from advice into arithmetic the model can do.

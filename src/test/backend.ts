@@ -144,7 +144,7 @@ export const SESSION = {
     rpcAddress: '127.0.0.1:7000',
     lspPort: 6005,
     dapPort: 6006,
-    godotVersion: '4.7.1.stable',
+    godotVersion: '4.7.2.stable',
     worktree: '/tmp/task'
 }
 
@@ -398,7 +398,7 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                             sequence: 1,
                             source: 'editor',
                             severity: 'info',
-                            message: 'Godot Engine v4.7.1.stable',
+                            message: 'Godot Engine v4.7.2.stable',
                             timestamp: 1_800_000_000
                         },
                         {

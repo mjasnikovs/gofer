@@ -1671,7 +1671,7 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
 
 /// An editor setting written through `editor.set_setting` is still there in the next editor.
 ///
-/// EditorSettings are machine-wide, and Godot 4.7.1 gives GDScript no way to write them: the
+/// EditorSettings are machine-wide, and Godot 4.7.2 gives GDScript no way to write them: the
 /// class exposes `set_setting` and nothing that flushes, which was checked against the pinned
 /// binary's own `--doctool` dump. The engine saves them when the editor exits — and Gofer never
 /// lets it, because stopping a session kills the child process outright. So every editor setting

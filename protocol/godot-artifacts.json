@@ -1,19 +1,19 @@
 {
-    "version": "4.7.1-stable",
+    "version": "4.7.2-stable",
     "artifacts": {
         "linux-x86_64": {
-            "url": "https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip",
-            "sha256": "c7ff14fd28472c8d4f193043de30278dcf7e5241a1dcf7566b02e27addaa33ba",
-            "binary": "Godot_v4.7.1-stable_linux.x86_64"
+            "url": "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip",
+            "sha256": "cadd3204e728a35d3f13adb7fd0d7902636b79f6b95c40c265eb73b6c35329e4",
+            "binary": "Godot_v4.7.2-stable_linux.x86_64"
         },
         "windows-x86_64": {
-            "url": "https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_win64.exe.zip",
-            "sha256": "c7a289051eaefb460b0106b60e9cd5bee0ef55fd102dcb2bed1eb356cf3d90a1",
-            "binary": "Godot_v4.7.1-stable_win64.exe"
+            "url": "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_win64.exe.zip",
+            "sha256": "731980f9608d61333e5baf54a2ef17210acc7a538446c0cb9969f002aca1e953",
+            "binary": "Godot_v4.7.2-stable_win64.exe"
         },
         "macos-universal": {
-            "url": "https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_macos.universal.zip",
-            "sha256": "897cb7f9799796c717ae75f31446aed883dc92b1d6c3b33d893cc7843fff2fa9",
+            "url": "https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_macos.universal.zip",
+            "sha256": "c58a24e31d720be9d62f60cb5627c4e695fb72f21b0cfe1bc9ccaa9a3b3ba63e",
             "binary": "Godot.app/Contents/MacOS/Godot"
         }
     }

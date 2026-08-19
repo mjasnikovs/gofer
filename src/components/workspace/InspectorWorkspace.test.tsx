@@ -214,7 +214,7 @@ describe('InspectorWorkspace', () => {
         const user = userEvent.setup()
         await renderWorkspace()
         await startSession(user)
-        expect(screen.getByText(/4\.7\.1\.stable · res:\/\/main\.tscn/)).toBeInTheDocument()
+        expect(screen.getByText(/4\.7\.2\.stable · res:\/\/main\.tscn/)).toBeInTheDocument()
 
         // No event, no announcement: the editor is gone, so there is nothing left to send one. All
         // that changed is the answer Rust derives from the child the next time it is asked.
@@ -608,7 +608,7 @@ describe('InspectorWorkspace', () => {
         await user.click(screen.getByRole('button', {name: 'Output'}))
 
         await flush()
-        expect(screen.getByText('Godot Engine v4.7.1.stable')).toBeInTheDocument()
+        expect(screen.getByText('Godot Engine v4.7.2.stable')).toBeInTheDocument()
         expect(screen.getByText('SCRIPT ERROR: Parse error')).toBeInTheDocument()
     })
 

@@ -130,7 +130,7 @@ func _test_declared_types(protocol: GDScript, failures: Array[String]) -> void:
 
 ## An editor screenshot is one image of several windows.
 ##
-## On a real desktop the editor's dialogs are native windows of their own — the pinned 4.7.1
+## On a real desktop the editor's dialogs are native windows of their own — the pinned 4.7.2
 ## reports `is_embedded() == false` for the "not a scene file" confirmation — so the base control's
 ## viewport texture is the editor *behind* whatever is being asked. A capture that reads only that
 ## texture shows an editor with nothing wrong with it while a modal is waiting for an answer.

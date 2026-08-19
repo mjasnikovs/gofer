@@ -7,7 +7,7 @@
     "client": {
         "name": "gofer-godot-addon",
         "addonVersion": "2.0.0",
-        "engineVersion": "4.7.1.stable",
+        "engineVersion": "4.7.2.stable",
         "projectPath": "/home/gofer/worktrees/task-17",
         "capabilities": ["session", "scene", "node", "project", "editor", "resource", "logs"]
     }

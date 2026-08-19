@@ -53,7 +53,7 @@ static func _frame_failed(code: String, message: String) -> Dictionary:
 ## Draws the windows standing over a viewport back onto it, so one capture is what a person sees.
 ##
 ## An editor screenshot is not one window. On a real desktop Godot gives every dialog a native
-## window of its own — the pinned 4.7.1 reports `is_embedded() == false` for the confirmation that
+## window of its own — the pinned 4.7.2 reports `is_embedded() == false` for the confirmation that
 ## a main scene is not a scene — and the base control's viewport texture is the editor *behind* it.
 ## A capture that reads only that texture shows an editor with nothing wrong with it while a modal
 ## waits for an answer, which is the one moment a screenshot is worth asking for.

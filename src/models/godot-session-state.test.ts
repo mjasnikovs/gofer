@@ -14,7 +14,7 @@ const SESSION: GodotSessionSummary = {
     rpcAddress: '127.0.0.1:9100',
     lspPort: 6005,
     dapPort: 6006,
-    godotVersion: 'Godot Engine v4.7.1.stable',
+    godotVersion: 'Godot Engine v4.7.2.stable',
     worktree: '/home/dev/game'
 }
 
@@ -128,7 +128,7 @@ describe('the epochs the panels depend on', () => {
             {type: 'started', session: SESSION},
             {type: 'state-changed', state: 'playing'}
         )
-        expect(moved.session?.godotVersion).toBe('Godot Engine v4.7.1.stable')
+        expect(moved.session?.godotVersion).toBe('Godot Engine v4.7.2.stable')
         expect(moved.state).toBe('playing')
     })
 })

@@ -94,7 +94,7 @@ async function installDesktop(page: Page, state: VisualState) {
                         rpcAddress: '127.0.0.1:7000',
                         lspPort: 6005,
                         dapPort: 6006,
-                        godotVersion: '4.7.1.stable',
+                        godotVersion: '4.7.2.stable',
                         worktree: '/fixture/worktree'
                     }
                 if (command === 'call_godot') {
@@ -179,7 +179,7 @@ async function installDesktop(page: Page, state: VisualState) {
                                 sequence: 1,
                                 source: 'editor',
                                 severity: 'info',
-                                message: 'Godot Engine v4.7.1.stable',
+                                message: 'Godot Engine v4.7.2.stable',
                                 timestamp: 1_800_000_000
                             }
                         ],
@@ -715,7 +715,7 @@ test('debugger tab', async ({page}) => {
 test('output tab', async ({page}) => {
     await openSession(page)
     await page.getByRole('button', {name: 'Output', exact: true}).click()
-    await expect(page.getByText('Godot Engine v4.7.1.stable')).toBeVisible()
+    await expect(page.getByText('Godot Engine v4.7.2.stable')).toBeVisible()
     await stableScreenshot(page, 'output-tab.png')
 })
 

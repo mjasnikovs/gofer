@@ -1,6 +1,6 @@
 //! The Godot rules Gofer enforces, and the addon calls that enforce them.
 //!
-//! Two rules, both verified against Godot 4.7.1 rather than assumed:
+//! Two rules, both verified against Godot 4.7.2 rather than assumed:
 //!
 //! * **Strict typing.** `debug/gdscript/warnings/*` warnings are tri-state — 0 Ignore, 1 Warn,
 //!   2 Error — and five of them are what "no dynamic GDScript" means. `untyped_declaration` catches
@@ -54,7 +54,7 @@ pub(crate) const STRICT_TYPING_WARNINGS: [&str; 5] = [
 /// The prefix every GDScript warning setting shares, and what the refusal is keyed on.
 ///
 /// Wider than [`STRICT_TYPING_WARNINGS`] because three of its neighbours switch all five off
-/// without naming any of them. Verified against 4.7.1 rather than assumed: with
+/// without naming any of them. Verified against 4.7.2 rather than assumed: with
 /// `untyped_declaration` at 2, `var x = 1` is a parse error and the script does not load; with
 /// `debug/gdscript/warnings/enable` set to `false`, or with `directory_rules` holding
 /// `{"res://": 0}`, the setting stays at 2 and the same script loads and runs.
@@ -63,7 +63,7 @@ pub(crate) const WARNING_SETTING_PREFIX: &str = "debug/gdscript/warnings/";
 /// The annotation family that turns a warning off from inside the source file.
 ///
 /// `@warning_ignore`, `@warning_ignore_start` and `@warning_ignore_restore` all begin with this,
-/// and all three defeat a warning that is an error — also verified against 4.7.1, because it is the
+/// and all three defeat a warning that is an error — also verified against 4.7.2, because it is the
 /// first thing the live run proposed. A `#` comment that merely mentions one does nothing, so a
 /// comment is not what this looks at.
 const WARNING_IGNORE_ANNOTATION: &str = "@warning_ignore";
@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// Neither of these is one of the five, and either one switches all five off. Both were run
-    /// against Godot 4.7.1 with `untyped_declaration` at 2: `var x = 1` errors, and with either of
+    /// against Godot 4.7.2 with `untyped_declaration` at 2: `var x = 1` errors, and with either of
     /// these written the same script loads.
     #[test]
     fn the_settings_that_switch_the_five_off_without_naming_them_are_refused_too() {
@@ -410,7 +410,7 @@ mod tests {
     }
 
     /// The other door, and the first one a model proposes: leave the setting alone and annotate the
-    /// script instead. All three spellings were run against 4.7.1, and all three make an errored
+    /// script instead. All three spellings were run against 4.7.2, and all three make an errored
     /// warning stop erroring.
     #[test]
     fn a_script_that_annotates_its_way_out_of_the_rule_is_not_saved() {

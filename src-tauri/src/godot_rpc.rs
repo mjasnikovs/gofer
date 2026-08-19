@@ -1084,7 +1084,7 @@ mod tests {
             "client": {
                 "name": "gofer-godot-addon",
                 "addonVersion": "2.0.0",
-                "engineVersion": "4.7.1.stable",
+                "engineVersion": "4.7.2.stable",
                 "projectPath": project_path,
                 "capabilities": ["session", "scene"]
             }

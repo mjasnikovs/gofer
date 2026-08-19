@@ -11,7 +11,7 @@ package manager, plus the sources Gofer's protocol implementation was written ag
 - Documentation: https://docs.godotengine.org — CC BY 4.0, engine class reference derived from the
   MIT-licensed source
 
-Gofer talks to an unmodified Godot 4.7.1-stable editor it does not redistribute. The transports it
+Gofer talks to an unmodified Godot 4.7.2-stable editor it does not redistribute. The transports it
 implements were written against Godot's own documentation and source:
 
 - the editor command-line options `--editor`, `--path`, `--lsp-port`, and `--dap-port`

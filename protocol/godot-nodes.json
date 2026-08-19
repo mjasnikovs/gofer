@@ -1,6 +1,6 @@
 {
-    "engine": "4.7.1.stable.official.a13da4feb",
-    "note": "Generated from ClassDB inside the pinned editor (dump the creatable Node subclasses via an EditorScript in the pinned 4.7.1 build). Every Node subclass except the Node3D subtree, NavigationAgent3D, and the editor-internal classes.",
+    "engine": "4.7.2.stable.official.ed1daf0bf",
+    "note": "Generated from ClassDB inside the pinned editor (dump the creatable Node subclasses via an EditorScript in the pinned 4.7.2 build). Every Node subclass except the Node3D subtree, NavigationAgent3D, and the editor-internal classes.",
     "creatable": [
         "AcceptDialog",
         "AnimatableBody2D",

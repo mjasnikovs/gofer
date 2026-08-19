@@ -1141,7 +1141,7 @@ describe('the live workspace', () => {
             // where they find out there is none; the toolbar's button is exercised further down.
             await clickButton('Start Godot')
             await expectSessionState('ready', 180_000)
-            await expectText(['4.7.1', 'Stop Godot'])
+            await expectText(['4.7.2', 'Stop Godot'])
             // The lifecycle the toolbar's status dot reflects, in the order it happened.
             expect(await sessionStates()).toContain('importing')
             bound = await sessionWorktree()
@@ -1593,16 +1593,16 @@ describe('the live workspace', () => {
     describe('the bottom panel', () => {
         it('shows the editor’s own output', async () => {
             await clickTab('Output')
-            await expectText(['Godot Engine v4.7.1'], {limitMs: 60_000})
+            await expectText(['Godot Engine v4.7.2'], {limitMs: 60_000})
         })
 
         it('filters the output down to errors and back', async () => {
             await clickControl('Errors')
             // The engine's startup banner is an informational line, so a filter that keeps only
             // errors has to drop it.
-            await expectGone(['Godot Engine v4.7.1'], {limitMs: 30_000})
+            await expectGone(['Godot Engine v4.7.2'], {limitMs: 30_000})
             await clickControl('All')
-            await expectText(['Godot Engine v4.7.1'], {limitMs: 30_000})
+            await expectText(['Godot Engine v4.7.2'], {limitMs: 30_000})
         })
 
         it('drops the informational lines when only warnings are wanted', async () => {
@@ -1610,14 +1610,14 @@ describe('the live workspace', () => {
             // The engine's startup banner is informational, so a filter that keeps warnings and
             // worse has to drop it — which line survives is the session's business, not the
             // filter's.
-            await expectGone(['Godot Engine v4.7.1'], {limitMs: 30_000})
+            await expectGone(['Godot Engine v4.7.2'], {limitMs: 30_000})
             await clickControl('All')
-            await expectText(['Godot Engine v4.7.1'], {limitMs: 30_000})
+            await expectText(['Godot Engine v4.7.2'], {limitMs: 30_000})
         })
 
         it('filters the output by text', async () => {
             await fillLabelledInput('Filter output', 'live tick')
-            await expectText(['live tick'], {absent: ['Godot Engine v4.7.1'], limitMs: 30_000})
+            await expectText(['live tick'], {absent: ['Godot Engine v4.7.2'], limitMs: 30_000})
             await fillLabelledInput('Filter output', '')
         })
 

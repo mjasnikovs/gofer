@@ -1,6 +1,6 @@
 //! Godot session supervisor.
 //!
-//! Owns one Gofer-managed Godot 4.7.1 editor session bound to the active task's worktree. The
+//! Owns one Gofer-managed Godot 4.7.2 editor session bound to the active task's worktree. The
 //! supervisor verifies the engine version, binds the loopback RPC listener, allocates LSP/DAP
 //! ports, verifies that the machine-wide LSP remote_host setting is loopback, and launches Godot
 //! with the editor, path, LSP, and DAP flags. Only one session is allowed at a time.
@@ -25,14 +25,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const REQUIRED_ENGINE_VERSION: &str = "4.7.1";
+pub const REQUIRED_ENGINE_VERSION: &str = "4.7.2";
 pub const REQUIRED_CHANNEL: &str = "stable";
-/// When the pinned release was published, from the `4.7.1-stable` tag in `godotengine/godot-builds`.
+/// When the pinned release was published, from the `4.7.2-stable` tag in `godotengine/godot-builds`.
 ///
 /// Held beside the version because the agent's prompt states it: a release dated after the model's
 /// training data is the difference between "look this API up" and "write the name I remember",
 /// and a model that is not told the date has no way to tell which of the two it is in.
-pub const REQUIRED_ENGINE_RELEASED: &str = "2026-07-14";
+pub const REQUIRED_ENGINE_RELEASED: &str = "2026-08-18";
 const PORT_RETRIES: usize = 3;
 /// Godot 4.7 writes a per-minor-version settings file; older 4.x builds wrote the unversioned one.
 const EDITOR_SETTINGS_FILE_NAMES: [&str; 2] =
@@ -122,7 +122,7 @@ pub struct LaunchRequest {
 
 /// Whether this launch has to ask Godot for its Wayland driver.
 ///
-/// Godot 4.7.1 embeds a running game by hosting a compositor of its own and taking the game's
+/// Godot 4.7.2 embeds a running game by hosting a compositor of its own and taking the game's
 /// window into it, and on Linux it has exactly one — `platform/linuxbsd/wayland/wayland_embedder`.
 /// There is no X11 counterpart, so an editor on X11 answers "Game embedding not available for the
 /// Display Server: 'X11'" and opens the game in a window beside itself, however the editor setting
@@ -852,7 +852,7 @@ fn quit_gracefully(session: &GodotSession, child: &mut Box<dyn ChildProcess>) {
 /// Asks the editor to close itself and waits, then kills whatever is left.
 ///
 /// This used to kill outright. Godot writes its machine-wide EditorSettings on its own way out of
-/// the editor and on no other path — probed against the pinned 4.7.1, where SIGTERM, SIGINT and
+/// the editor and on no other path — probed against the pinned 4.7.2, where SIGTERM, SIGINT and
 /// SIGKILL each left the settings file untouched, and where a `get_tree().quit()` from inside the
 /// editor saved a value the next editor read straight back. So every editor setting an agent
 /// changed was applied to the live editor and thrown away here, while `editor.set_setting`
@@ -911,12 +911,12 @@ fn verify_version(spawner: &impl ProcessSpawner, binary: &str) -> Result<String,
     Ok(output)
 }
 
-/// Accepts exactly one engine: 4.7.1-stable.
+/// Accepts exactly one engine: 4.7.2-stable.
 ///
-/// `--version` answers `4.7.1.stable` for a build made from source and
-/// `4.7.1.stable.official.<hash>` for a release, so the required version and channel are matched as
+/// `--version` answers `4.7.2.stable` for a build made from source and
+/// `4.7.2.stable.official.<hash>` for a release, so the required version and channel are matched as
 /// a prefix and the build metadata behind them is ignored. Requiring the whole string to equal
-/// `4.7.1.stable` would reject every published release — which is every editor a user actually has.
+/// `4.7.2.stable` would reject every published release — which is every editor a user actually has.
 fn is_supported_version(version: &str) -> bool {
     let version = version.trim();
     let required = format!("{REQUIRED_ENGINE_VERSION}.{REQUIRED_CHANNEL}");
@@ -1369,15 +1369,15 @@ mod tests {
 
     #[test]
     fn supported_version_matches_exact_release() {
-        assert!(is_supported_version("4.7.1.stable"));
+        assert!(is_supported_version("4.7.2.stable"));
         // What a published release actually reports; rejecting it would reject every real editor.
-        assert!(is_supported_version("4.7.1.stable.official"));
-        assert!(is_supported_version("4.7.1.stable.official.a13da4feb"));
-        assert!(!is_supported_version("4.7.1.dev"));
+        assert!(is_supported_version("4.7.2.stable.official"));
+        assert!(is_supported_version("4.7.2.stable.official.ed1daf0bf"));
+        assert!(!is_supported_version("4.7.2.dev"));
         assert!(!is_supported_version("4.7.0.stable"));
-        assert!(!is_supported_version("4.7.1.stablish.official"));
-        assert!(!is_supported_version("4.7.10.stable"));
-        assert!(!is_supported_version("4.7.1"));
+        assert!(!is_supported_version("4.7.2.stablish.official"));
+        assert!(!is_supported_version("4.7.20.stable"));
+        assert!(!is_supported_version("4.7.2"));
         assert!(!is_supported_version(""));
     }
 
@@ -1499,7 +1499,7 @@ mod tests {
         let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
         let directory = TempDir::new().expect("temporary worktree");
         let worktree = paths::canonical(directory.path()).expect("canonicalize");
-        let spawner = FakeSpawner::new("4.7.1.stable");
+        let spawner = FakeSpawner::new("4.7.2.stable");
 
         let error = start_with(
             LaunchRequest {
@@ -1523,7 +1523,7 @@ mod tests {
     /// Embedding is a display driver, not only a setting.
     ///
     /// Found on a live Wayland desktop with `game_embed_mode` already reading 1 in the editor
-    /// settings file: the game still opened in a window of its own. Godot 4.7.1 carries one game
+    /// settings file: the game still opened in a window of its own. Godot 4.7.2 carries one game
     /// embedder on Linux and it is the Wayland one, and Godot starts on X11 by default even inside
     /// a Wayland session — so the rule the user ticked was written to an editor that could not
     /// carry it out.
@@ -1555,7 +1555,7 @@ mod tests {
                 settings_path.display().to_string(),
             )
         };
-        let spawner = FakeSpawner::new("4.7.1.stable");
+        let spawner = FakeSpawner::new("4.7.2.stable");
 
         let info = start_with(
             LaunchRequest {
@@ -1568,7 +1568,7 @@ mod tests {
         .expect("start session");
 
         assert_eq!(info.state, SessionState::Starting);
-        assert_eq!(info.godot_version, "4.7.1.stable");
+        assert_eq!(info.godot_version, "4.7.2.stable");
         let arguments = spawner.arguments.lock().expect("arguments");
         assert!(arguments.contains(&OsString::from("--editor")));
         assert!(arguments.contains(&OsString::from("--lsp-port")));
@@ -1600,7 +1600,7 @@ mod tests {
             );
             std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
         };
-        let spawner = FakeSpawner::new("4.7.1.stable");
+        let spawner = FakeSpawner::new("4.7.2.stable");
 
         start_with(
             LaunchRequest {
@@ -1636,7 +1636,7 @@ mod tests {
     fn an_editor_that_exits_on_its_own_is_reported_as_failed() {
         let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
         let (_directory, worktree) = workspace();
-        let spawner = FakeSpawner::new("4.7.1.stable");
+        let spawner = FakeSpawner::new("4.7.2.stable");
 
         start_with(
             LaunchRequest {
@@ -1677,7 +1677,7 @@ mod tests {
     fn a_session_whose_editor_died_is_replaced_by_the_next_start() {
         let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
         let (_directory, worktree) = workspace();
-        let first = FakeSpawner::new("4.7.1.stable");
+        let first = FakeSpawner::new("4.7.2.stable");
         start_with(
             LaunchRequest {
                 worktree: worktree.clone(),
@@ -1689,7 +1689,7 @@ mod tests {
         .expect("start the first session");
 
         // A live session is still refused, which is the guard this must not remove.
-        let second = FakeSpawner::new("4.7.1.stable");
+        let second = FakeSpawner::new("4.7.2.stable");
         let refused = start_with(
             LaunchRequest {
                 worktree: worktree.clone(),
@@ -1719,7 +1719,7 @@ mod tests {
             "and the answer does not change after it"
         );
 
-        let replacement = FakeSpawner::new("4.7.1.stable");
+        let replacement = FakeSpawner::new("4.7.2.stable");
         start_with(
             LaunchRequest {
                 worktree,
@@ -1772,7 +1772,7 @@ mod tests {
                 settings_path.display().to_string(),
             )
         };
-        let spawner = FakeSpawner::new("4.7.1.stable");
+        let spawner = FakeSpawner::new("4.7.2.stable");
 
         let error = start_with(
             LaunchRequest {
@@ -1799,7 +1799,7 @@ mod tests {
                 settings_path.display().to_string(),
             )
         };
-        let spawner = FakeSpawner::new("4.7.1.stable");
+        let spawner = FakeSpawner::new("4.7.2.stable");
 
         start_with(
             LaunchRequest {
@@ -1837,7 +1837,7 @@ mod tests {
     fn captured_output_is_classified_paged_and_bounded() {
         let _test = SESSION_TEST_LOCK.lock().expect("session test lock");
         clear_logs();
-        append_log(LogSource::Editor, "Godot Engine v4.7.1.stable\n");
+        append_log(LogSource::Editor, "Godot Engine v4.7.2.stable\n");
         append_log(LogSource::Editor, "presses: 1 (key)\n");
         append_log(
             LogSource::EditorError,
@@ -1853,7 +1853,7 @@ mod tests {
         assert_eq!(all.entries.len(), 5);
         assert_eq!(all.dropped, 0);
         // The newline is not part of the message, and the engine's own markers set the severity.
-        assert_eq!(all.entries[0].message, "Godot Engine v4.7.1.stable");
+        assert_eq!(all.entries[0].message, "Godot Engine v4.7.2.stable");
         assert_eq!(all.entries[0].severity, LogSeverity::Info);
         assert_eq!(all.entries[2].severity, LogSeverity::Error);
         assert_eq!(all.entries[3].severity, LogSeverity::Warning);

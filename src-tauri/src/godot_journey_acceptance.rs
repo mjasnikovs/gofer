@@ -494,7 +494,7 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     assert!(
         session["godotVersion"]
             .as_str()
-            .is_some_and(|version| version.starts_with("4.7.1.stable")),
+            .is_some_and(|version| version.starts_with("4.7.2.stable")),
         "the supervisor must report the pinned engine: {session}"
     );
     assert!(
@@ -510,7 +510,7 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     // The editor's own output is captured by the supervisor and archived against this session, so
     // the engine banner is both proof that a real editor started and the first line of the run.
     assert!(
-        session_output().contains("Godot Engine v4.7.1"),
+        session_output().contains("Godot Engine v4.7.2"),
         "the session must capture the editor's own output:\n{}",
         session_output()
     );

@@ -1347,7 +1347,7 @@ mod tests {
     /// copy over the branch that was switched to — with no error anywhere. Yet `release_worktree`
     /// answers `()`, throws its stop's failure away, and returns early and silently whenever the two
     /// paths do not compare equal. Nothing else tests it: it has no unit test of its own, and the
-    /// only suite that reaches it needs a real 4.7.1 editor.
+    /// only suite that reaches it needs a real 4.7.2 editor.
     ///
     /// So the checkout moves whatever happened. A stop that failed reads exactly like a stop that
     /// worked.

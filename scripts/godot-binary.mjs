@@ -10,7 +10,7 @@ export function pinnedGodotArtifacts() {
     return JSON.parse(readFileSync(fileURLToPath(MANIFEST_URL), 'utf8'))
 }
 
-// Godot reports "4.7.1.stable.official.<hash>" for the "4.7.1-stable" release tag.
+// Godot reports "4.7.2.stable.official.<hash>" for the "4.7.2-stable" release tag.
 export function pinnedVersionPrefix() {
     return pinnedGodotArtifacts().version.replace('-', '.')
 }

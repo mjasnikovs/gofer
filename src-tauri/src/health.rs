@@ -642,7 +642,7 @@ mod tests {
             storage_error: None,
             godot: godot_session::BinaryProbe {
                 binary: Some("godot4".to_owned()),
-                version: Some("4.7.1.stable".to_owned()),
+                version: Some("4.7.2.stable".to_owned()),
                 error: None,
             },
             ai: AiHealth {
