@@ -1,89 +1,137 @@
 /**
- * Which worktree files an `@` in the composer offers, and in what order.
+ * Which worktree entries an `@` in the composer offers, and in what order.
  *
- * A file mention is typed from memory, not from a listing: someone reaching for
- * `docs/TASK_CHECKLIST.md` types `taskch`, and someone reaching for a script they saw once types
- * `enemybase`. A substring filter on the whole path answers neither, so the match is a subsequence
- * — every character of the query in order, anywhere in the path — and the ordering is what makes
- * that useful rather than noisy.
+ * This is a port of the autocomplete the `pi` CLI puts behind its own `@`
+ * (`@earendil-works/pi-tui`, `dist/autocomplete.js`), because that is the one the user browses with
+ * every day. Three things make it feel like browsing rather than guessing:
+ *
+ * - **Folders are offered too.** The Rust scan only reports files (`src-tauri/src/files.rs`), so
+ *   every folder here is derived from the paths above a file. Picking one steps into it.
+ * - **A `/` scopes the search.** `@scripts/en` searches inside `scripts/`, and the rows are what
+ *   lives there. Without a `/` the whole worktree answers.
+ * - **The score is four fixed tiers, not a fuzzy match.** An exact name beats a name that starts
+ *   with the query, which beats a name that holds it, which beats a hit anywhere in the path.
+ *   Folders take a bonus so they sort above files that scored the same.
+ *
+ * The tiers replaced a subsequence match, which is the ranking the user called unintuitive: `@ge`
+ * matched `addons/gut/enemy.gd`, so the rows moved for reasons the typist could not see. Tiers
+ * cost the `taskch` → `TASK_CHECKLIST.md` trick and buy a menu whose order can be predicted from
+ * the query alone.
  *
  * Kept as plain functions over strings so the ranking is held to a test rather than to a screenshot.
  */
 
-/** One offered file: the path it inserts, split for the row that shows it. */
+/** One offered entry: a file, or a folder derived from the files under it. */
 export type FileMention = Readonly<{
+    /** The worktree-relative path. A folder carries no trailing slash here. */
     path: string
-    /** The file's own name, which is what the eye looks for first. */
+    /** The entry's own name, which is what the eye looks for first. */
     name: string
-    /** The directory holding it, or `''` at the top level. */
+    /** The folder holding it, or `''` at the top level. */
     directory: string
+    isDirectory: boolean
 }>
 
 /** How many suggestions a menu shows before it stops being a menu and becomes a listing. */
 export const FILE_MENTION_LIMIT = 20
 
-const WORD_BOUNDARIES = new Set(['/', '_', '-', '.', ' '])
+/** What a folder scores over a file that matched exactly as well. */
+const DIRECTORY_BONUS = 10
+
+function split(path: string, isDirectory: boolean): FileMention {
+    const cut = path.lastIndexOf('/')
+    if (cut === -1) return {path, name: path, directory: '', isDirectory}
+    return {path, name: path.slice(cut + 1), directory: path.slice(0, cut), isDirectory}
+}
 
 export function splitMentionPath(path: string): FileMention {
-    const cut = path.lastIndexOf('/')
-    if (cut === -1) return {path, name: path, directory: ''}
-    return {path, name: path.slice(cut + 1), directory: path.slice(0, cut)}
+    return split(path, false)
 }
 
 /**
- * What one path scores against one query, or `undefined` when it does not match at all.
+ * Every file, plus every folder that holds one.
  *
- * The bonuses are the whole ranking, and each one is a way a person types a path they remember:
- * they type consecutive characters (`contiguous`), they type the starts of the words
- * (`boundary` — after `/`, `_`, `-` or `.`), and they type the file's own name far more often than
- * the folders above it (`basename`). Length breaks ties towards the shorter path, so `game.gd`
- * comes before `addons/vendor/game.gd` when both match equally well.
+ * Built once per listing rather than per keystroke: a worktree of a few thousand files yields a few
+ * hundred folders, and rebuilding that set on each letter is the difference between a menu that
+ * answers on the same tick and one that does not.
  */
-function score(path: string, query: string): number | undefined {
-    const haystack = path.toLowerCase()
-    const basenameFrom = haystack.lastIndexOf('/') + 1
-    let total = 0
-    let cursor = 0
-    let previous = -2
-    for (const wanted of query) {
-        const found = haystack.indexOf(wanted, cursor)
-        if (found === -1) return undefined
-        total += 1
-        if (found === previous + 1) total += 8
-        if (found === 0 || WORD_BOUNDARIES.has(haystack.charAt(found - 1))) total += 6
-        if (found >= basenameFrom) total += 4
-        previous = found
-        cursor = found + 1
+export function mentionEntries(files: readonly string[]): readonly FileMention[] {
+    const directories = new Set<string>()
+    for (const path of files) {
+        let cut = path.indexOf('/')
+        while (cut !== -1) {
+            directories.add(path.slice(0, cut))
+            cut = path.indexOf('/', cut + 1)
+        }
     }
-    return total - path.length / 100
+    const entries: FileMention[] = []
+    for (const path of directories) entries.push(split(path, true))
+    for (const path of files) entries.push(split(path, false))
+    return entries
 }
 
 /**
- * The files an `@` query offers, best first.
+ * The entries an `@` query offers, best first.
  *
- * An empty query is the menu the user sees before typing anything, so it is ordered by depth and
- * then by name: the project's own files first, and whatever a package manager or the engine left in
- * a nested directory last.
+ * An empty query — the menu the moment `@` is typed, and the listing of a folder just stepped into
+ * — scores everything the same, so the sort alone orders it: folders first, then whatever sits
+ * closest to the top.
  */
 export function rankFileMentions(
-    paths: readonly string[],
+    entries: readonly FileMention[],
     query: string,
     limit: number = FILE_MENTION_LIMIT
 ): readonly FileMention[] {
-    const wanted = query.toLowerCase().replaceAll(' ', '')
-    if (wanted === '') {
-        return [...paths]
-            .sort((left, right) => depth(left) - depth(right) || left.localeCompare(right))
-            .slice(0, limit)
-            .map(splitMentionPath)
+    const wanted = query.toLowerCase()
+    const cut = wanted.lastIndexOf('/')
+    if (cut !== -1) {
+        const scoped = collect(entries, wanted.slice(0, cut + 1), wanted.slice(cut + 1), limit)
+        if (scoped.length > 0) return scoped
     }
-    const scored: {path: string; score: number}[] = []
-    for (const path of paths) {
-        const found = score(path, wanted)
-        if (found !== undefined) scored.push({path, score: found})
+    // No `/`, or a folder that is not there. The query is matched against whole paths instead,
+    // which is what answers `scripts/game` typed straight through from memory.
+    return collect(entries, '', wanted, limit)
+}
+
+function collect(
+    entries: readonly FileMention[],
+    base: string,
+    needle: string,
+    limit: number
+): readonly FileMention[] {
+    const scored: {mention: FileMention; score: number; depth: number}[] = []
+    for (const mention of entries) {
+        const lower = mention.path.toLowerCase()
+        // A scoped query offers what is under the folder, never the folder itself.
+        if (base !== '' && (!lower.startsWith(base) || lower.length === base.length)) continue
+        const rest = lower.slice(base.length)
+        const found = score(mention.name.toLowerCase(), rest, needle)
+        if (found === undefined) continue
+        scored.push({
+            mention,
+            score: found + (mention.isDirectory ? DIRECTORY_BONUS : 0),
+            depth: depth(rest)
+        })
     }
-    scored.sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
-    return scored.slice(0, limit).map(entry => splitMentionPath(entry.path))
+    // Ties break towards what is nearest and then towards the alphabet: `scripts/game.gd` before
+    // `addons/vendor/pack/game.gd`, and a folder's own listing in the order a listing is read in.
+    scored.sort(
+        (left, right) =>
+            right.score - left.score
+            || left.depth - right.depth
+            || left.mention.path.localeCompare(right.mention.path)
+    )
+    return scored.slice(0, limit).map(entry => entry.mention)
+}
+
+/** The four tiers, or `undefined` when the entry does not match at all. */
+function score(name: string, rest: string, needle: string): number | undefined {
+    if (needle === '') return 1
+    if (name === needle) return 100
+    if (name.startsWith(needle)) return 80
+    if (name.includes(needle)) return 50
+    if (rest.includes(needle)) return 30
+    return undefined
 }
 
 function depth(path: string) {

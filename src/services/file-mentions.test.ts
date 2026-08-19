@@ -11,11 +11,11 @@ describe('the search source behind an @ mention', () => {
     it('offers the worktree it was handed', async () => {
         const source = createFileMentionSource(() => Promise.resolve(LISTING))
         expect((await source.bootstrap()).map(entry => entry.id)).toContain('project.godot')
-        const found = await source.search('taskch')
+        const found = await source.search('task')
         expect(found[0]).toMatchObject({
             id: 'docs/TASK_CHECKLIST.md',
             label: 'TASK_CHECKLIST.md',
-            auxiliaryData: {directory: 'docs'}
+            auxiliaryData: {directory: 'docs', isDirectory: false}
         })
     })
 
@@ -27,7 +27,7 @@ describe('the search source behind an @ mention', () => {
     it('reads the worktree for a search, without being bootstrapped first', async () => {
         const list = vi.fn().mockResolvedValue(LISTING)
         const source = createFileMentionSource(list)
-        expect((await source.search('taskch')).map(entry => entry.id)).toEqual([
+        expect((await source.search('task')).map(entry => entry.id)).toEqual([
             'docs/TASK_CHECKLIST.md'
         ])
         expect(list).toHaveBeenCalledTimes(1)
@@ -37,7 +37,7 @@ describe('the search source behind an @ mention', () => {
     it('reads once for a burst of searches', async () => {
         const list = vi.fn().mockResolvedValue(LISTING)
         const source = createFileMentionSource(list)
-        for (const query of ['', 't', 'ta', 'tas', 'task', 'taskc']) await source.search(query)
+        for (const query of ['', 't', 'ta', 'tas', 'task', 'task_']) await source.search(query)
         expect(list).toHaveBeenCalledTimes(1)
     })
 
@@ -61,8 +61,25 @@ describe('the search source behind an @ mention', () => {
     it('answers a search out of the listing it already holds, on the same tick', async () => {
         const source = createFileMentionSource(() => Promise.resolve(LISTING))
         await source.search('')
-        expect(source.search('taskch')).not.toBeInstanceOf(Promise)
+        expect(source.search('task')).not.toBeInstanceOf(Promise)
         expect(source.bootstrap()).not.toBeInstanceOf(Promise)
+    })
+
+    /*
+     * The folders are the browsable half and the Rust scan reports none of them, so the source is
+     * the only place they can come from. A folder's `id` is what marks it: the trailing slash is
+     * both what the row inserts and what the composer reads to decide whether to step in.
+     */
+    it('offers the folders above the files as well', async () => {
+        const source = createFileMentionSource(() => Promise.resolve(LISTING))
+        await source.bootstrap()
+        expect((await source.search('docs')).map(entry => entry.id)).toEqual([
+            'docs/',
+            'docs/TASK_CHECKLIST.md'
+        ])
+        expect((await source.search('docs/')).map(entry => entry.id)).toEqual([
+            'docs/TASK_CHECKLIST.md'
+        ])
     })
 
     /* A workspace that cannot be listed is an empty menu, not a thrown message half-written. */

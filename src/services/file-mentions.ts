@@ -1,9 +1,15 @@
 import type {SearchSource, SearchableItem} from '@astryxdesign/core/Typeahead'
-import {rankFileMentions} from '../models/file-mentions'
+import {mentionEntries, rankFileMentions} from '../models/file-mentions'
 import type {FileMention} from '../models/file-mentions'
 import {listWorkspaceFiles} from './workspace-files'
 
-/** One row of the `@` menu. `id` is the path, which is also what the token inserts. */
+/**
+ * One row of the `@` menu.
+ *
+ * `id` is the path, and a folder's carries a trailing `/`. That is what the row inserts, and it is
+ * also what tells a folder from a file without reaching into `auxiliaryData` — two entries can
+ * otherwise share a path, since a worktree may hold both a `build` folder and a `build` file.
+ */
 export type FileMentionItem = SearchableItem<FileMention>
 
 type Listing = () => Promise<readonly {path: string}[]>
@@ -18,7 +24,11 @@ type Listing = () => Promise<readonly {path: string}[]>
 const LISTING_REUSE_MS = 5_000
 
 function item(mention: FileMention): FileMentionItem {
-    return {id: mention.path, label: mention.name, auxiliaryData: mention}
+    return {
+        id: mention.isDirectory ? `${mention.path}/` : mention.path,
+        label: mention.name,
+        auxiliaryData: mention
+    }
 }
 
 /**
@@ -44,7 +54,7 @@ export function createFileMentionSource(
     list: Listing = listWorkspaceFiles,
     now: () => number = Date.now
 ): SearchSource<FileMentionItem> {
-    let paths: readonly string[] | undefined
+    let entries: readonly FileMention[] | undefined
     let readAt = Number.NEGATIVE_INFINITY
     let reading: Promise<void> | undefined
     // Ranked rows for the listing in hand. The menu asks twice per keystroke — once with an empty
@@ -54,9 +64,9 @@ export function createFileMentionSource(
 
     const read = async () => {
         try {
-            paths = (await list()).map(entry => entry.path)
+            entries = mentionEntries((await list()).map(entry => entry.path))
         } catch {
-            paths = []
+            entries = []
         }
         readAt = now()
         ranked = new Map()
@@ -74,7 +84,7 @@ export function createFileMentionSource(
     const rank = (query: string): FileMentionItem[] => {
         const held = ranked.get(query)
         if (held) return held
-        const rows = rankFileMentions(paths ?? [], query).map(item)
+        const rows = rankFileMentions(entries ?? [], query).map(item)
         ranked.set(query, rows)
         return rows
     }
@@ -82,7 +92,7 @@ export function createFileMentionSource(
     const search = (query: string) => {
         const first = refresh()
         // Nothing has been read yet, so there is nothing to answer with but the read itself.
-        if (paths === undefined) return (first ?? Promise.resolve()).then(() => rank(query))
+        if (entries === undefined) return (first ?? Promise.resolve()).then(() => rank(query))
         return rank(query)
     }
 

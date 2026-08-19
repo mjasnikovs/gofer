@@ -1,6 +1,6 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {useState} from 'react'
-import {cleanup, render, screen, within} from '@testing-library/react'
+import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {ChatComposer, ChatComposerInput} from '@astryxdesign/core/Chat'
 import {useFileMentionTrigger} from './useFileMentionTrigger'
@@ -15,6 +15,11 @@ import {flush} from '../test/flush'
  * promise puts the menu on its 150 ms debounce and shows "Searching…" in place of the rows on every
  * keystroke, and a menu holding no rows hands Enter back to the composer, which sends the message.
  * These drive the real composer and the real menu, because that seam is the whole defect.
+ *
+ * Third report: the menu offered no folders, so there was nothing to browse. Stepping into one runs
+ * against Astryx closing the menu on every pick, and the workaround is a synthetic `input` event —
+ * which is exactly the kind of thing that has to be driven through the real composer or not
+ * believed at all.
  */
 
 const tauri = createDesktopFake()
@@ -23,6 +28,7 @@ const FILES = [
     {path: 'docs/TASK_CHECKLIST.md', bytes: 120},
     {path: 'scripts/player.gd', bytes: 200},
     {path: 'scripts/enemy_base.gd', bytes: 300},
+    {path: 'scripts/ui/hud.gd', bytes: 150},
     {path: 'project.godot', bytes: 40}
 ]
 
@@ -48,6 +54,11 @@ async function composer() {
     return {onSubmit, editable: screen.getByRole('combobox'), user: userEvent.setup()}
 }
 
+const rows = () =>
+    within(screen.getByRole('listbox'))
+        .queryAllByRole('option')
+        .map(row => row.textContent)
+
 describe('the @ menu', () => {
     beforeEach(() => {
         installDesktopFake(tauri)
@@ -62,7 +73,7 @@ describe('the @ menu', () => {
     it('shows the matching files as they are typed, without a pass through "Searching…"', async () => {
         const {user, editable} = await composer()
         await user.click(editable)
-        await user.type(editable, '@taskch')
+        await user.type(editable, '@task')
         const menu = screen.getByRole('listbox')
         expect(menu).not.toHaveTextContent('Searching')
         expect(within(menu).getByRole('option', {name: /TASK_CHECKLIST\.md/})).toBeInTheDocument()
@@ -71,10 +82,62 @@ describe('the @ menu', () => {
     it('takes the Enter that follows the last letter typed, instead of sending the message', async () => {
         const {user, editable, onSubmit} = await composer()
         await user.click(editable)
-        await user.type(editable, '@taskch{Enter}')
+        await user.type(editable, '@task{Enter}')
         expect(onSubmit).not.toHaveBeenCalled()
         // The second Enter is the one that sends, and what it sends is the file that was chosen.
         await user.type(editable, '{Enter}')
         expect(onSubmit).toHaveBeenCalledWith('@docs/TASK_CHECKLIST.md')
+    })
+
+    /* The folders are what makes an `@` browsable, and the scan they are derived from has none. */
+    it('offers the folders first when nothing has been typed yet', async () => {
+        const {user, editable} = await composer()
+        await user.click(editable)
+        await user.type(editable, '@')
+        expect(rows().slice(0, 2)).toEqual([
+            expect.stringContaining('docs/'),
+            expect.stringContaining('scripts/')
+        ])
+    })
+
+    /*
+     * The whole point of the rework. Astryx closes its menu on every pick, so this only works
+     * because the hook dispatches an `input` event afterwards — assert the listing, not the text.
+     *
+     * Every Enter after the first goes through `user.keyboard`, not `user.type`: `type` clicks the
+     * element first, and a click puts the caret on the editable itself rather than in the text
+     * inside it, which is not what pressing Enter on an open menu does.
+     */
+    it('steps into a folder and lists what is inside it', async () => {
+        const {user, editable} = await composer()
+        await user.click(editable)
+        await user.type(editable, '@scripts{Enter}')
+        await waitFor(() => {
+            expect(rows()).toContain('hud.gdscripts/ui/hud.gd')
+        })
+        expect(rows()).toEqual([
+            'ui/scripts/ui',
+            'enemy_base.gdscripts/enemy_base.gd',
+            'player.gdscripts/player.gd',
+            'hud.gdscripts/ui/hud.gd'
+        ])
+        expect(editable).toHaveTextContent('@scripts/')
+    })
+
+    it('keeps stepping, and ends on the file that is picked', async () => {
+        const {user, editable, onSubmit} = await composer()
+        await user.click(editable)
+        await user.type(editable, '@scripts{Enter}')
+        await waitFor(() => {
+            expect(rows()[0]).toBe('ui/scripts/ui')
+        })
+        await user.keyboard('{Enter}')
+        await waitFor(() => {
+            expect(rows()).toEqual(['hud.gdscripts/ui/hud.gd'])
+        })
+        await user.keyboard('{Enter}')
+        // The folder steps left plain text behind; only the file becomes a token.
+        await user.keyboard('{Enter}')
+        expect(onSubmit).toHaveBeenCalledWith('@scripts/ui/hud.gd')
     })
 })
