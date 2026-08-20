@@ -65,8 +65,9 @@ function StepLine({step}: Readonly<{step: string}>) {
 
 export function BriefProgress({
     state,
+    onCancel,
     onStartWithoutPlan
-}: Readonly<{state: BriefState; onStartWithoutPlan?: () => void}>) {
+}: Readonly<{state: BriefState; onCancel?: () => void; onStartWithoutPlan?: () => void}>) {
     const current = state.phase
     const reached = current ? BRIEF_PHASES.indexOf(current) : -1
     const answered = new Map(state.research.map(worker => [worker.section, worker.kind]))
@@ -203,6 +204,29 @@ export function BriefProgress({
                     >
                         {`Planning cost ${thousands(state.cost.input + state.cost.output)} tokens`}
                     </Text>
+                )}
+                {/*
+                 * "Cancel", not "Stop", because nothing survives it. A brief cannot be resumed:
+                 * a second run rewrites the stored row from its first phase and is handed only the
+                 * raw ask, and no control on screen starts one anyway. "Stop" would promise a
+                 * pause over minutes of work that is actually thrown away.
+                 *
+                 * It lives here because the composer is gone. Stopping a brief was the composer's
+                 * Stop button, and this panel now stands where the composer stood.
+                 *
+                 * `secondary`: the screen's job is to be waited on, and leaving is not the press it
+                 * should invite.
+                 */}
+                {state.isRunning && onCancel && (
+                    <HStack justify='end'>
+                        <Button
+                            label='Cancel planning'
+                            variant='secondary'
+                            size='sm'
+                            tooltip='Ends the plan. The phases it has finished are not kept.'
+                            onClick={onCancel}
+                        />
+                    </HStack>
                 )}
                 {state.ended && (
                     <VStack gap={2}>

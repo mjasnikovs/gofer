@@ -2,6 +2,7 @@ import {ChatLayoutScrollButton} from '@astryxdesign/core/Chat'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
 import {useChatColumn} from '../../hooks/useChatColumn'
 import {ErrorBoundary} from '../application/ErrorBoundary'
+import {BriefProgress} from './BriefProgress'
 import {ChatConversation} from './ChatConversation'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
 
@@ -42,9 +43,30 @@ export function ChatColumn() {
         messages,
         scrollRef,
         scrollToBottom,
-        retry
+        retry,
+        brief,
+        cancelBrief,
+        startWithoutPlan
     } = useChatColumn()
-    const composer = <WorkspaceComposer />
+    /*
+     * What the welcome offers: the composer, or the plan that took its place.
+     *
+     * A plan is started from this composer and only ever runs before the first message, so for the
+     * minutes it takes there is nothing to type into — the draft has already been handed over. The
+     * progress stands in the same slot rather than above the frame, where it was a band across a
+     * screen that still showed an empty box inviting a second ask.
+     *
+     * A run that worked reports no ending: it sends the specification, the first message lands, and
+     * this branch is gone with the welcome. Only a run that stopped or broke is still here.
+     */
+    const composer =
+        brief.isRunning || brief.ended ?
+            <BriefProgress
+                state={brief}
+                onCancel={cancelBrief}
+                onStartWithoutPlan={startWithoutPlan}
+            />
+        :   <WorkspaceComposer />
 
     if (messages.length === 0) {
         // The welcome scrolls: the centre region shares its height with the bottom panel, and a

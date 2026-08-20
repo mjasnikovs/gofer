@@ -1,5 +1,6 @@
 import {createContext, use} from 'react'
 import type {RefObject} from 'react'
+import type {BriefState} from '../models/brief'
 import type {Message} from '../models/chat'
 
 /** The conversation on screen, as the column that draws it needs it. */
@@ -14,6 +15,22 @@ export type ChatColumn = Readonly<{
     /** Jumps to the newest message and re-locks the follow. */
     scrollToBottom: () => void
     retry: (assistantId: number) => void
+    /**
+     * The plan running before the first message, which stands where the composer would.
+     *
+     * It travels with the conversation rather than beside it because it replaces part of it: a plan
+     * only ever runs on a task with an empty chat, and while it runs there is nothing to type into.
+     */
+    brief: BriefState
+    /**
+     * Ends a running plan.
+     *
+     * Not a pause. A second run starts at the first phase over a row that `INSERT OR REPLACE` has
+     * already emptied, and nothing on screen can start one anyway — so this throws the phases away.
+     */
+    cancelBrief: () => void
+    /** Starts the task from the ask a plan that ended badly was going to work from. */
+    startWithoutPlan: () => void
 }>
 
 /**

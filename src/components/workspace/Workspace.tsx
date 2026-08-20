@@ -35,7 +35,6 @@ import {UnsavedWorkDialog} from './UnsavedWorkDialog'
 import {unsavedScenes} from '../../models/unsaved-work'
 import type {UnsavedWork} from '../../models/unsaved-work'
 import {ToolApprovalDialog} from './ToolApprovalDialog'
-import {BriefProgress} from './BriefProgress'
 import {UserQuestionDialog} from './UserQuestionDialog'
 import {WorkspaceHeader} from './WorkspaceHeader'
 
@@ -589,7 +588,10 @@ export function Workspace({
         scrollRef: messageScrollRef,
         isScrolledUp: chatScroll.isScrolledUp,
         scrollToBottom: jumpToNewest,
-        retry: retryTurn
+        retry: retryTurn,
+        brief: briefState,
+        cancelBrief: stopBrief,
+        startWithoutPlan
     }
 
     return (
@@ -609,12 +611,6 @@ export function Workspace({
                         {...(activeTask && {activeTask})}
                     />
                     <Divider />
-                    {(briefState.isRunning || briefState.ended) && (
-                        <BriefProgress
-                            state={briefState}
-                            onStartWithoutPlan={startWithoutPlan}
-                        />
-                    )}
                     <StackItem size='fill'>
                         <ChatReferenceContext.Provider value={references}>
                             <InspectorWorkspace

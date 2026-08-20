@@ -189,30 +189,38 @@ describe('Workspace while a plan is running', () => {
         expect(screen.queryByRole('button', {name: 'Execute as plan'})).not.toBeInTheDocument()
     })
 
-    it('offers Stop, and stops the plan by the identifier it was started under', async () => {
+    /*
+     * Cancel, not Stop, and on the panel rather than on the composer.
+     *
+     * The panel stands where the composer stood, so the composer's Stop is not on screen to press.
+     * And the word is the honest one: a second run rewrites the stored row from its first phase and
+     * is handed only the raw ask, so nothing the cancelled run finished is ever read again.
+     */
+    it('cancels the plan by the identifier it was started under', async () => {
         const user = userEvent.setup()
         const requestId = await startPlan(user)
 
         expect(screen.getByText('Planning this task')).toBeInTheDocument()
-        const stop = await screen.findByRole('button', {name: 'Stop'})
+        const cancel = await screen.findByRole('button', {name: 'Cancel planning'})
 
-        await user.click(stop)
+        await user.click(cancel)
         await flush()
 
         expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId})
     })
 
     /*
-     * The composer stays typeable — it does during an ordinary turn too — so what has to hold is
-     * that sending does nothing. The backend would refuse the message anyway, by name, and a
-     * refusal the user never asked for is worse than a send that plainly did not happen.
+     * There is nothing to send from, which is the point.
+     *
+     * The panel takes the composer's place for the minutes a plan runs. An empty box left beside it
+     * invites a second ask that the backend would refuse by name, and a refusal the user never asked
+     * for is worse than never offering the press.
      */
-    it('sends nothing while the plan runs', async () => {
+    it('has no composer to send from while the plan runs', async () => {
         const user = userEvent.setup()
         await startPlan(user)
 
-        await send(user, 'never mind, do this instead')
-
+        expect(screen.queryByRole('combobox', {name: 'Message input'})).not.toBeInTheDocument()
         expect(tauri.invoke).not.toHaveBeenCalledWith('send_ai_message', expect.anything())
     })
 
