@@ -558,7 +558,8 @@ pub const CATALOG: &[ToolDomain] = &[
     ToolDomain {
         name: "godot_runtime",
         description: "The running game: its live scene tree, input, performance, and screenshots. \
-                      Distinct from the edited scene.",
+                      Distinct from the edited scene, and named differently: every path here \
+                      starts at /root, where godot_node's start at the edited scene's own root.",
         operations: &[
             operation("run", "Runs the project and captures the first frame."),
             operation("stop", "Stops the running game."),

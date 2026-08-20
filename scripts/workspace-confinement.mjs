@@ -11,8 +11,10 @@
  * which is why the gate lives on typed operations rather than here.
  */
 
-import {realpath} from 'node:fs/promises'
+import {readFile, realpath} from 'node:fs/promises'
 import {basename, dirname, extname, isAbsolute, relative, resolve, sep} from 'node:path'
+
+import {nearMiss, refusedAnchorIndex} from './anchor-near-miss.mjs'
 
 /**
  * The files the running editor owns, and the tool that edits each of them properly.
@@ -256,6 +258,38 @@ function validateBashCommand(command) {
         )
 }
 
+/**
+ * A refused `edit` anchor, with the region the file actually holds added to it.
+ *
+ * The tool underneath is pi's, and its refusal names the file and the index and stops there —
+ * `getNotFoundError` is handed a path and a number and never the content, so it could not say more
+ * if it wanted to. The model that met it sent the identical call again rather than reading
+ * anything, three times out of seven over the measured week, and was refused every time.
+ *
+ * Nothing was written when this runs: pi resolves every anchor in
+ * `applyEditsToNormalizedContent` before it calls `writeFile`, so the file on disk is still the
+ * one the anchors were matched against. A read here is a read of the text that refused them.
+ *
+ * Everything degrades to the original error — another tool, another failure, an unreadable file,
+ * a call whose shape does not carry the anchor. A refusal that cannot be improved is passed
+ * through, never replaced with a worse one.
+ */
+async function withTheRegionTheFileHolds(workspacePath, toolName, params, error) {
+    if (toolName !== 'edit') return error
+    const message = error instanceof Error ? error.message : String(error)
+    const index = refusedAnchorIndex(message)
+    if (index === undefined) return error
+    const anchor = params?.edits?.[index]?.oldText
+    if (typeof anchor !== 'string' || anchor.length === 0) return error
+    const content = await readFile(resolve(workspacePath, params.path), 'utf8').catch(
+        () => undefined
+    )
+    if (content === undefined) return error
+    const region = nearMiss(content, anchor)
+    if (region === undefined) return error
+    return new Error(`${message} ${region}`)
+}
+
 export function confineTool(tool, workspacePath) {
     return {
         ...tool,
@@ -269,7 +303,12 @@ export function confineTool(tool, workspacePath) {
             refuseEditorOwnedWrite(tool.name, resolved.path)
             return tool
                 .execute(id, resolved, signal, onUpdate, context)
-                .catch(error => inProjectTerms(workspacePath, error))
+                .catch(async error =>
+                    inProjectTerms(
+                        workspacePath,
+                        await withTheRegionTheFileHolds(workspacePath, tool.name, resolved, error)
+                    )
+                )
         }
     }
 }

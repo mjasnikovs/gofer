@@ -358,6 +358,128 @@ pub fn save_document(request: SaveScriptRequest) -> Result<ScriptStamp, LspError
     })
 }
 
+/// How much of the file one refused anchor quotes back before it stops quoting.
+///
+/// The number is measured, not chosen. Over a week of one project seven anchors were refused, and
+/// the text a near miss would have quoted was 136 bytes at the median and 950 at the worst. A
+/// thousand covers every one of them and still costs two orders of magnitude less than the recovery
+/// it replaces, which ran to 17,634 bytes of calls and answers per anchor. Past the cap the region
+/// is named by its lines rather than quoted, because a block cut in half is the failure
+/// `OPEN_TEXT_BUDGET` exists to prevent: the model pastes back the half it was shown and is refused
+/// again for the same reason.
+const MAX_NEAR_MISS_BYTES: usize = 1_000;
+
+/// One text with every whitespace character removed, and the map back to where each surviving byte
+/// came from.
+///
+/// `starts[i]` and `ends[i]` are the original byte range of the character that produced squeezed
+/// byte `i`, so a match over `squeezed[a..b]` names the original span `starts[a]..ends[b - 1]`. Two
+/// maps rather than one: the end of the last matched character is not the start of the next one,
+/// and the difference between them is exactly the whitespace a near miss exists to forgive.
+struct Squeezed {
+    text: String,
+    starts: Vec<usize>,
+    ends: Vec<usize>,
+}
+
+fn squeeze(text: &str) -> Squeezed {
+    let mut squeezed = Squeezed {
+        text: String::with_capacity(text.len()),
+        starts: Vec::with_capacity(text.len()),
+        ends: Vec::with_capacity(text.len()),
+    };
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            continue;
+        }
+        squeezed.text.push(character);
+        while squeezed.starts.len() < squeezed.text.len() {
+            squeezed.starts.push(index);
+            squeezed.ends.push(index + character.len_utf8());
+        }
+    }
+    squeezed
+}
+
+/// What a refused anchor says, once the file has been asked whether it holds the same text under
+/// different whitespace.
+///
+/// The failure this closes, measured over a week of one project: an anchor that differed from the
+/// file by a single tab was refused with "read the file and anchor on text it currently has", and
+/// the model sent the identical call again rather than reading anything. Three of seven refusals
+/// were byte-identical retries and every one of them was refused a second time. Recovery cost
+/// 17,634 bytes of calls and answers at the median, against the 136 the file's own bytes would have
+/// cost. Zero of four distinct anchors recovered in one call.
+///
+/// Whitespace is squeezed out of both sides only to FIND the region. What is quoted back is the
+/// file's own bytes, never the squeezed form, and nothing here writes: GDScript indentation is
+/// semantic, so a region found without it is a thing to show the model, not a thing to apply.
+/// Silence is the fallback on purpose. Over those same seven refusals this answered with a region
+/// three times and with nothing four times, and never once with the wrong region — the two it
+/// could not reach were a stale idea of the file's content, which no amount of whitespace
+/// forgiveness reaches.
+fn anchor_not_found(path: &str, text: &str, old_text: &str) -> LspError {
+    let unmatched = format!(
+        "`oldText` is not in {path}. The file may already hold the change, or the anchor may \
+         differ in whitespace. Read the file and anchor on text it currently has."
+    );
+    let haystack = squeeze(text);
+    let needle = squeeze(old_text);
+    if needle.text.is_empty() {
+        return LspError::new("anchor_not_found", unmatched);
+    }
+    let mut found = haystack.text.match_indices(needle.text.as_str());
+    let Some((first, _)) = found.next() else {
+        return LspError::new("anchor_not_found", unmatched);
+    };
+    // A line is counted rather than indexed: the alternative is a second table over the file, and
+    // this runs once, on the way out of a call that has already failed.
+    let line_of = |offset: usize| text[..offset].matches('\n').count() + 1;
+    let others: Vec<usize> = found.map(|(start, _)| start).collect();
+    if !others.is_empty() {
+        let lines: Vec<String> = std::iter::once(first)
+            .chain(others)
+            .map(|start| line_of(haystack.starts[start]).to_string())
+            .collect();
+        return LspError::new(
+            "anchor_not_found",
+            format!(
+                "`oldText` is not in {path}. Apart from whitespace it matches {} regions, at lines \
+                 {}, so it still names no single region. Quote one of them from the file, with a \
+                 neighbouring line.",
+                lines.len(),
+                lines.join(", ")
+            ),
+        );
+    }
+    let start = haystack.starts[first];
+    let last = first + needle.text.len() - 1;
+    let held = &text[start..haystack.ends[last]];
+    let first_line = line_of(start);
+    // The last character's start, not the region's end: an end offset can fall inside a character,
+    // and slicing there panics.
+    let last_line = line_of(haystack.starts[last]);
+    if held.len() > MAX_NEAR_MISS_BYTES {
+        let opening = held.lines().next().unwrap_or_default().trim();
+        return LspError::new(
+            "anchor_not_found",
+            format!(
+                "`oldText` is not in {path}, but apart from whitespace it matches lines \
+                 {first_line} to {last_line}, which are too long to quote here. They open with \
+                 `{opening}`. Read those lines and anchor on what they hold."
+            ),
+        );
+    }
+    LspError::new(
+        "anchor_not_found",
+        format!(
+            "`oldText` is not in {path}. Apart from whitespace it matches lines {first_line} to \
+             {last_line}, which the file holds as:\n\n{held}\n\nAnchor on that text exactly, or \
+             read the file again if it is not the region you meant."
+        ),
+    )
+}
+
 /// Replaces every anchor in one file's text, and refuses anything it cannot do exactly once.
 ///
 /// Offsets are taken against the original text and applied back to front, so an earlier
@@ -384,14 +506,7 @@ fn apply_edits(path: &str, text: &str, edits: &[ScriptEdit]) -> Result<String, L
         }
         let mut found = text.match_indices(edit.old_text.as_str());
         let Some((start, _)) = found.next() else {
-            return Err(LspError::new(
-                "anchor_not_found",
-                format!(
-                    "`oldText` is not in {path}. The file may already hold the change, or the \
-                     anchor may differ in whitespace. Read the file and anchor on text it \
-                     currently has."
-                ),
-            ));
+            return Err(anchor_not_found(path, text, &edit.old_text));
         };
         if found.next().is_some() {
             return Err(LspError::new(
@@ -1103,6 +1218,151 @@ mod tests {
                 .expect_err("a file with no edits asks for nothing")
                 .code,
             "no_edits"
+        );
+    }
+
+    /// The refusal hands back the bytes the file holds, when the only difference is whitespace.
+    ///
+    /// This is `scripts/main.gd` on 2026-08-20, reduced. The model quoted `_disconnect_spider_events`
+    /// one tab deeper than the file has it, was told to "read the file and anchor on text it
+    /// currently has", and sent the identical call again instead. Both were refused. The region it
+    /// needed was four lines away and the refusal was holding it.
+    #[test]
+    fn a_stray_tab_is_answered_with_the_bytes_the_file_actually_holds() {
+        let text = concat!(
+            "extends Node\n",
+            "\n",
+            "func _return_spider_to_pool(spider: StrategyUnit) -> void:\n",
+            "\tactive_units.erase(spider)\n",
+            "\tif selected_unit == spider:\n",
+            "\t\tselected_unit = null\n",
+            "\t_disconnect_spider_events(spider)\n",
+            "\tspider.reset_for_pool()\n",
+        );
+        let one_tab_too_deep = concat!(
+            "func _return_spider_to_pool(spider: StrategyUnit) -> void:\n",
+            "\tactive_units.erase(spider)\n",
+            "\tif selected_unit == spider:\n",
+            "\t\tselected_unit = null\n",
+            "\t\t_disconnect_spider_events(spider)\n",
+            "\tspider.reset_for_pool()",
+        );
+
+        let refusal = edited(
+            text,
+            &[edit(one_tab_too_deep, "func _return_spider_to_pool():\n")],
+        )
+        .expect_err("the anchor is one tab off");
+
+        assert_eq!(refusal.code, "anchor_not_found");
+        // The file's own bytes, at the file's own indentation — not the squeezed form the region
+        // was found with, which would be unusable as the next anchor.
+        assert!(
+            refusal
+                .message
+                .contains("\n\t_disconnect_spider_events(spider)\n"),
+            "the region the file holds has to be in the refusal: {}",
+            refusal.message
+        );
+        assert!(
+            refusal.message.contains("lines 3 to 8"),
+            "and it has to say where it is: {}",
+            refusal.message
+        );
+    }
+
+    /// An anchor that is near several regions still names none of them, so it picks none.
+    ///
+    /// The same rule `anchor_not_unique` follows one branch above: two regions is two answers, and
+    /// choosing one would be a guess about which. Naming the lines is what the caller can act on.
+    #[test]
+    fn a_near_miss_in_several_places_names_the_lines_and_refuses_to_pick() {
+        let text = "extends Node\n\nfunc a():\n\tpass\n\nfunc b():\n\t pass\n";
+
+        let refusal = edited(text, &[edit("\tpass ", "\treturn")])
+            .expect_err("the anchor is near both bodies");
+
+        assert_eq!(refusal.code, "anchor_not_found");
+        assert!(
+            refusal.message.contains("matches 2 regions, at lines 4, 7"),
+            "both regions have to be named: {}",
+            refusal.message
+        );
+        assert!(
+            !refusal.message.contains("Anchor on that text exactly"),
+            "and none of them may be handed back as the answer: {}",
+            refusal.message
+        );
+    }
+
+    /// A region past the cap is named, never quoted in part.
+    ///
+    /// Truncation is the worse failure of the two, for the reason `OPEN_TEXT_BUDGET` records: a
+    /// model handed half a block pastes that half back as `oldText` and is refused again, this
+    /// time by a refusal that caused itself.
+    #[test]
+    fn a_near_miss_too_long_to_quote_is_named_by_its_lines_instead() {
+        let body: String = (0..80)
+            .map(|index| format!("\tprint(\"line {index} of a long function body\")\n"))
+            .collect();
+        let text = format!("extends Node\n\nfunc _ready() -> void:\n{body}");
+        let one_tab_too_deep = text
+            .trim_start_matches("extends Node\n\n")
+            .replace("\tprint", "\t\tprint");
+
+        let refusal = edited(
+            &text,
+            &[edit(&one_tab_too_deep, "func _ready() -> void:\n\tpass\n")],
+        )
+        .expect_err("the anchor is one tab off throughout");
+
+        assert_eq!(refusal.code, "anchor_not_found");
+        assert!(
+            refusal.message.contains("too long to quote here"),
+            "the cap has to say so: {}",
+            refusal.message
+        );
+        assert!(
+            refusal.message.contains("`func _ready() -> void:`"),
+            "and it has to name where to look: {}",
+            refusal.message
+        );
+        assert!(
+            !refusal.message.contains("line 40 of a long function body"),
+            "no part of the region may be quoted: {}",
+            refusal.message
+        );
+    }
+
+    /// An anchor the file does not resemble is answered with nothing, and that is the design.
+    ///
+    /// Two of the four anchors refused over the measured week were a stale idea of the file's
+    /// content rather than its whitespace — one omitted six comment lines, one wrote `**bold**`
+    /// where the file had a `###` heading. Squeezing whitespace does not reach either, and the
+    /// refusal says so plainly instead of offering the nearest thing it can find. Silence is what
+    /// kept the false-positive count at zero.
+    #[test]
+    fn an_anchor_the_file_does_not_resemble_is_answered_with_no_region_at_all() {
+        let text = "### The kit has no letters\n\nSilkscreen is the only font.\n";
+
+        let refusal = edited(
+            text,
+            &[edit("**The kit has no letters**\n", "## Letters\n")],
+        )
+        .expect_err("bold is not a heading");
+
+        assert_eq!(refusal.code, "anchor_not_found");
+        assert!(
+            refusal
+                .message
+                .contains("Read the file and anchor on text it currently has."),
+            "the fallback sentence is what a content mistake gets: {}",
+            refusal.message
+        );
+        assert!(
+            !refusal.message.contains("Apart from whitespace"),
+            "and it must not claim a region it did not find: {}",
+            refusal.message
         );
     }
 

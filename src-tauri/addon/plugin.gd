@@ -4616,11 +4616,24 @@ func _undo_reparent(node: Node, old_parent: Node, owner: Node, old_index: int) -
     if old_index >= 0 and old_index < old_parent.get_child_count():
         old_parent.move_child(node, old_index)
 
+## A node the edited scene does not hold, and the spelling that would have found it.
+##
+## The mirror of `runtime.gd`'s funnel, for the mistake made the other way round. `godot_runtime`
+## names the running game's tree, whose every path starts at `/root`; this names the scene the
+## editor has open, whose paths start at the scene's own root. Two trees, two processes, one node
+## with two names — so a path that arrives with `/root/` in front of it is not a missing node, it
+## is the other tool's spelling, and saying so costs one sentence.
 func _node_not_found_error(path: String) -> Dictionary:
+    var message := "Node %s was not found in the edited scene" % path
+    if path.begins_with("/root/") and _find_node(path.substr(5)) != null:
+        message = (
+            "%s. It is there as %s: a path that starts at /root is how godot_runtime names the"
+            + " running game, which is a different tree in a different process."
+        ) % [message, path.substr(5)]
     return {
         "_gofer_error": {
             "code": "node_not_found",
-            "message": "Node %s was not found in the edited scene" % path,
+            "message": message,
             "retryable": false,
             "readiness": "ready",
             "details": {"path": path}

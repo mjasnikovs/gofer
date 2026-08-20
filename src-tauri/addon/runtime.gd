@@ -134,6 +134,32 @@ func _succeed(payload: Dictionary = {}) -> Dictionary:
 func _failure(code: String, message: String) -> Dictionary:
     return {"ok": false, "code": code, "message": message}
 
+## A node the running tree does not hold, and the spelling that would have found it.
+##
+## The failure this closes, counted over a week of one project: every `node_not_found` this script
+## answered was a path written the way `godot_node` names the EDITED scene — `/Main/Units` — and
+## all twenty calls that spelled it `/root/Main/...` were answered. Four were refused, and the
+## refusal repeated the wrong spelling back without saying that another one existed. The editor's
+## tool and this one name two trees in two processes, so one node has two names.
+##
+## Only `message` survives to the model: `plugin.gd` relays a runtime failure with its code and its
+## message and drops `details`, so the corrected call is a sentence rather than a field. The
+## parameter is named because the two callers spell it differently — `root` for the tree walk,
+## `path` for the inspection — and a corrected call that names the wrong key is not one.
+func _node_not_found(parameter: String, path: String) -> Dictionary:
+    var plain := "No running node at '%s'" % path
+    if path.begins_with("/root/"):
+        return _failure("node_not_found", plain)
+    var spelled := "/root/" + path.trim_prefix("/")
+    if get_tree().root.get_node_or_null(NodePath(spelled)) == null:
+        return _failure("node_not_found", plain)
+    var corrected := (
+        "%s. The running tree names it '%s': every path here starts at /root, while godot_node"
+        + " names the edited scene, which is a different tree in a different process."
+        + " Send \"%s\": \"%s\"."
+    )
+    return _failure("node_not_found", corrected % [plain, spelled, parameter, spelled])
+
 ## Dumps the live scene tree from `root` down, `limit` nodes at most and `depth` levels at most.
 ##
 ## The default budget is what keeps `truncated` readable at all. The worker slices an oversized tool
@@ -148,7 +174,7 @@ func _op_tree(params: Dictionary) -> Dictionary:
     if not from.is_empty():
         start = get_tree().root.get_node_or_null(NodePath(from))
         if start == null:
-            return _failure("node_not_found", "No running node at '%s'" % from)
+            return _node_not_found("root", from)
     var levels := int(params.get("depth", MAX_TREE_DEPTH))
     # Cast rather than assigned: a JSON number reaches the addon as a float, and a typed
     # assignment from one is a runtime error that takes the whole response with it.
@@ -227,7 +253,7 @@ func _op_inspect(params: Dictionary) -> Dictionary:
         return _failure("invalid_params", "runtime.inspect_node requires a path")
     var node := get_tree().root.get_node_or_null(NodePath(path))
     if node == null:
-        return _failure("node_not_found", "No running node at '%s'" % path)
+        return _node_not_found("path", path)
     var known: Array[String] = []
     for entry in node.get_property_list():
         known.append(str(entry["name"]))

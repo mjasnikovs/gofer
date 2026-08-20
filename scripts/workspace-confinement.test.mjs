@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
-import {mkdir, mkdtemp, rm, symlink, writeFile} from 'node:fs/promises'
+import {mkdir, mkdtemp, readFile, rm, symlink, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import test from 'node:test'
+import {NodeExecutionEnv, createEditTool} from '@earendil-works/pi-agent-core/node'
 import {confineTool} from './workspace-confinement.mjs'
 
 async function workspace() {
@@ -330,4 +331,149 @@ test('lets git read a scene it can only ever read', async context => {
 
     // And git is not a way past the other rules: an absolute path is still an absolute path.
     await assert.rejects(tool.execute('4', {command: 'git diff -- /etc/passwd'}), /absolute/u)
+})
+
+/**
+ * The three `edit` refusals of the measured week were all Markdown, and all of this tool — pi's,
+ * not Gofer's. So these drive pi's real tool rather than a stub: what is being pinned is that the
+ * region survives pi's own fuzzy pass, which strips trailing whitespace and leaves indentation
+ * alone, and that the file is still on disk to be read when the refusal arrives.
+ */
+function editing(workspacePath) {
+    const tool = confineTool(createEditTool(), workspacePath)
+    const context = {env: new NodeExecutionEnv({cwd: workspacePath})}
+    return (path, oldText, newText) =>
+        tool.execute('1', {path, edits: [{oldText, newText}]}, undefined, undefined, context)
+}
+
+test('answers a refused anchor with the region the file actually holds', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    // Indentation, which is the one thing pi's fuzzy pass does not forgive: it strips trailing
+    // whitespace per line and folds Unicode, and leaves every leading tab and space exactly alone.
+    await writeFile(join(current.path, 'DESIGN.md'), '# Notes\n\n- first\n  - nested\n- second\n')
+    const edit = editing(current.path)
+
+    const refusal = await edit('DESIGN.md', '- first\n    - nested\n- second', '- only').then(
+        () => '',
+        error => error.message
+    )
+
+    assert.match(refusal, /Could not find the exact text in DESIGN\.md/u)
+    assert.match(refusal, /Apart from whitespace it matches lines 3 to 5/u)
+    // The file's own bytes, at the file's own indentation — not the squeezed form the region was
+    // found with, which would be unusable as the next anchor.
+    assert.match(refusal, /- first\n {2}- nested\n- second/u)
+    // And nothing was written, which is what makes the read above a read of the refusing text.
+    assert.equal(
+        await readFile(join(current.path, 'DESIGN.md'), 'utf8'),
+        '# Notes\n\n- first\n  - nested\n- second\n'
+    )
+})
+
+test('leaves a refused anchor alone when the file holds no such region', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    // The worst anchor of the measured week: the model wrote the heading in bold. Squeezing
+    // whitespace does not reach a content mistake, and this says so by adding nothing at all —
+    // which is what held the false-positive count at zero over the same corpus.
+    await writeFile(join(current.path, 'DESIGN.md'), '### The kit has no letters\n\nSilkscreen.\n')
+    const edit = editing(current.path)
+
+    const refusal = await edit('DESIGN.md', '**The kit has no letters**\n', '## Letters\n').then(
+        () => '',
+        error => error.message
+    )
+
+    assert.match(refusal, /Could not find the exact text in DESIGN\.md/u)
+    assert.doesNotMatch(refusal, /Apart from whitespace/u)
+})
+
+test('names the index of the anchor it refused when a call carries several', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    await writeFile(join(current.path, 'DESIGN.md'), '# Notes\n\n- first\n  - nested\n- second\n')
+    const tool = confineTool(createEditTool(), current.path)
+    const runtime = {env: new NodeExecutionEnv({cwd: current.path})}
+
+    // pi writes a different sentence for a call of several, and the region has to be read for the
+    // anchor it actually named rather than for the first one in the list.
+    const refusal = await tool
+        .execute(
+            '1',
+            {
+                path: 'DESIGN.md',
+                edits: [
+                    {oldText: '# Notes', newText: '# Design'},
+                    {oldText: '- first\n    - nested\n- second', newText: '- only'}
+                ]
+            },
+            undefined,
+            undefined,
+            runtime
+        )
+        .then(
+            () => '',
+            error => error.message
+        )
+
+    assert.match(refusal, /Could not find edits\[1\] in DESIGN\.md/u)
+    assert.match(refusal, /Apart from whitespace it matches lines 3 to 5/u)
+})
+
+test('leaves an edit refusal it cannot improve exactly as it arrived', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    await writeFile(join(current.path, 'DESIGN.md'), '# Notes\n\n- first\n  - nested\n- second\n')
+    const miss =
+        'Could not find the exact text in DESIGN.md. The old text must match exactly '
+        + 'including all whitespace and newlines.'
+    const anchor = '- first\n    - nested\n- second'
+    const refusing = thrown =>
+        confineTool(
+            {
+                name: 'edit',
+                execute: () => Promise.reject(thrown)
+            },
+            current.path
+        )
+    const refusalFrom = (tool, params) =>
+        tool.execute('1', params).then(
+            () => '',
+            error => error
+        )
+
+    // A failure that is not a missing anchor is not this one's to touch, and it is passed through
+    // as the object the tool threw rather than a copy of its message.
+    const unrelated = new Error('Could not edit file: DESIGN.md. Path is not a file.')
+    assert.equal(
+        await refusalFrom(refusing(unrelated), {path: 'DESIGN.md', edits: [{oldText: anchor}]}),
+        unrelated
+    )
+
+    // A promise may be rejected with anything, and the region is read for a string exactly as it
+    // is for an Error.
+    const fromString = await refusalFrom(refusing(miss), {
+        path: 'DESIGN.md',
+        edits: [{oldText: anchor}]
+    })
+    assert.match(fromString.message, /Apart from whitespace it matches lines 3 to 5/u)
+
+    // A call whose shape does not carry the anchor the message names has nothing to look up.
+    assert.equal(
+        (await refusalFrom(refusing(new Error(miss)), {path: 'DESIGN.md', edits: []})).message,
+        miss
+    )
+
+    // Nor has one whose file cannot be read. `edit` reaches a missing path the same way `write`
+    // does, and a refusal about a file that is not there must not become a refusal about reading.
+    assert.equal(
+        (
+            await refusalFrom(refusing(new Error(miss)), {
+                path: 'GONE.md',
+                edits: [{oldText: anchor}]
+            })
+        ).message,
+        miss
+    )
 })
