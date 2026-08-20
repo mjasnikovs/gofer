@@ -1,6 +1,7 @@
 import {useState} from 'react'
 import type {ReactNode} from 'react'
 import {AlertDialog} from '@astryxdesign/core/AlertDialog'
+import {Avatar} from '@astryxdesign/core/Avatar'
 import {Icon} from '@astryxdesign/core/Icon'
 import {IconButton} from '@astryxdesign/core/IconButton'
 import {NavIcon} from '@astryxdesign/core/NavIcon'
@@ -15,9 +16,9 @@ import {HStack, StackItem} from '@astryxdesign/core/Stack'
 import {Tooltip} from '@astryxdesign/core/Tooltip'
 import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
 import PlusIcon from '@heroicons/react/24/outline/PlusIcon'
-import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
 import TrashIcon from '@heroicons/react/24/outline/TrashIcon'
 import {preloadSettingsPage, preloadWorkspace} from '../../app/routes-preload'
+import mascotUrl from '../../assets/gofer-mascot.png'
 import {SIDE_NAV_MAX, SIDE_NAV_MIN, isSideNavWidth} from '../../models/ui-state'
 import type {SideNavLayout} from '../../models/ui-state'
 import type {Page, TaskSummary} from '../../models/app'
@@ -190,12 +191,17 @@ export function Navigation({
                     <SideNavHeading
                         heading='Gofer'
                         icon={
+                            // The mascot carries its own disc: the artwork's own blue is baked into
+                            // the image, and Avatar's content box clips it to a circle. NavIcon's
+                            // accent fill is covered rather than overridden, because this repo
+                            // forbids `xstyle`.
                             <NavIcon
                                 icon={
-                                    <Icon
-                                        icon={SparklesIcon}
-                                        size='sm'
-                                        color='accent'
+                                    <Avatar
+                                        src={mascotUrl}
+                                        size={32}
+                                        alt=''
+                                        tooltip={false}
                                     />
                                 }
                             />
