@@ -95,6 +95,8 @@ export type SubagentSettings = Readonly<{
     maxTurns: number
     /** Ceiling on the answer handed back, in characters. 0 turns it off. */
     maxAnswerChars: number
+    /** How many times one delegation may stop the user to show them something. 0 turns it off. */
+    maxShows: number
     /** How many times a delegation that failed transiently is asked again. 0 turns retry off. */
     retryAttempts: number
     /** The first wait before asking again, in seconds. Each further attempt doubles it. */
@@ -252,6 +254,7 @@ export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {
     streamInactivityMinutes: 10,
     maxTurns: 24,
     maxAnswerChars: 12_000,
+    maxShows: 6,
     retryAttempts: 2,
     retryBaseDelaySeconds: 1
 }
@@ -272,6 +275,9 @@ export const SUBAGENT_RANGES = {
     // Capped at what a tool result is truncated to anyway (`MAX_TOOL_TEXT_CHARS`): an answer larger
     // than that is cut by the layer above regardless of what is chosen here.
     maxAnswerChars: {min: 0, max: 24_000, step: 1_000},
+    // Attention, not machine time. Past six the conversation has stopped converging and belongs
+    // back in the chat, so the top of the range is a ceiling rather than an absence of one.
+    maxShows: {min: 0, max: 12, step: 1},
     retryAttempts: {min: 0, max: 5, step: 1},
     retryBaseDelaySeconds: {min: 1, max: 10, step: 1}
 } as const
@@ -294,6 +300,11 @@ export function stepsLabel(steps: number) {
 export function charactersLabel(characters: number) {
     if (characters === 0) return 'Off'
     return `${characters.toLocaleString()} characters`
+}
+
+export function showsLabel(shows: number) {
+    if (shows === 0) return 'Never'
+    return `${String(shows)} time${shows === 1 ? '' : 's'}`
 }
 
 export function retriesLabel(retries: number) {

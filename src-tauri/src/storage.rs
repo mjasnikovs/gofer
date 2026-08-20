@@ -884,6 +884,11 @@ impl ProjectStorage {
         Runs { storage: self }
     }
 
+    /// The layouts the agent has shown the user, kept as files.
+    pub fn sketches(&self) -> Sketches<'_> {
+        Sketches { storage: self }
+    }
+
     /// What the agent has been told to remember, and what finds it again.
     pub fn memory(&self) -> Memories<'_> {
         Memories { storage: self }
@@ -893,6 +898,49 @@ impl ProjectStorage {
     pub fn project(&self) -> Project<'_> {
         Project { storage: self }
     }
+}
+
+/// The layouts the agent has shown the user, one file per sketch.
+///
+/// Not content-addressed the way an attachment is, and not a row in a table. A sketch is revised in
+/// place — the third draft of a pause menu replaces the second under the same identifier — so what is
+/// wanted afterwards is one file holding what was actually agreed, not five near-identical drafts
+/// with no way to tell which one the user was looking at when they said yes.
+pub struct Sketches<'a> {
+    storage: &'a ProjectStorage,
+}
+
+impl Sketches<'_> {
+    /// Keeps one revision, replacing whatever was under that identifier before.
+    ///
+    /// Best effort by design: the caller is a tool call the user is waiting on, and a full disk must
+    /// not turn a layout the user just approved into a refused tool call. A failure here loses an
+    /// artefact; a failure reported upwards would lose the reaction.
+    pub fn keep(&self, sketch_id: &str, html: &str) -> Result<PathBuf, CommandError> {
+        if sketch_id.is_empty() || !sketch_id.bytes().all(is_sketch_id_byte) {
+            return Err(CommandError::from(
+                "A sketch identifier may only hold letters, digits and hyphens".to_owned(),
+            ));
+        }
+        let directory = self.storage.project_directory().join("sketches");
+        fs::create_dir_all(&directory).map_err(|error| {
+            CommandError::from(format!("Could not create {}: {error}", directory.display()))
+        })?;
+        let path = directory.join(format!("{sketch_id}.html"));
+        fs::write(&path, html).map_err(|error| {
+            CommandError::from(format!("Could not save {}: {error}", path.display()))
+        })?;
+        Ok(path)
+    }
+}
+
+/// The bytes a sketch identifier may hold, which is what keeps it from naming a path.
+///
+/// The identifier is minted by `ask::new_sketch_id` and echoed back by the model, so the model is in
+/// the loop of a value that becomes a filename. Nothing in `sketch-7` needs a dot or a separator, so
+/// neither is allowed, and `..` cannot be spelt at all.
+fn is_sketch_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
 }
 
 /// The conversation the active task holds, and the images in it.

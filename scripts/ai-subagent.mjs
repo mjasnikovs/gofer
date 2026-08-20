@@ -45,8 +45,9 @@ import {
 } from '@earendil-works/pi-agent-core/node'
 import {createAssistantMessageEventStream, isRetryableAssistantError} from '@earendil-works/pi-ai'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
-import {createGodotTools} from './ai-host.mjs'
+import {createGodotTools, withoutPictures} from './ai-host.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
+import {ASK_USER_TOOL_NAME, createAskUserTool} from './ai-ask.mjs'
 import {toolStepLine} from './tool-target.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 
@@ -57,12 +58,18 @@ export const SUBAGENT_TOOL_NAME = 'subagent'
  * starting point: `assertChildTools` refuses anything outside it, so widening any child's reach
  * means editing this line on purpose.
  *
- * Notably absent, and staying absent: `web_fetch`. It is itself a sub-agent — it hands the page to a
- * toolless child so the raw text never reaches the caller — so a child holding it is a grandchild,
+ * Notably absent, and staying absent: `web_fetch` and `design_with_user`. Each is itself a
+ * sub-agent — one hands a page to a toolless child so the raw text never reaches the caller, the
+ * other hands a brief to a child that talks to the user — so a child holding either is a grandchild,
  * and "a child cannot delegate" stops being true with nothing in the code left to say so. A caller
  * that needs a page fetches it and puts the answer in the child's prompt.
+ *
+ * `ask_user` is on the list and is not an exception to that rule. It builds no agent; it is a call
+ * to the window, the same shape as `godot_docs_search`'s call to the editor. What it needs instead
+ * is a ceiling of its own, and that ceiling is a count rather than a name: nothing else in the
+ * system can see a child spending somebody's attention. See `REACHING_CHILD_TOOLS`.
  */
-export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot_docs_search', 'web_search']
+export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot_docs_search', 'web_search', 'ask_user']
 
 /**
  * What the `subagent` tool itself hands its child, and the default for any caller that does not ask.
@@ -73,6 +80,15 @@ export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot_docs_search', 'web_searc
  * else's feature is precisely the invisible widening `assertChildTools` exists to catch.
  */
 export const SUBAGENT_TOOL_NAMES = ['read', 'bash']
+
+/**
+ * What `design_with_user` hands its child: the delegation ration, plus the window.
+ *
+ * Named here rather than written at the call site so the one child allowed to interrupt the user is
+ * a constant somebody can grep for, and so a test can assert that `SUBAGENT_TOOL_NAMES` did not
+ * quietly become this.
+ */
+export const DESIGN_TOOL_NAMES = ['read', 'bash', 'ask_user']
 
 /**
  * The shipped ceilings as the settings file stores them, and what a caller with no settings gets.
@@ -91,6 +107,7 @@ export const SUBAGENT_SETTINGS_DEFAULTS = {
     streamInactivityMinutes: 10,
     maxTurns: 24,
     maxAnswerChars: 12_000,
+    maxShows: 6,
     retryAttempts: 2,
     retryBaseDelaySeconds: 1
 }
@@ -107,6 +124,7 @@ export function boundsFrom(settings) {
         streamInactivityMs: pick('streamInactivityMinutes') * 60_000,
         maxTurns: pick('maxTurns'),
         maxAnswerChars: pick('maxAnswerChars'),
+        maxShows: pick('maxShows'),
         retryAttempts: pick('retryAttempts'),
         retryBaseDelayMs: pick('retryBaseDelaySeconds') * 1_000
     }
@@ -292,8 +310,19 @@ export function commandOverrunMessage(toolName, timeoutMs) {
  * gets the correction as that call's result, and carries on — which is why none of pi-task's restart,
  * carry-forward and salvage machinery is needed here.
  */
+/**
+ * The tools the command clock does not apply to, because their wait is a person.
+ *
+ * The clock exists to stop an unbounded shell command from ending a delegation by never returning.
+ * A question in front of somebody is the opposite case: the wait is the feature, five minutes is a
+ * short time to look at a layout and say what is wrong with it, and aborting one would report a
+ * runaway command to a model whose tool was working perfectly. `scripts/brief/run.mjs` holds the
+ * same time out of its own deadline, for the same reason and under the same name.
+ */
+const WAITS_ON_A_PERSON = new Set([ASK_USER_TOOL_NAME])
+
 function underCommandClock(tool, {timeoutMs, timers}) {
-    if (!(timeoutMs > 0)) return tool
+    if (!(timeoutMs > 0) || WAITS_ON_A_PERSON.has(tool.name)) return tool
     return {
         ...tool,
         execute: async (id, params, signal, onUpdate) => {
@@ -376,7 +405,24 @@ const REACHING_CHILD_TOOLS = {
         return createGodotTools(docs, host)[0]
     },
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
-        createWebSearchTool({provider: searchProvider, apiKey: braveApiKey})
+        createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
+    ask_user: ({host, asks, sketchesRequired = false}) => {
+        if (!host) {
+            throw new Error(
+                'A child was asked for ask_user without the tool host that answers it. '
+                    + 'Pass `host` to createChildTools.'
+            )
+        }
+        if (!Number.isInteger(asks) || asks < 1) {
+            throw new Error(
+                'A child was asked for ask_user without a ration. A child that can interrupt the '
+                    + 'user has to say how many times, because nothing else can see that it did: '
+                    + 'the parent never learns a dialog was opened, and the clocks here do not tick '
+                    + 'while a person is thinking.'
+            )
+        }
+        return createAskUserTool({host, budget: asks, sketchesRequired})
+    }
 }
 
 /**
@@ -407,6 +453,8 @@ export function createChildTools(
             execute: (id, params, signal, onUpdate) =>
                 tool.execute(id, params, signal, onUpdate, context)
         }))
+        // The child's own model, which may not be the parent's and may not have its eyes.
+        .map(tool => (deps.model?.input?.includes('image') === true ? tool : withoutPictures(tool)))
         .map(tool => underCommandClock(tool, {timeoutMs: bounds.commandTimeoutMs, timers}))
     assertChildTools(tools, toolNames)
     return {env, tools}
@@ -602,7 +650,12 @@ async function attemptSubagent({
     timers,
     deps
 }) {
-    const {env, tools} = createChildTools(workspacePath, {bounds, timers, toolNames, deps})
+    const {env, tools} = createChildTools(workspacePath, {
+        bounds,
+        timers,
+        toolNames,
+        deps: {...deps, model}
+    })
 
     let requests = 0
     let overran = false
@@ -939,7 +992,7 @@ function wait(ms, signal, timers) {
  * and a count with no model against it cannot be read: two hundred thousand tokens is a runaway on
  * the connection the parent is paying for and an ordinary read on a local one.
  */
-function usageFooter({turns, usage}, model) {
+export function usageFooter({turns, usage}, model) {
     return (
         `[sub-agent: ${model.name || model.id}, `
         + `${String(turns)} step${turns === 1 ? '' : 's'}, `
@@ -948,7 +1001,7 @@ function usageFooter({turns, usage}, model) {
     )
 }
 
-const PROBE_PROMPT = 'Reachability probe. Answer with one word and call no tools.'
+export const PROBE_PROMPT = 'Reachability probe. Answer with one word and call no tools.'
 
 /** The word a probed sub-agent has to come back with. Shared with `ai-reachability.mjs`. */
 export const SUBAGENT_PROBE_ANSWER = 'sub-agent-reachable'
@@ -964,13 +1017,13 @@ export const SUBAGENT_PROBE_ANSWER = 'sub-agent-reachable'
  * prove is that the model server is up, which is not this tool's to prove — the parent's own turn
  * fails on that within seconds, saying so.
  */
-function cannedModels(model) {
+export function cannedModels(model, answer = SUBAGENT_PROBE_ANSWER) {
     return {
         streamSimple: () => {
             const stream = createAssistantMessageEventStream()
             const message = {
                 role: 'assistant',
-                content: [{type: 'text', text: SUBAGENT_PROBE_ANSWER}],
+                content: [{type: 'text', text: answer}],
                 api: model.api,
                 provider: model.provider,
                 model: model.id,

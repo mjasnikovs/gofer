@@ -443,6 +443,42 @@ function withoutTheirPixels(result) {
  * base64 PNG in a text blob is worth nothing to the model and would swamp the context — and the
  * remaining JSON is bounded, because a scene tree is allowed to be large.
  */
+/**
+ * The same tool, with every picture taken out of what it answers.
+ *
+ * `read` hands back a real image part for a PNG, and a model with no vision refuses the whole
+ * request rather than the part it cannot use: one llama.cpp turn died on `failed to process mtmd
+ * chunk` after the agent read a tileset to match the game's art. A tool result the model cannot use
+ * must cost it nothing, so the bytes are replaced by a sentence saying what was there.
+ *
+ * Applied by whoever knows the model, because only they do — the parent and its child may be
+ * different models with different eyes.
+ */
+export function withoutPictures(tool) {
+    return {
+        ...tool,
+        execute: async (id, params, signal, onUpdate, context) => {
+            const result = await tool.execute(id, params, signal, onUpdate, context)
+            const parts = result?.content
+            if (!Array.isArray(parts) || !parts.some(part => part?.type === 'image')) return result
+            return {
+                ...result,
+                content: parts.map(part =>
+                    part?.type === 'image' ?
+                        {
+                            type: 'text',
+                            text:
+                                `[a ${String(part.mimeType ?? 'image')} you cannot see: this model `
+                                + 'takes text only. Ask the user about it, or capture the game and '
+                                + 'describe what you need from the answer.]'
+                        }
+                    :   part
+                )
+            }
+        }
+    }
+}
+
 export function toolResult(result) {
     const {described, images} = withoutTheirPixels(result)
     let text = JSON.stringify(described ?? null)

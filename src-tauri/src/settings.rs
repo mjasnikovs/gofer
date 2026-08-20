@@ -192,6 +192,9 @@ pub(crate) struct SubagentSettings {
     /// Ceiling on the answer handed back. 0 turns it off.
     #[serde(default = "default_subagent_max_answer_chars")]
     pub(crate) max_answer_chars: u32,
+    /// How many times one delegation may stop the user to show them something. 0 turns showing off.
+    #[serde(default = "default_subagent_max_shows")]
+    pub(crate) max_shows: u32,
     /// How many times a delegation that failed transiently is asked again. 0 turns retry off.
     #[serde(default = "default_subagent_retry_attempts")]
     pub(crate) retry_attempts: u32,
@@ -445,6 +448,17 @@ fn default_subagent_max_answer_chars() -> u32 {
     12_000
 }
 
+/// How many times one delegation may stop the user to show them something.
+///
+/// The only ceiling here that is measured in the user's attention rather than the machine's time,
+/// and the only one whose cost nothing else can see: the parent never learns that a dialog opened,
+/// and no clock ticks while a person is looking at it. Six is two or three revisions of one layout
+/// plus room to be wrong once — past that the conversation has stopped converging and belongs back
+/// in the chat.
+fn default_subagent_max_shows() -> u32 {
+    6
+}
+
 /// How many times a delegation that failed transiently is asked again.
 fn default_subagent_retry_attempts() -> u32 {
     2
@@ -465,6 +479,7 @@ impl Default for SubagentSettings {
             stream_inactivity_minutes: default_subagent_stream_inactivity_minutes(),
             max_turns: default_subagent_max_turns(),
             max_answer_chars: default_subagent_max_answer_chars(),
+            max_shows: default_subagent_max_shows(),
             retry_attempts: default_subagent_retry_attempts(),
             retry_base_delay_seconds: default_subagent_retry_base_delay_seconds(),
             connection: None,

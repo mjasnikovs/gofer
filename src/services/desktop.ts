@@ -10,7 +10,13 @@ import type {EventCallback, UnlistenFn} from '@tauri-apps/api/event'
 import type {OpenDialogOptions} from '@tauri-apps/plugin-dialog'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import type {PendingChange, TaskSummary} from '../models/app'
-import type {BriefEvent, BriefRun, UserQuestionPrompt, UserQuestionSettled} from '../models/brief'
+import type {
+    BriefEvent,
+    BriefRun,
+    UserQuestionPrompt,
+    UserQuestionResponse,
+    UserQuestionSettled
+} from '../models/brief'
 import type {HealthRemedyRequest, HealthReport} from '../models/health'
 import type {UnsavedWork} from '../models/unsaved-work'
 import type {
@@ -100,19 +106,6 @@ type BackupResult = Readonly<{path: string}>
 type ToolApprovalRequest = Readonly<{
     approvalId: string
     approved: boolean
-}>
-
-/**
- * One answer to a question the agent asked.
- *
- * `skipped` is not "no answer": the user read the question and decided not to pin it, which is a
- * decision the asker records and carries on from. An answer of only whitespace means the same thing
- * and the backend reads it as one.
- */
-type UserQuestionResponse = Readonly<{
-    questionId: string
-    answer?: string
-    skipped?: boolean
 }>
 
 /** Starting a brief: which task it is for, and the ask it works from. */

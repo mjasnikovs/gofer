@@ -27,6 +27,7 @@
                 "worker-src": "'self' blob:",
                 "font-src": "'self' data:",
                 "img-src": "'self' blob: data:",
+                "frame-src": "'none'",
                 "object-src": "'none'",
                 "style-src": "'self' 'unsafe-inline'"
             },
@@ -36,6 +37,7 @@
                 "worker-src": "'self' blob:",
                 "font-src": "'self' data:",
                 "img-src": "'self' blob: data:",
+                "frame-src": "'none'",
                 "object-src": "'none'",
                 "style-src": "'self' 'unsafe-inline'"
             }

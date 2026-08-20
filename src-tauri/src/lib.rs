@@ -787,7 +787,9 @@ fn workspace_watch()
 }
 
 /// Binds file access to the active task's worktree, which `agent_workspace` resolves.
-fn active_workspace<R: Runtime>(app: &AppHandle<R>) -> Result<files::Workspace, files::FileError> {
+pub(crate) fn active_workspace<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<files::Workspace, files::FileError> {
     let storage = project_storage(app).map_err(files::FileError::unavailable)?;
     let root = storage
         .tasks()

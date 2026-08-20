@@ -695,12 +695,7 @@ fn ask_user<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, Too
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .ok_or_else(|| {
-            ToolFailure::new(
-                "invalid_params",
-                "ask_user needs a `question`: the one thing you want the user to decide.",
-            )
-        })?;
+        .ok_or_else(|| invalid("ask_user needs a `question`: the one thing you want decided."))?;
     let options = params
         .get("options")
         .and_then(Value::as_array)
@@ -716,15 +711,25 @@ fn ask_user<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, Too
         .get("why")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let sketches = requested_sketches(params)?;
+    // Echoed back rather than chosen: a caller revising something it has already asked about sends
+    // the identifier it was given, and anything else starts a new question under a fresh one.
+    let question_id = params
+        .get("questionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map_or_else(crate::ask::new_question_id, str::to_owned);
 
-    match crate::ask::ask_question(app, question, options, why) {
-        crate::ask::Answer::Given(answer) => Ok(json!({ "answer": answer, "skipped": false })),
-        crate::ask::Answer::Skipped => Ok(json!({
-            "answer": "",
-            "skipped": true,
-            "note": "The user read the question and chose not to decide it. Carry on and make the \
-                     call yourself; do not ask again."
-        })),
+    // Resolved before anything is shown, so the user judges a layout with the game's own artwork in
+    // it rather than with the window's default typeface.
+    let (sketches, unresolved) = resolve_sketch_assets(app, sketches);
+
+    match crate::ask::ask_question(app, &question_id, question, options, sketches.clone(), why) {
+        crate::ask::Answer::Answered(reply) => {
+            keep_sketch(app, &question_id, &sketches, &reply);
+            Ok(reply_answer(&question_id, &sketches, &reply, unresolved))
+        }
         crate::ask::Answer::TimedOut => Err(ToolFailure::new(
             "question_timeout",
             "Nobody answered the question in time. Decide it yourself and say which way you went.",
@@ -738,6 +743,250 @@ fn ask_user<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, Too
             "There is no window open to ask the user anything.",
         )),
     }
+}
+
+/// Puts the project's own artwork into every sketch, and says what it could not find.
+///
+/// No workspace open is not a reason to refuse the question: one that names no asset is unaffected,
+/// and one that does says so in its own answer.
+fn resolve_sketch_assets<R: Runtime>(
+    app: &AppHandle<R>,
+    sketches: Vec<crate::ask::Sketch>,
+) -> (Vec<crate::ask::Sketch>, Vec<String>) {
+    let Ok(workspace) = crate::active_workspace(app) else {
+        return (sketches, Vec::new());
+    };
+    let mut refused = Vec::new();
+    let resolved = sketches
+        .into_iter()
+        .map(|sketch| {
+            let (html, missing) = inline_project_assets(&workspace, &sketch.html);
+            refused.extend(missing);
+            crate::ask::Sketch { html, ..sketch }
+        })
+        .collect();
+    (resolved, refused)
+}
+
+/// The reply as the worker reads it.
+///
+/// The prose is written in `scripts/ai-ask.mjs`, next to the description that told the model what to
+/// send, so the two are edited together.
+fn reply_answer(
+    question_id: &str,
+    sketches: &[crate::ask::Sketch],
+    reply: &crate::ask::Reply,
+    unresolved: Vec<String>,
+) -> Value {
+    let picked = reply
+        .picked
+        .filter(|index| *index < sketches.len())
+        .map(|index| json!({"index": index, "label": sketches[index].label}));
+    json!({
+        "questionId": question_id,
+        "skipped": reply.skipped,
+        "answer": reply.text,
+        "picked": picked,
+        "sketches": sketches.len(),
+        "blocked": reply.blocked,
+        "unresolved": unresolved,
+    })
+}
+
+/// Keeps the revision the user reacted to, so what was agreed outlives the turn that agreed it.
+///
+/// Best effort, and silent. The caller is a tool call somebody is waiting on: a project with no
+/// storage open, or a full disk, must cost an artefact rather than the answer itself.
+fn keep_sketch<R: Runtime>(
+    app: &AppHandle<R>,
+    question_id: &str,
+    sketches: &[crate::ask::Sketch],
+    reply: &crate::ask::Reply,
+) {
+    if reply.skipped || sketches.is_empty() {
+        return;
+    }
+    let chosen = reply
+        .picked
+        .and_then(|index| sketches.get(index))
+        .or_else(|| sketches.first());
+    let Some(sketch) = chosen else { return };
+    if let Ok(storage) = crate::workspace::project_storage(app) {
+        let _ = storage.sketches().keep(question_id, &sketch.html);
+    }
+}
+
+/// The most variants one showing may hold.
+///
+/// Three, because the point of more than one is that the user can tell them apart at a glance, and
+/// the fourth is where that stops being true. A model with four layouts has not narrowed anything
+/// down, and the way to narrow it down is to ask about them in words first.
+const MAX_SKETCHES: usize = 3;
+
+/// The most markup one sketch may hold.
+///
+/// A ceiling on what the *model* spends, not on what the renderer can draw. Every revision is written
+/// out in full, so a model that answers a layout question with a stylesheet pays for it on every
+/// round of an iteration — and three variants at this size still sit inside the tool-text ceiling in
+/// `scripts/ai-host.mjs`.
+const MAX_SKETCH_CHARS: usize = 8_000;
+
+fn invalid(message: impl Into<String>) -> ToolFailure {
+    ToolFailure::new("invalid_params", message)
+}
+
+/// Reads the sketches out of the call, refusing every shape the renderer could not draw.
+///
+/// Absent and empty both mean a question in words, which is what most questions are. Only a
+/// `sketches` that is present and misshapen is a mistake worth naming.
+fn requested_sketches(params: &Value) -> Result<Vec<crate::ask::Sketch>, ToolFailure> {
+    let Some(given) = params.get("sketches").filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let entries = given.as_array().ok_or_else(|| {
+        invalid("`sketches` is a list of {label, html}. Leave it out entirely to ask in words.")
+    })?;
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    if entries.len() > MAX_SKETCHES {
+        return Err(invalid(format!(
+            "ask_user was given {} sketches and shows at most {MAX_SKETCHES}. More than three \
+             cannot be told apart at a glance, so narrow them down in words first.",
+            entries.len()
+        )));
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let text = |name: &str| {
+                entry
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            };
+            let label = text("label").ok_or_else(|| {
+                invalid(format!(
+                    "Sketch {} has no `label`. Name what makes it different in two or three words \
+                     — \"Bar across the top\", not \"Option A\".",
+                    index + 1
+                ))
+            })?;
+            let html = text("html")
+                .ok_or_else(|| invalid(format!("Sketch {} has no `html` to show.", index + 1)))?;
+            if html.chars().count() > MAX_SKETCH_CHARS {
+                return Err(invalid(format!(
+                    "Sketch {} holds {} characters and the ceiling is {MAX_SKETCH_CHARS}. Cut the \
+                     styling rather than the structure: the layout is what is being looked at.",
+                    index + 1,
+                    html.chars().count()
+                )));
+            }
+            Ok(crate::ask::Sketch {
+                label: label.to_owned(),
+                html: html.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The most one inlined asset may weigh, before encoding.
+///
+/// A sketch travels as a string through a window event, so a background plate at full resolution
+/// would be megabytes of base64 in a message the renderer parses on the main thread. Anything larger
+/// is reported to the model as unusable rather than quietly making the dialog slow.
+const MAX_ASSET_BYTES: u64 = 512 * 1024;
+
+/// What a `res://` path is served as, by its extension.
+///
+/// A short list on purpose: these are the things a layout is made of. Anything else has no business
+/// being fetched by a sketch, and saying so by name is more useful than guessing a type.
+fn asset_mime(path: &str) -> Option<&'static str> {
+    let extension = path.rsplit('.').next()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        _ => return None,
+    })
+}
+
+/// Where one `res://` reference ends: at the quote, bracket or space that closes it.
+fn reference_end(rest: &str) -> usize {
+    rest.find(|character: char| {
+        character.is_whitespace() || matches!(character, '"' | '\'' | ')' | '>' | ',' | ';')
+    })
+    .unwrap_or(rest.len())
+}
+
+/// Replaces every `res://` reference in a sketch with the bytes it names.
+///
+/// The reason this exists at all: the frame runs under a policy that refuses everything remote, and
+/// a local file is not reachable from it either. So a sketch of a pause menu was drawn in the
+/// window's own typeface rather than the game's — which is the one thing the user was being asked to
+/// judge. The model cannot fix that itself; `read` hands it text, and a font is not text.
+///
+/// Confined by `files::Workspace`, which resolves against the task's worktree and refuses anything
+/// outside it. `res://` is Godot's own spelling for exactly that root, so the model writes the path
+/// it already uses everywhere else and gets the file.
+///
+/// Returns the rewritten markup and every reference it could not honour, worded for the model.
+fn inline_project_assets(workspace: &crate::files::Workspace, html: &str) -> (String, Vec<String>) {
+    const PREFIX: &str = "res://";
+    let mut out = String::with_capacity(html.len());
+    let mut refused = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find(PREFIX) {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + PREFIX.len()..];
+        let end = reference_end(tail);
+        let relative = &tail[..end];
+        rest = &tail[end..];
+        match asset_data_uri(workspace, relative) {
+            Ok(uri) => out.push_str(&uri),
+            Err(reason) => {
+                // The reference is left as it was written. Removed, the markup would silently lose
+                // an attribute; left alone, the model can see in its own sketch what did not resolve.
+                out.push_str(PREFIX);
+                out.push_str(relative);
+                refused.push(format!("res://{relative} ({reason})"));
+            }
+        }
+    }
+    out.push_str(rest);
+    (out, refused)
+}
+
+/// One asset as a `data:` URI, or why it is not one.
+fn asset_data_uri(workspace: &crate::files::Workspace, relative: &str) -> Result<String, String> {
+    let Some(mime) = asset_mime(relative) else {
+        return Err("not a picture or a font".to_owned());
+    };
+    let path = workspace
+        .resolve(relative)
+        .map_err(|_| "outside the project".to_owned())?;
+    let size = std::fs::metadata(&path)
+        .map_err(|_| "no such file".to_owned())?
+        .len();
+    if size > MAX_ASSET_BYTES {
+        return Err(format!(
+            "{size} bytes, over the {MAX_ASSET_BYTES} a sketch may carry"
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|_| "could not be read".to_owned())?;
+    use base64::Engine;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 /// Marks a tool request as a reachability probe rather than an operation.
@@ -772,6 +1021,9 @@ fn probe(domain: &str) -> Result<Value, ToolFailure> {
         // turn refused at the start because the user had the window minimised would be refusing
         // work over a state that no longer holds by the time the tool is called. Asking with no
         // window is refused at the call, by name, which is where the answer is still true.
+        // Answered together, and without looking for a window, for the reason above: whether a
+        // window is open is a thing that changes during a turn, and the call is where the answer is
+        // still true.
         ASK_USER_TOOL => Ok(json!({"tool": domain, "reachable": true})),
         other => Err(ToolFailure::new(
             "unprobed_tool",
@@ -2503,6 +2755,162 @@ mod tests {
         // proves the probe was taken before the parameters were read.
         let answer = ask_user(app.handle(), &json!({"probe": true})).expect("a probe is answered");
         assert_eq!(answer["tool"], serde_json::json!(ASK_USER_TOOL));
+    }
+
+    /// A showing with nothing in it, or too much, is refused before a window is looked for.
+    ///
+    /// Every one of these is a shape the renderer could not draw, and naming which one it was is the
+    /// difference between the model fixing the call and the model trying the same call again.
+    #[test]
+    fn a_sketch_the_window_could_not_draw_is_refused_by_name() {
+        let app = unattended_app();
+        let sketch = |html: &str| json!({"label": "Bar across the top", "html": html});
+        for params in [
+            json!({"question": "   ", "sketches": [sketch("<p>a</p>")]}),
+            json!({"question": "which?", "sketches": {"label": "x"}}),
+            json!({"question": "which?", "sketches": [
+                sketch("<p>a</p>"),
+                sketch("<p>b</p>"),
+                sketch("<p>c</p>"),
+                sketch("<p>d</p>"),
+            ]}),
+            json!({"question": "which?", "sketches": [{"html": "<p>a</p>"}]}),
+            json!({"question": "which?", "sketches": [{"label": "Bar"}]}),
+            json!({"question": "which?", "sketches": [sketch(&"x".repeat(MAX_SKETCH_CHARS + 1))]}),
+        ] {
+            let failure =
+                ask_user(app.handle(), &params).expect_err("an undrawable sketch is refused");
+            assert_eq!(failure.code, "invalid_params", "for {params}");
+        }
+    }
+
+    /// A question with no sketches is the ordinary case, and must not be refused for having none.
+    #[test]
+    fn a_question_in_words_needs_no_sketches() {
+        let app = unattended_app();
+        for params in [
+            json!({"question": "Where does the menu live?"}),
+            json!({"question": "Where does the menu live?", "sketches": []}),
+            json!({"question": "Where does the menu live?", "sketches": null}),
+        ] {
+            // No window, so it gets that far and no further — which is proof it was not refused for
+            // its parameters on the way.
+            let failure = ask_user(app.handle(), &params).expect_err("no window to ask in");
+            assert_eq!(failure.code, "question_unavailable", "for {params}");
+        }
+    }
+
+    /// The reply the worker reads names the sketch, not just its number.
+    ///
+    /// A number alone is a number against a list the model wrote several messages ago. The label is
+    /// what it called the thing, which is what it can act on without counting back.
+    #[test]
+    fn a_pick_is_reported_by_the_name_the_asker_gave_it() {
+        let sketches = vec![
+            crate::ask::Sketch {
+                label: "Bar across the top".to_owned(),
+                html: "<p>a</p>".to_owned(),
+            },
+            crate::ask::Sketch {
+                label: "Side rail".to_owned(),
+                html: "<p>b</p>".to_owned(),
+            },
+        ];
+        let answer = reply_answer(
+            "question-1",
+            &sketches,
+            &crate::ask::Reply {
+                picked: Some(1),
+                text: "tighter".to_owned(),
+                ..crate::ask::Reply::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(answer["picked"]["label"], json!("Side rail"));
+        assert_eq!(answer["picked"]["index"], json!(1));
+        assert_eq!(answer["answer"], json!("tighter"));
+
+        // A pick pointing past the end of the list is dropped rather than panicking or naming the
+        // wrong sketch: the reaction crosses a process boundary and nothing on the way is typed.
+        let stray = reply_answer(
+            "question-1",
+            &sketches,
+            &crate::ask::Reply {
+                picked: Some(7),
+                ..crate::ask::Reply::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(stray["picked"], Value::Null);
+    }
+
+    /**
+     * A sketch is drawn with the game's own artwork, not the window's default typeface.
+     *
+     * The frame refuses everything remote and cannot reach a local file either, so before this the
+     * one thing the user was asked to judge — how it looks in their game — was the one thing the
+     * sketch could not show. The model cannot fix that itself: `read` hands it text, and a font is
+     * not text.
+     */
+    #[test]
+    fn a_project_asset_named_the_way_godot_names_it_goes_into_the_sketch() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        std::fs::create_dir_all(directory.path().join("ui")).expect("make ui");
+        std::fs::write(directory.path().join("ui/hero.png"), b"\x89PNG").expect("write asset");
+        let workspace = crate::files::Workspace::open(directory.path()).expect("open workspace");
+
+        let (html, refused) =
+            inline_project_assets(&workspace, r#"<img src="res://ui/hero.png"><i>x</i>"#);
+
+        assert!(html.contains("data:image/png;base64,"));
+        assert!(
+            html.contains("<i>x</i>"),
+            "the rest of the markup is untouched"
+        );
+        assert!(refused.is_empty());
+    }
+
+    /**
+     * Everything a reference can be wrong about is named, and the reference is left where it was.
+     *
+     * Removed, the markup would silently lose an attribute and the model would be looking for a bug
+     * in its own layout. Left alone, the sketch shows it what did not resolve.
+     */
+    #[test]
+    fn an_asset_that_cannot_go_in_is_reported_rather_than_dropped() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        std::fs::write(directory.path().join("big.png"), vec![0u8; 600 * 1024])
+            .expect("write asset");
+        std::fs::write(directory.path().join("notes.txt"), b"x").expect("write text");
+        let workspace = crate::files::Workspace::open(directory.path()).expect("open workspace");
+
+        let (html, refused) = inline_project_assets(
+            &workspace,
+            "res://big.png res://notes.txt res://gone.png res://../escape.png",
+        );
+
+        assert_eq!(refused.len(), 4, "{refused:?}");
+        assert!(refused[0].contains("over the"));
+        assert!(refused[1].contains("not a picture or a font"));
+        assert!(refused[2].contains("no such file"));
+        assert!(refused[3].contains("outside the project"));
+        assert!(
+            html.contains("res://big.png"),
+            "the reference stays where it was"
+        );
+    }
+
+    /// Markup naming nothing is handed back exactly as it arrived.
+    #[test]
+    fn a_sketch_with_no_assets_in_it_is_left_alone() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let workspace = crate::files::Workspace::open(directory.path()).expect("open workspace");
+        let markup = "<div class=\"p\"><h1>Paused</h1></div>";
+
+        let (html, refused) = inline_project_assets(&workspace, markup);
+
+        assert_eq!(html, markup);
+        assert!(refused.is_empty());
     }
 
     /// Every tool the worker declares has to be able to say whether it can answer, and a tool

@@ -31,6 +31,13 @@ function godotTarget(args) {
         :   distinct.join(', ')
 }
 
+/** One line of whatever was written, because a row is one line and does not un-wrap. */
+function flatten(value) {
+    return String(value ?? '')
+        .replace(/\s+/gu, ' ')
+        .trim()
+}
+
 export function toolTarget(name, args) {
     const given = args ?? {}
     if (name === 'bash') return given.command
@@ -39,12 +46,19 @@ export function toolTarget(name, args) {
     // The URL rather than the question: a row is read to see where the agent went, and two fetches
     // of different pages must not look like the same row.
     if (name === 'web_fetch') return given.url
-    // Flattened, because a delegated question is written as a paragraph and the row it lands in is
-    // one line. The row already ellipsises; it does not un-wrap.
-    if (name === 'subagent')
-        return String(given.prompt ?? '')
-            .replace(/\s+/gu, ' ')
-            .trim()
+    // A question carrying sketches is named by them: two revisions of one layout must not read as
+    // the same row, and neither must two different layouts. Everything else is flattened, because a
+    // question written as a paragraph lands in a row that is one line.
+    if (name === 'ask_user') {
+        const labels =
+            Array.isArray(given.sketches) ?
+                given.sketches.map(sketch => sketch?.label).filter(Boolean)
+            :   []
+        if (labels.length > 0) return labels.join(' / ')
+        return flatten(given.question)
+    }
+    if (name === 'design_with_user') return flatten(given.brief)
+    if (name === 'subagent') return flatten(given.prompt)
     return given.path
 }
 

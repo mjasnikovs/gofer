@@ -279,7 +279,7 @@ impl AiTurn {
         // And so do questions, for the same reason and on the same schedule. Two gates rather than
         // one because they are two registries — an approval and a question are different answers —
         // but there is no run in which one of them should be open and the other shut.
-        crate::ask::open_questions();
+        crate::ask::open_user_prompts();
         *AI_STREAM
             .lock()
             .map_err(|_| CommandError::new("lock_poisoned", "The AI stream lock is poisoned"))? =
@@ -315,7 +315,7 @@ impl AiTurn {
     /// the one place the *order* matters rather than the fact.
     fn close_gate_before_draining(&self) {
         crate::approvals::cancel_all();
-        crate::ask::cancel_questions();
+        crate::ask::cancel_user_prompts();
     }
 
     /// Marks this turn cancelled, for the tests that drive the worker's cancelled exit directly.
@@ -330,7 +330,7 @@ impl Drop for AiTurn {
         // First, because it is the one that was being missed: no gated call may outlive the agent
         // that asked for it, whichever way the turn ended.
         crate::approvals::cancel_all();
-        crate::ask::cancel_questions();
+        crate::ask::cancel_user_prompts();
         ACTIVE_AI_REQUEST_ID.store(0, Ordering::Release);
         AI_REQUEST_CANCELLED.store(false, Ordering::Release);
         if let Ok(mut active) = AI_CHILD.lock() {
@@ -612,7 +612,7 @@ pub(crate) fn cancel_ai_request_with(request_id: u64) -> Result<bool, String> {
     // A tool call waiting for the user belongs to the turn being cancelled: left waiting, it would
     // hold a tool worker open long after the agent that asked for it is gone.
     crate::approvals::cancel_all();
-    crate::ask::cancel_questions();
+    crate::ask::cancel_user_prompts();
     // So does one waiting on the editor. Killing the worker below ends the conversation, but the
     // calls already dispatched into Rust wait on their own timeouts — minutes, for an addon request
     // that names one — and the turn is not over until they return.

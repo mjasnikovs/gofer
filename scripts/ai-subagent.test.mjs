@@ -674,7 +674,11 @@ test('every tool a child may hold is named, not just the two that were', () => {
         read: {path: 'a.gd'},
         bash: {command: 'ls'},
         godot_docs_search: {ops: [{op: 'ask'}]},
-        web_search: {query: 'godot 4 signals'}
+        web_search: {query: 'godot 4 signals'},
+        ask_user: {
+            question: 'which menu?',
+            sketches: [{label: 'Bar across the top', html: '<p>'}]
+        }
     }
     for (const name of CHILD_TOOL_NAMES) {
         const line = toolStepLine(name, ARGS[name])
@@ -1012,6 +1016,7 @@ test('every bound comes from the settings, not from this file', async context =>
     assert.deepEqual(Object.keys(SUBAGENT_SETTINGS_DEFAULTS).sort(), [
         'commandTimeoutMinutes',
         'maxAnswerChars',
+        'maxShows',
         'maxTurns',
         'retryAttempts',
         'retryBaseDelaySeconds',

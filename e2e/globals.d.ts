@@ -78,5 +78,7 @@ interface Window {
     __TAURI_INTERNALS__?: TauriInternals
     /** Raises the approval prompt a fixture cannot provoke through an ordinary command. */
     __GOFER_TEST_APPROVE__?: () => void
+    /** Raises one question with `sketches` sketches on it, for the visual suite. */
+    __GOFER_TEST_ASK__?: (sketches: number) => void
     __GOFER_TEST_DESKTOP__?: FixtureDesktop
 }

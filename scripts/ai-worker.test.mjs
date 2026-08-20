@@ -6,6 +6,7 @@ import {join} from 'node:path'
 import {spawn, spawnSync} from 'node:child_process'
 import {createInterface} from 'node:readline'
 import test from 'node:test'
+import {canSeePictures} from './ai-provider.mjs'
 import {pathToFileURL} from 'node:url'
 import {
     EVENT_PREFIX,
@@ -13,7 +14,8 @@ import {
     createGodotTools,
     createToolHost,
     normalizeToolCalls,
-    toolResult
+    toolResult,
+    withoutPictures
 } from './ai-host.mjs'
 import Ajv from 'ajv'
 
@@ -2645,3 +2647,35 @@ test(
         assert.match(session.stderr(), /The request was rejected/u)
     }
 )
+
+/**
+ * A picture a text-only model cannot see costs it a sentence, not the whole request.
+ *
+ * `read` hands back a real image part for a PNG, and llama.cpp refuses the request rather than the
+ * part it cannot use: one live turn died on `failed to process mtmd chunk` after the agent read a
+ * tileset to match the game's art. Which is exactly what an agent asked about a layout will do.
+ */
+test('a tool answering with an image is stripped for a model that cannot see', async () => {
+    const png = {
+        content: [
+            {type: 'text', text: 'Read image file [image/png]'},
+            {type: 'image', data: 'iVBOR', mimeType: 'image/png'}
+        ]
+    }
+    const tool = {name: 'read', execute: () => Promise.resolve(png)}
+
+    const blind = await withoutPictures(tool).execute('id', {})
+    assert.equal(blind.content.length, 2)
+    assert.equal(blind.content[1].type, 'text')
+    assert.match(blind.content[1].text, /you cannot see/u)
+
+    // A model that was declared as taking images keeps them, and a result with none is untouched.
+    assert.equal(canSeePictures({input: ['text', 'image']}), true)
+    assert.equal(canSeePictures({input: ['text']}), false)
+    assert.equal(canSeePictures(undefined), false)
+    const plain = {content: [{type: 'text', text: 'hello'}]}
+    assert.equal(
+        await withoutPictures({name: 'read', execute: () => plain}).execute('id', {}),
+        plain
+    )
+})

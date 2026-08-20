@@ -44,7 +44,9 @@ const ask = () => {
         questionId: 'q-1',
         question: 'Where does the menu live?',
         options: ['its own scene'],
-        why: ''
+        sketches: [],
+        why: '',
+        revision: 1
     })
 }
 
@@ -64,11 +66,11 @@ describe('the questions the agent is waiting on', () => {
         ask()
 
         act(() => {
-            view.result.current.answer('q-1', 'its own scene')
+            view.result.current.answer({questionId: 'q-1', answer: 'its own scene'})
         })
 
         expect(tauri.invoke).toHaveBeenCalledWith('respond_user_question', {
-            request: {questionId: 'q-1', answer: 'its own scene', skipped: false}
+            request: {questionId: 'q-1', answer: 'its own scene'}
         })
         // Dropped at once: the agent resumes the moment the backend has the answer, and the card
         // must not outlive that.
@@ -86,7 +88,7 @@ describe('the questions the agent is waiting on', () => {
         ask()
 
         act(() => {
-            view.result.current.answer('q-1', null)
+            view.result.current.answer({questionId: 'q-1', skipped: true})
         })
 
         expect(tauri.invoke).toHaveBeenCalledWith('respond_user_question', {
@@ -101,7 +103,7 @@ describe('the questions the agent is waiting on', () => {
         ask()
 
         act(() => {
-            view.result.current.answer('q-1', 'anything')
+            view.result.current.answer({questionId: 'q-1', answer: 'anything'})
         })
         await flush()
 

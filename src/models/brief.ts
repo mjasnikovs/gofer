@@ -1,3 +1,4 @@
+import type {Sketch} from './sketch'
 /**
  * A planned task's brief: the four phases it runs before the first chat turn, and what each produced.
  *
@@ -158,7 +159,34 @@ export type UserQuestionPrompt = Readonly<{
     questionId: string
     question: string
     options: readonly string[]
+    /**
+     * The layouts this question is about, or nothing, which is most questions.
+     *
+     * A question about where something sits cannot be asked in a sentence: the user would have to
+     * build the layout in their head before they could correct it. So the question carries pictures
+     * when it needs to, and the card grows a second half when it does.
+     */
+    sketches: readonly Sketch[]
     why: string
+    /** Which asking of this question it is, counting from one. */
+    revision: number
+}>
+
+/**
+ * What the window sends back.
+ *
+ * Everything is optional because every combination is a real answer: a sentence, a pick with no
+ * words, or both. Only `skipped` says the user read it and declined to decide.
+ *
+ * `blocked` is not an answer — it is what the policy refused while a sketch was on screen. It rides
+ * along because the frame has no console the agent can read.
+ */
+export type UserQuestionResponse = Readonly<{
+    questionId: string
+    answer?: string
+    picked?: number
+    blocked?: readonly string[]
+    skipped?: boolean
 }>
 
 /** Emitted when a question stops waiting, however it stopped. */

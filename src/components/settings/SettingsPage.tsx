@@ -56,6 +56,7 @@ import {
     progressLabel,
     progressValue,
     retriesLabel,
+    showsLabel,
     secondsLabel,
     selectAiDriver,
     stepsLabel
@@ -973,6 +974,22 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 description='A longer answer is cut. What the sub-agent read is meant to stay with it, so an answer near this size means the question was too broad.'
                                 onChange={(maxAnswerChars: number) => {
                                     updateSubagent({maxAnswerChars})
+                                }}
+                            />
+                            <Slider
+                                label='Times it may interrupt you'
+                                value={draft.ai.subagent.maxShows}
+                                {...SUBAGENT_RANGES.maxShows}
+                                valueDisplay='text'
+                                formatValue={showsLabel}
+                                marks={[
+                                    {value: 0, label: 'Off'},
+                                    {value: 6, label: '6'},
+                                    {value: 12, label: '12'}
+                                ]}
+                                description='How often one sub-agent may stop you to show you a layout and wait. The only ceiling here measured in your attention rather than the machine, and the only one nothing else can see being spent.'
+                                onChange={(maxShows: number) => {
+                                    updateSubagent({maxShows})
                                 }}
                             />
                             <Slider

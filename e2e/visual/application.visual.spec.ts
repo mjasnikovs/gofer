@@ -49,6 +49,35 @@ async function installDesktop(page: Page, state: VisualState) {
         const emit = (event: string, payload: unknown) => {
             for (const handler of listeners.get(event) ?? []) handler({event, payload})
         }
+        /**
+         * Puts one question with sketches on screen.
+         *
+         * The dialog is the hardest screen in this application to look at any other way: it only
+         * appears while a real model is holding a real turn open, and every layout defect it has
+         * shipped — a column sized by its own 1280-wide sketch, a badge pushing one column three
+         * pixels down, a button below the fold — was invisible to jsdom and obvious here.
+         */
+        window.__GOFER_TEST_ASK__ = (sketches: number) => {
+            const sketch = (accent: string, name: string) =>
+                `<style>body{margin:0;width:1280px;height:720px;background:#0d1020;`
+                + `font-family:monospace;color:#dbe4ff}`
+                + `.p{position:absolute;top:180px;left:${name === 'Side Panel' ? '900px' : '440px'};`
+                + `width:380px;padding:24px;border:2px solid ${accent};background:#141a35}`
+                + `h1{color:${accent};font-size:34px;letter-spacing:6px;margin:0 0 20px}`
+                + `b{display:block;padding:12px;margin:8px 0;border:1px solid ${accent}}</style>`
+                + `<div class="p"><h1>PAUSED</h1><b>RESUME</b><b>OPTIONS</b><b>QUIT</b></div>`
+            emit('ai-question-request', {
+                questionId: 'question-1',
+                question: 'Which pause menu layout do you prefer?',
+                why: 'It decides the scene tree I build.',
+                revision: 1,
+                options: sketches === 0 ? ['Its own scene', 'Inside the HUD'] : ([] as string[]),
+                sketches: [
+                    {label: 'Centered Overlay', html: sketch('#4f8cff', 'Centered Overlay')},
+                    {label: 'Side Panel', html: sketch('#ff4f7d', 'Side Panel')}
+                ].slice(0, sketches)
+            })
+        }
         window.__GOFER_TEST_APPROVE__ = () => {
             emit('ai-approval-request', {
                 approvalId: 'approval-1',
@@ -388,12 +417,16 @@ const MONACO_DIFF_HOST = '[data-testid="script-diff-host"]'
  * host answers the first; the contrast rule has to come off for the second, and the same tokens are
  * measured on every other screen here.
  */
-async function stableScreenshot(page: Page, name: string, hasDiff = false) {
+async function stableScreenshot(page: Page, name: string, hasDiff = false, hasSketch = false) {
     await page.addStyleTag({
         content:
             '*, *::before, *::after { animation: none !important; transition: none !important; }'
     })
     const builder = new AxeBuilder({page}).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
+    // A sketch is a sandboxed frame with no `allow-scripts`, so nothing can be injected into it to
+    // be scanned — axe waits for a frame that will never answer. What is inside is the agent's
+    // markup rather than this application's, and it is not ours to hold to WCAG.
+    if (hasSketch) builder.exclude('iframe')
     const accessibility = await (
         hasDiff ?
             builder.exclude(MONACO_DIFF_HOST).disableRules(['color-contrast'])
@@ -644,6 +677,86 @@ test('inspector workspace', async ({page}) => {
  * connection form and nothing else — and each tab carries its own footer, which is the part most
  * likely to regress.
  */
+/**
+ * A question the agent asks with pictures, which is the screen this application is worst at.
+ *
+ * Two sketches side by side is the case every defect has been in: the columns have to be the same
+ * size and start at the same height, each sketch has to be scaled rather than cut off by the column
+ * edge, and the control that answers the question has to be on screen.
+ */
+test('question with two sketches', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2))
+    await expect(page.getByRole('button', {name: 'Choose Centered Overlay'})).toBeVisible()
+    // Side by side means side by side. A label allowed to wrap, or a badge on one column only, put
+    // the two sketches out of line — twice — and a screenshot alone never said by how much.
+    const frames = await page.evaluate(() =>
+        [...document.querySelectorAll('dialog[open] iframe')].map(frame => {
+            const rect = frame.getBoundingClientRect()
+            return {top: rect.top, width: rect.width, height: rect.height}
+        })
+    )
+    expect(frames).toHaveLength(2)
+    expect(Math.abs((frames[0]?.top ?? 0) - (frames[1]?.top ?? 0))).toBeLessThanOrEqual(1)
+    expect(Math.abs((frames[0]?.width ?? 0) - (frames[1]?.width ?? 1))).toBeLessThanOrEqual(1)
+    expect(Math.abs((frames[0]?.height ?? 0) - (frames[1]?.height ?? 1))).toBeLessThanOrEqual(1)
+    await stableScreenshot(page, 'question-two-sketches.png', false, true)
+})
+
+test('question with one sketch', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(1))
+    await expect(page.getByRole('button', {name: 'Choose Centered Overlay'})).toBeVisible()
+    await stableScreenshot(page, 'question-one-sketch.png', false, true)
+})
+
+/**
+ * The same question with no pictures, which is what most questions are.
+ *
+ * Here so that the small card cannot be broken by work on the large one — the two share a component
+ * and every change to the sketch half has run through this code.
+ */
+test('question in words', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(0))
+    await expect(page.getByRole('textbox', {name: /Your answer/u})).toBeVisible()
+    await stableScreenshot(page, 'question-in-words.png')
+})
+
+/**
+ * A sketch that has been chosen.
+ *
+ * Its own screenshot because the state had none, and what shipped was the chosen button *disabled* —
+ * the answer the user had just given, drawn as the one thing they were not allowed to pick.
+ */
+test('a sketch chosen', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2))
+    await page.getByRole('button', {name: 'Choose Side Panel'}).click()
+    await expect(page.getByRole('button', {name: 'Choose Side Panel'})).toBeEnabled()
+    await expect(page.getByRole('button', {name: 'Answer'})).toBeEnabled()
+    await stableScreenshot(page, 'question-chosen.png', false, true)
+})
+
+/** The zoom: one sketch as large as the window allows, and one way out. */
+test('a sketch zoomed', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2))
+    await page.getByRole('button', {name: 'Open Side Panel'}).click()
+    await expect(page.getByRole('button', {name: 'Close'})).toBeVisible()
+    await stableScreenshot(page, 'question-zoomed.png', false, true)
+})
+
 test('settings dialog', async ({page}) => {
     await installDesktop(page, 'settings')
     await page.goto('/#/settings')

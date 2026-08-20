@@ -19,10 +19,11 @@ import {createModels, createProvider, isRetryableAssistantError} from '@earendil
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
-import {createGodotTools} from './ai-host.mjs'
+import {createGodotTools, withoutPictures} from './ai-host.mjs'
 import {createCredentialStore} from './ai-credentials.mjs'
 import {probeTools} from './ai-reachability.mjs'
 import {createAskUserTool} from './ai-ask.mjs'
+import {createDesignWithUserTool} from './ai-design.mjs'
 import {createSubagentTool} from './ai-subagent.mjs'
 import {createWebFetchTool} from './ai-fetch.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
@@ -346,7 +347,7 @@ function bindTool(tool, context) {
  * cannot give it. It is passed in rather than built here because it needs the provider, and the
  * provider is not made until a turn starts.
  */
-export function createAgentTools(workspacePath, domains, host, extra = []) {
+export function createAgentTools(workspacePath, domains, host, extra = [], model) {
     const env = new NodeExecutionEnv({cwd: workspacePath})
     const context = {env}
     const confined = [
@@ -357,10 +358,13 @@ export function createAgentTools(workspacePath, domains, host, extra = []) {
     ]
         .map(tool => confineTool(tool, workspacePath))
         .map(tool => bindTool(tool, context))
-    return {
-        env,
-        tools: [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra]
-    }
+    const tools = [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra]
+    return {env, tools: tools.map(tool => (canSeePictures(model) ? tool : withoutPictures(tool)))}
+}
+
+/** Whether this model was declared as taking images. Absent means text, which is the safe answer. */
+export function canSeePictures(model) {
+    return Array.isArray(model?.input) && model.input.includes('image')
 }
 
 /** The words of a stored user message, whose content is a string until an image makes it a list. */
@@ -520,38 +524,63 @@ export async function runAgent({
         sessionId,
         signal
     })
-    const {env, tools} = createAgentTools(workspacePath, domains, host, [
-        createSubagentTool({
-            workspacePath,
-            models,
-            model: subagent.model,
-            thinkingLevel: subagent.thinkingLevel,
-            streamOptions,
-            settings: settings.subagent
-        }),
-        createWebSearchTool({
-            provider: settings.web?.searchProvider ?? 'exa',
-            apiKey: braveApiKey
-        }),
-        // The page reader borrows the sub-agent's model and its ceilings. Reading one page is the
-        // same size of job as answering one question about the checkout, and a second set of
-        // sliders for it would be a second thing to keep in step with the first.
-        createWebFetchTool({
-            workspacePath,
-            models,
-            model: subagent.model,
-            thinkingLevel: subagent.thinkingLevel,
-            streamOptions,
-            settings: settings.subagent
-        }),
-        // Answered in Rust, where the window is. Built here because this is where the turn's tools
-        // are built, not because a model is involved — nothing about a question needs one.
-        //
-        // Offered only when there is a backend to answer it, the same rule the domain tools follow:
-        // a question with no channel behind it cannot be asked, and a tool that cannot answer would
-        // stop the turn at the probe rather than never being offered.
-        ...(host ? [createAskUserTool({host})] : [])
-    ])
+    const {env, tools} = createAgentTools(
+        workspacePath,
+        domains,
+        host,
+        [
+            createSubagentTool({
+                workspacePath,
+                models,
+                model: subagent.model,
+                thinkingLevel: subagent.thinkingLevel,
+                streamOptions,
+                settings: settings.subagent
+            }),
+            createWebSearchTool({
+                provider: settings.web?.searchProvider ?? 'exa',
+                apiKey: braveApiKey
+            }),
+            // The page reader borrows the sub-agent's model and its ceilings. Reading one page is the
+            // same size of job as answering one question about the checkout, and a second set of
+            // sliders for it would be a second thing to keep in step with the first.
+            createWebFetchTool({
+                workspacePath,
+                models,
+                model: subagent.model,
+                thinkingLevel: subagent.thinkingLevel,
+                streamOptions,
+                settings: settings.subagent
+            }),
+            // Answered in Rust, where the window is. Built here because this is where the turn's tools
+            // are built, not because a model is involved — nothing about a question needs one.
+            //
+            // Offered only when there is a backend to answer it, the same rule the domain tools follow:
+            // a question with no channel behind it cannot be asked, and a tool that cannot answer would
+            // stop the turn at the probe rather than never being offered.
+            //
+            // `design_with_user` is here for the same reason and under the same rule: it agrees a
+            // layout with the user over several rounds inside a child, and it reaches the window
+            // through this channel or not at all.
+            ...(host ?
+                [
+                    createAskUserTool({host}),
+                    createDesignWithUserTool({
+                        workspacePath,
+                        models,
+                        model: subagent.model,
+                        thinkingLevel: subagent.thinkingLevel,
+                        streamOptions,
+                        settings: settings.subagent,
+                        host
+                    })
+                ]
+            :   [])
+        ],
+        // The parent's own model, so a tool answering with a picture it cannot see costs it a sentence
+        // rather than the whole request.
+        model
+    )
     // Before the model is told anything: a tool that cannot answer stops the turn here, where the
     // reason can be read, rather than becoming a tool the model is offered and never calls.
     try {
