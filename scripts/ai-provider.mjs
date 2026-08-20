@@ -16,6 +16,7 @@ import {
     shouldCompact
 } from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider, isRetryableAssistantError} from '@earendil-works/pi-ai'
+import {runVerifyPoints, verifyPointsIn, verifyReport} from './verify-points.mjs'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
@@ -770,6 +771,11 @@ export async function runAgent({
             :   () => agent.prompt(contextMessage(promptMessage, model))
         let recoveredOverflow = false
         let attempt = 0
+        let verifyAttempt = 0
+        // Read once, before the model runs: the specification is already on the transcript when the
+        // turn starts, and a model that writes a VERIFY block into its own answer is describing
+        // what it did rather than agreeing to be held to it.
+        const verifyPoints = verifyPointsIn(messages)
         for (;;) {
             await resume()
             // A context overflow is recovered from once, not surfaced: the error is taken back off
@@ -796,7 +802,26 @@ export async function runAgent({
                 finalMessage = undefined
                 await agent.continue()
             }
-            if (finalMessage && finalMessage.stopReason !== 'error') break
+            if (finalMessage && finalMessage.stopReason !== 'error') {
+                // The turn is over as far as the model is concerned, and this is the last moment
+                // before `done` says so out loud. Running the points here rather than after the
+                // loop is what makes them a gate: the executor is already rooted in the worktree,
+                // the composer has not been released, and the model is still there to be asked
+                // again. After `done` it is none of those things.
+                if (!verifyPoints) break
+                const report = verifyReport(
+                    await runVerifyPoints({points: verifyPoints, env, emit, signal})
+                )
+                if (report === undefined) break
+                // Told once, then let go. A model that cannot make its own checks pass on a second
+                // attempt is spending turns to write the same answer, and the red points are on the
+                // transcript either way — which is the thing that was missing.
+                if (verifyAttempt >= 1) break
+                verifyAttempt += 1
+                resume = () => agent.prompt(contextMessage({sender: 'user', text: report}, model))
+                finalMessage = undefined
+                continue
+            }
             const failure = turnFailure(finalMessage, agent)
             if (attempt >= retry.attempts || !isTransientFailure(failure, model)) {
                 throw new Error(failure.errorMessage)
