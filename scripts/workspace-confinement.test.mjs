@@ -477,3 +477,43 @@ test('leaves an edit refusal it cannot improve exactly as it arrived', async con
         miss
     )
 })
+
+/**
+ * The frozen list is enforced by the tool that would have written the file, not noticed afterwards.
+ *
+ * Prompt framing is measured insufficient for this class — `pi-task` records "FROZEN CONTRACT, MUST
+ * NOT edit" holding 0 of 5 unguarded and about 1 of 5 with framing — so it is a refusal, in the
+ * same place and shape as the rule that keeps a `.tscn` away from these tools.
+ */
+test('refuses a write to a path the task froze, and still reads it', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    await writeFile(join(current.path, 'DESIGN.md'), '# Design\n')
+    const seen = []
+    const tool = name =>
+        confineTool(
+            {
+                name,
+                execute: (id, params) => {
+                    seen.push(`${name}:${params.path}`)
+                    return Promise.resolve('ok')
+                }
+            },
+            current.path,
+            ['DESIGN.md']
+        )
+
+    await assert.rejects(
+        tool('edit').execute('1', {path: 'DESIGN.md', edits: []}),
+        /specification freezes DESIGN\.md/u
+    )
+    await assert.rejects(
+        tool('write').execute('2', {path: 'DESIGN.md', content: 'x'}),
+        /never yours to make/u
+    )
+    // Reading is how a task learns what binds it. Only writing is refused.
+    assert.equal(await tool('read').execute('3', {path: 'DESIGN.md'}), 'ok')
+    // A file the specification did not name is untouched by the rule.
+    assert.equal(await tool('write').execute('4', {path: 'inside.txt', content: 'x'}), 'ok')
+    assert.deepEqual(seen, ['read:DESIGN.md', 'write:inside.txt'])
+})

@@ -17,6 +17,7 @@ import {
 } from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider, isRetryableAssistantError} from '@earendil-works/pi-ai'
 import {runVerifyPoints, verifyPointsIn, verifyReport, verifySummary} from './verify-points.mjs'
+import {frozenPathsIn} from './frozen-paths.mjs'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
@@ -347,7 +348,7 @@ function bindTool(tool, context) {
  * cannot give it. It is passed in rather than built here because it needs the provider, and the
  * provider is not made until a turn starts.
  */
-export function createAgentTools(workspacePath, domains, host, extra = []) {
+export function createAgentTools(workspacePath, domains, host, extra = [], frozen = []) {
     const env = new NodeExecutionEnv({cwd: workspacePath})
     const context = {env}
     const confined = [
@@ -356,7 +357,7 @@ export function createAgentTools(workspacePath, domains, host, extra = []) {
         createEditTool(),
         createBashTool()
     ]
-        .map(tool => confineTool(tool, workspacePath))
+        .map(tool => confineTool(tool, workspacePath, frozen))
         .map(tool => bindTool(tool, context))
     return {
         env,
@@ -521,38 +522,46 @@ export async function runAgent({
         sessionId,
         signal
     })
-    const {env, tools} = createAgentTools(workspacePath, domains, host, [
-        createSubagentTool({
-            workspacePath,
-            models,
-            model: subagent.model,
-            thinkingLevel: subagent.thinkingLevel,
-            streamOptions,
-            settings: settings.subagent
-        }),
-        createWebSearchTool({
-            provider: settings.web?.searchProvider ?? 'exa',
-            apiKey: braveApiKey
-        }),
-        // The page reader borrows the sub-agent's model and its ceilings. Reading one page is the
-        // same size of job as answering one question about the checkout, and a second set of
-        // sliders for it would be a second thing to keep in step with the first.
-        createWebFetchTool({
-            workspacePath,
-            models,
-            model: subagent.model,
-            thinkingLevel: subagent.thinkingLevel,
-            streamOptions,
-            settings: settings.subagent
-        }),
-        // Answered in Rust, where the window is. Built here because this is where the turn's tools
-        // are built, not because a model is involved — nothing about a question needs one.
-        //
-        // Offered only when there is a backend to answer it, the same rule the domain tools follow:
-        // a question with no channel behind it cannot be asked, and a tool that cannot answer would
-        // stop the turn at the probe rather than never being offered.
-        ...(host ? [createAskUserTool({host})] : [])
-    ])
+    const {env, tools} = createAgentTools(
+        workspacePath,
+        domains,
+        host,
+        [
+            createSubagentTool({
+                workspacePath,
+                models,
+                model: subagent.model,
+                thinkingLevel: subagent.thinkingLevel,
+                streamOptions,
+                settings: settings.subagent
+            }),
+            createWebSearchTool({
+                provider: settings.web?.searchProvider ?? 'exa',
+                apiKey: braveApiKey
+            }),
+            // The page reader borrows the sub-agent's model and its ceilings. Reading one page is the
+            // same size of job as answering one question about the checkout, and a second set of
+            // sliders for it would be a second thing to keep in step with the first.
+            createWebFetchTool({
+                workspacePath,
+                models,
+                model: subagent.model,
+                thinkingLevel: subagent.thinkingLevel,
+                streamOptions,
+                settings: settings.subagent
+            }),
+            // Answered in Rust, where the window is. Built here because this is where the turn's tools
+            // are built, not because a model is involved — nothing about a question needs one.
+            //
+            // Offered only when there is a backend to answer it, the same rule the domain tools follow:
+            // a question with no channel behind it cannot be asked, and a tool that cannot answer would
+            // stop the turn at the probe rather than never being offered.
+            ...(host ? [createAskUserTool({host})] : [])
+        ],
+        // Read before the model is offered a single tool, so a frozen path is refused by the tool that
+        // would have written it rather than noticed after the commit.
+        frozenPathsIn(messages)
+    )
     // Before the model is told anything: a tool that cannot answer stops the turn here, where the
     // reason can be read, rather than becoming a tool the model is offered and never calls.
     try {

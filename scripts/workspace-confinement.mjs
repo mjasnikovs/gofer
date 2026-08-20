@@ -15,6 +15,7 @@ import {readFile, realpath} from 'node:fs/promises'
 import {basename, dirname, extname, isAbsolute, relative, resolve, sep} from 'node:path'
 
 import {nearMiss, refusedAnchorIndex} from './anchor-near-miss.mjs'
+import {refuseFrozenShellWrite, refuseFrozenWrite} from './frozen-paths.mjs'
 
 /**
  * The files the running editor owns, and the tool that edits each of them properly.
@@ -290,17 +291,19 @@ async function withTheRegionTheFileHolds(workspacePath, toolName, params, error)
     return new Error(`${message} ${region}`)
 }
 
-export function confineTool(tool, workspacePath) {
+export function confineTool(tool, workspacePath, frozen = []) {
     return {
         ...tool,
         execute: async (id, params, signal, onUpdate, context) => {
             if (tool.name === 'bash') {
                 validateBashCommand(params.command)
+                refuseFrozenShellWrite(params.command, frozen)
                 return tool.execute(id, params, signal, onUpdate, context)
             }
             const resolved = {...params, path: worktreePath(params.path)}
             await validateToolPath(workspacePath, resolved.path)
             refuseEditorOwnedWrite(tool.name, resolved.path)
+            refuseFrozenWrite(tool.name, resolved.path, frozen)
             return tool
                 .execute(id, resolved, signal, onUpdate, context)
                 .catch(async error =>
