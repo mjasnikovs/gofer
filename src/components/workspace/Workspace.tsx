@@ -18,6 +18,7 @@ import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useConversation} from '../../hooks/useConversation'
 import {useRememberedValue} from '../../hooks/useRememberedValue'
 import {useToolApprovals} from '../../hooks/useToolApprovals'
+import {useDesignSession} from '../../hooks/useDesignSession'
 import {useUserQuestions} from '../../hooks/useUserQuestions'
 import {useTaskBrief} from '../../hooks/useTaskBrief'
 import {ChatColumnContext} from '../../hooks/useChatColumn'
@@ -175,6 +176,10 @@ export function Workspace({
     // ordinary tool, so an ordinary chat turn can ask the user something too.
     const {questions, answer: answerQuestion} = useUserQuestions({onError: report})
     const isBusy = useSyncExternalStore(watchTurn, isTurnRunning, isTurnRunning)
+    // A design loop asks about one layout several times. Left as ordinary questions the card would
+    // close on every answer and reopen once the agent had redrawn, so the user would watch their own
+    // modal flicker rather than one design change. This keeps it on screen for the whole loop.
+    const design = useDesignSession({questions, isTurnRunning: isBusy})
 
     const hasConversation = messages.length > 0
     /*
@@ -625,7 +630,8 @@ export function Workspace({
                     />
                     <UserQuestionDialog
                         onAnswer={answerQuestion}
-                        {...(questions[0] && {prompt: questions[0]})}
+                        isRedrawing={design.isRedrawing}
+                        {...(design.prompt && {prompt: design.prompt})}
                     />
                     <UnsavedWorkDialog
                         scenes={unsaved}

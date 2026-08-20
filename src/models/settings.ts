@@ -11,6 +11,22 @@ export type AiSettings = Readonly<{
     maxTokens: number
     reasoning: boolean
     supportsReasoningEffort: boolean
+    /**
+     * Whether thinking is turned on by a chat-template argument rather than by an effort field.
+     *
+     * True for a llama.cpp host, which takes `chat_template_kwargs.enable_thinking` and ignores
+     * `reasoning_effort` without a word. Derived from the server, never typed.
+     */
+    chatTemplateThinking: boolean
+    /**
+     * The efforts this model's server said it will accept, or empty when nothing has said.
+     *
+     * The menu, in other words. Empty is not "none" — it is "unasked", and the two reasoning flags
+     * answer instead. A list rather than a flag because a chat template refuses the efforts it does
+     * not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the other
+     * two with HTTP 500 on every request of the turn.
+     */
+    thinkingLevels: readonly ThinkingLevel[]
     input: readonly string[]
     thinkingLevel: ThinkingLevel
     maxRetries: number
@@ -73,6 +89,17 @@ export type AiConnectionProfile = Readonly<{
     maxTokens: number
     reasoning: boolean
     supportsReasoningEffort: boolean
+    /** See `AiSettings`. A property of the connection, not of the model on it. */
+    chatTemplateThinking: boolean
+    /**
+     * The efforts this model's server said it will accept, or empty when nothing has said.
+     *
+     * The menu, in other words. Empty is not "none" — it is "unasked", and the two reasoning flags
+     * answer instead. A list rather than a flag because a chat template refuses the efforts it does
+     * not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the other
+     * two with HTTP 500 on every request of the turn.
+     */
+    thinkingLevels: readonly ThinkingLevel[]
     input: readonly string[]
     thinkingLevel: ThinkingLevel
 }>
@@ -125,6 +152,15 @@ export type SubagentConnection = Readonly<{
     maxTokens: number
     reasoning: boolean
     supportsReasoningEffort: boolean
+    /**
+     * The efforts this model's server said it will accept, or empty when nothing has said.
+     *
+     * The menu, in other words. Empty is not "none" — it is "unasked", and the two reasoning flags
+     * answer instead. A list rather than a flag because a chat template refuses the efforts it does
+     * not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the other
+     * two with HTTP 500 on every request of the turn.
+     */
+    thinkingLevels: readonly ThinkingLevel[]
     input: readonly string[]
     thinkingLevel: ThinkingLevel
 }>
@@ -139,7 +175,16 @@ export type AgentPrompt = Readonly<{
     defaultPrompt: string
 }>
 
-export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ThinkingLevel =
+    | 'off'
+    /** The one level a model that thinks without named efforts has. See `thinkingLevelsFor`. */
+    | 'on'
+    | 'minimal'
+    | 'low'
+    | 'medium'
+    | 'high'
+    | 'xhigh'
+    | 'max'
 
 export type AiModelOption = Readonly<{
     id: string
@@ -148,6 +193,8 @@ export type AiModelOption = Readonly<{
     maxTokens: number
     reasoning: boolean
     supportsReasoningEffort: boolean
+    /** See `AiSettings`. Empty for anything but a local server that named its own efforts. */
+    thinkingLevels: readonly ThinkingLevel[]
     input: readonly string[]
 }>
 
@@ -243,6 +290,37 @@ export const ALL_THINKING_LEVELS: readonly ThinkingLevel[] = [
     'max'
 ]
 export const NO_THINKING_LEVELS: readonly ThinkingLevel[] = ['off']
+/** What a model that thinks and has no efforts to name offers. See `thinkingLevelsFor`. */
+export const ON_OFF_THINKING_LEVELS: readonly ThinkingLevel[] = ['off', 'on']
+
+/**
+ * The levels one model may be asked at, which is not one list.
+ *
+ * Three cases, and the middle one is why this exists. A chat template can have a place for thinking
+ * and no effort to name — llama.cpp reports exactly that pair for a Qwen build — so the honest
+ * control there is on or off, not seven words that all mean on.
+ */
+export function thinkingLevelsFor(model: ThinkingCapable): readonly ThinkingLevel[] {
+    // Reasoning first, and it is not redundant: a model can be marked as taking an effort and as
+    // not thinking at all, and a model that does not think has nothing to spend an effort on.
+    if (!model.reasoning) return NO_THINKING_LEVELS
+    // What the server named wins outright. Its template raises on an effort it does not know, and
+    // llama.cpp turns that into an HTTP 500 on every request of the turn.
+    if (model.thinkingLevels.length > 0) return ['off', ...model.thinkingLevels]
+    return model.supportsReasoningEffort ? ALL_THINKING_LEVELS : ON_OFF_THINKING_LEVELS
+}
+
+/** The three fields that decide what a reasoning menu offers. See `thinkingLevelsFor`. */
+type ThinkingCapable = Readonly<{
+    reasoning: boolean
+    supportsReasoningEffort: boolean
+    thinkingLevels: readonly ThinkingLevel[]
+}>
+
+/** The stored level, kept if the model still offers it and dropped to `off` if it does not. */
+export function keepThinkingLevel(model: ThinkingCapable, level: ThinkingLevel): ThinkingLevel {
+    return thinkingLevelsFor(model).includes(level) ? level : 'off'
+}
 
 /**
  * The sub-agent's shipped bounds. The same numbers as `default_subagent_*` in `settings.rs`, which
@@ -329,6 +407,8 @@ function profileOf(ai: AiSettings): AiConnectionProfile {
         maxTokens: ai.maxTokens,
         reasoning: ai.reasoning,
         supportsReasoningEffort: ai.supportsReasoningEffort,
+        chatTemplateThinking: ai.chatTemplateThinking,
+        thinkingLevels: ai.thinkingLevels,
         input: ai.input,
         thinkingLevel: ai.thinkingLevel
     }
@@ -342,6 +422,8 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
             maxTokens: 120_064,
             reasoning: false,
             supportsReasoningEffort: false,
+            chatTemplateThinking: false,
+            thinkingLevels: [],
             input: ['text'],
             thinkingLevel: 'off',
             maxRetries: 2,
@@ -408,8 +490,9 @@ export function applyModelSelection(ai: AiSettings, model: AiModelOption): AiSet
         maxTokens: model.maxTokens,
         reasoning: model.reasoning,
         supportsReasoningEffort: model.supportsReasoningEffort,
+        thinkingLevels: model.thinkingLevels,
         input: model.input,
-        thinkingLevel: model.reasoning ? ai.thinkingLevel : 'off'
+        thinkingLevel: keepThinkingLevel(model, ai.thinkingLevel)
     })
 }
 
@@ -436,7 +519,8 @@ export function adoptModelReasoning(ai: AiSettings, model: AiModelOption): AiSet
         ...ai,
         reasoning: model.reasoning,
         supportsReasoningEffort: model.supportsReasoningEffort,
-        thinkingLevel: model.reasoning ? ai.thinkingLevel : 'off'
+        thinkingLevels: model.thinkingLevels,
+        thinkingLevel: keepThinkingLevel(model, ai.thinkingLevel)
     })
 }
 
@@ -484,6 +568,7 @@ export function startSubagentConnection(
         maxTokens: profile.maxTokens,
         reasoning: profile.reasoning,
         supportsReasoningEffort: profile.supportsReasoningEffort,
+        thinkingLevels: profile.thinkingLevels,
         input: profile.input,
         thinkingLevel: profile.thinkingLevel
     }
@@ -509,8 +594,9 @@ export function applySubagentModel(
         maxTokens: model.maxTokens,
         reasoning: model.reasoning,
         supportsReasoningEffort: model.supportsReasoningEffort,
+        thinkingLevels: model.thinkingLevels,
         input: model.input,
-        thinkingLevel: model.reasoning ? connection.thinkingLevel : 'off'
+        thinkingLevel: keepThinkingLevel(model, connection.thinkingLevel)
     }
 }
 
@@ -536,7 +622,8 @@ export function adoptSubagentReasoning(
         ...connection,
         reasoning: model.reasoning,
         supportsReasoningEffort: model.supportsReasoningEffort,
-        thinkingLevel: model.reasoning ? connection.thinkingLevel : 'off'
+        thinkingLevels: model.thinkingLevels,
+        thinkingLevel: keepThinkingLevel(model, connection.thinkingLevel)
     }
 }
 

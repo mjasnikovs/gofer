@@ -65,6 +65,7 @@ mod godot_ai_acceptance;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_journey_acceptance;
 mod memory;
+mod model_server;
 mod off_thread;
 mod paths;
 mod process;
@@ -381,6 +382,50 @@ fn write_project_state(
 #[tauri::command(async)]
 fn list_project_tasks(app: AppHandle) -> Result<Vec<TaskRecord>, CommandError> {
     project_storage(&app)?.tasks().list()
+}
+
+/// Every memory the open project holds, each checked against the files the workspace has now.
+///
+/// The check is not a second command the user has to press. A memory nobody has looked at is read
+/// into the front of every turn's prompt, so the point of putting the list on screen at all is to
+/// see which rows have stopped matching the project — and a verdict behind a button is a verdict
+/// nobody asks for. It costs one directory walk, which is what the file watcher already does.
+///
+/// A workspace it cannot open is reported as unchecked rather than as every file being missing.
+/// There is no active task before the first one is created, and a project with no worktree would
+/// otherwise have its entire memory drawn as broken.
+#[tauri::command(async)]
+fn list_project_memory(app: AppHandle) -> Result<Vec<project_memory::CheckedMemory>, CommandError> {
+    let storage = project_storage(&app)?;
+    project_memory::list_checked_memories(&storage, workspace_snapshot(&app).as_ref())
+}
+
+/// Stores one memory the user wrote or corrected, and answers with it checked.
+///
+/// Editing is the same upsert a finished turn uses, so an edited row loses its vector the moment
+/// its text changes and is re-embedded here. What the user is really reaching for is often `state`:
+/// retrieval reads `confirmed` and nothing else, so moving a row to `candidate` takes it away from
+/// the model without throwing away what it says.
+#[tauri::command(async)]
+fn save_project_memory(
+    app: AppHandle,
+    edit: project_memory::MemoryEdit,
+) -> Result<project_memory::CheckedMemory, CommandError> {
+    let storage = project_storage(&app)?;
+    project_memory::save_memory(&storage, &edit, workspace_snapshot(&app).as_ref())
+}
+
+/// Forgets one memory, so the next turn is never given it again.
+#[tauri::command(async)]
+fn delete_project_memory(app: AppHandle, id: String) -> Result<(), CommandError> {
+    project_storage(&app)?.memory().delete(&id)
+}
+
+/// The files the active task's worktree holds, or nothing when there is no worktree to read.
+fn workspace_snapshot(app: &AppHandle) -> Option<files::Snapshot> {
+    active_workspace(app)
+        .ok()
+        .map(|workspace| files::scan(workspace.root()))
 }
 
 #[tauri::command(async)]
@@ -831,6 +876,25 @@ async fn run_task_brief(
     ai_turn::run_brief(app, request, stream).await
 }
 
+/// Puts one memory to a read-only sub-agent, which says whether it is still true of the checkout.
+///
+/// The other half of `list_project_memory`'s check, and the half that costs something. That one
+/// reads a memory's file paths and looks for them — free, instant, and blind to any sentence that
+/// names no file, which was 32 of 87 memories measured on a real project. This one reads the code.
+///
+/// It takes a stream channel because it runs as a turn: that is what Stop reaches, and what keeps
+/// it from running beside a chat turn on the one provider connection. Its own progress does not
+/// ride the channel — it goes out as `ai-memory-judge` window events, because the panel reading it
+/// is not the chat timeline.
+#[tauri::command]
+async fn judge_project_memory(
+    app: AppHandle,
+    request: ai_turn::JudgeRequest,
+    stream: tauri::ipc::Channel<ai_turn::AiStreamPayload>,
+) -> Result<project_memory::CheckedMemory, CommandError> {
+    ai_turn::run_judge(app, request, stream).await
+}
+
 /// A task's brief as far as it got, or nothing when it never had one.
 #[tauri::command]
 async fn read_task_brief(
@@ -1075,6 +1139,7 @@ pub fn run() {
         pending_project_changes,
         create_project_backup,
         delete_chat_task,
+        delete_project_memory,
         delete_rag_cache,
         delete_workspace_path,
         edit_workspace_file,
@@ -1084,6 +1149,8 @@ pub fn run() {
         import_legacy_chat,
         initialize_rag,
         list_ai_models,
+        judge_project_memory,
+        list_project_memory,
         list_project_tasks,
         list_workspace_files,
         load_chat,
@@ -1110,6 +1177,7 @@ pub fn run() {
         run_storage_maintenance,
         save_agent_prompt,
         save_chat,
+        save_project_memory,
         save_script_document,
         save_settings,
         save_godot_settings,

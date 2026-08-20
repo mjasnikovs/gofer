@@ -47,6 +47,7 @@ const MODEL = {
     maxTokens: 128_000,
     reasoning: true,
     supportsReasoningEffort: true,
+    thinkingLevels: [],
     input: ['text', 'image'],
     thinkingLevel: 'medium'
 }

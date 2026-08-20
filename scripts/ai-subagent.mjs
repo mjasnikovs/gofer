@@ -406,7 +406,7 @@ const REACHING_CHILD_TOOLS = {
     },
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
         createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
-    ask_user: ({host, asks, sketchesRequired = false}) => {
+    ask_user: ({host, asks, sketchesRequired = false, sessionId}) => {
         if (!host) {
             throw new Error(
                 'A child was asked for ask_user without the tool host that answers it. '
@@ -421,7 +421,7 @@ const REACHING_CHILD_TOOLS = {
                     + 'while a person is thinking.'
             )
         }
-        return createAskUserTool({host, budget: asks, sketchesRequired})
+        return createAskUserTool({host, budget: asks, sketchesRequired, sessionId})
     }
 }
 

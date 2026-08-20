@@ -527,6 +527,15 @@ pub struct RetrieveConnection {
     pub max_tokens: u64,
     pub reasoning: bool,
     pub supports_reasoning_effort: bool,
+    /// The efforts this model's server named, or empty when nothing has. Carried for the same
+    /// reason as the flag above: this is a second copy of the worker's model builder, and without
+    /// the list pi-ai clamps a level the server named onto one it did not — `xhigh` goes out as
+    /// `high`, and a template that has no word for `high` answers with HTTP 500.
+    #[serde(default)]
+    pub thinking_levels: Vec<String>,
+    /// See `AiSettings::chat_template_thinking`. Carried because this call is a second copy of the
+    /// worker's model builder, in a process that must not import the agent to reach one.
+    pub chat_template_thinking: bool,
     pub timeout_ms: u64,
     pub max_retries: u32,
 }

@@ -13,11 +13,13 @@ import type {PendingChange, TaskSummary} from '../models/app'
 import type {
     BriefEvent,
     BriefRun,
+    DesignSessionEvent,
     UserQuestionPrompt,
     UserQuestionResponse,
     UserQuestionSettled
 } from '../models/brief'
 import type {HealthRemedyRequest, HealthReport} from '../models/health'
+import type {MemoryEdit, MemoryJudgeEvent, ProjectMemory} from '../models/memory'
 import type {UnsavedWork} from '../models/unsaved-work'
 import type {
     DeleteWorkspacePathRequest,
@@ -103,6 +105,12 @@ export type ClipboardImage = Readonly<{
 
 type BackupResult = Readonly<{path: string}>
 
+/** Putting one memory to a read-only sub-agent: which turn it runs as, and which memory. */
+type JudgeMemoryRequest = Readonly<{
+    requestId: number
+    memoryId: string
+}>
+
 type ToolApprovalRequest = Readonly<{
     approvalId: string
     approved: boolean
@@ -166,6 +174,8 @@ export type DesktopCommandMap = Readonly<{
     create_chat_task: CommandSpec<{bringChanges: boolean}, StoredChat>
     create_project_backup: CommandSpec<undefined, BackupResult>
     delete_chat_task: CommandSpec<{taskId: string}, StoredChat>
+    // Forgetting one memory, so no later turn is given it again.
+    delete_project_memory: CommandSpec<{id: string}, void>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
@@ -174,7 +184,16 @@ export type DesktopCommandMap = Readonly<{
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>
     initialize_rag: CommandSpec<undefined, void>
+    // Runs as a turn, so it takes the channel one does — that is what Stop reaches. Its own
+    // progress rides `ai-memory-judge` window events instead: the panel is not the chat timeline.
+    judge_project_memory: CommandSpec<
+        {request: JudgeMemoryRequest; stream: Channel<AiStreamPayload>},
+        ProjectMemory
+    >
     list_ai_models: CommandSpec<{request: SettingsRequest}, readonly AiModelOption[]>
+    // Every memory, each already checked against the files the workspace has now. The check is not
+    // a second command: it is one directory walk, and one nobody would press a button for.
+    list_project_memory: CommandSpec<undefined, readonly ProjectMemory[]>
     list_project_tasks: CommandSpec<undefined, readonly TaskSummary[]>
     list_workspace_files: CommandSpec<undefined, readonly WorkspaceEntry[]>
     load_chat: CommandSpec<{taskId: string | undefined}, StoredChat>
@@ -219,6 +238,9 @@ export type DesktopCommandMap = Readonly<{
     // The Godot rules alone. Separate from save_settings because the tab has no Save of its own,
     // and a checkbox must not store another tab's half-typed draft as a side effect.
     save_godot_settings: CommandSpec<{godot: GodotSettings}, SettingsResponse>
+    // Only the three fields the window may change. The backend carries provenance, the task and any
+    // supersession across, because the upsert behind this overwrites whatever it is handed.
+    save_project_memory: CommandSpec<{edit: MemoryEdit}, ProjectMemory>
     save_script_document: CommandSpec<{request: SaveScriptRequest}, ScriptStamp>
     save_settings: CommandSpec<{request: SettingsRequest}, SettingsResponse>
     search_godot_log_history: CommandSpec<
@@ -257,6 +279,14 @@ type DesktopEventMap = Readonly<{
     'ai-brief': BriefEvent
     'ai-question-request': UserQuestionPrompt
     'ai-question-settled': UserQuestionSettled
+    /** How judging one memory is going, and how it ended. Not the chat's, so not the channel's. */
+    'ai-memory-judge': MemoryJudgeEvent
+    /**
+     * A design loop's two edges. Between them the question card holds itself open, because the
+     * rounds are one layout being revised rather than a queue of unrelated questions.
+     */
+    'ai-design-opened': DesignSessionEvent
+    'ai-design-closed': DesignSessionEvent
     'godot-session-event': GodotSessionEvent
     'rag-download-progress': DownloadProgress
     /** What the settings file now says, sent by whichever screen saved it to every other one. */

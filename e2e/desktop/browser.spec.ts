@@ -30,6 +30,7 @@ describe('renderer desktop journey', () => {
                     maxTokens: 1_024,
                     reasoning: false,
                     supportsReasoningEffort: false,
+                    thinkingLevels: [],
                     input: ['text'],
                     thinkingLevel: 'off',
                     maxRetries: 0,

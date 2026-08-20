@@ -680,6 +680,57 @@ pub fn summary_of(tool: &str, op: &str) -> &'static str {
 /// does, not because it belongs to the editor.
 pub const ASK_USER_TOOL: &str = "ask_user";
 
+/// The name the design tool calls to bracket its loop. Not a catalogue domain, for [`ASK_USER_TOOL`]'s
+/// reasons, and not a model tool either: nothing chooses to call it.
+pub const DESIGN_SESSION_TOOL: &str = "design_session";
+
+/// Tells the window a design loop started or finished, and answers at once.
+///
+/// The one call here that opens nothing and waits for nobody. A design loop asks the user several
+/// questions about one layout, and without these two edges the window cannot tell that from several
+/// questions about several things — so it closes its card on every answer and reopens it a minute
+/// later, which is what this exists to stop.
+fn design_session<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, ToolFailure> {
+    if params.get(PROBE_KEY).and_then(Value::as_bool) == Some(true) {
+        return probe(DESIGN_SESSION_TOOL);
+    }
+    let session_id = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| invalid("design_session needs a `sessionId`."))?;
+    let opening = match params.get("state").and_then(Value::as_str) {
+        Some("open") => true,
+        Some("closed") => false,
+        _ => {
+            return Err(invalid(
+                "design_session needs a `state` of 'open' or 'closed'.",
+            ));
+        }
+    };
+    crate::ask::design_session(app, session_id, opening);
+    Ok(json!({"sessionId": session_id, "state": if opening { "open" } else { "closed" }}))
+}
+
+/// A value with its surrounding quotation marks taken off, if it arrived wearing any.
+///
+/// Written for the question identifier, and measured rather than guessed. The answer the model reads
+/// used to name the identifier in quotes, and the real model copied the quotes into the parameter —
+/// `"question-1"` instead of `question-1`. That is a different identifier: the revision counter
+/// started again at one and a fourth draft was drawn as though it were the first.
+///
+/// The wording was fixed too, next to the sentence that caused it. This is the half that holds when
+/// the wording does not, which is the only half worth relying on. Safe because an identifier this
+/// side hands out is `question-<n>` and never contains a quotation mark.
+fn unquoted(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'')
+        .trim()
+        .to_owned()
+}
+
 /// Blocks until the user answers, and reports every other ending as a failure the asker can act on.
 ///
 /// A skip and a timeout are told apart on purpose. A skip is a decision — the user read the question
@@ -717,15 +768,31 @@ fn ask_user<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, Too
     let question_id = params
         .get("questionId")
         .and_then(Value::as_str)
+        .map(unquoted)
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(crate::ask::new_question_id);
+    // Put there by the design tool, never by the model. It says these questions are one layout being
+    // revised, which is the difference between a card that stays put and a card that reopens.
+    let design_session = params
+        .get("designSession")
+        .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .map_or_else(crate::ask::new_question_id, str::to_owned);
+        .map(str::to_owned);
 
     // Resolved before anything is shown, so the user judges a layout with the game's own artwork in
     // it rather than with the window's default typeface.
     let (sketches, unresolved) = resolve_sketch_assets(app, sketches);
 
-    match crate::ask::ask_question(app, &question_id, question, options, sketches.clone(), why) {
+    match crate::ask::ask_question(
+        app,
+        &question_id,
+        question,
+        options,
+        sketches.clone(),
+        why,
+        design_session,
+    ) {
         crate::ask::Answer::Answered(reply) => {
             keep_sketch(app, &question_id, &sketches, &reply);
             Ok(reply_answer(&question_id, &sketches, &reply, unresolved))
@@ -785,6 +852,7 @@ fn reply_answer(
     json!({
         "questionId": question_id,
         "skipped": reply.skipped,
+        "approved": reply.approved,
         "answer": reply.text,
         "picked": picked,
         "sketches": sketches.len(),
@@ -1024,7 +1092,7 @@ fn probe(domain: &str) -> Result<Value, ToolFailure> {
         // Answered together, and without looking for a window, for the reason above: whether a
         // window is open is a thing that changes during a turn, and the call is where the answer is
         // still true.
-        ASK_USER_TOOL => Ok(json!({"tool": domain, "reachable": true})),
+        ASK_USER_TOOL | DESIGN_SESSION_TOOL => Ok(json!({"tool": domain, "reachable": true})),
         other => Err(ToolFailure::new(
             "unprobed_tool",
             format!(
@@ -1042,9 +1110,7 @@ pub fn dispatch<R: Runtime>(
 ) -> Result<Value, ToolFailure> {
     // A settings file that cannot be read falls back to the rules being on, which is what a machine
     // that never chose gets. Failing open would make an unreadable settings file the way past them.
-    let rules = crate::settings::read_settings(app)
-        .map(|settings| settings.godot)
-        .unwrap_or_default();
+    let rules = crate::settings::read_godot_settings(app).unwrap_or_default();
     dispatch_under(app, request, &rules)
 }
 
@@ -1072,6 +1138,12 @@ fn dispatch_under<R: Runtime>(
     // reason `web_search` is built in Node: this is simply where the thing that answers it lives.
     if request.tool == ASK_USER_TOOL {
         return ask_user(app, &request.params);
+    }
+    // Beside `ask_user` and for the same reason: not a Godot operation, so not a catalogue domain.
+    // It is also not a tool any model holds — the design tool calls it around its own child, and a
+    // model has no way to reach it, which is why it needs no description and no probe.
+    if request.tool == DESIGN_SESSION_TOOL {
+        return design_session(app, &request.params);
     }
     let domain = CATALOG
         .iter()
@@ -2965,6 +3037,70 @@ mod tests {
         )
         .expect_err("a tool that is not in the catalog cannot be reachable");
         assert_eq!(failure.code, "unknown_tool");
+    }
+
+    /**
+     * The design loop reaches its own route, by the name the Node side actually sends.
+     *
+     * Worth a test of its own because the failure is silent by design. The design tool swallows
+     * whatever this answers — an announcement that did not arrive must cost the card its held-open
+     * state and never the design itself — so a name that stopped matching here would read as the bug
+     * this whole seam was built to remove, with nothing anywhere saying why.
+     */
+    #[test]
+    fn a_design_session_is_routed_by_name_and_is_not_a_catalogue_domain() {
+        let app = unattended_app();
+        for state in ["open", "closed"] {
+            let answer = dispatch(
+                app.handle(),
+                ToolRequest {
+                    tool: DESIGN_SESSION_TOOL.to_owned(),
+                    params: json!({"sessionId": "design-1", "state": state}),
+                },
+            )
+            .expect("the design session is answered rather than looked up in the catalogue");
+            assert_eq!(answer["state"], json!(state));
+        }
+        assert!(
+            !CATALOG
+                .iter()
+                .any(|domain| domain.name == DESIGN_SESSION_TOOL),
+            "the catalogue is the Godot domains, and this is not one"
+        );
+    }
+
+    /**
+     * A quoted identifier is the same identifier.
+     *
+     * Measured against the real model, not imagined. The answer it reads named the identifier in
+     * quotation marks and it copied them into the parameter, which made `"question-1"` a different
+     * question from `question-1` — so the revision counter started again at one and a fourth draft
+     * was drawn as though it were the first. The wording was fixed as well; this is the half that
+     * holds when the wording does not.
+     */
+    #[test]
+    fn a_question_identifier_that_arrived_in_quotes_is_the_same_question() {
+        assert_eq!(unquoted("\"question-1\""), "question-1");
+        assert_eq!(unquoted("'question-1'"), "question-1");
+        assert_eq!(unquoted("  question-1  "), "question-1");
+        assert_eq!(unquoted("question-1"), "question-1");
+        // Nothing but quotes is nothing, and the caller reads that as "no identifier given".
+        assert_eq!(unquoted("\"\""), "");
+    }
+
+    /// A malformed announcement is refused by name rather than emitting an edge nobody asked for.
+    #[test]
+    fn a_design_session_with_no_state_is_refused() {
+        let app = unattended_app();
+        let failure = dispatch(
+            app.handle(),
+            ToolRequest {
+                tool: DESIGN_SESSION_TOOL.to_owned(),
+                params: json!({"sessionId": "design-1"}),
+            },
+        )
+        .expect_err("an announcement that says nothing is not an announcement");
+        assert_eq!(failure.code, "invalid_params");
     }
 
     /// Issue #5. An editor operation asked with no session started one and answered, instead of

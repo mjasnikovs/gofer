@@ -808,6 +808,16 @@ impl DapClient {
         self.shared.lock().map_err(|_| DapError::poisoned())
     }
 
+    /// Whether this client's transport is gone: the adapter hung up, or `shutdown` closed it.
+    ///
+    /// A poisoned lock reads as closed, because a client nobody can inspect is not one to keep.
+    pub fn is_closed(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|shared| shared.closed)
+            .unwrap_or(true)
+    }
+
     /// Disconnects the way the protocol expects — `disconnect` terminating the debuggee — and
     /// closes the transport. Repeated calls are no-ops.
     pub fn shutdown(&self) {
@@ -1958,6 +1968,13 @@ mod tests {
         let error = client.initialize().expect_err("server hung up");
         assert_eq!(error.code, "transport_closed");
         assert!(error.retryable);
+        // And the client says so afterwards, which is what the cached connection is asked before
+        // it is handed out again. Without it a hung-up adapter is kept and every later request is
+        // answered `session_closed` until the whole editor session is restarted.
+        assert!(
+            client.is_closed(),
+            "a hung-up transport must read as closed"
+        );
         server.join().expect("server");
     }
 

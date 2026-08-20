@@ -2170,3 +2170,130 @@ fn unsaved_scenes(session: &mut Session) -> Vec<String> {
     scenes.sort();
     scenes
 }
+
+/// `dirty` is the editor's answer about the edited scene, not a count of what Gofer did to it.
+///
+/// The flag was set by Gofer's own mutations and cleared by Gofer's own saves, so anything the
+/// editor did to the same scene went unseen. A scene switch is the reachable proof: switching away
+/// and back rebaselines the session (`_track_edited_scene` zeroes the flag), while the editor is
+/// still holding the change and still says so in `session.get_unsaved_scenes`. The same divergence
+/// is what a person pressing Ctrl+S produces — the file lands on disk and the session goes on
+/// reporting a dirty scene — and neither direction is something a caller can work around, because
+/// `dirty` is the field every unsaved-work prompt is built on.
+#[test]
+fn the_dirty_flag_answers_for_the_editor_across_a_scene_switch() {
+    let mut session = Session::start();
+    let first = "res://dirty_first.tscn";
+    let second = "res://dirty_second.tscn";
+    session.mutate("scene.create", json!({"path": first, "rootType": "Node2D"}));
+    session.mutate("scene.save", json!({}));
+    session.mutate(
+        "scene.create",
+        json!({"path": second, "rootType": "Node2D"}),
+    );
+    session.mutate("scene.save", json!({}));
+
+    session.open_scene(first);
+    session.mutate(
+        "node.create",
+        json!({"parent": "/dirty_first", "name": "Marker", "type": "Marker2D"}),
+    );
+    assert_eq!(
+        session.call("session.get_state", json!({}))["dirty"],
+        true,
+        "a mutated scene is dirty"
+    );
+
+    session.open_scene(second);
+    session.open_scene(first);
+
+    // The editor's own answer first: it is the fact the session's flag has to agree with.
+    assert_eq!(
+        unsaved_scenes(&mut session),
+        vec![first.to_owned()],
+        "the editor must still be holding the change the switch did not save"
+    );
+    let state = session.call("session.get_state", json!({}));
+    assert_eq!(
+        state["dirty"], true,
+        "a scene the editor is still holding changes to must read as dirty: {state}"
+    );
+
+    // And the agreement has to hold the other way, or the flag is merely stuck on.
+    session.mutate("scene.save", json!({}));
+    assert_eq!(
+        unsaved_scenes(&mut session),
+        Vec::<String>::new(),
+        "the save must reach disk"
+    );
+    assert_eq!(
+        session.call("session.get_state", json!({}))["dirty"],
+        false,
+        "and a written scene must read as clean"
+    );
+}
+
+/// Undo and redo answer for the editor's own history, not for a count of Gofer's mutations.
+///
+/// The depths were bumped by Gofer's mutations and zeroed on every scene switch, so they were a
+/// record of this session's traffic rather than of the history the editor would actually step.
+/// Switching away and back is the reachable proof: the scene keeps its history in the editor, the
+/// counters do not, and `session.undo` then refuses an undo the Edit menu offers. The same gap runs
+/// the other way for a person pressing Ctrl+Z — the counter stays high over a history that moved,
+/// and the next `session.undo` steps one action further back than the caller asked for, into work
+/// nobody told it about.
+#[test]
+fn undo_answers_for_the_editors_history_across_a_scene_switch() {
+    let mut session = Session::start();
+    let first = "res://history_first.tscn";
+    let second = "res://history_second.tscn";
+    session.mutate("scene.create", json!({"path": first, "rootType": "Node2D"}));
+    session.mutate("scene.save", json!({}));
+    session.mutate(
+        "scene.create",
+        json!({"path": second, "rootType": "Node2D"}),
+    );
+    session.mutate("scene.save", json!({}));
+
+    session.open_scene(first);
+    session.mutate(
+        "node.create",
+        json!({"parent": "/history_first", "name": "Marker", "type": "Marker2D"}),
+    );
+    assert_eq!(
+        session.call("session.get_state", json!({}))["canUndo"],
+        true,
+        "the mutation is undoable while the session is still counting it"
+    );
+
+    session.open_scene(second);
+    session.open_scene(first);
+
+    let state = session.call("session.get_state", json!({}));
+    assert_eq!(
+        state["canUndo"], true,
+        "the editor kept this scene's history across the switch, so the session must offer it: \
+         {state}"
+    );
+    session.mutate("session.undo", json!({}));
+    assert!(
+        child_names(&session.call("scene.get_tree", json!({}))).is_empty(),
+        "the undo must remove the node the editor's history is holding"
+    );
+    let after = session.call("session.get_state", json!({}));
+    assert_eq!(
+        after["canUndo"], false,
+        "with the scene back at its saved state there is nothing left to undo: {after}"
+    );
+    assert_eq!(
+        after["canRedo"], true,
+        "and the undone action is offered back"
+    );
+
+    session.mutate("session.redo", json!({}));
+    assert_eq!(
+        child_names(&session.call("scene.get_tree", json!({}))),
+        vec!["Marker".to_owned()],
+        "redo must restore the node"
+    );
+}

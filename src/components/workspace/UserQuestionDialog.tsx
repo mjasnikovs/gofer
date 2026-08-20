@@ -5,6 +5,7 @@ import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {SelectableCard} from '@astryxdesign/core/SelectableCard'
 import {Grid} from '@astryxdesign/core/Grid'
+import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {TextArea} from '@astryxdesign/core/TextArea'
@@ -14,6 +15,13 @@ import type {UserQuestionPrompt, UserQuestionResponse} from '../../models/brief'
 
 type UserQuestionDialogProps = Readonly<{
     prompt?: UserQuestionPrompt | undefined
+    /**
+     * The design loop is between rounds: this prompt has been answered and the next has not arrived.
+     *
+     * The card stays where it is rather than closing, which is the whole point of a design session.
+     * Nothing here decides when that is true — see `useDesignSession`.
+     */
+    isRedrawing?: boolean
     onAnswer: (response: UserQuestionResponse) => void
 }>
 
@@ -57,8 +65,17 @@ const SKETCH_CANVAS = {width: 1280, height: 720}
  *
  * Dismissing is a skip, not a refusal and not an empty answer — the agent is told the user read it
  * and left the decision to it, and told not to ask again.
+ *
+ * A question that belongs to a design loop is the same card with two differences, and both are
+ * because it is one of several. It cannot be dismissed by accident, since a stray Escape between
+ * rounds would end a design the user is in the middle of. And it carries the button that ends the
+ * loop, because otherwise the only way out is to stop answering.
  */
-export function UserQuestionDialog({prompt, onAnswer}: UserQuestionDialogProps) {
+export function UserQuestionDialog({
+    prompt,
+    isRedrawing = false,
+    onAnswer
+}: UserQuestionDialogProps) {
     const [draft, setDraft] = useState('')
     const [picked, setPicked] = useState<number>()
     // Which sketch is open at full size, or none, which is the side-by-side comparison.
@@ -79,6 +96,53 @@ export function UserQuestionDialog({prompt, onAnswer}: UserQuestionDialogProps) 
     }
 
     if (!prompt) return null
+
+    /*
+     * Whether this question is one round of a design, asked of the value rather than of its absence.
+     *
+     * `!== undefined` was wrong and a live sweep is what found it. The backend sends the field as
+     * `null` when there is no design, and `null` is not `undefined` — so every ordinary question
+     * arrived dressed as a design loop: it grew a button that ends one, its Answer control was
+     * renamed, and Escape stopped closing it. The payload no longer carries the null either. This is
+     * the half that holds if it ever does again.
+     */
+    const inDesign = typeof prompt.designSession === 'string' && prompt.designSession !== ''
+
+    /*
+     * Between rounds: the question is answered and the next drawing does not exist yet.
+     *
+     * The sketches go rather than staying greyed out. A layout the user can still read but can no
+     * longer act on invites them to keep judging one that is already being replaced, and the pick
+     * they make against it belongs to a round that is over.
+     */
+    if (isRedrawing)
+        return (
+            <Dialog
+                isOpen
+                purpose='required'
+                width={TEXT_WIDTH}
+                onOpenChange={() => undefined}
+            >
+                <DialogHeader title='Design in progress' />
+                <VStack
+                    gap={3}
+                    padding={6}
+                    align='center'
+                >
+                    <Spinner
+                        size='lg'
+                        label='Redrawing your layout'
+                    />
+                    <Text
+                        size='sm'
+                        color='secondary'
+                    >
+                        {`Round ${String(prompt.revision)} sent. The next one appears here.`}
+                    </Text>
+                </VStack>
+            </Dialog>
+        )
+
     const answer = draft.trim()
     const sketches = prompt.sketches
     const isVisual = sketches.length > 0
@@ -100,11 +164,13 @@ export function UserQuestionDialog({prompt, onAnswer}: UserQuestionDialogProps) 
     return (
         <Dialog
             isOpen
-            purpose='form'
+            // A design loop cannot be dismissed by accident. Escape and the backdrop between rounds
+            // would end a design the user is halfway through, and the two ways out are on screen.
+            purpose={inDesign ? 'required' : 'form'}
             width={isVisual ? SKETCH_WIDTH : TEXT_WIDTH}
             {...(isVisual && {maxHeight: SKETCH_MAX_HEIGHT})}
             onOpenChange={isOpen => {
-                if (!isOpen)
+                if (!isOpen && !inDesign)
                     onAnswer({questionId: prompt.questionId, blocked: refused, skipped: true})
             }}
         >
@@ -114,6 +180,16 @@ export function UserQuestionDialog({prompt, onAnswer}: UserQuestionDialogProps) 
                         <DialogHeader
                             title={prompt.question}
                             {...(prompt.why && {subtitle: prompt.why})}
+                            {...(prompt.revision > 1 && {
+                                // Read from the prompt since the first build and never drawn, which
+                                // is what made a revised layout look like a brand new question.
+                                endContent: (
+                                    <Badge
+                                        variant='neutral'
+                                        label={`Round ${String(prompt.revision)}`}
+                                    />
+                                )
+                            })}
                         />
                         <VStack
                             gap={3}
@@ -269,8 +345,8 @@ export function UserQuestionDialog({prompt, onAnswer}: UserQuestionDialogProps) 
                                     }}
                                 />
                                 <Button
-                                    label='Answer'
-                                    variant='primary'
+                                    label={inDesign ? 'Send changes' : 'Answer'}
+                                    variant={inDesign ? 'secondary' : 'primary'}
                                     isDisabled={!hasAnswer}
                                     onClick={() => {
                                         onAnswer({
@@ -281,6 +357,30 @@ export function UserQuestionDialog({prompt, onAnswer}: UserQuestionDialogProps) 
                                         })
                                     }}
                                 />
+                                {/*
+                                 * The way out of a design loop, and the only one that ends it as
+                                 * agreed rather than abandoned.
+                                 *
+                                 * Held shut until a sketch is chosen, because approving without one
+                                 * hands the agent three layouts and the news that the user liked a
+                                 * layout. It is the primary action: the loop exists to reach it.
+                                 */}
+                                {inDesign && (
+                                    <Button
+                                        label='Complete and handoff'
+                                        variant='primary'
+                                        isDisabled={picked === undefined}
+                                        onClick={() => {
+                                            onAnswer({
+                                                questionId: prompt.questionId,
+                                                answer,
+                                                ...(picked !== undefined && {picked}),
+                                                blocked: refused,
+                                                approved: true
+                                            })
+                                        }}
+                                    />
+                                )}
                             </HStack>
                         </VStack>
                     </>

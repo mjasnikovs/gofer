@@ -38,6 +38,7 @@ async function installDesktop(page: Page, state: VisualState) {
                 maxTokens: 8_192,
                 reasoning: true,
                 supportsReasoningEffort: true,
+                thinkingLevels: [],
                 input: ['text', 'image'],
                 thinkingLevel: 'medium',
                 maxRetries: 2,
@@ -57,7 +58,7 @@ async function installDesktop(page: Page, state: VisualState) {
          * shipped — a column sized by its own 1280-wide sketch, a badge pushing one column three
          * pixels down, a button below the fold — was invisible to jsdom and obvious here.
          */
-        window.__GOFER_TEST_ASK__ = (sketches: number) => {
+        window.__GOFER_TEST_ASK__ = (sketches: number, design?: {revision: number}) => {
             const sketch = (accent: string, name: string) =>
                 `<style>body{margin:0;width:1280px;height:720px;background:#0d1020;`
                 + `font-family:monospace;color:#dbe4ff}`
@@ -70,13 +71,17 @@ async function installDesktop(page: Page, state: VisualState) {
                 questionId: 'question-1',
                 question: 'Which pause menu layout do you prefer?',
                 why: 'It decides the scene tree I build.',
-                revision: 1,
+                revision: design?.revision ?? 1,
+                ...(design && {designSession: 'design-1'}),
                 options: sketches === 0 ? ['Its own scene', 'Inside the HUD'] : ([] as string[]),
                 sketches: [
                     {label: 'Centered Overlay', html: sketch('#4f8cff', 'Centered Overlay')},
                     {label: 'Side Panel', html: sketch('#ff4f7d', 'Side Panel')}
                 ].slice(0, sketches)
             })
+        }
+        window.__GOFER_TEST_DESIGN__ = (sessionId: string, closing = false) => {
+            emit(closing ? 'ai-design-closed' : 'ai-design-opened', {sessionId})
         }
         window.__GOFER_TEST_APPROVE__ = () => {
             emit('ai-approval-request', {
@@ -289,6 +294,7 @@ async function installDesktop(page: Page, state: VisualState) {
                             maxTokens: 8_192,
                             reasoning: true,
                             supportsReasoningEffort: true,
+                            thinkingLevels: [],
                             input: ['text', 'image']
                         }
                     ]
@@ -394,6 +400,19 @@ async function installDesktop(page: Page, state: VisualState) {
                             }
                         }
                     ]
+                    /*
+                     * A turn that never finishes, for the screens that only exist while one is
+                     * running.
+                     *
+                     * The design card is the only thing in this application that has to survive a
+                     * question being answered, and what keeps it alive is a live turn. Nothing else
+                     * in the fixture can hold one open: every other turn here pushes its events and
+                     * settles in the same tick.
+                     */
+                    if (window.__GOFER_TEST_HOLD_TURN__ === true) {
+                        stream.onmessage({requestId, event: events[0]})
+                        return new Promise(() => undefined)
+                    }
                     for (const event of events) stream.onmessage({requestId, event})
                 }
                 return undefined
@@ -744,6 +763,77 @@ test('a sketch chosen', async ({page}) => {
     await expect(page.getByRole('button', {name: 'Choose Side Panel'})).toBeEnabled()
     await expect(page.getByRole('button', {name: 'Answer'})).toBeEnabled()
     await stableScreenshot(page, 'question-chosen.png', false, true)
+})
+
+/**
+ * A round of a design loop, which is the same card carrying two more controls.
+ *
+ * Worth its own screenshot because the footer is where it can go wrong: three buttons instead of
+ * two, one of them the primary the loop exists to reach, and a badge in the header that has to sit
+ * beside a long question rather than push it. None of that is visible to jsdom.
+ */
+test('a design round with two sketches', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2, {revision: 3}))
+    await expect(page.getByRole('button', {name: 'Complete and handoff'})).toBeVisible()
+    // Which round this is, drawn. The prompt has carried it since the first build and the card threw
+    // it away, so a layout the user had already commented on came back looking like a new question.
+    await expect(page.getByText('Round 3')).toBeVisible()
+    await page.getByRole('button', {name: 'Choose Side Panel'}).click()
+    await expect(page.getByRole('button', {name: 'Complete and handoff'})).toBeEnabled()
+    // The footer holds three controls now. On the shipped window they have to be on screen together,
+    // which is the thing a count in a unit test cannot tell anybody.
+    const footer = await page.evaluate(() => {
+        const names = ['Complete and handoff', 'Send changes', 'Let the agent decide']
+        return [...document.querySelectorAll('dialog[open] button')]
+            .filter(button => names.includes(button.textContent.trim()))
+            .map(button => {
+                const rect = button.getBoundingClientRect()
+                return {bottom: rect.bottom, text: button.textContent.trim()}
+            })
+    })
+    expect(footer).toHaveLength(3)
+    for (const button of footer)
+        expect(button.bottom, `${button.text} is below the fold`).toBeLessThanOrEqual(
+            page.viewportSize()?.height ?? 0
+        )
+    await stableScreenshot(page, 'question-design-round.png', false, true)
+})
+
+/**
+ * Between rounds, which is the state this whole seam was built for.
+ *
+ * What shipped before was nothing at all here: the card closed on the answer, the window sat empty
+ * for the minute the agent spent redrawing, and a new card opened looking like a new question. This
+ * is the only screenshot of the thing that replaced it, and it is a real one — a live turn, a real
+ * answer sent through the real hook, and the card that stayed.
+ */
+test('the card between two design rounds', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    // A turn that does not finish. The card outlives an answer only while one is running.
+    await page.evaluate(() => {
+        window.__GOFER_TEST_HOLD_TURN__ = true
+    })
+    await page.getByRole('combobox', {name: 'Message input'}).fill('Design the pause menu')
+    await page.getByRole('combobox', {name: 'Message input'}).press('Enter')
+    await page.evaluate(() => window.__GOFER_TEST_DESIGN__?.('design-1'))
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2, {revision: 2}))
+    await page.getByRole('button', {name: 'Choose Side Panel'}).click()
+    await page.getByRole('button', {name: 'Send changes'}).click()
+
+    // The answer is gone and the card is not.
+    await expect(page.getByText('Design in progress')).toBeVisible()
+    await expect(page.getByText(/Round 2 sent/u)).toBeVisible()
+    await expect(page.getByRole('button', {name: 'Choose Side Panel'})).toBeHidden()
+    await stableScreenshot(page, 'question-design-redrawing.png')
+
+    // And it goes when the loop does, rather than sitting over a design that already finished.
+    await page.evaluate(() => window.__GOFER_TEST_DESIGN__?.('design-1', true))
+    await expect(page.getByText('Design in progress')).toBeHidden()
 })
 
 /** The zoom: one sketch as large as the window allows, and one way out. */

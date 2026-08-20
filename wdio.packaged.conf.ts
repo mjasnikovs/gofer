@@ -133,6 +133,7 @@ export const config: WebdriverIO.Config = {
                             maxTokens: 2048,
                             reasoning: false,
                             supportsReasoningEffort: false,
+                            thinkingLevels: [],
                             input: ['text', 'image'],
                             thinkingLevel: 'off',
                             maxRetries: 0,

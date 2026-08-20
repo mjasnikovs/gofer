@@ -296,6 +296,7 @@ describe('Workspace', () => {
                     maxTokens: 120_064,
                     reasoning: false,
                     supportsReasoningEffort: false,
+                    thinkingLevels: [],
                     input: ['text', 'image']
                 }
             ]
@@ -836,6 +837,7 @@ describe('Workspace', () => {
                         maxTokens: 120_064,
                         reasoning: false,
                         supportsReasoningEffort: false,
+                        thinkingLevels: [],
                         input: ['text']
                     }
                 ]

@@ -189,12 +189,39 @@ pub(crate) enum WorkerJob {
         /// The project's tracked files, so four workers do not each spend steps discovering them.
         inventory: Option<String>,
     },
+    /// One stored memory, put to a read-only child that says whether it is still true.
+    ///
+    /// The whole memory travels rather than its id. The worker has no database handle — nothing in
+    /// Node does — and reading the row here is also what refuses a judgement of a memory that was
+    /// deleted between the click and the spawn.
+    Judge {
+        memory_id: String,
+        memory: JudgedMemory,
+    },
+}
+
+/// The memory a judgement is about, as the worker is given it.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JudgedMemory {
+    pub id: String,
+    pub content: String,
+    /// What the path check already settled, so the child does not spend steps rediscovering it.
+    pub anchors: Vec<crate::project_memory::MemoryAnchor>,
 }
 
 impl WorkerJob {
     /// The phase outputs this job writes, or none for a turn.
     fn is_brief(&self) -> bool {
         matches!(self, Self::Brief { .. })
+    }
+
+    /// Which memory this job is judging, or none for every other job.
+    fn judged_memory(&self) -> Option<&str> {
+        match self {
+            Self::Judge { memory_id, .. } => Some(memory_id),
+            _ => None,
+        }
     }
 }
 
@@ -431,6 +458,114 @@ pub struct BriefRequest {
     /// this field existed means exactly that.
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
+}
+
+/// What judging a memory needs: which turn it runs as, and which memory it is about.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JudgeRequest {
+    pub request_id: u64,
+    pub memory_id: String,
+}
+
+/// Puts one stored memory to a read-only child and files what it says.
+///
+/// It begins an `AiTurn` for the same two reasons a brief does, and neither is a convenience. The
+/// turn is what Stop can reach, because cancelling kills whatever `register_child` registered; and
+/// it is what holds the single provider operation, so a judgement cannot run beside a chat turn on
+/// the one connection or have the shared checkout switched out from under the child reading it.
+///
+/// The verdict is not returned by the worker to here — it crosses on `judge-verdict` and is filed
+/// by [`handle_judge_event`], which is the only side that survives the worker being killed. What
+/// this answers with is the memory read back afterwards, so the window draws what was stored rather
+/// than what was reported.
+pub(crate) async fn run_judge(
+    app: AppHandle,
+    request: JudgeRequest,
+    stream: tauri::ipc::Channel<AiStreamPayload>,
+) -> Result<crate::project_memory::CheckedMemory, CommandError> {
+    let turn = AiTurn::begin(request.request_id, stream)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let turn = turn;
+        let settings = crate::settings::read_settings(&app)?;
+        let api_key = crate::settings::ai_worker_api_key()?;
+        let oauth_credential = crate::settings::stored_chatgpt_credential()?;
+        let storage = crate::workspace::project_storage(&app)?;
+        let workspace_path = storage
+            .tasks()
+            .agent_workspace()
+            .map_err(|failure| failure.message)?
+            .display()
+            .to_string();
+        // Read here rather than in the worker, which holds no database. It is also what refuses a
+        // memory deleted between the click and the spawn, before a model is paid for.
+        let record = storage
+            .memory()
+            .get(&request.memory_id)
+            .map_err(|failure| failure.message)?
+            .ok_or_else(|| "That memory is no longer stored".to_owned())?;
+        let snapshot = crate::files::scan(std::path::Path::new(&workspace_path));
+        let index = crate::project_memory::basename_index(&snapshot);
+        let checked = crate::project_memory::check_memory(record, Some(&snapshot), Some(&index));
+
+        let outcome = run_ai_worker(
+            &app,
+            &turn,
+            AiWorkerRequest {
+                settings: settings.ai,
+                api_key,
+                // The child holds `read` and `bash`. Neither reaches the web, so a search key it
+                // cannot use is a key with no reason to be in the request.
+                brave_api_key: None,
+                oauth_credential,
+                // No cache key. A judgement is one question about one row, so there is no prefix a
+                // later ask would reuse, and keying it per memory would fragment the cache the
+                // conversation depends on.
+                session_id: None,
+                workspace_path,
+                tools: crate::ai_tools::CATALOG,
+                job: WorkerJob::Judge {
+                    memory_id: request.memory_id.clone(),
+                    memory: JudgedMemory {
+                        id: checked.memory.id.clone(),
+                        content: checked.memory.content.clone(),
+                        anchors: checked.anchors,
+                    },
+                },
+            },
+        );
+
+        // A worker that broke before its own handler ran emits nothing, and a row left spinning is
+        // the failure the brief's ending contract was written for. Said here so every ending is
+        // said once, whether or not the worker lived long enough to say it.
+        if outcome.is_err() || turn.is_cancelled() {
+            let ending = if turn.is_cancelled() {
+                serde_json::json!({"type": "judge-stopped", "memoryId": request.memory_id})
+            } else {
+                serde_json::json!({
+                    "type": "judge-failed",
+                    "memoryId": request.memory_id,
+                    "reason": outcome.as_ref().err().map_or("", String::as_str),
+                })
+            };
+            let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, ending);
+        }
+        outcome?;
+
+        let record = storage
+            .memory()
+            .get(&request.memory_id)
+            .map_err(|failure| failure.message)?
+            .ok_or_else(|| "That memory is no longer stored".to_owned())?;
+        Ok(crate::project_memory::check_memory(
+            record,
+            Some(&snapshot),
+            Some(&index),
+        ))
+    })
+    .await
+    .map_err(|error| format!("The memory judgement failed: {error}"))?
+    .map_err(CommandError::coded("memory_judge_failed"))
 }
 
 /// Runs the four phases that produce a task's brief.
@@ -866,6 +1001,43 @@ fn handle_brief_event<R: Runtime>(
     let _ = app.emit_to(crate::ask::MAIN_WINDOW, BRIEF_EVENT, event);
 }
 
+/// The window event every memory judgement reaches the renderer on.
+const JUDGE_EVENT: &str = "ai-memory-judge";
+
+/// Files one judgement and passes every update to the window.
+///
+/// The filing happens on this side of the pipe for the reason the brief's does: a run is cancelled
+/// by killing the worker, so a verdict still held in Node goes with it. A verdict that has crossed
+/// this line is one a stopped run still leaves behind.
+///
+/// Best-effort: a storage write that failed is not worth ending a judgement over, and a window that
+/// is not listening is not a failure either.
+fn handle_judge_event<R: Runtime>(
+    app: &AppHandle<R>,
+    memory_id: &str,
+    kind: &str,
+    event: &serde_json::Value,
+) {
+    let text = |key: &str| event.get(key).and_then(serde_json::Value::as_str);
+    if kind == "judge-verdict"
+        && let Some(verdict) = text("verdict")
+        && let Ok(storage) = crate::workspace::project_storage(app)
+    {
+        let _ = crate::project_memory::record_judgement(
+            &storage,
+            memory_id,
+            verdict,
+            text("reason").unwrap_or_default(),
+            text("model").unwrap_or_default(),
+        );
+    }
+    let mut event = event.clone();
+    if let Some(fields) = event.as_object_mut() {
+        fields.insert("memoryId".to_owned(), serde_json::json!(memory_id));
+    }
+    let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, event);
+}
+
 /// Runs one worker for a turn that has already begun.
 ///
 /// It takes the turn rather than a request id and a channel because both belong to it, and because
@@ -934,6 +1106,8 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
         .is_brief()
         .then(|| request.session_id.clone())
         .flatten();
+    // Which memory this worker is judging, or `None` for every other job.
+    let judged_memory = request.job.judged_memory().map(str::to_owned);
 
     // The stream is read in a closure so that a malformed line leaves the turn the same way a
     // clean end does: through the cancel-and-join below, rather than past it.
@@ -962,6 +1136,16 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
                 && kind.starts_with("brief-")
             {
                 handle_brief_event(app, brief_task.as_deref(), kind, &event);
+                continue;
+            }
+            // A judgement's progress is not part of an assistant message either, and the panel
+            // reading it is not the chat. Same rule, same reason: the timeline drops what it does
+            // not draw, so this goes out as a window event and its verdict is filed on the way.
+            if let Some(memory_id) = judged_memory.as_deref()
+                && let Some(kind) = event.get("type").and_then(serde_json::Value::as_str)
+                && kind.starts_with("judge-")
+            {
+                handle_judge_event(app, memory_id, kind, &event);
                 continue;
             }
             let is_done = event.get("type").and_then(serde_json::Value::as_str) == Some("done");
@@ -1386,6 +1570,127 @@ mod tests {
         let brief = storage.tasks().read_brief(&task_id).expect("the brief");
         assert_eq!(brief.status, "failed");
         assert_eq!(brief.reason.as_deref(), Some("no verify"));
+    }
+
+    /*
+     * The verdict is filed as its event crosses the pipe, for the same reason a phase is.
+     *
+     * A judgement is cancelled by killing the worker, and Node cannot reach the database at all. A
+     * verdict that has crossed this line survives a stop; one still held in the worker does not —
+     * and it cost a model request and a minute, so losing it is not a small thing.
+     */
+    #[test]
+    fn a_verdict_is_filed_as_its_event_crosses_the_pipe() {
+        let directory = TempDir::new().expect("temporary directory");
+        let (app, _task_id) = app_with_a_task(&directory);
+        let storage = crate::workspace::project_storage(app.handle()).expect("storage");
+        let stored = storage
+            .memory()
+            .upsert(&crate::storage::UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "summary".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "Deleted GRAYZONE.md.".to_owned(),
+                provenance: serde_json::json!({"source": "completed-ai-turn"}),
+                superseded_by: None,
+            })
+            .expect("store a memory");
+
+        handle_judge_event(
+            app.handle(),
+            &stored.id,
+            "judge-verdict",
+            &serde_json::json!({
+                "type": "judge-verdict",
+                "verdict": "holds",
+                "reason": "the file is still absent",
+                "model": "qwen3",
+            }),
+        );
+
+        let filed = crate::project_memory::check_memory(
+            storage.memory().get(&stored.id).expect("read").expect("it"),
+            None,
+            None,
+        );
+        let judgement = filed.judgement.expect("a verdict was filed");
+        assert_eq!(judgement.verdict, "holds");
+        assert_eq!(judgement.reason, "the file is still absent");
+        assert_eq!(judgement.model, "qwen3");
+        assert!(judgement.is_current);
+        // The row keeps everything the verdict was not about.
+        assert_eq!(filed.memory.provenance["source"], "completed-ai-turn");
+    }
+
+    /// Progress crosses the pipe without touching the row: only a verdict is worth storing.
+    #[test]
+    fn a_running_judgement_reports_itself_without_filing_anything() {
+        let directory = TempDir::new().expect("temporary directory");
+        let (app, _task_id) = app_with_a_task(&directory);
+        let storage = crate::workspace::project_storage(app.handle()).expect("storage");
+        let stored = storage
+            .memory()
+            .upsert(&crate::storage::UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "summary".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "Deleted GRAYZONE.md.".to_owned(),
+                provenance: serde_json::json!({}),
+                superseded_by: None,
+            })
+            .expect("store a memory");
+
+        handle_judge_event(
+            app.handle(),
+            &stored.id,
+            "judge-step",
+            &serde_json::json!({"type": "judge-step", "line": "read: main.gd"}),
+        );
+
+        let filed = crate::project_memory::check_memory(
+            storage.memory().get(&stored.id).expect("read").expect("it"),
+            None,
+            None,
+        );
+        assert!(filed.judgement.is_none(), "nothing was filed");
+    }
+
+    /*
+     * The job says which memory it is about, where the worker reads it.
+     *
+     * `rename_all_fields` is what makes this true, and it has been wrong before: a variant's fields
+     * keep their Rust names without it, and the worker reads `memoryId`. Nothing fails when it is
+     * wrong — JavaScript answers `undefined` for a key that is not there — so the judgement would
+     * run against a memory with no id and file its verdict nowhere.
+     */
+    #[test]
+    fn a_judgement_names_its_memory_where_the_worker_reads_it() {
+        let request = AiWorkerRequest {
+            job: WorkerJob::Judge {
+                memory_id: "01a0".to_owned(),
+                memory: JudgedMemory {
+                    id: "01a0".to_owned(),
+                    content: "Deleted GRAYZONE.md.".to_owned(),
+                    anchors: Vec::new(),
+                },
+            },
+            ..worker_request()
+        };
+        let encoded = serde_json::to_value(&request).expect("serialize the request");
+
+        assert_eq!(encoded["mode"], serde_json::json!("judge"));
+        assert_eq!(encoded["memoryId"], serde_json::json!("01a0"));
+        assert_eq!(
+            encoded["memory"]["content"],
+            serde_json::json!("Deleted GRAYZONE.md.")
+        );
+        assert_eq!(encoded["memory"]["anchors"], serde_json::json!([]));
+        // A judgement carries none of a turn's own fields: its child has one question and its own
+        // system prompt, and no transcript to be given.
+        assert!(encoded.get("systemPrompt").is_none(), "{encoded}");
+        assert!(encoded.get("messages").is_none(), "{encoded}");
     }
 
     /*

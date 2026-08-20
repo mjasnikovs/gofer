@@ -79,6 +79,10 @@ interface Window {
     /** Raises the approval prompt a fixture cannot provoke through an ordinary command. */
     __GOFER_TEST_APPROVE__?: () => void
     /** Raises one question with `sketches` sketches on it, for the visual suite. */
-    __GOFER_TEST_ASK__?: (sketches: number) => void
+    __GOFER_TEST_ASK__?: (sketches: number, design?: {revision: number}) => void
+    /** Opens or closes a design loop, which is what keeps the question card alive between rounds. */
+    __GOFER_TEST_DESIGN__?: (sessionId: string, closing?: boolean) => void
+    /** Holds the turn open, for the screens that only exist while one is running. */
+    __GOFER_TEST_HOLD_TURN__?: boolean
     __GOFER_TEST_DESKTOP__?: FixtureDesktop
 }

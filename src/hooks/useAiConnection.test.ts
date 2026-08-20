@@ -35,6 +35,7 @@ function storedSettings(ai: Partial<GoferSettings['ai']>): GoferSettings {
             maxTokens: 120_064,
             reasoning: false,
             supportsReasoningEffort: false,
+            thinkingLevels: [],
             input: ['text'],
             thinkingLevel: 'off',
             ...ai
@@ -51,6 +52,7 @@ function catalogued(model: Partial<AiModelOption>): AiModelOption {
         maxTokens: 120_064,
         reasoning: true,
         supportsReasoningEffort: true,
+        thinkingLevels: [],
         input: ['text'],
         ...model
     }

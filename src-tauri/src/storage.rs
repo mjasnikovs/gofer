@@ -2404,6 +2404,68 @@ impl Memories<'_> {
         Ok(records)
     }
 
+    /// One memory by id, or nothing when the project has never held it.
+    pub fn get(&self, id: &str) -> Result<Option<MemoryRecord>, CommandError> {
+        let connection = self
+            .storage
+            .connection()
+            .map_err(CommandError::or_coded("memory_unavailable"))?;
+        memory_by_id(&connection, id)
+    }
+
+    /// Every memory the project holds, most recently changed first.
+    ///
+    /// Search cannot answer this and is not a narrower version of it. Search needs a query, ranks
+    /// what it finds, and reads only `confirmed` rows — which is precisely the set a person
+    /// reviewing this cannot see past. A memory demoted to `candidate` has been taken away from the
+    /// model and still has to be visible to whoever demoted it, or the demotion looks like a delete.
+    pub fn list(&self, limit: usize) -> Result<Vec<MemoryRecord>, CommandError> {
+        self.listed_records(limit)
+            .map_err(CommandError::or_coded("memory_unavailable"))
+    }
+
+    fn listed_records(&self, limit: usize) -> Result<Vec<MemoryRecord>, CommandError> {
+        let connection = self.storage.connection()?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {MEMORY_COLUMNS} FROM memory_items
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT ?1"
+            ))
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([limit as i64], memory_columns)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        rows.into_iter().map(memory_record).collect()
+    }
+
+    /// Forgets one memory for good.
+    ///
+    /// The vector goes with it without being named here: the embedding cascades on the foreign key
+    /// and `memory_items_ad_vectors` deletes the `vec0` row the cascade cannot reach. A row that is
+    /// not there is reported rather than passed over, because the caller is a person who just
+    /// pressed Delete on something the list showed them.
+    pub fn delete(&self, id: &str) -> Result<(), CommandError> {
+        self.delete_record(id)
+            .map_err(CommandError::or_coded("memory_not_deleted"))
+    }
+
+    fn delete_record(&self, id: &str) -> Result<(), CommandError> {
+        let (_write_guard, connection) = self.storage.write_connection()?;
+        let removed = connection
+            .execute("DELETE FROM memory_items WHERE id = ?1", [id])
+            .map_err(database_error)?;
+        if removed == 0 {
+            return Err(CommandError::new(
+                "memory_not_found",
+                format!("There is no memory {id} to delete"),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn search(
         &self,
         request: &SearchMemoryRequest,
@@ -3264,45 +3326,68 @@ fn reciprocal_rank(rank: usize) -> f64 {
     1.0 / (60.0 + rank as f64)
 }
 
+/// The columns every memory read selects, in the order both readers below expect them.
+const MEMORY_COLUMNS: &str = "id, task_id, kind, state, content, provenance_json,
+                              superseded_by, created_at, updated_at";
+
+/// One row as SQLite hands it over, before the JSON and the timestamps are made sense of.
+///
+/// Split from [`memory_record`] because the two failures are different: a column rusqlite cannot
+/// read is a database fault it reports itself, and provenance that will not parse is ours. Keeping
+/// them in one closure meant `query_map` had to carry a `Result` inside a `Result`.
+type MemoryColumns = (
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    i64,
+);
+
+fn memory_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryColumns> {
+    Ok((
+        row.get::<_, String>(0)?,
+        row.get::<_, Option<String>>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, String>(3)?,
+        row.get::<_, String>(4)?,
+        row.get::<_, String>(5)?,
+        row.get::<_, Option<String>>(6)?,
+        row.get::<_, i64>(7)?,
+        row.get::<_, i64>(8)?,
+    ))
+}
+
+fn memory_record(row: MemoryColumns) -> Result<MemoryRecord, CommandError> {
+    Ok(MemoryRecord {
+        id: row.0,
+        task_id: row.1,
+        kind: row.2,
+        state: row.3,
+        content: row.4,
+        provenance: serde_json::from_str(&row.5).map_err(|error| {
+            CommandError::from(format!("Stored memory provenance is invalid: {error}"))
+        })?,
+        superseded_by: row.6,
+        created_at: from_database_u64(row.7, "memory creation time")?,
+        updated_at: from_database_u64(row.8, "memory update time")?,
+    })
+}
+
 fn memory_by_id(connection: &Connection, id: &str) -> Result<Option<MemoryRecord>, CommandError> {
-    let row = connection
+    connection
         .query_row(
-            "SELECT id, task_id, kind, state, content, provenance_json,
-                    superseded_by, created_at, updated_at
-             FROM memory_items WHERE id = ?1",
+            &format!("SELECT {MEMORY_COLUMNS} FROM memory_items WHERE id = ?1"),
             [id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            },
+            memory_columns,
         )
         .optional()
-        .map_err(database_error)?;
-    row.map(|row| {
-        Ok(MemoryRecord {
-            id: row.0,
-            task_id: row.1,
-            kind: row.2,
-            state: row.3,
-            content: row.4,
-            provenance: serde_json::from_str(&row.5).map_err(|error| {
-                CommandError::from(format!("Stored memory provenance is invalid: {error}"))
-            })?,
-            superseded_by: row.6,
-            created_at: from_database_u64(row.7, "memory creation time")?,
-            updated_at: from_database_u64(row.8, "memory update time")?,
-        })
-    })
-    .transpose()
+        .map_err(database_error)?
+        .map(memory_record)
+        .transpose()
 }
 
 fn empty_object() -> Value {

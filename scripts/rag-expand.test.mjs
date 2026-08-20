@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {createAssistantMessageEventStream} from '@earendil-works/pi-ai'
+import {clampThinkingLevel, createAssistantMessageEventStream} from '@earendil-works/pi-ai'
 import {createCompletion, isUsableConnection, textOf} from './rag-expand.mjs'
 
 const CONNECTION = {
@@ -84,6 +84,28 @@ test('the reasoning level, the ceilings and the prompt are the ones supplied', a
     assert.deepEqual(call.context.messages, [{role: 'user', content: 'animate a value'}])
 })
 
+test('a chat-template server is sent the argument that turns thinking on', async () => {
+    const models = fakeModels([{type: 'text', text: 'Tween'}])
+    const complete = createCompletion({...CONNECTION, chatTemplateThinking: true}, {models})
+
+    await complete({system: 'EXPAND', user: 'animate a value', maxTokens: 100})
+
+    // The same switch the agent worker sends. This is the second copy of that builder, in a process
+    // that cannot import the first without dragging the whole agent into a search.
+    const [call] = models.calls
+    assert.equal(call.model.compat.thinkingFormat, 'chat-template')
+    assert.equal(call.model.compat.chatTemplateKwargs.enable_thinking.$var, 'thinking.enabled')
+
+    // And a connection that never heard from a `/props` is left exactly as it was.
+    const plain = fakeModels([{type: 'text', text: 'Tween'}])
+    await createCompletion(CONNECTION, {models: plain})({
+        system: 'EXPAND',
+        user: 'animate a value',
+        maxTokens: 100
+    })
+    assert.equal(plain.calls[0].model.compat.thinkingFormat, undefined)
+})
+
 test('a model that answered with an error throws rather than returning empty text', async () => {
     const models = fakeModels([], {stopReason: 'error', errorMessage: 'connection refused'})
     const complete = createCompletion(CONNECTION, {models})
@@ -115,4 +137,52 @@ test('textOf keeps only text parts', () => {
         }),
         'a'
     )
+})
+
+/**
+ * The level the search asks at has to be one pi-ai's own scale contains.
+ *
+ * `on` is not on it. Handed one it does not know, `clampThinkingLevel` drops to the lowest level
+ * the model offers — `off` — and the chat-template switch then resolves to `enable_thinking: false`.
+ * A search expansion that was supposed to think went out with thinking explicitly disabled.
+ */
+test('the on level survives the clamp pi-ai puts every request through', async () => {
+    const models = fakeModels([{type: 'text', text: 'Tween'}])
+    const connection = {
+        ...CONNECTION,
+        supportsReasoningEffort: false,
+        chatTemplateThinking: true,
+        thinkingLevel: 'on'
+    }
+
+    await createCompletion(connection, {models})({system: 's', user: 'u', maxTokens: 100})
+
+    const [call] = models.calls
+    const clamped = clampThinkingLevel(call.model, call.options.reasoning)
+    assert.notEqual(clamped, 'off', 'the level reached the request as off')
+    // Which is what makes the template argument true, since that is read off the surviving effort.
+    assert.equal(call.model.compat.chatTemplateKwargs.enable_thinking.$var, 'thinking.enabled')
+})
+
+/**
+ * The search asks at the level the server named, under the name the server used.
+ *
+ * The second copy of the worker's model builder, and it had the second copy of the same clamp.
+ * pi-ai only believes a model has `xhigh` or `max` if the model says so; unsaid, `xhigh` is clamped
+ * to `high`, and the chat template these levels were read out of raises on a word it does not know.
+ */
+test('a named effort is not clamped onto one the template never offered', async () => {
+    const models = fakeModels([{type: 'text', text: 'Tween'}])
+    const connection = {
+        ...CONNECTION,
+        supportsReasoningEffort: true,
+        chatTemplateThinking: true,
+        thinkingLevels: ['low', 'medium', 'xhigh'],
+        thinkingLevel: 'xhigh'
+    }
+
+    await createCompletion(connection, {models})({system: 's', user: 'u', maxTokens: 100})
+
+    const [call] = models.calls
+    assert.equal(clampThinkingLevel(call.model, call.options.reasoning), 'xhigh')
 })

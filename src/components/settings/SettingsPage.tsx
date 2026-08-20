@@ -40,8 +40,7 @@ import {
 } from '../../services/chatgpt-auth'
 import {commandErrorMessage} from '../../utils/command-error'
 import {
-    ALL_THINKING_LEVELS,
-    NO_THINKING_LEVELS,
+    thinkingLevelsFor,
     SEARCH_PROVIDERS,
     SEARCH_PROVIDERS_NEEDING_KEY,
     SEARCH_PROVIDER_LABELS,
@@ -744,10 +743,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     label: `Reasoning: ${draft.ai.thinkingLevel}`,
                                     variant: 'secondary'
                                 }}
-                                items={(draft.ai.reasoning ?
-                                    ALL_THINKING_LEVELS
-                                :   NO_THINKING_LEVELS
-                                ).map(level => ({
+                                items={thinkingLevelsFor(draft.ai).map(level => ({
                                     label: level,
                                     onClick: () => {
                                         updateAi({thinkingLevel: level})
@@ -898,17 +894,17 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                             label: `Sub-agent reasoning: ${subagentConnection.thinkingLevel}`,
                                             variant: 'secondary'
                                         }}
-                                        items={(subagentConnection.reasoning ? ALL_THINKING_LEVELS
-                                        :   NO_THINKING_LEVELS
-                                        ).map(thinkingLevel => ({
-                                            label: thinkingLevel,
-                                            onClick: () => {
-                                                dispatch({
-                                                    type: 'subagent-thinking-chosen',
-                                                    thinkingLevel
-                                                })
-                                            }
-                                        }))}
+                                        items={thinkingLevelsFor(subagentConnection).map(
+                                            thinkingLevel => ({
+                                                label: thinkingLevel,
+                                                onClick: () => {
+                                                    dispatch({
+                                                        type: 'subagent-thinking-chosen',
+                                                        thinkingLevel
+                                                    })
+                                                }
+                                            })
+                                        )}
                                     />
                                 </>
                             )}

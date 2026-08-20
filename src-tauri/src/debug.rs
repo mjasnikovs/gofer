@@ -422,8 +422,11 @@ fn connection() -> Result<BoundAdapter, DapError> {
     })?;
     let key = format!("{dap_port}|{worktree}");
     let mut slot = CONNECTION.lock().map_err(|_| poisoned())?;
+    // The same three conditions the language server's cache takes, closed included: an adapter
+    // that hung up — every `disconnect` ends with one — is not a connection to hand out again.
     if let Some(existing) = slot.as_ref()
         && existing.key == key
+        && !existing.client.is_closed()
     {
         return Ok((
             Arc::clone(&existing.client),

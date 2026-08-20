@@ -19,6 +19,7 @@ import {createModels, createProvider} from '@earendil-works/pi-ai'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createCredentialStore} from './ai-credentials.mjs'
+import {piThinkingLevel, piThinkingLevelMap} from './thinking-level.mjs'
 
 const PROVIDER_ID = 'rag'
 export const CODEX_PROVIDER_ID = 'openai-codex'
@@ -49,6 +50,7 @@ export function isUsableConnection(connection) {
  * wants the window. A model object is plain data, so it is built per call rather than mutated.
  */
 function modelFor(connection, maxTokens) {
+    const thinkingLevelMap = piThinkingLevelMap(connection.thinkingLevels)
     return {
         id: connection.model,
         name: connection.modelName || connection.model,
@@ -60,9 +62,27 @@ function modelFor(connection, maxTokens) {
         cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
         contextWindow: connection.contextWindow ?? 120_064,
         maxTokens,
+        // The efforts this server named. The same reason as in the agent worker: without them
+        // pi-ai clamps a named level onto one it believes in instead. See `piThinkingLevelMap`.
+        ...(thinkingLevelMap ? {thinkingLevelMap} : {}),
         compat: {
             supportsDeveloperRole: false,
             supportsReasoningEffort: connection.supportsReasoningEffort ?? false,
+            // A llama.cpp host turns thinking on with a chat-template argument and ignores
+            // `reasoning_effort` without a word. The same switch the agent worker sends, and the
+            // same reason: without it the level does nothing, on either call this package makes.
+            ...(connection.chatTemplateThinking ?
+                {
+                    thinkingFormat: 'chat-template',
+                    chatTemplateKwargs: {
+                        enable_thinking: {$var: 'thinking.enabled'},
+                        preserve_thinking: true,
+                        ...(connection.supportsReasoningEffort ?
+                            {reasoning_effort: {$var: 'thinking.effort', omitWhenOff: true}}
+                        :   {})
+                    }
+                }
+            :   {}),
             sendSessionAffinityHeaders: false
         }
     }
@@ -136,7 +156,7 @@ export function createCompletion(connection, {models: injected, persistCredentia
             codex ? {...model, maxTokens} : modelFor(connection, maxTokens),
             {systemPrompt: system, messages: [{role: 'user', content: user}]},
             {
-                reasoning: connection.thinkingLevel || 'off',
+                reasoning: piThinkingLevel(connection.thinkingLevel),
                 timeoutMs: connection.timeoutMs ?? 120_000,
                 maxRetries: connection.maxRetries ?? 2
             }

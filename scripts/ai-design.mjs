@@ -27,8 +27,25 @@ import {
 
 export const DESIGN_TOOL_NAME = 'design_with_user'
 
+/**
+ * The host call that tells the window a design loop is running.
+ *
+ * Not a tool the model holds and not a catalogue domain — it takes no operations, has no addon
+ * handler and nothing chooses to call it. It exists because the window needs to know that the next
+ * few questions are one layout being revised rather than a queue of unrelated ones, and only the
+ * thing that starts and ends the loop knows where its edges are.
+ */
+export const DESIGN_SESSION_TOOL_NAME = 'design_session'
+
 /** What the probe proves: the child builds, holds `show_user`, runs a turn and answers. */
 export const DESIGN_PROBE_ANSWER = 'design-loop-reachable'
+
+/** Session identifiers, distinct within a process, which is as far as one ever travels. */
+let sessions = 0
+function nextSessionId() {
+    sessions += 1
+    return `design-${String(process.pid)}-${String(sessions)}`
+}
 
 /**
  * What the model is told about the tool.
@@ -73,9 +90,10 @@ const DESIGN_SYSTEM_PROMPT =
     + 'three variants that differ in a way a person sees at a glance.\n'
     + '3. Read what they say back. Revise, and ask again under the SAME questionId you were '
     + 'given, so they see one layout changing rather than a pile of them.\n'
-    + '4. They end it by choosing a sketch and saying nothing else. Words about a sketch are a '
-    + 'change to make, not approval. Stop the moment they choose one. You may interrupt them only '
-    + 'a few times, so do not spend one on a change you were already told to make.\n'
+    + '4. They end it two ways. They press the button that says the design is agreed, or they '
+    + 'choose a sketch and say nothing else. Either one is the end: stop and write your answer. '
+    + 'Words about a sketch are a change to make, not approval. You may interrupt them only a few '
+    + 'times, so do not spend one on a change you were already told to make.\n'
     + '\n'
     + 'Your final message is the agreement, written down, and nothing else. Name each region, say '
     + 'where it is anchored, how big it is, and how much space is around it. Give the type sizes and '
@@ -96,6 +114,30 @@ const PARAMETERS = {
         }
     },
     required: ['brief']
+}
+
+/**
+ * Tells the window a loop started or finished, and never fails because of it.
+ *
+ * Swallowed on purpose, both ways. An announcement that did not arrive costs the card its held-open
+ * state, and that is a worse-looking design loop; an announcement that threw would cost the design
+ * itself. The close is the one that matters and it is the one most likely to be refused — a
+ * cancelled turn rejects every call back to Rust, which is exactly when it is sent — so the window
+ * closes its own card when the turn stops rather than trusting this to arrive.
+ */
+async function tellWindow(host, sessionId, state, signal) {
+    if (sessionId === undefined) return
+    try {
+        await host.call(
+            DESIGN_SESSION_TOOL_NAME,
+            {sessionId, state},
+            // The close is deliberately unsignalled: it is sent while unwinding, and the signal it
+            // would be given is usually the one that caused the unwind.
+            state === 'open' ? signal : undefined
+        )
+    } catch {
+        // Nothing to do and nobody to tell. See above.
+    }
 }
 
 /**
@@ -134,27 +176,39 @@ export function createDesignWithUserTool({
                         + 'nobody for a design loop to talk to. Propose the layout in your answer '
                         + 'instead, or put one sketch in front of them yourself with ask_user.'
                 )
-            const result = await runSubagent({
-                prompt: probing ? PROBE_PROMPT : params.brief,
-                systemPrompt: DESIGN_SYSTEM_PROMPT,
-                toolNames: DESIGN_TOOL_NAMES,
-                workspacePath,
-                models: probing ? cannedModels(model, DESIGN_PROBE_ANSWER) : models,
-                model,
-                thinkingLevel,
-                streamOptions,
-                settings,
-                timers,
-                signal,
-                progress: toolProgress(onUpdate),
-                // A ration, not a rule. Nothing else in the system can see a delegation spending
-                // somebody's attention: the parent is never told a dialog opened, and no clock ticks
-                // while a person is looking at one.
-                deps: {host, asks: probing ? 1 : shows, sketchesRequired: true}
-            })
-            return {
-                content: [{type: 'text', text: `${result.text}\n\n${usageFooter(result, model)}`}],
-                details: {turns: result.turns, usage: result.usage}
+            // Opened before the child exists and closed in a `finally`, because the window has no
+            // other way to learn the loop is over. A child that throws, is cancelled mid-draft or
+            // runs out of ration ends the same way from the user's side: nothing more is coming.
+            // The probe opens none — it must not put anything on screen.
+            const sessionId = probing ? undefined : nextSessionId()
+            await tellWindow(host, sessionId, 'open', signal)
+            try {
+                const result = await runSubagent({
+                    prompt: probing ? PROBE_PROMPT : params.brief,
+                    systemPrompt: DESIGN_SYSTEM_PROMPT,
+                    toolNames: DESIGN_TOOL_NAMES,
+                    workspacePath,
+                    models: probing ? cannedModels(model, DESIGN_PROBE_ANSWER) : models,
+                    model,
+                    thinkingLevel,
+                    streamOptions,
+                    settings,
+                    timers,
+                    signal,
+                    progress: toolProgress(onUpdate),
+                    // A ration, not a rule. Nothing else in the system can see a delegation spending
+                    // somebody's attention: the parent is never told a dialog opened, and no clock
+                    // ticks while a person is looking at one.
+                    deps: {host, asks: probing ? 1 : shows, sketchesRequired: true, sessionId}
+                })
+                return {
+                    content: [
+                        {type: 'text', text: `${result.text}\n\n${usageFooter(result, model)}`}
+                    ],
+                    details: {turns: result.turns, usage: result.usage}
+                }
+            } finally {
+                await tellWindow(host, sessionId, 'closed', signal)
             }
         }
     }

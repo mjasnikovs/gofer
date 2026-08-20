@@ -33,6 +33,7 @@ import {createTranscript, withoutTrailingAnswer} from './ai-transcript.mjs'
 import {toolTarget} from './tool-target.mjs'
 import {withoutPackedLiterals} from './scene-text.mjs'
 import {confineTool} from './workspace-confinement.mjs'
+import {piThinkingLevel, piThinkingLevelMap} from './thinking-level.mjs'
 
 const PROVIDER_ID = 'local'
 const DEFAULT_CONTEXT_WINDOW = 120_064
@@ -212,6 +213,7 @@ async function compactMessages(messages, models, model, settings, thinkingLevel,
 }
 
 function modelFor(settings) {
+    const thinkingLevelMap = piThinkingLevelMap(settings.thinkingLevels)
     return {
         id: settings.model,
         name: settings.modelName || settings.model,
@@ -223,9 +225,33 @@ function modelFor(settings) {
         cost: settings.cost ?? {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
         contextWindow: settings.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         maxTokens: settings.maxTokens ?? settings.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        // The efforts this server named, so pi-ai asks at the one that was picked rather than at the
+        // nearest one it believes in. See `piThinkingLevelMap`.
+        ...(thinkingLevelMap ? {thinkingLevelMap} : {}),
         compat: {
             supportsDeveloperRole: false,
             supportsReasoningEffort: settings.supportsReasoningEffort ?? false,
+            // A llama.cpp host turns thinking on with a chat-template argument and ignores
+            // `reasoning_effort` without a word. Sending only the effort field is why the reasoning
+            // level did nothing at all for a local model: the server accepted the request, the
+            // template never saw the switch, and the model thought or did not think according to
+            // whatever the server was started with.
+            ...(settings.chatTemplateThinking ?
+                {
+                    thinkingFormat: 'chat-template',
+                    chatTemplateKwargs: {
+                        enable_thinking: {$var: 'thinking.enabled'},
+                        // So a turn that thought still shows what it thought when it is replayed as
+                        // context. Without it the template drops the reasoning of every prior turn.
+                        preserve_thinking: true,
+                        // Only where the template has efforts to name. Passing one it does not know
+                        // puts an unknown key in the kwargs of every single request.
+                        ...(settings.supportsReasoningEffort ?
+                            {reasoning_effort: {$var: 'thinking.effort', omitWhenOff: true}}
+                        :   {})
+                    }
+                }
+            :   {}),
             // The same story, told to a local server. `prompt_cache_key` is an OpenAI field and a
             // local endpoint never sees one, so the session travels as headers instead: anything
             // holding a KV cache per session — a proxy, a second worker — can route the ask back to
@@ -270,8 +296,8 @@ function parentDriver(settings) {
  */
 function subagentModelFor(settings, models, parent) {
     const chosen = settings.subagent?.connection
-    if (!chosen) return {model: parent, thinkingLevel: settings.thinkingLevel || 'off'}
-    const thinkingLevel = chosen.thinkingLevel || 'off'
+    if (!chosen) return {model: parent, thinkingLevel: piThinkingLevel(settings.thinkingLevel)}
+    const thinkingLevel = piThinkingLevel(chosen.thinkingLevel)
     if (chosen.connectionType === 'openai-codex') {
         const model = models.getModel('openai-codex', chosen.model)
         if (!model)
@@ -295,6 +321,8 @@ function subagentModelFor(settings, models, parent) {
             reasoning: chosen.reasoning,
             supportsReasoningEffort: chosen.supportsReasoningEffort,
             input: chosen.input
+            // `chatTemplateThinking` is deliberately not overridden: it is the connection's, not
+            // the model's, and the connection is the one being spread above.
         }),
         thinkingLevel
     }
@@ -649,7 +677,7 @@ export async function runAgent({
             models,
             model,
             compaction,
-            settings.thinkingLevel || 'off',
+            piThinkingLevel(settings.thinkingLevel),
             signal
         )
         emit({type: 'compaction-end'})
@@ -664,7 +692,7 @@ export async function runAgent({
             models,
             model,
             compaction,
-            settings.thinkingLevel || 'off',
+            piThinkingLevel(settings.thinkingLevel),
             signal
         )
         emit({type: 'compaction-end'})
@@ -685,7 +713,7 @@ export async function runAgent({
             // appended here, because it is this turn's data rather than the user's instructions.
             systemPrompt: `${systemPrompt}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}`,
             model,
-            thinkingLevel: settings.thinkingLevel || 'off',
+            thinkingLevel: piThinkingLevel(settings.thinkingLevel),
             tools,
             messages: contextMessages
         },

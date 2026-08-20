@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest'
 import {
     adoptModelReasoning,
+    thinkingLevelsFor,
     adoptSubagentReasoning,
     apiKeyUpdate,
     applySubagentModel,
@@ -29,6 +30,7 @@ const chatgptProfile = {
     maxTokens: 128_000,
     reasoning: true,
     supportsReasoningEffort: true,
+    thinkingLevels: [],
     input: ['text', 'image'],
     thinkingLevel: 'high'
 } as const
@@ -59,6 +61,8 @@ describe('normalizeSettings', () => {
             maxTokens: 120_064,
             reasoning: false,
             supportsReasoningEffort: false,
+            chatTemplateThinking: false,
+            thinkingLevels: [],
             input: ['text'],
             thinkingLevel: 'off',
             maxRetries: 2,
@@ -76,6 +80,8 @@ describe('normalizeSettings', () => {
                 maxTokens: 120_064,
                 reasoning: false,
                 supportsReasoningEffort: false,
+                chatTemplateThinking: false,
+                thinkingLevels: [],
                 input: ['text'],
                 thinkingLevel: 'off'
             },
@@ -135,6 +141,7 @@ describe('the sub-agent connection', () => {
             maxTokens: 128_000,
             reasoning: true,
             supportsReasoningEffort: true,
+            thinkingLevels: [],
             input: ['text', 'image'],
             thinkingLevel: 'high'
         })
@@ -160,6 +167,7 @@ describe('the sub-agent connection', () => {
             maxTokens: 128_000,
             reasoning: false,
             supportsReasoningEffort: false,
+            thinkingLevels: [],
             input: ['text']
         })
 
@@ -168,6 +176,53 @@ describe('the sub-agent connection', () => {
         expect(smaller.thinkingLevel).toBe('off')
         // And the connection it is served by is the child's own, untouched by the model.
         expect(smaller.connectionType).toBe('openai-codex')
+    })
+})
+
+describe('thinkingLevelsFor', () => {
+    /*
+     * All four cases are real, and all four were measured against one machine running two Qwen
+     * builds in turn. The Q3.6 template preserves reasoning and names no efforts. The Q3.8 one
+     * names three — and answers HTTP 500 to the four Gofer knows that it does not.
+     */
+    it('offers exactly what the server named, and off', () => {
+        expect(
+            thinkingLevelsFor({
+                reasoning: true,
+                supportsReasoningEffort: true,
+                thinkingLevels: ['low', 'medium', 'xhigh']
+            })
+        ).toEqual(['off', 'low', 'medium', 'xhigh'])
+    })
+
+    it('offers on and off to a model that thinks without named efforts', () => {
+        expect(
+            thinkingLevelsFor({
+                reasoning: true,
+                supportsReasoningEffort: false,
+                thinkingLevels: []
+            })
+        ).toEqual(['off', 'on'])
+    })
+
+    it('offers every level to a model nobody has asked about', () => {
+        expect(
+            thinkingLevelsFor({
+                reasoning: true,
+                supportsReasoningEffort: true,
+                thinkingLevels: []
+            })
+        ).toHaveLength(7)
+    })
+
+    it('offers nothing but off to a model that does not think', () => {
+        expect(
+            thinkingLevelsFor({
+                reasoning: false,
+                supportsReasoningEffort: true,
+                thinkingLevels: ['low']
+            })
+        ).toEqual(['off'])
     })
 })
 
@@ -189,6 +244,7 @@ describe('adoptModelReasoning', () => {
             maxTokens: 4_096,
             reasoning: true,
             supportsReasoningEffort: true,
+            thinkingLevels: [],
             input: ['text']
         })
 
@@ -213,12 +269,49 @@ describe('adoptModelReasoning', () => {
             maxTokens: 4_096,
             reasoning: false,
             supportsReasoningEffort: false,
+            thinkingLevels: [],
             input: ['text']
         })
 
         expect(adopted.reasoning).toBe(false)
         expect(adopted.thinkingLevel).toBe('off')
         expect(adopted.local?.thinkingLevel).toBe('off')
+    })
+
+    /*
+     * The second half of the same regression. A chat template can have a place for thinking and no
+     * levels to be asked at — llama.cpp reports exactly that pair for a Qwen build. Keeping a level
+     * because the model reasons left `Reasoning: medium` on screen for a model that has no medium.
+     */
+    it('keeps on for a model that thinks but cannot be told how hard', () => {
+        const ai = {
+            ...normalizeSettings(stored).ai,
+            reasoning: true,
+            supportsReasoningEffort: true,
+            thinkingLevel: 'high'
+        } as const
+        const model = {
+            id: 'local-model',
+            name: 'Local model',
+            contextWindow: 8_192,
+            maxTokens: 4_096,
+            reasoning: true,
+            supportsReasoningEffort: false,
+            thinkingLevels: [],
+            input: ['text']
+        } as const
+
+        // `high` is not one of the two it offers, so it goes.
+        const dropped = adoptModelReasoning(ai, model)
+        expect(dropped.reasoning).toBe(true)
+        expect(dropped.supportsReasoningEffort).toBe(false)
+        expect(dropped.thinkingLevel).toBe('off')
+        expect(dropped.local?.thinkingLevel).toBe('off')
+
+        // `on` is, so it stays. Thinking is not taken away from a model that thinks.
+        const kept = adoptModelReasoning({...ai, thinkingLevel: 'on'}, model)
+        expect(kept.thinkingLevel).toBe('on')
+        expect(kept.local?.thinkingLevel).toBe('on')
     })
 
     it('is the same object when the catalogue says what the settings already said', () => {
@@ -232,6 +325,7 @@ describe('adoptModelReasoning', () => {
                 maxTokens: 4_096,
                 reasoning: false,
                 supportsReasoningEffort: false,
+                thinkingLevels: [],
                 input: ['text']
             })
         ).toBe(ai)
@@ -253,6 +347,7 @@ describe('adoptSubagentReasoning', () => {
             maxTokens: 4_096,
             reasoning: true,
             supportsReasoningEffort: true,
+            thinkingLevels: [],
             input: ['text']
         })
 
@@ -276,6 +371,7 @@ describe('adoptSubagentReasoning', () => {
             maxTokens: 128_000,
             reasoning: false,
             supportsReasoningEffort: false,
+            thinkingLevels: [],
             input: ['text']
         })
 
@@ -296,6 +392,7 @@ describe('adoptSubagentReasoning', () => {
                 maxTokens: 128_000,
                 reasoning: true,
                 supportsReasoningEffort: true,
+                thinkingLevels: [],
                 input: ['text', 'image']
             })
         ).toBe(connection)

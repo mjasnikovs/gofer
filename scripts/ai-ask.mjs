@@ -118,6 +118,14 @@ const PARAMETERS = {
                 + 'with. The user sees one thing changing rather than a pile of questions, and you '
                 + 'are told which revision they are on.'
         },
+        // Not in `required`, and never sent by the model: the design tool puts it there. Declared
+        // so the shape the host receives is the shape written down here, rather than a field that
+        // only exists in the merge below.
+        designSession: {
+            type: 'string',
+            description:
+                'Set for you when a design loop is running, and ignored otherwise. Do not send it.'
+        },
         why: {
             type: 'string',
             description: 'One sentence on what turns on the answer.'
@@ -135,6 +143,18 @@ const SKIPPED =
 export const BUDGET_SPENT =
     'You have asked the user everything you are allowed to ask them in this delegation. Write your '
     + 'answer now, from what they have already told you. Do not ask anything else.'
+
+/**
+ * What the model is told when the user pressed the button that ends a design loop.
+ *
+ * The wording is only half of it. The ration is spent at the same moment, so a model that reads this
+ * and asks anyway gets `BUDGET_SPENT` rather than a dialog. Nothing in this codebase relies on a
+ * sentence to stop a model from doing something it can still do.
+ */
+const APPROVED =
+    'The user ended the design here: this layout is agreed and there is nothing left to decide. '
+    + 'Write the agreement down now. Do not show them anything else and do not ask them anything '
+    + 'else.'
 
 /**
  * What the policy refused while a sketch was on screen, in a sentence the model can act on.
@@ -185,16 +205,26 @@ export function answerText(answer) {
     // A pick with nothing written is a whole answer, and it is the end of the matter. Left to speak
     // for itself it reads as half of one, and the next thing the model does is ask the user to
     // justify a choice they have already made.
-    if (answer?.picked && !said)
+    // Checked before either of the two below, because both of them ask for another round and this
+    // is the user saying there is not going to be one. Words alongside it are the last note on a
+    // layout that is already agreed, not a change to make.
+    if (answer?.approved === true) parts.push(APPROVED)
+    else if (answer?.picked && !said)
         parts.push(
             'They chose it and said nothing else, so that is the whole answer. Build it. Do not ask '
                 + 'them to justify it and do not ask again.'
         )
     // Words about a sketch are a change to it, and a changed layout is the same question again.
+    //
+    // The identifier is written bare. Quoted, the real model copied the quotation marks into the
+    // parameter — `"question-1"` rather than `question-1` — which is a different identifier, so the
+    // revision counter started again at one and the card stopped saying which round it was on. The
+    // reader trims them too; this is the half that stops it happening.
     else if (answer?.picked || (said && Number(answer?.sketches) > 0))
         parts.push(
-            `If you show them a revision, ask under questionId "${String(answer?.questionId ?? '')}" `
-                + 'rather than as a new question.'
+            `If you show them a revision, send questionId ${String(answer?.questionId ?? '')} with `
+                + 'it rather than asking as a new question. Send the identifier exactly as written '
+                + 'here, with no quotation marks around it.'
         )
     if (parts.length === 0) parts.push('The user answered with nothing at all.')
     return parts.join(' ') + trailing
@@ -204,14 +234,21 @@ export function answerText(answer) {
  * @param host the tool channel back to Rust, which holds the window
  * @param budget how many times this holder may interrupt the user, or `undefined` for no ceiling
  * @param sketchesRequired refuse a question with no sketches, for a holder that may only show things
+ * @param sessionId the design loop these questions belong to, or nothing for an ordinary question
  *
  * The budget is a number rather than a name because the two catch different failures. A tool list
  * catches a tool that appeared; nothing in a tool list catches a tool used ninety times, which is
  * what a delegated child with twenty-four steps and a modal can do to somebody. Over budget the tool
  * *answers* rather than throwing: a throw reads to the model as a fault worth retrying, and an
  * answer telling it to wrap up is the thing it should actually do.
+ *
+ * `sessionId` is put on the request here rather than left to the model, and that is the whole reason
+ * it is a parameter. It tells the window that these questions are one iteration of one layout, so
+ * the card stays where it is between rounds instead of closing and reopening. A model asked to
+ * remember to send it would forget on the round that mattered, and every ordinary question — which
+ * is nearly all of them — must carry no session at all.
  */
-export function createAskUserTool({host, budget, sketchesRequired = false}) {
+export function createAskUserTool({host, budget, sketchesRequired = false, sessionId}) {
     let asked = 0
     return {
         name: ASK_USER_TOOL_NAME,
@@ -219,8 +256,17 @@ export function createAskUserTool({host, budget, sketchesRequired = false}) {
         description: DESCRIPTION,
         parameters: PARAMETERS,
         execute: async (_toolCallId, params, signal) => {
-            const request = params ?? {}
-            if (request.probe !== true) {
+            const given = params ?? {}
+            const probing = given.probe === true
+            // The session is ours, not the model's. Written over what was sent under that name when
+            // we have one, and taken away when we do not — the word is in the schema the model
+            // reads, and forwarding it would let an ordinary question award itself a design round:
+            // no escape, no dismissing it, and a button that ends a loop nothing started. A probe
+            // carries none either: it opens no window, so it belongs to no loop.
+            const {designSession: _sent, ...rest} = given
+            const request =
+                sessionId !== undefined && !probing ? {...rest, designSession: sessionId} : rest
+            if (!probing) {
                 if (sketchesRequired && !(request.sketches?.length > 0))
                     throw new Error(
                         'Here you may only put a layout in front of the user, so every question '
@@ -231,6 +277,9 @@ export function createAskUserTool({host, budget, sketchesRequired = false}) {
                 asked += 1
             }
             const answer = await host.call(ASK_USER_TOOL_NAME, request, signal)
+            // The user pressed the button that ends the loop, so the ration is gone rather than
+            // merely discouraged. `APPROVED` says why; this is what makes it true.
+            if (answer?.approved === true && budget !== undefined) asked = budget
             return {
                 content: [{type: 'text', text: answerText(answer)}],
                 details: {

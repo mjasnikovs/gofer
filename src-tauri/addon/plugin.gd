@@ -37,9 +37,6 @@ var _session_id: String = "gofer-session"
 # every accepted mutation. Save keeps the revision and clears dirty; reload resets both.
 var _current_scene_path: String = ""
 var _scene_revision: int = 0
-var _scene_dirty: bool = false
-var _undo_depth: int = 0
-var _redo_depth: int = 0
 # Play mode is not a protocol readiness, so it is tracked apart from `_readiness`.
 var _playing: bool = false
 
@@ -131,7 +128,8 @@ var _runtime_ready: bool = false
 ## leaves that flag set on the editor's session, so it reads `true` over a game that is running
 ## perfectly well and answering — and every runtime call would then be refused against a healthy
 ## game, which is worse than the wait this is here to end. Any message from the game is proof it is
-## running, and a paused game sends none.
+## running, and a paused game sends none. The debugger's `continued` clears it too, for the break
+## that is resumed by hand and followed by nothing.
 var _runtime_broke: bool = false
 var _runtime_pending: Array[Dictionary] = []
 
@@ -373,6 +371,11 @@ class GoferDebuggerBridge extends EditorDebuggerPlugin:
             var breaked := _on_session_breaked.bind(session_id)
             if not session.breaked.is_connected(breaked):
                 session.breaked.connect(breaked)
+            # A resumed game answers again, and it may never speak first: without this the break
+            # state would outlive the break.
+            var continued := _on_session_continued.bind(session_id)
+            if not session.continued.is_connected(continued):
+                session.continued.connect(continued)
         var plugin = _plugin.get_ref()
         if plugin != null:
             plugin._on_runtime_debugger_session_started(session_id)
@@ -386,6 +389,11 @@ class GoferDebuggerBridge extends EditorDebuggerPlugin:
         var plugin = _plugin.get_ref()
         if plugin != null:
             plugin._on_runtime_debugger_session_breaked(session_id)
+
+    func _on_session_continued(session_id: int) -> void:
+        var plugin = _plugin.get_ref()
+        if plugin != null:
+            plugin._on_runtime_debugger_session_continued(session_id)
 
 func _enter_tree() -> void:
     print("GOFER_ADDON_READY:%d" % PROTOCOL_VERSION)
@@ -773,13 +781,21 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
 ## caller, because a mutation, an undo, and a redo each move them differently.
 func _advance_revision() -> void:
     _scene_revision += 1
-    _scene_dirty = true
-    _send_event("scene.changed", {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_dirty})
+    _send_event("scene.changed", {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_is_dirty()})
 
 func _bump_revision() -> void:
-    _undo_depth += 1
-    _redo_depth = 0
     _advance_revision()
+
+## Whether the editor is holding unsaved changes to the edited scene.
+##
+## The editor's own answer, because it is the only one that counts work Gofer did not do. Counting
+## Gofer's own mutations instead made a scene a person saved with Ctrl+S read dirty until the next
+## scene switch, and a scene a person edited by hand read clean — and `dirty` is the field every
+## unsaved-work prompt is built on.
+func _scene_is_dirty() -> bool:
+    if _current_scene_path.is_empty():
+        return false
+    return EditorInterface.get_unsaved_scenes().has(_current_scene_path)
 
 ## Godot keeps starting up for a while after a plugin's first frame: it imports the project on a
 ## background thread and, once that first scan lands, opens a scene for itself — the project's main
@@ -842,13 +858,10 @@ func _track_edited_scene() -> void:
     # A different scene is a different revision baseline, exactly as a Gofer-driven switch is.
     _current_scene_path = path
     _scene_revision = 0
-    _scene_dirty = false
-    _undo_depth = 0
-    _redo_depth = 0
     _send_event("scene.changed", {
         "scene": _current_scene_path,
         "revision": _scene_revision,
-        "dirty": _scene_dirty
+        "dirty": _scene_is_dirty()
     })
 
 ## Godot raises no signal when the project starts or stops running, so the plugin polls the editor
@@ -1052,6 +1065,13 @@ func _on_runtime_debugger_session_breaked(session_id: int) -> void:
         "runtime_broke",
         "The game stopped at an error while starting and is paused in the debugger; read the error in the session output, fix it, and run again",
     )
+
+## The debugger has resumed the game. It can answer again, and a game that is only being watched
+## sends nothing on its own, so this is the clearing that does not wait for the game to speak.
+func _on_runtime_debugger_session_continued(session_id: int) -> void:
+    if session_id != _runtime_session_id:
+        return
+    _runtime_broke = false
 
 func _on_runtime_debugger_session_stopped(session_id: int) -> void:
     if session_id != _runtime_session_id:
@@ -1338,9 +1358,9 @@ func _session_state() -> Dictionary:
         "state": _readiness,
         "scene": _current_scene_path,
         "revision": _scene_revision,
-        "dirty": _scene_dirty,
-        "canUndo": _undo_depth > 0,
-        "canRedo": _redo_depth > 0,
+        "dirty": _scene_is_dirty(),
+        "canUndo": _history_depths()["undoDepth"] > 0,
+        "canRedo": _history_depths()["redoDepth"] > 0,
         # An editor waiting on a person is not something any other field can say. It is not a
         # readiness — commands are answered normally while a dialog is up — and on a real desktop
         # it is not in a screenshot either, because the dialog is a native window of its own.
@@ -1360,9 +1380,8 @@ func _session_quit() -> Dictionary:
 
 ## The scenes the editor is holding changes to that are not on disk.
 ##
-## The editor's own answer, not Gofer's. `_scene_dirty` counts the mutations Gofer made, so a scene
-## a person painted a tilemap onto is clean by it, and every path that stops the editor — a task
-## switch, a merge — threw that work away without a word.
+## Every open scene, where `dirty` answers for the edited one alone. A task switch or a merge stops
+## the editor, and this is what says which files that would throw away.
 func _session_unsaved_scenes() -> Dictionary:
     return {"scenes": Array(EditorInterface.get_unsaved_scenes())}
 
@@ -1382,7 +1401,6 @@ func _session_save_all_scenes() -> Dictionary:
             % ", ".join(PackedStringArray(left)),
             {"scenes": left}
         )
-    _scene_dirty = false
     return {"saved": before}
 
 ## Presses a button on the dialog the editor is waiting on, exactly as a person would.
@@ -1461,11 +1479,11 @@ func _session_cancel(params: Dictionary) -> Dictionary:
     return {"requestId": request_id, "cancelled": cancelled}
 
 func _undo() -> Dictionary:
-    if _undo_depth <= 0:
-        return _history_error("undo_unavailable", "Nothing to undo")
     var history := _scene_history()
     if history == null:
         return _history_error("undo_unavailable", "The editor refused to undo the last action")
+    if not history.has_undo():
+        return _history_error("undo_unavailable", "Nothing to undo")
     var before := history.get_version()
     if not history.undo():
         return _history_error("undo_unavailable", "The editor refused to undo the last action")
@@ -1474,17 +1492,15 @@ func _undo() -> Dictionary:
         return _readback_error(
             "session.undo", "a step back through the history", "version %d, unmoved" % before
         )
-    _undo_depth -= 1
-    _redo_depth += 1
     _after_history_step()
-    return {"undoDepth": _undo_depth, "redoDepth": _redo_depth}
+    return _history_depths()
 
 func _redo() -> Dictionary:
-    if _redo_depth <= 0:
-        return _history_error("redo_unavailable", "Nothing to redo")
     var history := _scene_history()
     if history == null:
         return _history_error("redo_unavailable", "The editor refused to redo the next action")
+    if not history.has_redo():
+        return _history_error("redo_unavailable", "Nothing to redo")
     var before := history.get_version()
     if not history.redo():
         return _history_error("redo_unavailable", "The editor refused to redo the next action")
@@ -1493,10 +1509,8 @@ func _redo() -> Dictionary:
         return _readback_error(
             "session.redo", "a step forward through the history", "version %d, unmoved" % before
         )
-    _undo_depth += 1
-    _redo_depth -= 1
     _after_history_step()
-    return {"undoDepth": _undo_depth, "redoDepth": _redo_depth}
+    return _history_depths()
 
 ## Settles the editor after the scene history moved under it.
 ##
@@ -1508,6 +1522,19 @@ func _after_history_step() -> void:
     EditorInterface.mark_scene_as_unsaved()
     _advance_revision()
 
+## Where the edited scene's history stands, counted off the editor's own `UndoRedo`.
+##
+## Gofer used to count its own mutations instead, and a person's Ctrl+Z moved the history without
+## moving that count: the next `session.undo` stepped one action further back than it was asked to,
+## into work nobody had told it about. A scene switch lost the count altogether, so an undo the Edit
+## menu still offered was refused. The editor is the only place both answers are true.
+func _history_depths() -> Dictionary:
+    var history := _scene_history()
+    if history == null:
+        return {"undoDepth": 0, "redoDepth": 0}
+    var undone_to := history.get_current_action() + 1
+    return {"undoDepth": undone_to, "redoDepth": history.get_history_count() - undone_to}
+
 func _history_error(code: String, message: String) -> Dictionary:
     return {
         "_gofer_error": {
@@ -1515,7 +1542,7 @@ func _history_error(code: String, message: String) -> Dictionary:
             "message": message,
             "retryable": false,
             "readiness": "ready",
-            "details": {"undoDepth": _undo_depth, "redoDepth": _redo_depth}
+            "details": _history_depths()
         }
     }
 
@@ -3035,8 +3062,7 @@ func _scene_save(_params: Dictionary) -> Dictionary:
     var verified := _saved_scene_holds(_current_scene_path, root)
     if not verified.is_empty():
         return verified
-    _scene_dirty = false
-    return {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_dirty}
+    return {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_is_dirty()}
 
 func _scene_save_as(params: Dictionary) -> Dictionary:
     # `root.scene_file_path` below is the editor's own `res://…` name for the file, so the request's
@@ -3075,8 +3101,7 @@ func _scene_save_as(params: Dictionary) -> Dictionary:
             "scene.save_as", path, owned if not owned.is_empty() else "no file", {"path": path}
         )
     _current_scene_path = owned
-    _scene_dirty = false
-    return {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_dirty}
+    return {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_is_dirty()}
 
 func _scene_reload(_params: Dictionary) -> Dictionary:
     if _current_scene_path.is_empty():
@@ -3167,14 +3192,11 @@ func _sweep_scene_pending() -> void:
         if _edited_scene_switched(pending):
             _current_scene_path = pending["path"]
             _scene_revision = 0
-            _scene_dirty = false
-            _undo_depth = 0
-            _redo_depth = 0
             _set_readiness("ready")
             var result := {
                 "scene": _current_scene_path,
                 "revision": _scene_revision,
-                "dirty": _scene_dirty,
+                "dirty": _scene_is_dirty(),
             }
             if pending["mutating"]:
                 _respond_result(pending["id"], result, _scene_revision)

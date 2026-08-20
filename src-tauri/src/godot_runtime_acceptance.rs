@@ -15,10 +15,12 @@
 //! because a screenshot needs a rendered frame. Gated behind the `godot-acceptance` feature so
 //! the fast gate needs no engine.
 
-use crate::godot_editor_harness::{self, PNG_BASE64_PREFIX, Session};
+use crate::godot_dap::{DapClient, MAIN_THREAD_ID};
+use crate::godot_editor_harness::{self, PNG_BASE64_PREFIX, Session, Transports, free_port};
 use crate::godot_rpc::{CallRequest, EventEnvelope};
 use crate::protocol_v2::Readiness;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -865,4 +867,127 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         none.starts_with("no_dialog_open"),
         "answering a dialog that is not there must say so: {none}"
     );
+}
+
+/// A probe that ticks every frame, so a breakpoint set while the game is already running is hit on
+/// the next frame rather than never. The scene expects the Label, so the script keeps writing it.
+const TICKING_PROBE_SCRIPT: &str = "extends Node2D\n\nvar ticks := 0\n\n@onready var label: Label = $Label\n\nfunc _process(_delta: float) -> void:\n\tticks += 1\n\tlabel.text = \"ticks: %d\" % ticks\n";
+/// 1-based, matching the editor UI and the adapter's declared `linesStartAt1`.
+const TICK_BREAK_LINE: i64 = 8;
+/// A breakpoint on a per-frame line is hit within a frame; the budget only covers a loaded machine.
+const BREAK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connects to the editor's debug adapter, which is still coming up while the addon is already
+/// answering.
+fn dap_client(dap_port: u16, session: &Session) -> DapClient {
+    let address = SocketAddr::from(([127, 0, 0, 1], dap_port));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = "no attempt".to_owned();
+    while Instant::now() < deadline {
+        match DapClient::connect(address).and_then(|mut client| client.initialize().map(|_| client))
+        {
+            Ok(client) => return client,
+            Err(error) => {
+                last = format!("{}: {}", error.code, error.message);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+    panic!(
+        "the debug adapter never answered: {last}\n--- editor output ---\n{}",
+        session.output()
+    );
+}
+
+/// A game continued after a break answers again, without having to speak first.
+///
+/// The break state is the addon's own, because the debugger's `is_breaked()` is stale over a
+/// healthy game. It was cleared by any message from the game — and a game only ever speaks when
+/// Gofer asks it something. So a breakpoint hit and then continued in the editor left every later
+/// request refused with "the game is paused at an error", forever: the one call that could have
+/// cleared the state was the call the state refused. The debugger's `continued` is the signal that
+/// ends it, and nothing else can.
+#[test]
+fn a_game_continued_after_a_break_answers_again() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let script = worktree.join("scripts/runtime_probe.gd");
+    std::fs::write(&script, TICKING_PROBE_SCRIPT).expect("write the ticking probe script");
+    let ledger = directory.path().join("ledger.json");
+    let dap_port = free_port();
+    let session = Session::start_on_worktree_with(
+        worktree,
+        ledger,
+        Some(directory),
+        Transports {
+            dap_port: Some(dap_port),
+            ..Transports::default()
+        },
+    );
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .expect("the game must launch");
+
+    // Attached rather than launched: the game is the one the editor is already running, which is
+    // the game every runtime command is about.
+    let client = dap_client(dap_port, &session);
+    let events = client.subscribe_events();
+    client.attach().expect("attach to the running game");
+    client.configuration_done().expect("configuration done");
+    let breakpoints = client
+        .set_breakpoints(&script, &[TICK_BREAK_LINE])
+        .expect("set breakpoints");
+    assert!(
+        breakpoints.iter().any(|breakpoint| breakpoint.verified),
+        "the probe breakpoint must verify, got {breakpoints:?}"
+    );
+
+    let stopped = client
+        .await_stop(&events, MAIN_THREAD_ID, BREAK_TIMEOUT)
+        .expect("a stop must arrive")
+        .expect("the game must stop at the breakpoint rather than terminate");
+    assert_eq!(stopped.reason, "breakpoint", "{stopped:?}");
+
+    // A paused game is refused for the reason it cannot answer, which is the state under test.
+    let state = session.call("runtime.get_state", json!({}));
+    assert_eq!(state["broke"], true, "{state}");
+    let refused = session
+        .try_call("runtime.get_tree", json!({}), None)
+        .expect_err("a paused game cannot answer a forwarded request");
+    assert!(
+        refused.starts_with("runtime_broke"),
+        "a paused game must be refused for the pause: {refused}"
+    );
+
+    client
+        .set_breakpoints(&script, &[])
+        .expect("clear breakpoints");
+    assert!(client.continue_execution(MAIN_THREAD_ID).expect("continue"));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let tree = loop {
+        match session.try_call("runtime.get_tree", json!({}), None) {
+            Ok(answer) => break answer,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "a continued game must answer again, and this one still refuses with {error}\n\
+                     --- editor output ---\n{}",
+                    session.output()
+                );
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    };
+    assert!(
+        tree["root"]["name"].is_string(),
+        "the continued game must answer its remote tree: {tree}"
+    );
+    let after = session.call("runtime.get_state", json!({}));
+    assert_eq!(after["broke"], false, "{after}");
+
+    // The game outlives the editor that spawned it, so a test that starts one stops it.
+    let stopped = session.call("runtime.stop", json!({}));
+    assert_eq!(stopped["running"], false, "{stopped}");
+    session.await_stopped();
 }

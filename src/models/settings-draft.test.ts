@@ -31,7 +31,9 @@ const SETTINGS: GoferSettings = {
         contextWindow: 32_768,
         maxTokens: 4096,
         reasoning: true,
+        chatTemplateThinking: false,
         supportsReasoningEffort: true,
+        thinkingLevels: [],
         input: ['text'],
         thinkingLevel: 'high',
         maxRetries: 2,
@@ -209,6 +211,7 @@ describe('editing the connection', () => {
             maxTokens: 2048,
             reasoning: true,
             supportsReasoningEffort: false,
+            thinkingLevels: [],
             input: ['text', 'image']
         }
         const state = reduce(loaded, {type: 'model-chosen', model})
@@ -229,6 +232,7 @@ describe('editing the connection', () => {
             maxTokens: 2048,
             reasoning: true,
             supportsReasoningEffort: true,
+            thinkingLevels: [],
             input: ['text']
         }
         expect(reduce(loaded, {type: 'model-chosen', model}).settings?.ai.thinkingLevel).toBe(
@@ -244,6 +248,7 @@ describe('editing the connection', () => {
             maxTokens: 2048,
             reasoning: false,
             supportsReasoningEffort: false,
+            thinkingLevels: [],
             input: ['text']
         }
         expect(reduce(loaded, {type: 'model-chosen', model}).settings?.ai.thinkingLevel).toBe('off')
@@ -264,6 +269,7 @@ describe('editing the connection', () => {
             maxTokens: 1_024,
             reasoning: true,
             supportsReasoningEffort: true,
+            thinkingLevels: [],
             input: ['text']
         }
         const stale = apply(
@@ -292,6 +298,7 @@ describe('editing the connection', () => {
             contextWindow: 4_096,
             maxTokens: 1_024,
             reasoning: loaded.settings?.ai.reasoning ?? false,
+            thinkingLevels: [],
             supportsReasoningEffort: loaded.settings?.ai.supportsReasoningEffort ?? false,
             input: ['text']
         }
@@ -308,6 +315,7 @@ describe('choosing the model the sub-agent answers with', () => {
         maxTokens: 2048,
         reasoning: false,
         supportsReasoningEffort: false,
+        thinkingLevels: [],
         input: ['text']
     }
 

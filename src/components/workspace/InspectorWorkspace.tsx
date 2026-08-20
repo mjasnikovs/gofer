@@ -32,6 +32,7 @@ import {
 import type {CenterTab, LayoutAction, ScriptViews, WorkspaceLayout} from '../../models/ui-state'
 import {BottomPanel} from './BottomPanel'
 import {DocsView} from './DocsView'
+import {MemoryView} from './MemoryView'
 import {ExplorerPanel} from './ExplorerPanel'
 import {GameView} from './GameView'
 import {InspectorPanel} from './InspectorPanel'
@@ -498,6 +499,10 @@ function FrameRegions({
                                 value='docs'
                                 label='Docs'
                             />
+                            <Tab
+                                value='memory'
+                                label='Memory'
+                            />
                         </TabList>
                         <StackItem size='fill'>
                             {layout.centerTab === 'chat' ?
@@ -516,7 +521,9 @@ function FrameRegions({
                                 />
                             : layout.centerTab === 'game' ?
                                 <GameView />
-                            :   <DocsView />}
+                            : layout.centerTab === 'docs' ?
+                                <DocsView />
+                            :   <MemoryView />}
                         </StackItem>
                         <Divider />
                         <VStack

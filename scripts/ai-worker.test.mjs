@@ -21,7 +21,7 @@ import Ajv from 'ajv'
 
 import {probeTools} from './ai-reachability.mjs'
 import {createChildTools} from './ai-subagent.mjs'
-import {createAgentTools, retryDelay, runAgent} from './ai-provider.mjs'
+import {createAgentTools, createModelContext, retryDelay, runAgent} from './ai-provider.mjs'
 
 /**
  * The worker these tests spawn.
@@ -2744,6 +2744,237 @@ test('a turn that passes its verification says nothing extra', async context => 
         // Exactly what the model said, and not a word more.
         assert.equal(completion.text, 'Hello Gofer')
         assert.equal(completion.verify.failed, 0)
+    } finally {
+        mock.server.close()
+    }
+})
+
+/**
+ * The switch a llama.cpp host actually reads.
+ *
+ * Measured, not assumed. One machine, two Qwen builds in turn: with no `chat_template_kwargs` the
+ * server produced 0 characters of reasoning, with `enable_thinking: true` it produced 1175, and a
+ * top-level `reasoning_effort` was accepted and ignored. So a connection that turns thinking on
+ * with a template argument has to say so, or the reasoning level does nothing at all.
+ */
+test('a chat-template server is sent the argument that turns thinking on', () => {
+    const settings = {
+        connectionType: 'openai-compatible',
+        name: 'Local AI',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        model: 'local.gguf',
+        modelName: 'local.gguf',
+        api: 'openai-completions',
+        contextWindow: 120_064,
+        maxTokens: 120_064,
+        reasoning: true,
+        supportsReasoningEffort: false,
+        chatTemplateThinking: true,
+        thinkingLevels: [],
+        input: ['text'],
+        thinkingLevel: 'on'
+    }
+    const {model} = createModelContext({settings, apiKey: 'local'})
+
+    assert.equal(model.compat.thinkingFormat, 'chat-template')
+    assert.deepEqual(model.compat.chatTemplateKwargs, {
+        enable_thinking: {$var: 'thinking.enabled'},
+        preserve_thinking: true
+    })
+
+    // A template that names its own efforts gets the effort argument too. The same template raises
+    // on an effort it does not know, so this only ever carries a level the server itself named.
+    const {model: withEfforts} = createModelContext({
+        settings: {...settings, supportsReasoningEffort: true, thinkingLevel: 'medium'},
+        apiKey: 'local'
+    })
+    assert.deepEqual(withEfforts.compat.chatTemplateKwargs.reasoning_effort, {
+        $var: 'thinking.effort',
+        omitWhenOff: true
+    })
+
+    // And a server that never answered `/props` is left exactly as it was: no template argument
+    // reaches an endpoint that would reject an unknown field.
+    const {model: plain} = createModelContext({
+        settings: {...settings, chatTemplateThinking: false},
+        apiKey: 'local'
+    })
+    assert.equal(plain.compat.thinkingFormat, undefined)
+    assert.equal(plain.compat.chatTemplateKwargs, undefined)
+})
+
+/**
+ * The level the menu offers, in the body the server receives.
+ *
+ * The test above reads the model's compat block, which is the shape of the request rather than the
+ * request. Between the two sits `clampThinkingLevel`, and it does not know the word `on`: an
+ * unknown level clamps to the lowest one available, which is `off`, which resolves
+ * `enable_thinking` to false. So the connection that only has on and off sent thinking explicitly
+ * disabled on every request — the one setting it exists to turn on.
+ */
+test('the on level reaches a chat-template server as thinking enabled', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const {port} = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: {
+                ...settings,
+                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
+                reasoning: true,
+                supportsReasoningEffort: false,
+                chatTemplateThinking: true,
+                thinkingLevel: 'on'
+            },
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        const {body} = mock.request()
+        assert.equal(body.chat_template_kwargs?.enable_thinking, true)
+        assert.equal(body.chat_template_kwargs?.preserve_thinking, true)
+        // The template does not name efforts, so it is never told one.
+        assert.equal('reasoning_effort' in body.chat_template_kwargs, false)
+    } finally {
+        mock.server.close()
+    }
+})
+
+/** And off still means off, or the level would be a label with one state. */
+test('the off level reaches a chat-template server as thinking disabled', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const {port} = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: {
+                ...settings,
+                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
+                reasoning: true,
+                supportsReasoningEffort: false,
+                chatTemplateThinking: true,
+                thinkingLevel: 'off'
+            },
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        assert.equal(mock.request().body.chat_template_kwargs?.enable_thinking, false)
+    } finally {
+        mock.server.close()
+    }
+})
+
+/** A template that does name its efforts still carries the one the user picked. */
+test('a named effort reaches a chat-template server unchanged', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const {port} = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: {
+                ...settings,
+                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
+                reasoning: true,
+                supportsReasoningEffort: true,
+                chatTemplateThinking: true,
+                thinkingLevel: 'medium'
+            },
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        const {body} = mock.request()
+        assert.equal(body.chat_template_kwargs?.enable_thinking, true)
+        assert.equal(body.chat_template_kwargs?.reasoning_effort, 'medium')
+    } finally {
+        mock.server.close()
+    }
+})
+
+/**
+ * A level the server named has to reach it under the name the server used.
+ *
+ * pi-ai treats `xhigh` and `max` as levels a model only has if it says so, and a model that has not
+ * said so has them clamped away — `xhigh` becomes `high`. The chat template these levels come from
+ * is the one that raises on an effort it does not know, and llama.cpp answers that with HTTP 500.
+ * Measured against a real Qwen3.8 build: its guard is `('xhigh', 'medium', 'low')`, Gofer offered
+ * xhigh because the server named it, and the request went out saying `high`. That one survived only
+ * because its template happens to alias high onto xhigh a line earlier. A template without that
+ * line answers every request with a 500.
+ */
+test('a level the server named is sent under that name, not the nearest one', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const {port} = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: {
+                ...settings,
+                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
+                reasoning: true,
+                supportsReasoningEffort: true,
+                chatTemplateThinking: true,
+                thinkingLevels: ['low', 'medium', 'xhigh'],
+                thinkingLevel: 'xhigh'
+            },
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        assert.equal(mock.request().body.chat_template_kwargs?.reasoning_effort, 'xhigh')
+    } finally {
+        mock.server.close()
+    }
+})
+
+/** And a level the server did not name is never reached for, however near it looks. */
+test('a level the server did not name is never what a request settles on', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const {port} = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: {
+                ...settings,
+                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
+                reasoning: true,
+                supportsReasoningEffort: true,
+                chatTemplateThinking: true,
+                thinkingLevels: ['low', 'medium', 'xhigh'],
+                // Nothing in the app can pick this — the menu offers what the server named — but a
+                // settings file written against an older model can still hold it.
+                thinkingLevel: 'high'
+            },
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        const sent = mock.request().body.chat_template_kwargs?.reasoning_effort
+        assert.ok(
+            sent === undefined || ['low', 'medium', 'xhigh'].includes(sent),
+            `sent an effort the template would raise on: ${String(sent)}`
+        )
     } finally {
         mock.server.close()
     }

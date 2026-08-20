@@ -52,6 +52,11 @@ async function runRequest(request, {host, credentialHost, emit}) {
         await runBrief({...request, host, credentialHost, emit})
         return
     }
+    if (mode === 'judge') {
+        const {runMemoryJudge} = await import('./memory-judge.mjs')
+        await runMemoryJudge({...request, host, credentialHost, emit})
+        return
+    }
     throw new Error(
         `The AI worker was asked for '${mode}', which it does not know how to run. `
             + 'If the backend was just updated, the bundled workers are stale: run '

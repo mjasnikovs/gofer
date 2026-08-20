@@ -12,7 +12,7 @@ use crate::godot_rpc::{CallRequest as RpcCallRequest, ResponseEnvelope, RpcError
 use crate::godot_session::{
     self, LaunchRequest, LogQuery, LogSeverity, SessionError, SessionInfo, SessionState,
 };
-use crate::settings::{GodotSettings, read_settings};
+use crate::settings::{GodotSettings, read_godot_settings};
 use crate::storage::{
     AppendGodotLogsRequest, FinishGodotRunRequest, GodotLogEntry, ProjectStorage,
     StartGodotRunRequest,
@@ -190,7 +190,7 @@ fn settle_transition<R: Runtime>(app: &AppHandle<R>, from: SessionState, to: Ses
     // rules alone instead of guessing at them. Godot reads the embed mode once, when its game view
     // becomes ready, so a session that has already started is the last moment this can be set for
     // that session at all.
-    let godot = read_settings(app).map(|settings| settings.godot).ok();
+    let godot = read_godot_settings(app).ok();
     // Off this thread: opening a scene is an RPC round trip, and the watch has to keep looking
     // while it is in flight.
     thread::spawn(move || {
@@ -510,8 +510,8 @@ pub fn start_session<R: Runtime>(
         // the editor is ready; this decides the display driver it is launched with, because on
         // Linux only one of them can embed anything. A settings file that cannot be read falls
         // back to what a machine that never chose gets, rather than to "off".
-        embed_game_window: read_settings(app)
-            .map(|settings| settings.godot.embed_game_window)
+        embed_game_window: read_godot_settings(app)
+            .map(|godot| godot.embed_game_window)
             .unwrap_or_else(|_| GodotSettings::default().embed_game_window),
     }) {
         Ok(info) => {

@@ -170,6 +170,15 @@ export type UserQuestionPrompt = Readonly<{
     why: string
     /** Which asking of this question it is, counting from one. */
     revision: number
+    /**
+     * The design loop this question belongs to, or nothing, which is every ordinary question.
+     *
+     * A design loop asks about one layout several times over. Left to look like a queue of unrelated
+     * questions, the card closes on every answer and opens again a minute later once the agent has
+     * redrawn — so the user watches their own modal flicker instead of watching one design change.
+     * This is what tells the card the rounds belong together.
+     */
+    designSession?: string
 }>
 
 /**
@@ -187,12 +196,25 @@ export type UserQuestionResponse = Readonly<{
     picked?: number
     blocked?: readonly string[]
     skipped?: boolean
+    /**
+     * The user ended a design here: this layout is agreed and there is nothing more to show them.
+     *
+     * The opposite of `skipped`, and only a design loop can produce it, because only its card has the
+     * button. The agent is told the design is settled, and its ration to interrupt is spent at the
+     * same moment so it cannot ask anyway.
+     */
+    approved?: boolean
 }>
 
 /** Emitted when a question stops waiting, however it stopped. */
 export type UserQuestionSettled = Readonly<{
     questionId: string
     answered: boolean
+}>
+
+/** A design loop starting or finishing. The card between its two edges is one design. */
+export type DesignSessionEvent = Readonly<{
+    sessionId: string
 }>
 
 /**

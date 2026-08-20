@@ -17,6 +17,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
 
+use crate::model_server::ServedModel;
+
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 const API_KEY_USERNAME: &str = "ai-default";
 const CHATGPT_CREDENTIAL_USERNAME: &str = "ai-openai-codex";
@@ -26,6 +28,17 @@ const BRAVE_KEY_USERNAME: &str = "web-brave-search";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
 const SETTINGS_VERSION: u32 = 1;
+
+/// The levels a model with named efforts can be asked at.
+const EFFORT_THINKING_LEVELS: &[&str] =
+    &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Every level a settings file may legally name. `on` belongs to a model that thinks and has no
+/// efforts to name; the rest belong to one that has. Which of them a given model actually offers is
+/// `thinking_levels`, and this is only what is not a typo.
+const ALL_THINKING_LEVELS: &[&str] = &[
+    "off", "on", "minimal", "low", "medium", "high", "xhigh", "max",
+];
 
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 
@@ -89,6 +102,21 @@ pub(crate) struct AiSettings {
     pub(crate) reasoning: bool,
     #[serde(default)]
     pub(crate) supports_reasoning_effort: bool,
+    /// Whether thinking is turned on by a chat-template argument rather than by an effort field.
+    ///
+    /// True for a llama.cpp host: it takes `chat_template_kwargs.enable_thinking` and silently
+    /// ignores `reasoning_effort`, so a build that sent only the effort field never turned thinking
+    /// on or off for one of these at all. Derived from the server, never typed.
+    #[serde(default)]
+    pub(crate) chat_template_thinking: bool,
+    /// The efforts this model's server said it will accept, or empty when nothing has said.
+    ///
+    /// The menu, in other words. Empty is not "none" — it is "unasked", and the reasoning flags
+    /// answer instead. A list rather than a flag because a chat template refuses the efforts it
+    /// does not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the
+    /// other two with HTTP 500 on every request of the turn.
+    #[serde(default)]
+    pub(crate) thinking_levels: Vec<String>,
     #[serde(default = "default_model_input")]
     pub(crate) input: Vec<String>,
     #[serde(default = "default_thinking_level")]
@@ -123,6 +151,21 @@ pub(crate) struct AiConnectionProfile {
     max_tokens: u64,
     reasoning: bool,
     supports_reasoning_effort: bool,
+    /// Whether thinking is turned on by a chat-template argument rather than by an effort field.
+    ///
+    /// True for a llama.cpp host: it takes `chat_template_kwargs.enable_thinking` and silently
+    /// ignores `reasoning_effort`, so a build that sent only the effort field never turned thinking
+    /// on or off for one of these at all. Derived from the server, never typed.
+    #[serde(default)]
+    chat_template_thinking: bool,
+    /// The efforts this model's server said it will accept, or empty when nothing has said.
+    ///
+    /// The menu, in other words. Empty is not "none" — it is "unasked", and the reasoning flags
+    /// answer instead. A list rather than a flag because a chat template refuses the efforts it
+    /// does not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the
+    /// other two with HTTP 500 on every request of the turn.
+    #[serde(default)]
+    thinking_levels: Vec<String>,
     input: Vec<String>,
     thinking_level: String,
 }
@@ -232,6 +275,14 @@ pub(crate) struct SubagentConnection {
     pub(crate) reasoning: bool,
     #[serde(default)]
     pub(crate) supports_reasoning_effort: bool,
+    /// The efforts this model's server said it will accept, or empty when nothing has said.
+    ///
+    /// The menu, in other words. Empty is not "none" — it is "unasked", and the reasoning flags
+    /// answer instead. A list rather than a flag because a chat template refuses the efforts it
+    /// does not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the
+    /// other two with HTTP 500 on every request of the turn.
+    #[serde(default)]
+    pub(crate) thinking_levels: Vec<String>,
     #[serde(default = "default_model_input")]
     pub(crate) input: Vec<String>,
     #[serde(default = "default_thinking_level")]
@@ -312,6 +363,10 @@ pub(crate) struct AiModelOption {
     max_tokens: u64,
     reasoning: bool,
     supports_reasoning_effort: bool,
+    /// The efforts this model's own server named, or empty when nothing named any. See
+    /// `AiSettings::thinking_levels` — this is the same list, on its way to the settings page.
+    #[serde(default)]
+    thinking_levels: Vec<String>,
     input: Vec<String>,
 }
 
@@ -510,6 +565,8 @@ impl Default for AiSettings {
             max_tokens: default_context_window(),
             reasoning: false,
             supports_reasoning_effort: false,
+            chat_template_thinking: false,
+            thinking_levels: Vec::new(),
             input: default_model_input(),
             thinking_level: default_thinking_level(),
             max_retries: default_max_retries(),
@@ -539,6 +596,10 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
         max_tokens: 128_000,
         reasoning: true,
         supports_reasoning_effort: true,
+        // ChatGPT takes a reasoning effort like any OpenAI endpoint. Nothing about a chat template
+        // reaches it, and there is no `/props` behind that address to say otherwise.
+        chat_template_thinking: false,
+        thinking_levels: Vec::new(),
         input: vec!["text".to_owned(), "image".to_owned()],
         thinking_level: "high".to_owned(),
     }
@@ -599,6 +660,13 @@ pub(crate) fn docs_expansion_connection(
         supports_reasoning_effort: chosen.map_or(profile.supports_reasoning_effort, |c| {
             c.supports_reasoning_effort
         }),
+        thinking_levels: chosen.map_or_else(
+            || profile.thinking_levels.clone(),
+            |c| c.thinking_levels.clone(),
+        ),
+        // The connection's, never the child's: the child borrows an address, and how thinking is
+        // turned on is a fact about the server at that address.
+        chat_template_thinking: profile.chat_template_thinking,
         timeout_ms: settings.timeout_ms,
         max_retries: settings.max_retries,
     })
@@ -643,40 +711,120 @@ fn model_facts(catalog: &PiCatalog, base_url: &str, model_id: &str) -> Option<Mo
     })
 }
 
-/// Re-derives every model-owned fact in a settings file from the catalogue.
+/// Every field a connection holds about its model, borrowed from whichever connection it is.
+///
+/// Three shapes hold the same facts — the flat settings, the saved local profile and the sub-agent's
+/// connection — and all three are corrected by the same rules. Borrowed rather than copied so the
+/// correction lands on the real thing, and written once rather than three times because the last
+/// build's copies drifted apart.
+struct ModelFields<'a> {
+    /// The address the model is resolved against. The sub-agent has none of its own — it borrows
+    /// the connection it names — so this is passed in rather than read off the connection.
+    base_url: String,
+    model: &'a mut String,
+    model_name: &'a mut String,
+    context_window: &'a mut u64,
+    max_tokens: &'a mut u64,
+    reasoning: &'a mut bool,
+    supports_reasoning_effort: &'a mut bool,
+    /// Absent for the sub-agent, which has no connection of its own to describe. It borrows the
+    /// local one, and the local one's copy of this is the one the worker reads.
+    chat_template_thinking: Option<&'a mut bool>,
+    thinking_levels: &'a mut Vec<String>,
+    input: &'a mut Vec<String>,
+    thinking_level: &'a mut String,
+}
+
+/// The levels one model may be asked at, which is not one list.
+///
+/// Four cases. `levels` is what the model's own server said it accepts, and it wins outright: a
+/// chat template raises on an effort it does not know, and llama.cpp turns that into an HTTP 500
+/// on every request of the turn. Empty means nobody has asked — a ChatGPT model, or a local one
+/// resolved before its server was reachable — and then the two flags answer instead.
+///
+/// The middle case is why this is not a constant. A template can have a place for thinking and no
+/// effort to name, and the honest control there is on or off, not seven words that all mean on.
+fn thinking_levels(
+    reasoning: bool,
+    supports_reasoning_effort: bool,
+    levels: &[String],
+) -> Vec<String> {
+    // Reasoning first, and it is not redundant: a model can be marked as taking an effort and as
+    // not thinking at all, and a model that does not think has nothing to spend an effort on.
+    if !reasoning {
+        return vec!["off".to_owned()];
+    }
+    if !levels.is_empty() {
+        return std::iter::once("off".to_owned())
+            .chain(levels.iter().cloned())
+            .collect();
+    }
+    if supports_reasoning_effort {
+        return EFFORT_THINKING_LEVELS
+            .iter()
+            .map(|level| (*level).to_owned())
+            .collect();
+    }
+    vec!["off".to_owned(), "on".to_owned()]
+}
+
+/// The stored level, kept if the model still offers it and dropped to `off` if it does not.
+fn keep_level(
+    level: &str,
+    reasoning: bool,
+    supports_reasoning_effort: bool,
+    levels: &[String],
+) -> String {
+    if thinking_levels(reasoning, supports_reasoning_effort, levels)
+        .iter()
+        .any(|offered| offered == level)
+    {
+        level.to_owned()
+    } else {
+        "off".to_owned()
+    }
+}
+
+/// Re-derives every model-owned fact in a settings file, from the catalogue and from the server.
 ///
 /// Called on every read and every save, so what is on disk is never the authority — it is a copy
 /// the next load overwrites. Only the local driver is resolvable here: Pi's `models.json` is a file
 /// on this machine, while ChatGPT's catalogue lives behind a sidecar process that a settings read
 /// cannot afford to start. The ChatGPT half keeps what it has and is refreshed by the model lister
 /// instead, which is the only other writer of these fields.
-fn resolve_model_facts(settings: &mut AiSettings, catalog: &PiCatalog) {
-    if matches!(settings.connection_type, AiConnectionType::OpenaiCompatible)
-        && let Some(facts) = model_facts(catalog, &settings.base_url, &settings.model)
-    {
-        if let Some(model_name) = facts.model_name {
-            settings.model_name = model_name;
-        }
-        settings.reasoning = facts.reasoning;
-        settings.supports_reasoning_effort = facts.supports_reasoning_effort;
-        if let Some(input) = facts.input {
-            settings.input = input;
-        }
-    }
-    if let Some(local) = settings.local.as_mut()
-        && let Some(facts) = model_facts(catalog, &local.base_url, &local.model)
-    {
-        if let Some(model_name) = facts.model_name {
-            local.model_name = model_name;
-        }
-        local.reasoning = facts.reasoning;
-        local.supports_reasoning_effort = facts.supports_reasoning_effort;
-        if let Some(input) = facts.input {
-            local.input = input;
-        }
+///
+/// Two sources, in order. The catalogue is a file written once and it names models by ids a
+/// llama.cpp host has never heard of, so it answers first and loosely. The server answers last and
+/// exactly: it is the only one of the two that changes when the user swaps the loaded `.gguf`,
+/// which they may do at any time and without telling anybody.
+fn resolve_model_facts(
+    settings: &mut AiSettings,
+    catalog: &PiCatalog,
+    served: &HashMap<String, ServedModel>,
+) {
+    if matches!(settings.connection_type, AiConnectionType::OpenaiCompatible) {
+        let base_url = settings.base_url.clone();
+        resolve_connection(
+            ModelFields {
+                base_url,
+                model: &mut settings.model,
+                model_name: &mut settings.model_name,
+                context_window: &mut settings.context_window,
+                max_tokens: &mut settings.max_tokens,
+                reasoning: &mut settings.reasoning,
+                supports_reasoning_effort: &mut settings.supports_reasoning_effort,
+                chat_template_thinking: Some(&mut settings.chat_template_thinking),
+                thinking_levels: &mut settings.thinking_levels,
+                input: &mut settings.input,
+                thinking_level: &mut settings.thinking_level,
+            },
+            catalog,
+            served,
+        );
     }
     // The sub-agent has no address of its own — it borrows the connection it names. So the server
-    // its model is resolved against is that connection's, not the parent's.
+    // its model is resolved against is that connection's, not the parent's. Read before the local
+    // profile is borrowed, because after that it cannot be.
     let local_base_url = settings
         .local
         .as_ref()
@@ -685,35 +833,107 @@ fn resolve_model_facts(settings: &mut AiSettings, catalog: &PiCatalog) {
             matches!(settings.connection_type, AiConnectionType::OpenaiCompatible)
                 .then(|| settings.base_url.clone())
         });
+    if let Some(local) = settings.local.as_mut() {
+        let base_url = local.base_url.clone();
+        resolve_connection(
+            ModelFields {
+                base_url,
+                model: &mut local.model,
+                model_name: &mut local.model_name,
+                context_window: &mut local.context_window,
+                max_tokens: &mut local.max_tokens,
+                reasoning: &mut local.reasoning,
+                supports_reasoning_effort: &mut local.supports_reasoning_effort,
+                chat_template_thinking: Some(&mut local.chat_template_thinking),
+                thinking_levels: &mut local.thinking_levels,
+                input: &mut local.input,
+                thinking_level: &mut local.thinking_level,
+            },
+            catalog,
+            served,
+        );
+    }
     if let Some(child) = settings.subagent.connection.as_mut()
         && matches!(child.connection_type, AiConnectionType::OpenaiCompatible)
         && let Some(base_url) = local_base_url
-        && let Some(facts) = model_facts(catalog, &base_url, &child.model)
     {
+        resolve_connection(
+            ModelFields {
+                base_url,
+                model: &mut child.model,
+                model_name: &mut child.model_name,
+                context_window: &mut child.context_window,
+                max_tokens: &mut child.max_tokens,
+                reasoning: &mut child.reasoning,
+                supports_reasoning_effort: &mut child.supports_reasoning_effort,
+                chat_template_thinking: None,
+                thinking_levels: &mut child.thinking_levels,
+                input: &mut child.input,
+                thinking_level: &mut child.thinking_level,
+            },
+            catalog,
+            served,
+        );
+    }
+}
+
+/// One connection, corrected by the catalogue and then by its own server.
+fn resolve_connection(
+    fields: ModelFields<'_>,
+    catalog: &PiCatalog,
+    served: &HashMap<String, ServedModel>,
+) {
+    if let Some(facts) = model_facts(catalog, &fields.base_url, fields.model) {
         if let Some(model_name) = facts.model_name {
-            child.model_name = model_name;
+            *fields.model_name = model_name;
         }
-        child.reasoning = facts.reasoning;
-        child.supports_reasoning_effort = facts.supports_reasoning_effort;
+        *fields.reasoning = facts.reasoning;
+        *fields.supports_reasoning_effort = facts.supports_reasoning_effort;
         if let Some(input) = facts.input {
-            child.input = input;
+            *fields.input = input;
         }
     }
-    // The level a model that cannot think is asked at, re-applied: resolution can take reasoning
-    // away, and a level left pointing at nothing is what `validate_settings` already refuses.
-    if !settings.reasoning {
-        settings.thinking_level = "off".to_owned();
+    if let Some(model) = served.get(&server_key(&fields.base_url)) {
+        // The id too, not only the facts about it — but only where there is one model to be. A
+        // host serving one file answers to its path, and a stored id naming the file before it was
+        // swapped names nothing at all. A router serving a directory of them is the other case:
+        // there the id is the user's choice among several, `/props` describes only one of those,
+        // and adopting it would move them onto a model they did not pick. So a router's answer is
+        // taken only for the model it is actually about.
+        if !model.sole && *fields.model != model.id {
+            return;
+        }
+        if *fields.model != model.id {
+            *fields.model = model.id.clone();
+            *fields.model_name = model.id.clone();
+        }
+        if let Some(window) = model.context_window {
+            *fields.context_window = window;
+            // The output ceiling cannot outlive the window it is spent inside. Clamped rather than
+            // replaced, so a user who chose a smaller one keeps it.
+            *fields.max_tokens = (*fields.max_tokens).min(window);
+        }
+        *fields.reasoning = model.reasoning;
+        *fields.supports_reasoning_effort = !model.efforts.is_empty();
+        *fields.thinking_levels = model.efforts.clone();
+        // A server that answered `/props` is a llama.cpp host, and thinking is turned on there by
+        // a chat-template argument. The effort field it also accepts does nothing.
+        if let Some(chat_template_thinking) = fields.chat_template_thinking {
+            *chat_template_thinking = model.reasoning;
+        }
+        if let Some(input) = model.input.clone() {
+            *fields.input = input;
+        }
     }
-    if let Some(local) = settings.local.as_mut()
-        && !local.reasoning
-    {
-        local.thinking_level = "off".to_owned();
-    }
-    if let Some(child) = settings.subagent.connection.as_mut()
-        && !child.reasoning
-    {
-        child.thinking_level = "off".to_owned();
-    }
+    // The level, re-applied against what the model turned out to offer. Resolution can take
+    // reasoning away entirely, and it can take the levels away while leaving the thinking — a
+    // stored `medium` means nothing to a template whose only answers are on and off.
+    *fields.thinking_level = keep_level(
+        fields.thinking_level,
+        *fields.reasoning,
+        *fields.supports_reasoning_effort,
+        fields.thinking_levels,
+    );
 }
 
 fn profile_of(settings: &AiSettings) -> AiConnectionProfile {
@@ -727,6 +947,8 @@ fn profile_of(settings: &AiSettings) -> AiConnectionProfile {
         max_tokens: settings.max_tokens,
         reasoning: settings.reasoning,
         supports_reasoning_effort: settings.supports_reasoning_effort,
+        chat_template_thinking: settings.chat_template_thinking,
+        thinking_levels: settings.thinking_levels.clone(),
         input: settings.input.clone(),
         thinking_level: settings.thinking_level.clone(),
     }
@@ -894,6 +1116,7 @@ pub(crate) async fn list_ai_models_with(
         models.data,
         &pi_catalog().unwrap_or_default(),
         &settings.ai,
+        crate::model_server::served_model(&settings.ai.base_url).as_ref(),
     ))
 }
 
@@ -911,6 +1134,7 @@ fn local_model_options(
     remote: Vec<Model>,
     catalog: &PiCatalog,
     ai: &AiSettings,
+    served: Option<&ServedModel>,
 ) -> Vec<AiModelOption> {
     let server_reasoning = catalog
         .servers
@@ -926,6 +1150,9 @@ fn local_model_options(
                 .and_then(|meta| meta.n_ctx)
                 .or_else(|| known.map(|model| model.context_window))
                 .unwrap_or(ai.context_window);
+            // And the server outranks both, for the model it says it has loaded. It is the only
+            // one of the three that changes when the user swaps the file it was started with.
+            let loaded = served.filter(|model| model.id == remote.id);
             AiModelOption {
                 id: remote.id.clone(),
                 name: known
@@ -935,14 +1162,20 @@ fn local_model_options(
                 max_tokens: known
                     .map(|model| model.max_tokens)
                     .unwrap_or(context_window),
-                reasoning: known
-                    .map(|model| model.reasoning)
-                    .unwrap_or(server_reasoning),
-                supports_reasoning_effort: known
-                    .map(|model| model.supports_reasoning_effort)
-                    .unwrap_or(server_reasoning),
-                input: known
-                    .map(|model| model.input.clone())
+                reasoning: loaded.map_or_else(
+                    || known.map_or(server_reasoning, |model| model.reasoning),
+                    |model| model.reasoning,
+                ),
+                supports_reasoning_effort: loaded.map_or_else(
+                    || known.map_or(server_reasoning, |model| model.supports_reasoning_effort),
+                    |model| !model.efforts.is_empty(),
+                ),
+                thinking_levels: loaded
+                    .map(|model| model.efforts.clone())
+                    .unwrap_or_default(),
+                input: loaded
+                    .and_then(|model| model.input.clone())
+                    .or_else(|| known.map(|model| model.input.clone()))
                     .unwrap_or_else(|| ai.input.clone()),
             }
         })
@@ -989,6 +1222,9 @@ fn chatgpt_models() -> Result<Vec<AiModelOption>, String> {
                     max_tokens: model.max_tokens,
                     reasoning: model.reasoning,
                     supports_reasoning_effort: !model.thinking_level_map.is_empty(),
+                    // ChatGPT names no efforts of its own — the seven Gofer knows are what it
+                    // takes, which is what an empty list here means.
+                    thinking_levels: Vec::new(),
                     input: model.input,
                 })
                 .collect()
@@ -1013,8 +1249,70 @@ pub(crate) fn read_settings<R: Runtime>(app: &AppHandle<R>) -> Result<GoferSetti
     read_settings_from_path(&path)
 }
 
-fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
+/// The read every caller in the app makes: the file, the catalogue, and then the server itself.
+///
+/// The server is asked here rather than inside the resolver so the resolver stays drivable without
+/// one. Asking is cheap and cached — see `model_server` — and asking on *every* read is the point:
+/// the loaded model can change between any two of them.
+/// The Godot rules alone, without asking any model server what it is serving.
+///
+/// Every read below asks the server, and the answer only ever changes fields under `ai`. The rules
+/// are read on paths that are hot and that never look at those fields: `ai_tools::dispatch` reads
+/// them for every single tool the model calls, and the session watch reads them on the editor
+/// becoming ready. A server that accepts a connection and then says nothing — a VPN that dropped, a
+/// container still starting — stalls each of those for the whole probe timeout, for an answer none
+/// of them was going to read.
+///
+/// Narrowed to `GodotSettings` rather than left as a second way to read all of them, so no caller
+/// can quietly take a stale model off this path.
+pub(crate) fn read_godot_settings<R: Runtime>(app: &AppHandle<R>) -> Result<GodotSettings, String> {
+    let path = settings_path(app)?;
+    Ok(read_settings_unprobed_from_path(&path)?.godot)
+}
+
+/// The file and the catalogue, and nothing over the network.
+fn read_settings_unprobed_from_path(path: &Path) -> Result<GoferSettings, String> {
     read_settings_from_paths(path, pi_models_path().ok().as_deref())
+}
+
+fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
+    let pi = pi_models_path().ok();
+    let settings = read_settings_from_paths(path, pi.as_deref())?;
+    let served = ask_servers(&settings.ai);
+    if served.is_empty() {
+        return Ok(settings);
+    }
+    let mut settings = settings;
+    resolve_model_facts(
+        &mut settings.ai,
+        &pi.and_then(|path| pi_catalog_from_path(&path).ok())
+            .unwrap_or_default(),
+        &served,
+    );
+    Ok(settings)
+}
+
+/// Asks every local server this settings file points at what it is serving.
+///
+/// Two addresses at most, and usually the same one twice: the connection the parent is on and the
+/// saved local profile. ChatGPT has no `/props` and is not asked.
+fn ask_servers(ai: &AiSettings) -> HashMap<String, ServedModel> {
+    let addresses = [
+        matches!(ai.connection_type, AiConnectionType::OpenaiCompatible)
+            .then(|| ai.base_url.clone()),
+        ai.local.as_ref().map(|local| local.base_url.clone()),
+    ];
+    let mut served = HashMap::new();
+    for base_url in addresses.into_iter().flatten() {
+        let key = server_key(&base_url);
+        if served.contains_key(&key) {
+            continue;
+        }
+        if let Some(model) = crate::model_server::served_model(&base_url) {
+            served.insert(key, model);
+        }
+    }
+    served
 }
 
 /// The same read with the Pi catalogue named rather than found.
@@ -1043,6 +1341,7 @@ fn read_settings_from_paths(path: &Path, pi: Option<&Path>) -> Result<GoferSetti
         &mut settings.ai,
         &pi.and_then(|path| pi_catalog_from_path(path).ok())
             .unwrap_or_default(),
+        &HashMap::new(),
     );
     Ok(settings)
 }
@@ -1103,6 +1402,8 @@ fn pi_model_option(provider: &PiProvider, model: &PiModel) -> AiModelOption {
         max_tokens: model.max_tokens,
         reasoning,
         supports_reasoning_effort: reasoning && provider.compat.supports_reasoning_effort,
+        // The catalogue is a file. Only the server that has the model loaded can name its efforts.
+        thinking_levels: Vec::new(),
         input: model.input.clone(),
     }
 }
@@ -1131,6 +1432,8 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             max_tokens: model.max_tokens,
             reasoning: known.reasoning,
             supports_reasoning_effort: known.supports_reasoning_effort,
+            chat_template_thinking: false,
+            thinking_levels: Vec::new(),
             input: model.input.clone(),
             thinking_level: default_thinking_level(),
             max_retries: default_max_retries(),
@@ -1232,14 +1535,15 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     if !(1_000..=3_600_000).contains(&settings.ai.timeout_ms) {
         return Err("Request timeout must be between 1,000 and 3,600,000 milliseconds".to_owned());
     }
-    if !["off", "minimal", "low", "medium", "high", "xhigh", "max"]
-        .contains(&settings.ai.thinking_level.as_str())
-    {
+    if !ALL_THINKING_LEVELS.contains(&settings.ai.thinking_level.as_str()) {
         return Err("Reasoning level is invalid".to_owned());
     }
-    if !settings.ai.reasoning {
-        settings.ai.thinking_level = "off".to_owned();
-    }
+    settings.ai.thinking_level = keep_level(
+        &settings.ai.thinking_level,
+        settings.ai.reasoning,
+        settings.ai.supports_reasoning_effort,
+        &settings.ai.thinking_levels,
+    );
     settings.ai.base_url = settings.ai.base_url.trim().trim_end_matches('/').to_owned();
     let url = reqwest::Url::parse(&settings.ai.base_url)
         .map_err(|error| format!("Base URL must be a valid absolute URL: {error}"))?;
@@ -1324,14 +1628,15 @@ fn validate_subagent_connection(
             "Context window and maximum output tokens must be greater than zero".to_owned(),
         );
     }
-    if !["off", "minimal", "low", "medium", "high", "xhigh", "max"]
-        .contains(&connection.thinking_level.as_str())
-    {
+    if !ALL_THINKING_LEVELS.contains(&connection.thinking_level.as_str()) {
         return Err("Reasoning level is invalid".to_owned());
     }
-    if !connection.reasoning {
-        connection.thinking_level = "off".to_owned();
-    }
+    connection.thinking_level = keep_level(
+        &connection.thinking_level,
+        connection.reasoning,
+        connection.supports_reasoning_effort,
+        &connection.thinking_levels,
+    );
     Ok(connection)
 }
 
@@ -1892,6 +2197,7 @@ mod tests {
             max_tokens: 4_096,
             reasoning: true,
             supports_reasoning_effort: true,
+            thinking_levels: Vec::new(),
             input: default_model_input(),
             thinking_level: "low".to_owned(),
         };
@@ -1997,6 +2303,7 @@ mod tests {
             max_tokens: 128_000,
             reasoning: true,
             supports_reasoning_effort: true,
+            thinking_levels: Vec::new(),
             input: default_model_input(),
             thinking_level: "low".to_owned(),
         };
@@ -2061,6 +2368,7 @@ mod tests {
             max_tokens: default_context_window(),
             reasoning: false,
             supports_reasoning_effort: false,
+            thinking_levels: Vec::new(),
             input: default_model_input(),
             thinking_level: "off".to_owned(),
         };
@@ -2362,6 +2670,7 @@ mod tests {
             ],
             &catalog,
             &ai,
+            None,
         );
 
         // The file the server was started with: not in the catalogue, and it thinks anyway.
@@ -2382,9 +2691,135 @@ mod tests {
             }],
             &catalog,
             &elsewhere,
+            None,
         );
         assert!(!unknown[0].reasoning);
         assert!(!unknown[0].supports_reasoning_effort);
+    }
+
+    /// The server outranks the catalogue, in every copy, including the one the user picked.
+    ///
+    /// This is the shape the user hit. The catalogue names one `.gguf`; the host was restarted with
+    /// a different one. Nothing named the loaded file, so its *server's* flag answered for it — and
+    /// a server-wide flag is a fact about the address, not about the model at it. The menu went on
+    /// offering seven reasoning levels to a template that has none.
+    #[test]
+    fn the_loaded_model_outranks_every_written_copy_of_it() {
+        let mut ai = settings("http://127.0.0.1:8080/v1", "old.gguf").ai;
+        ai.model_name = "Old Model".to_owned();
+        ai.reasoning = true;
+        ai.supports_reasoning_effort = true;
+        ai.thinking_level = "medium".to_owned();
+        ai.max_tokens = 200_000;
+        ai.local = Some(profile_of(&ai));
+        ai.subagent.connection = Some(SubagentConnection {
+            connection_type: AiConnectionType::OpenaiCompatible,
+            model: "old.gguf".to_owned(),
+            model_name: "Old Model".to_owned(),
+            context_window: 200_000,
+            max_tokens: 200_000,
+            reasoning: true,
+            supports_reasoning_effort: true,
+            thinking_levels: Vec::new(),
+            input: vec!["text".to_owned(), "image".to_owned()],
+            thinking_level: "high".to_owned(),
+        });
+
+        let served = HashMap::from([(
+            "http://127.0.0.1:8080/v1".to_owned(),
+            ServedModel {
+                id: "/models/new.gguf".to_owned(),
+                context_window: Some(120_064),
+                reasoning: true,
+                efforts: Vec::new(),
+                input: Some(vec!["text".to_owned()]),
+                sole: true,
+            },
+        )]);
+        resolve_model_facts(&mut ai, &PiCatalog::default(), &served);
+
+        let local = ai.local.as_ref().expect("the saved local profile");
+        let child = ai.subagent.connection.as_ref().expect("the sub-agent");
+        for (model, name, effort, level, window, tokens, input) in [
+            (
+                &ai.model,
+                &ai.model_name,
+                ai.supports_reasoning_effort,
+                &ai.thinking_level,
+                ai.context_window,
+                ai.max_tokens,
+                &ai.input,
+            ),
+            (
+                &local.model,
+                &local.model_name,
+                local.supports_reasoning_effort,
+                &local.thinking_level,
+                local.context_window,
+                local.max_tokens,
+                &local.input,
+            ),
+            (
+                &child.model,
+                &child.model_name,
+                child.supports_reasoning_effort,
+                &child.thinking_level,
+                child.context_window,
+                child.max_tokens,
+                &child.input,
+            ),
+        ] {
+            assert_eq!(model, "/models/new.gguf", "the id the server answers to");
+            assert_eq!(name, "/models/new.gguf");
+            assert!(!effort, "the loaded template takes no effort");
+            assert_eq!(level, "off", "so there is no level to be asked at");
+            assert_eq!(window, 120_064, "the window the host was started with");
+            assert_eq!(tokens, 120_064, "clamped into it");
+            assert_eq!(input, &["text".to_owned()], "and no pictures");
+        }
+        assert!(
+            ai.reasoning,
+            "it still thinks, it just cannot be told how hard"
+        );
+    }
+
+    /// A server with more than one model does not get to choose which one the user is on.
+    ///
+    /// llama.cpp has a router mode that serves a whole directory. `/props` describes one of them,
+    /// and it is not necessarily the one that was picked — so its answer applies to that model and
+    /// to no other.
+    #[test]
+    fn a_router_answers_only_for_the_model_it_named() {
+        let mut ai = settings("http://127.0.0.1:8080/v1", "chosen.gguf").ai;
+        ai.reasoning = true;
+        ai.supports_reasoning_effort = true;
+        ai.thinking_level = "medium".to_owned();
+        let before = ai.clone();
+        let served = HashMap::from([(
+            "http://127.0.0.1:8080/v1".to_owned(),
+            ServedModel {
+                id: "another.gguf".to_owned(),
+                context_window: Some(4_096),
+                reasoning: false,
+                efforts: Vec::new(),
+                input: Some(vec!["text".to_owned()]),
+                sole: false,
+            },
+        )]);
+        resolve_model_facts(&mut ai, &PiCatalog::default(), &served);
+        assert_eq!(ai, before, "another model's facts are not this model's");
+    }
+
+    /// A server that does not answer `/props` leaves every written copy exactly as it was.
+    #[test]
+    fn a_server_with_nothing_to_say_changes_nothing() {
+        let mut ai = settings("http://127.0.0.1:8080/v1", "old.gguf").ai;
+        ai.reasoning = true;
+        ai.supports_reasoning_effort = true;
+        ai.thinking_level = "medium".to_owned();
+        let before = ai.clone();
+        resolve_model_facts(&mut ai, &PiCatalog::default(), &HashMap::new());
+        assert_eq!(ai, before);
     }
 
     /// The whole point of the resolver: nothing on disk is the authority on what a model can do.
@@ -2425,6 +2860,7 @@ mod tests {
             max_tokens: 120_064,
             reasoning: false,
             supports_reasoning_effort: false,
+            thinking_levels: Vec::new(),
             input: vec!["text".to_owned()],
             thinking_level: "off".to_owned(),
         });
@@ -2748,6 +3184,87 @@ mod tests {
                 value: "x".repeat(MAX_API_KEY_BYTES + 1)
             })
             .is_err()
+        );
+    }
+}
+
+/// What a settings read costs when the address in it does not answer.
+#[cfg(test)]
+mod probe_cost_tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    /// An address that accepts a connection and then says nothing at all — the one case the probe
+    /// timeout exists to bound. A VPN that dropped, a container still starting, a port taken by
+    /// something else entirely.
+    fn black_hole() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+        let address = listener.local_addr().expect("an address").to_string();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                // Held, never answered, never closed.
+                thread::sleep(std::time::Duration::from_secs(30));
+                drop(stream);
+            }
+        });
+        format!("http://{address}/v1")
+    }
+
+    fn settings_at(directory: &TempDir, base_url: &str) -> PathBuf {
+        let path = directory.path().join("settings.json");
+        let mut settings = GoferSettings::default();
+        settings.ai.connection_type = AiConnectionType::OpenaiCompatible;
+        settings.ai.base_url = base_url.to_owned();
+        settings.ai.local = None;
+        fs::write(
+            &path,
+            serde_json::to_string(&settings).expect("settings as json"),
+        )
+        .expect("write settings");
+        path
+    }
+
+    /**
+    The Godot rules are read on paths that are hot, and they cost a round trip they never use.
+
+    `read_settings` asks the model server what it is serving on every read, and the answer only ever
+    changes fields under `ai`. Every tool the model calls goes through `ai_tools::dispatch`, which
+    reads the settings for `settings.godot` alone — so a server that accepts and then says nothing
+    stalls a Godot operation for the whole probe timeout, once per cache period, forever.
+    */
+    #[test]
+    fn reading_the_godot_rules_never_waits_on_a_model_server() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = settings_at(&directory, &black_hole());
+
+        let started = Instant::now();
+        let rules = read_settings_unprobed_from_path(&path).expect("read settings");
+        let elapsed = started.elapsed();
+
+        assert_eq!(rules.godot, GodotSettings::default());
+        assert!(
+            elapsed < crate::model_server::PROBE_TIMEOUT,
+            "waited {elapsed:?} for rules that no server has a say in"
+        );
+    }
+
+    /// And the read that does want the served model still pays for it, so the two are not the same
+    /// call by another name.
+    #[test]
+    fn the_read_that_wants_the_served_model_still_asks_for_it() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = settings_at(&directory, &black_hole());
+
+        let started = Instant::now();
+        read_settings_from_path(&path).expect("read settings");
+
+        assert!(
+            started.elapsed() >= crate::model_server::PROBE_TIMEOUT,
+            "the probe was skipped on the path that needs it"
         );
     }
 }

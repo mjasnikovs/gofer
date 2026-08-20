@@ -1,7 +1,7 @@
 [[permission]]
 identifier = "main-window-commands"
 description = "Allows the main window to use Gofer's user-facing application commands."
-# GENERATED-BEGIN allow-list sha256:5be3807ad09a17cb
+# GENERATED-BEGIN allow-list sha256:c3879e494864c821
 commands.allow = [
     "abandon_task_merge",
     "activate_chat_task",
@@ -17,6 +17,7 @@ commands.allow = [
     "create_chat_task",
     "create_project_backup",
     "delete_chat_task",
+    "delete_project_memory",
     "delete_rag_cache",
     "delete_workspace_path",
     "edit_workspace_file",
@@ -25,7 +26,9 @@ commands.allow = [
     "get_rag_cache_status",
     "import_legacy_chat",
     "initialize_rag",
+    "judge_project_memory",
     "list_ai_models",
+    "list_project_memory",
     "list_project_tasks",
     "list_workspace_files",
     "load_chat",
@@ -55,6 +58,7 @@ commands.allow = [
     "save_chat",
     "save_chat_attachment",
     "save_godot_settings",
+    "save_project_memory",
     "save_script_document",
     "save_settings",
     "search_godot_log_history",

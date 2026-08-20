@@ -329,4 +329,137 @@ describe('asking the user something', () => {
             expect(answerBox()).toHaveValue('')
         })
     })
+
+    /*
+     * A design loop is several askings about one layout, and the card is the loop rather than one
+     * asking of it.
+     *
+     * Every test here is a way the first build made a loop look like a queue: the card vanishing on
+     * every answer, a revision arriving with nothing saying it was one, and no way out but to stop
+     * replying.
+     */
+    describe('a question that belongs to a design loop', () => {
+        const round = (over: Partial<UserQuestionPrompt> = {}) => ({
+            ...question,
+            sketches: TWO,
+            designSession: 'design-1',
+            ...over
+        })
+
+        const inLoop = (prompt: UserQuestionPrompt, isRedrawing = false) => {
+            const onAnswer = vi.fn<(response: UserQuestionResponse) => void>()
+            const view = render(
+                <UserQuestionDialog
+                    prompt={prompt}
+                    isRedrawing={isRedrawing}
+                    onAnswer={onAnswer}
+                />
+            )
+            return {onAnswer, view}
+        }
+
+        /** The button that ends the loop as agreed, rather than by the user giving up on it. */
+        it('ends the design on the layout the user chose', async () => {
+            const {onAnswer} = inLoop(round())
+
+            await userEvent.click(screen.getByRole('button', {name: 'Choose Side rail'}))
+            await userEvent.click(screen.getByRole('button', {name: 'Complete and handoff'}))
+
+            expect(onAnswer).toHaveBeenCalledWith(
+                expect.objectContaining({questionId: 'q-1', picked: 1, approved: true})
+            )
+        })
+
+        /*
+         * Approving without a pick hands the agent three layouts and the news that the user liked
+         * one, which is not an answer it can build from.
+         */
+        it('will not end the design until a layout is chosen', async () => {
+            inLoop(round())
+            expect(screen.getByRole('button', {name: 'Complete and handoff'})).toBeDisabled()
+
+            await userEvent.click(screen.getByRole('button', {name: 'Choose Side rail'}))
+            expect(screen.getByRole('button', {name: 'Complete and handoff'})).toBeEnabled()
+        })
+
+        /** Words about a sketch are a change to make, and a change is another round. */
+        it('sends changes without ending the design', async () => {
+            const {onAnswer} = inLoop(round())
+
+            await userEvent.type(answerBox(), 'the title is too big')
+            await userEvent.click(screen.getByRole('button', {name: 'Send changes'}))
+
+            expect(onAnswer).toHaveBeenCalledWith(expect.not.objectContaining({approved: true}))
+        })
+
+        /*
+         * The revision has been on the prompt since the first build and was never drawn, so a
+         * layout the user had already commented on came back looking like a brand new question.
+         */
+        it('says which round the user is on', () => {
+            inLoop(round({revision: 3}))
+            expect(screen.getByText('Round 3')).toBeInTheDocument()
+        })
+
+        it('does not label the first round', () => {
+            inLoop(round({revision: 1}))
+            expect(screen.queryByText(/^Round /u)).not.toBeInTheDocument()
+        })
+
+        /*
+         * Between rounds the card stays and the sketches go.
+         *
+         * A layout the user can still read but can no longer act on invites them to keep judging one
+         * that is already being replaced.
+         */
+        it('holds the card open while the agent redraws', () => {
+            inLoop(round({revision: 2}), true)
+
+            expect(screen.getByText('Design in progress')).toBeInTheDocument()
+            expect(screen.getByText(/Round 2 sent/u)).toBeInTheDocument()
+            expect(screen.queryByRole('button', {name: 'Choose Side rail'})).not.toBeInTheDocument()
+        })
+
+        /** A stray Escape between rounds would end a design the user is halfway through. */
+        it('cannot be dismissed by accident', async () => {
+            const {onAnswer} = inLoop(round())
+
+            await userEvent.keyboard('{Escape}')
+
+            expect(onAnswer).not.toHaveBeenCalled()
+            expect(screen.getByRole('button', {name: 'Send changes'})).toBeInTheDocument()
+        })
+
+        /*
+         * The backend sends the field, not its absence, and `null` is not `undefined`.
+         *
+         * A live sweep found this: every ordinary question arrived carrying `designSession: null`,
+         * so the card read it as a design round. It grew the button that ends a loop, renamed its
+         * Answer control, and stopped closing on Escape. The payload no longer carries the null
+         * either — this is the half that holds if it ever does again.
+         */
+        it('reads a null session as no session at all', async () => {
+            const {onAnswer} = inLoop({
+                ...question,
+                designSession: null
+            } as unknown as UserQuestionPrompt)
+
+            expect(
+                screen.queryByRole('button', {name: 'Complete and handoff'})
+            ).not.toBeInTheDocument()
+            expect(screen.getByRole('button', {name: 'Answer'})).toBeInTheDocument()
+
+            await userEvent.keyboard('{Escape}')
+            expect(onAnswer).toHaveBeenCalledWith(expect.objectContaining({skipped: true}))
+        })
+
+        /** An ordinary question is unchanged: Escape is still the user leaving it to the agent. */
+        it('leaves an ordinary question dismissable', async () => {
+            const {onAnswer} = inLoop(question)
+
+            await userEvent.keyboard('{Escape}')
+
+            expect(onAnswer).toHaveBeenCalledWith(expect.objectContaining({skipped: true}))
+        })
+    })
 })
