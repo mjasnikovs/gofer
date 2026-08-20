@@ -33,6 +33,14 @@ type ChatConversationProps = Readonly<{
  * (`npm run astryx -- component ChatMessage`), so the override stays until one of them does.
  */
 const LEFT_ALIGNED_USER_BUBBLE_STYLE = {alignSelf: 'flex-start'} as const
+/*
+ * A sent message is shown back the way it was typed. The composer is a contenteditable at
+ * `white-space: pre-wrap`, but `Text` sets no `white-space` at all below `maxLines`, so the
+ * default `normal` collapsed every newline and blank line the moment the message left the
+ * box — a paragraphed brief came back as one blob. `ChatMessageBubble` already carries
+ * `overflow-wrap: break-word`, which is inherited, so a long path still breaks.
+ */
+const SENT_TEXT_STYLE = {whiteSpace: 'pre-wrap'} as const
 // The conversation sits in a centre-aligned column: without an explicit width it
 // would shrink to the widest message and grow as the reply streams in.
 const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex', width: '100%'} as const
@@ -547,7 +555,12 @@ const ConversationMessage = memo(
                             />
                         :   null}
                         {message.text ?
-                            <Text>{message.text}</Text>
+                            <Text
+                                type='code'
+                                style={SENT_TEXT_STYLE}
+                            >
+                                {message.text}
+                            </Text>
                         :   null}
                     </VStack>
                 </ChatMessageBubble>

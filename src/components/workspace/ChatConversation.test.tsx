@@ -63,6 +63,35 @@ describe('ChatConversation', () => {
         expect(await screen.findByText('scenes/player.tscn · 24s')).toBeTruthy()
     })
 
+    /*
+     * A brief is typed as paragraphs and pasted as a block, and it has to read back that way. The
+     * bubble used to hand the string to a `Text` with no `white-space`, so the browser's `normal`
+     * collapsed every newline and every blank line into one wall of prose.
+     */
+    it('keeps the line breaks in a message the way it was typed', () => {
+        const message: Message = {
+            id: 1,
+            sender: 'user',
+            text: '=== 1. BLOCKER ===\n\nscripts/main.gd:850\n    _spawn_centipede()',
+            timestamp: STARTED_AT
+        }
+        render(
+            <ChatConversation
+                attachmentPreviews={{}}
+                isStreaming={false}
+                messages={[message]}
+                scrollRef={createRef<HTMLElement>()}
+                onRetry={() => undefined}
+            />
+        )
+
+        // jsdom does not lay text out, so the evidence is the preserved string plus the rule that
+        // decides whether a browser would honour it.
+        const sent = screen.getByText(/BLOCKER/)
+        expect(sent.textContent).toBe(message.text)
+        expect(sent.style.whiteSpace).toBe('pre-wrap')
+    })
+
     /* A sent picture is still the thing the turn is about, so it has to open bigger than a thumbnail. */
     it('opens a sent attachment full size', async () => {
         const user = userEvent.setup()
