@@ -18,6 +18,7 @@ import {useGodotReading} from '../../hooks/useGodotReading'
 import {useGodotClassIcons} from '../../hooks/useGodotClassIcons'
 import {useChatReferences} from '../../hooks/useChatReferences'
 import type {ChatReferenceSink} from '../../hooks/useChatReferences'
+import type {ChatReference} from '../../utils/chat-references'
 import type {ClassIcons} from '../../hooks/useGodotClassIcons'
 import {buildPathTree, filterSceneTree} from '../../utils/godot-format'
 import type {PathTreeNode} from '../../utils/godot-format'
@@ -137,6 +138,47 @@ function NodeIcon({icon, type}: Readonly<{icon: string | undefined; type: string
     )
 }
 
+/**
+ * A row's own `@`: it names what the row shows inside the message being written.
+ *
+ * Raw span, and deliberately: the wrapper exists so `src/theme/rows.css` can reveal the button when
+ * its row is hovered or focused, which is a relationship between two elements that no component
+ * prop expresses.
+ *
+ * Every caller puts it in `startContent`, at the head of the row and ahead of any icon, because
+ * that is where the row's own width is guaranteed: the end of a row is the first thing a long name
+ * in a deep branch takes away. The at sign is the gesture people already know — it names a thing
+ * inside a message rather than creating one, which is what a plus promised and this does not do.
+ */
+function MentionButton({
+    name,
+    reference,
+    references
+}: Readonly<{name: string; reference: ChatReference; references: ChatReferenceSink}>) {
+    return (
+        <span className='gofer-row-action'>
+            <IconButton
+                label={`Mention ${name} in the message`}
+                size='sm'
+                variant='ghost'
+                // Through Astryx's `Icon`, which puts a width and a height on the drawing. A bare
+                // Heroicon carries only a `viewBox`: Chromium then stretches it to its box, WebKit
+                // — the engine the desktop actually renders in — draws it at nothing at all, so the
+                // button was there and empty on every row.
+                icon={
+                    <Icon
+                        icon={AtSymbolIcon}
+                        size='sm'
+                    />
+                }
+                clickAction={() => {
+                    references.add(reference)
+                }}
+            />
+        </span>
+    )
+}
+
 type NodeTreeContext = Readonly<{
     origin: GodotSelection['origin']
     selected: string | undefined
@@ -185,35 +227,13 @@ function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData 
                 </HStack>
             </Tooltip>
         ),
-        // At the head of the row, ahead of the class icon, because that is where the row's own
-        // width is guaranteed: the end of a row is the first thing a long name in a deep branch
-        // takes away. The at sign is the gesture people already know — it names a thing inside a
-        // message rather than creating one, which is what a plus promised and this does not do.
         ...(references && {
             startContent: (
-                // Raw, and deliberately: the wrapper exists so `src/theme/rows.css` can reveal the
-                // button when its row is hovered or focused, which is a relationship between two
-                // elements that no component prop expresses.
-                <span className='gofer-row-action'>
-                    <IconButton
-                        label={`Mention ${node.name} in the message`}
-                        size='sm'
-                        variant='ghost'
-                        // Through Astryx's `Icon`, which puts a width and a height on the drawing.
-                        // A bare Heroicon carries only a `viewBox`: Chromium then stretches it to
-                        // its box, WebKit — the engine the desktop actually renders in — draws it
-                        // at nothing at all, so the button was there and empty on every row.
-                        icon={
-                            <Icon
-                                icon={AtSymbolIcon}
-                                size='sm'
-                            />
-                        }
-                        clickAction={() => {
-                            references.add({kind: 'node', id: node.path, detail: node.type})
-                        }}
-                    />
-                </span>
+                <MentionButton
+                    name={node.name}
+                    reference={{kind: 'node', id: node.path, detail: node.type}}
+                    references={references}
+                />
             )
         }),
         isExpanded: true,
@@ -227,24 +247,60 @@ function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData 
     }
 }
 
-function fileItems(
-    nodes: readonly PathTreeNode[],
-    onOpenFile: (path: string) => void,
+type FileTreeContext = Readonly<{
+    onOpenFile: (path: string) => void
     onOpenScene: (path: string) => void
-): TreeListItemData[] {
-    return nodes.map(node => ({
-        id: node.path,
-        label: node.name,
-        ...(node.isDirectory ?
-            {isExpanded: true, children: fileItems(node.children, onOpenFile, onOpenScene)}
-        :   {
-                isDisabled: !isEditable(node.path) && !isScene(node.path),
-                onClick: () => {
-                    if (isScene(node.path)) onOpenScene(node.path)
-                    else onOpenFile(node.path)
+    /** Absent wherever there is no conversation to add a file to. */
+    references: ChatReferenceSink | undefined
+}>
+
+function fileItems(nodes: readonly PathTreeNode[], context: FileTreeContext): TreeListItemData[] {
+    const {onOpenFile, onOpenScene, references} = context
+    return nodes.map(node => {
+        const canOpen = isEditable(node.path) || isScene(node.path)
+        return {
+            id: node.path,
+            /*
+             * A file Gofer cannot open says so by being the quieter of the two, not by being
+             * disabled. Astryx puts `pointer-events: none` on a disabled row, which would take the
+             * row's `@` with it — and a `.png` is exactly the file worth naming in a message and
+             * never worth opening in Monaco. Without an `onClick` the row is not interactive
+             * anyway, so nothing is lost but the greying.
+             */
+            label:
+                node.isDirectory || canOpen ?
+                    node.name
+                :   <Text
+                        color='secondary'
+                        maxLines={1}
+                    >
+                        {node.name}
+                    </Text>,
+            // A folder is mentioned with the trailing slash the composer's own menu leaves behind,
+            // which is both the mark of a folder and the text that scopes the next search.
+            ...(references && {
+                startContent: (
+                    <MentionButton
+                        name={node.name}
+                        reference={{
+                            kind: 'file',
+                            id: node.isDirectory ? `${node.path}/` : node.path
+                        }}
+                        references={references}
+                    />
+                )
+            }),
+            ...(node.isDirectory ? {isExpanded: true, children: fileItems(node.children, context)}
+            : canOpen ?
+                {
+                    onClick: () => {
+                        if (isScene(node.path)) onOpenScene(node.path)
+                        else onOpenFile(node.path)
+                    }
                 }
-            })
-    }))
+            :   {})
+        }
+    })
 }
 
 /**
@@ -385,8 +441,13 @@ export function ExplorerPanel({
     )
 
     const fileTree = useMemo(
-        () => fileItems(buildPathTree(listed.map(file => file.path)), onOpenFile, onOpenScene),
-        [listed, onOpenFile, onOpenScene]
+        () =>
+            fileItems(buildPathTree(listed.map(file => file.path)), {
+                onOpenFile,
+                onOpenScene,
+                references
+            }),
+        [listed, onOpenFile, onOpenScene, references]
     )
 
     const offline = (
@@ -426,13 +487,15 @@ export function ExplorerPanel({
                     value='scene'
                     label='Scene'
                 />
-                <Tab
-                    value='runtime'
-                    label='Runtime'
-                />
+                {/* Files sits second because Runtime is empty until the game is run, and a tab
+                    that is empty most of the day does not belong between two that are not. */}
                 <Tab
                     value='files'
                     label='Files'
+                />
+                <Tab
+                    value='runtime'
+                    label='Runtime'
                 />
             </TabList>
             {tab === 'files' ?

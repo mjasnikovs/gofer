@@ -37,6 +37,21 @@ export type FileMention = Readonly<{
 /** How many suggestions a menu shows before it stops being a menu and becomes a listing. */
 export const FILE_MENTION_LIMIT = 20
 
+/**
+ * How a path reads inside a message: `@scripts/player.gd`.
+ *
+ * A path with a space in it is quoted, so the agent reads one argument rather than two. The menu
+ * can offer such a path but the composer can never be typed towards one: Astryx's
+ * `findActiveTrigger` abandons the trigger at the first space, so `@my ` closes the menu. Quoting
+ * fixes the message; it does not make a folder with a space in its name steppable.
+ *
+ * Shared, because the composer's `@` menu and the Files tree's own `@` button both write it. Two
+ * spellings of the same file would be two things to the model reading them.
+ */
+export function mentionValue(path: string) {
+    return path.includes(' ') ? `@"${path}"` : `@${path}`
+}
+
 function split(path: string, isDirectory: boolean): FileMention {
     const cut = path.lastIndexOf('/')
     if (cut === -1) return {path, name: path, directory: '', isDirectory}

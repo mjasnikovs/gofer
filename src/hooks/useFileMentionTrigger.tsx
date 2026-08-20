@@ -1,6 +1,7 @@
 import {useEffect, useMemo} from 'react'
 import type {ChatComposerTrigger} from '@astryxdesign/core/Chat'
 import {FileMentionRow} from '../components/workspace/FileMentionRow'
+import {mentionValue} from '../models/file-mentions'
 import {createFileMentionSource} from '../services/file-mentions'
 
 /**
@@ -21,17 +22,6 @@ import {createFileMentionSource} from '../services/file-mentions'
  * The worktree is listed at mount rather than at the first `@`, because the menu can only stay off
  * its loading state while the source can answer without waiting (`services/file-mentions.ts`).
  */
-
-/**
- * A path with a space in it is quoted, so the agent reads one argument rather than two.
- *
- * The menu can offer such a path but the composer can never be typed towards one: Astryx's
- * `findActiveTrigger` abandons the trigger at the first space, so `@my ` closes the menu. Quoting
- * fixes the message; it does not make a folder with a space in its name steppable.
- */
-function mentionValue(path: string) {
-    return path.includes(' ') ? `@"${path}"` : `@${path}`
-}
 
 export function useFileMentionTrigger(): ChatComposerTrigger {
     const trigger = useMemo<ChatComposerTrigger>(

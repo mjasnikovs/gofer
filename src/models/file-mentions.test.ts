@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {FILE_MENTION_LIMIT, mentionEntries, rankFileMentions} from './file-mentions'
+import {FILE_MENTION_LIMIT, mentionEntries, mentionValue, rankFileMentions} from './file-mentions'
 
 const PROJECT = [
     'project.godot',
@@ -166,5 +166,14 @@ describe('a query that names a folder', () => {
     it('falls back to whole paths when the folder is not there', () => {
         expect(paths('nope/game')).toEqual([])
         expect(paths('vendor/pack')).toEqual(['addons/vendor/pack/', 'addons/vendor/pack/game.gd'])
+    })
+})
+
+/* Both the composer's menu and the Files tree's own `@` button write a path through this. */
+describe('how a path reads inside a message', () => {
+    it('quotes only a path the agent would otherwise read as two arguments', () => {
+        expect(mentionValue('scripts/game.gd')).toBe('@scripts/game.gd')
+        expect(mentionValue('scripts/')).toBe('@scripts/')
+        expect(mentionValue('my art/tile.png')).toBe('@"my art/tile.png"')
     })
 })

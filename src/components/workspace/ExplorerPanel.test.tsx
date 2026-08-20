@@ -7,6 +7,8 @@ import {fakeSession, refusal} from '../../test/fake-session'
 import type {GodotSessionState} from '../../models/godot'
 import type {GodotCall} from '../../models/workspace'
 import type {WorkspaceEntry} from '../../models/script'
+import {ChatReferenceContext} from '../../hooks/useChatReferences'
+import type {ChatReference} from '../../utils/chat-references'
 
 /**
  * The explorer, mounted as itself.
@@ -30,6 +32,7 @@ const TREE = {
 const FILES: readonly WorkspaceEntry[] = [
     {path: 'scenes/main.tscn', bytes: 10},
     {path: 'scripts/player.gd', bytes: 10},
+    {path: 'art/tile.png', bytes: 10},
     {path: 'scenes/main.tscn.import', bytes: 10},
     {path: '.godot/uid_cache.bin', bytes: 10}
 ]
@@ -39,9 +42,11 @@ function explorer(
         tab?: 'scene' | 'runtime' | 'files'
         state?: GodotSessionState
         answer?: () => Promise<unknown>
+        /** Mounted without a sink unless one is asked for, as a panel with no conversation is. */
+        add?: (reference: ChatReference) => void
     }> = {}
 ) {
-    const {tab = 'scene', state = 'ready', answer = () => Promise.resolve(TREE)} = options
+    const {tab = 'scene', state = 'ready', answer = () => Promise.resolve(TREE), add} = options
     const call = vi.fn(answer)
     const handlers = {
         onTabChange: vi.fn(),
@@ -51,7 +56,7 @@ function explorer(
         onOpenMainScene: vi.fn(),
         onStartSession: vi.fn()
     }
-    render(
+    const panel = (
         <InEditorSession session={fakeSession({state, call: call as unknown as GodotCall})}>
             <ExplorerPanel
                 tab={tab}
@@ -60,6 +65,11 @@ function explorer(
                 {...handlers}
             />
         </InEditorSession>
+    )
+    render(
+        add ?
+            <ChatReferenceContext.Provider value={{add}}>{panel}</ChatReferenceContext.Provider>
+        :   panel
     )
     return {call, ...handlers}
 }
@@ -114,6 +124,31 @@ describe('the explorer column', () => {
 
         expect(screen.queryByText('main.tscn.import')).not.toBeInTheDocument()
         expect(screen.queryByText('uid_cache.bin')).not.toBeInTheDocument()
+    })
+
+    it('offers no way to mention a file where there is no conversation to mention it in', () => {
+        explorer({tab: 'files'})
+        expect(screen.queryByRole('button', {name: /^Mention /})).not.toBeInTheDocument()
+    })
+
+    /**
+     * A picture is the file most worth naming in a message and the one Gofer will never open, so
+     * the two have to be independent. They were not: a row Astryx marks disabled takes no pointer
+     * events at all, which would have taken this button with it.
+     */
+    it('mentions a file, a folder, and a picture it cannot open', async () => {
+        const user = userEvent.setup()
+        const add = vi.fn()
+        explorer({tab: 'files', add})
+
+        await user.click(screen.getByRole('button', {name: 'Mention player.gd in the message'}))
+        expect(add).toHaveBeenCalledWith({kind: 'file', id: 'scripts/player.gd'})
+
+        await user.click(screen.getByRole('button', {name: 'Mention scripts in the message'}))
+        expect(add).toHaveBeenCalledWith({kind: 'file', id: 'scripts/'})
+
+        await user.click(screen.getByRole('button', {name: 'Mention tile.png in the message'}))
+        expect(add).toHaveBeenCalledWith({kind: 'file', id: 'art/tile.png'})
     })
 
     it('chooses a node with the origin it was chosen in', async () => {
