@@ -16,7 +16,7 @@ import {
     shouldCompact
 } from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider, isRetryableAssistantError} from '@earendil-works/pi-ai'
-import {runVerifyPoints, verifyPointsIn, verifyReport} from './verify-points.mjs'
+import {runVerifyPoints, verifyPointsIn, verifyReport, verifySummary} from './verify-points.mjs'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
@@ -772,6 +772,7 @@ export async function runAgent({
         let recoveredOverflow = false
         let attempt = 0
         let verifyAttempt = 0
+        let verifyResults
         // Read once, before the model runs: the specification is already on the transcript when the
         // turn starts, and a model that writes a VERIFY block into its own answer is describing
         // what it did rather than agreeing to be held to it.
@@ -809,9 +810,8 @@ export async function runAgent({
                 // the composer has not been released, and the model is still there to be asked
                 // again. After `done` it is none of those things.
                 if (!verifyPoints) break
-                const report = verifyReport(
-                    await runVerifyPoints({points: verifyPoints, env, emit, signal})
-                )
+                verifyResults = await runVerifyPoints({points: verifyPoints, env, emit, signal})
+                const report = verifyReport(verifyResults)
                 if (report === undefined) break
                 // Told once, then let go. A model that cannot make its own checks pass on a second
                 // attempt is spending turns to write the same answer, and the red points are on the
@@ -849,9 +849,25 @@ export async function runAgent({
             resume = () => agent.continue()
         }
         if (finalMessage.stopReason === 'length') throw new Error(outOfRoom(finalMessage, model))
+        // The answer carries its own verdict. A turn whose points went red used to end with
+        // `stopReason: 'stop'` and whatever the model chose to say — measured live, that was "The
+        // verification passes" four seconds after the second failure. The transcript held the truth
+        // and the bubble held the opposite.
+        const verifyFailure = verifySummary(verifyResults)
+        const answered = textContent(finalMessage.content)
         const completion = {
             type: 'done',
-            text: textContent(finalMessage.content),
+            text: verifyFailure === undefined ? answered : `${answered}\n\n${verifyFailure}`,
+            verify:
+                verifyResults === undefined ? undefined : (
+                    {
+                        failed: verifyResults.filter(result => !result.passed).length,
+                        points: verifyResults.map(result => ({
+                            name: result.name,
+                            passed: result.passed
+                        }))
+                    }
+                ),
             thinking: finalMessage.content
                 .filter(part => part.type === 'thinking')
                 .map(part => part.thinking)

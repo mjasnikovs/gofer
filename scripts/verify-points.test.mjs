@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {runVerifyPoints, verifyPointsIn, verifyReport} from './verify-points.mjs'
+import {runVerifyPoints, verifyPointsIn, verifyReport, verifySummary} from './verify-points.mjs'
 
 const SPEC =
     'GOAL\nA boss.\n\nVERIFY\n```sh\n'
@@ -114,4 +114,26 @@ test('a report is written only when something failed, and it names every point',
     assert.match(report, /actual=0/u)
     // The one thing it must forbid, because it is the cheapest way to turn a check green.
     assert.match(report, /Do not edit or delete the check/u)
+})
+
+/**
+ * Measured live on this code: a point failed twice, the model was handed the report and asked
+ * again, and the turn still ended with "The verification passes. The code is already correct." The
+ * red was on the transcript and nowhere near the sentence anyone reads.
+ */
+test('a finished answer carries its own verdict, and says nothing when everything passed', () => {
+    const results = [
+        {name: 'the boss moves', command: 'make boss', passed: false, output: 'actual=0'},
+        {name: 'it still starts', command: 'make start', passed: true, output: ''}
+    ]
+
+    const summary = verifySummary(results)
+    assert.match(summary, /Verification failed: 1 of 2 points/u)
+    assert.match(summary, /FAIL {2}the boss moves/u)
+    // Every point is named, so the summary cannot be read as being about something else.
+    assert.match(summary, /PASS {2}it still starts/u)
+
+    assert.equal(verifySummary([{name: 'a', command: 'a', passed: true, output: ''}]), undefined)
+    assert.equal(verifySummary([]), undefined)
+    assert.equal(verifySummary(undefined), undefined)
 })

@@ -2645,3 +2645,72 @@ test(
         assert.match(session.stderr(), /The request was rejected/u)
     }
 )
+
+/**
+ * A turn that failed its own verification must say so in the answer, not only on the transcript.
+ *
+ * Measured live against a local model: a point failed twice, the model was handed the report and
+ * asked again, and the turn still ended "The verification passes. The code is already correct." —
+ * four seconds after the second red. The turn reported `stopReason: 'stop'` and nothing anywhere
+ * near the sentence a person reads said otherwise, which is the Centipede failure one layer up.
+ */
+test('a turn whose verification failed carries the verdict in its answer', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const address = mock.server.address()
+    const spec =
+        'GOAL\nA thing.\n\nVERIFY\n```sh\n'
+        + '# the boss registers every part it builds\n'
+        + 'sh -c "exit 1"\n'
+        + '# the project is still there\n'
+        + 'sh -c "exit 0"\n'
+        + '```\n'
+
+    try {
+        const completion = await runAgent({
+            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            messages: [{sender: 'user', text: spec, images: [], timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        // The model said "Hello" and stopped. The answer says what actually happened.
+        assert.match(completion.text, /^Hello/u)
+        assert.match(completion.text, /Verification failed: 1 of 2 points/u)
+        assert.match(completion.text, /FAIL {2}the boss registers every part it builds/u)
+        assert.match(completion.text, /PASS {2}the project is still there/u)
+        assert.equal(completion.verify.failed, 1)
+        assert.deepEqual(completion.verify.points, [
+            {name: 'the boss registers every part it builds', passed: false},
+            {name: 'the project is still there', passed: true}
+        ])
+    } finally {
+        mock.server.close()
+    }
+})
+
+test('a turn that passes its verification says nothing extra', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const address = mock.server.address()
+    const spec = 'GOAL\nA thing.\n\nVERIFY\n```sh\n# it is there\nsh -c "exit 0"\n```\n'
+
+    try {
+        const completion = await runAgent({
+            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            messages: [{sender: 'user', text: spec, images: [], timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        // Exactly what the model said, and not a word more.
+        assert.equal(completion.text, 'Hello Gofer')
+        assert.equal(completion.verify.failed, 0)
+    } finally {
+        mock.server.close()
+    }
+})

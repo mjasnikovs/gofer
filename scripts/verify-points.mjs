@@ -97,6 +97,28 @@ export async function runVerifyPoints({points, env, emit, signal}) {
 }
 
 /**
+ * What a finished turn says about its own verification, in the answer the user reads.
+ *
+ * The failure this closes was measured live, on this code. A point failed twice, the model was
+ * handed the report and asked again, and it still ended the turn with "The verification passes. The
+ * code is already correct." — four seconds after the second red. The red was on the transcript and
+ * nowhere near the sentence anyone reads, so the turn presented as clean.
+ *
+ * Appended after the model's own words rather than before them, because the last line is the one
+ * that is believed, and every point is named so the summary cannot be read as being about something
+ * else.
+ */
+export function verifySummary(results) {
+    const failed = (results ?? []).filter(result => !result.passed)
+    if (failed.length === 0) return undefined
+    const lines = results.map(result => `  ${result.passed ? 'PASS' : 'FAIL'}  ${result.name}`)
+    return (
+        `Verification failed: ${failed.length} of ${results.length} points from this task's `
+        + `specification did not pass.\n${lines.join('\n')}`
+    )
+}
+
+/**
  * What a failing run says to the model that has just called itself finished.
  *
  * Written as the user's own words rather than a system note, because that is the seam the turn
