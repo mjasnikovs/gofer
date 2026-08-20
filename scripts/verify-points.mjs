@@ -15,6 +15,7 @@
  */
 
 import {parseVerifyPoints} from './brief/phases.mjs'
+import {validateBashCommand} from './workspace-confinement.mjs'
 
 /**
  * How long one point may run before it is called a failure.
@@ -73,10 +74,20 @@ export async function runVerifyPoints({points, env, emit, signal}) {
             index,
             of: points.length
         })
-        const outcome = await env.exec(point.command, {
-            timeout: POINT_TIMEOUT_SECONDS,
-            abortSignal: signal
-        })
+        // The same rules the bash tool obeys. Measured live: the specification told the model to
+        // put its check outside the project, `validateBashCommand` then refused that path, and the
+        // model copied the file into the workspace to get around it — while this ran the original
+        // unconfined. One of the two was wrong and it was not the tool.
+        let outcome
+        try {
+            validateBashCommand(point.command)
+            outcome = await env.exec(point.command, {
+                timeout: POINT_TIMEOUT_SECONDS,
+                abortSignal: signal
+            })
+        } catch (error) {
+            outcome = {ok: false, error}
+        }
         const passed = outcome.ok && outcome.value.exitCode === 0
         const output =
             outcome.ok ?

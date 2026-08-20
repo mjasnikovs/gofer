@@ -197,7 +197,7 @@ function inProjectTerms(workspacePath, error) {
     throw new Error(spelled)
 }
 
-function validateBashCommand(command) {
+export function validateBashCommand(command) {
     if (typeof command !== 'string' || command.length === 0 || command.includes('\0'))
         throw new Error('Shell commands must be non-empty strings')
     // Every absolute path is refused, including one that points inside the worktree: a shell

@@ -307,6 +307,14 @@ export function isAiStreamEvent(value: unknown): value is AiStreamEvent {
                 && isText(value['model'])
                 && Array.isArray(value['agentMessages'])
             )
+        case 'verify-point':
+            return (
+                isText(value['name'])
+                && isText(value['command'])
+                && (value['status'] === 'running'
+                    || value['status'] === 'complete'
+                    || value['status'] === 'error')
+            )
         default:
             return false
     }
@@ -423,6 +431,30 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
                 model: event.model,
                 status: 'complete',
                 ...(thinking !== undefined && {thinking})
+            }
+        }
+        /*
+         * A point is upserted by name, not appended.
+         *
+         * Every point sends twice — once when it starts and once when it answers — so appending
+         * would draw a running row and a finished row for the same check. The order is the order
+         * they ran in, which is the order the specification listed them.
+         */
+        case 'verify-point': {
+            const point = {
+                name: event.name,
+                command: event.command,
+                status: event.status,
+                ...(event.output !== undefined && event.output !== '' && {output: event.output})
+            }
+            const points = message.verifyPoints ?? []
+            const at = points.findIndex(existing => existing.name === event.name)
+            return {
+                ...message,
+                verifyPoints:
+                    at < 0 ?
+                        [...points, point]
+                    :   [...points.slice(0, at), point, ...points.slice(at + 1)]
             }
         }
         // The transcript is the caller's to store; the message on screen does not hold it.

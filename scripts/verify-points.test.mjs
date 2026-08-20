@@ -137,3 +137,41 @@ test('a finished answer carries its own verdict, and says nothing when everythin
     assert.equal(verifySummary([]), undefined)
     assert.equal(verifySummary(undefined), undefined)
 })
+
+/**
+ * A point obeys the rules the bash tool obeys.
+ *
+ * Measured on a live run: the specification told the model to put its check outside the project,
+ * `validateBashCommand` refused that path when the model tried to run it, and the model copied the
+ * file into the workspace to get around it — while the gate ran the original, unconfined. The gate
+ * was the one in the wrong, and the specification now names `.gofer/checks/`, which is inside the
+ * workspace and which Gofer already keeps out of git.
+ */
+test('a point that reaches outside the workspace is refused, not run', async () => {
+    const env = {
+        ran: [],
+        exec: command => {
+            env.ran.push(command)
+            return Promise.resolve({ok: true, value: {stdout: '', stderr: '', exitCode: 0}})
+        }
+    }
+    const spec =
+        'VERIFY\n```sh\n'
+        + '# reaches out of the workspace\n'
+        + 'godot --headless --script /etc/passwd\n'
+        + '# stays inside it\n'
+        + 'godot --headless --script .gofer/checks/boss.gd\n'
+        + '```\n'
+
+    const results = await runVerifyPoints({
+        points: verifyPointsIn([{sender: 'user', text: spec}]),
+        env,
+        emit: () => {}
+    })
+
+    assert.equal(results[0].passed, false)
+    assert.match(results[0].output, /absolute path/u)
+    // Refused before it ran, not after: only the second command ever reached the shell.
+    assert.deepEqual(env.ran, ['godot --headless --script .gofer/checks/boss.gd'])
+    assert.equal(results[1].passed, true)
+})
