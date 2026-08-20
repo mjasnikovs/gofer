@@ -52,6 +52,23 @@ function tail(text) {
 }
 
 /**
+ * A refusal a point can act on.
+ *
+ * Confinement writes for the bash tool, and its advice names the editor tools — "read one with the
+ * read tool, and change it with godot_scene". A point has no tools. It is one shell line whose exit
+ * code is the whole of its answer, so a refusal that sends it to a tool is a refusal it cannot do
+ * anything about. The reason is kept, because the reason is right; only the way out is rewritten.
+ */
+function refusedPoint(error) {
+    const reason = String(error?.message ?? error ?? 'the command was refused')
+    return (
+        `${reason} A verification point is one shell command and has no tools of its own — check `
+        + 'this by booting the game instead, with `godot --headless --audio-driver Dummy --script '
+        + '.gofer/checks/<name>.gd`.'
+    )
+}
+
+/**
  * Runs every point and answers with what each one did.
  *
  * Every point runs, even after one has failed: a run that stopped at the first red would report one
@@ -86,7 +103,7 @@ export async function runVerifyPoints({points, env, emit, signal}) {
                 abortSignal: signal
             })
         } catch (error) {
-            outcome = {ok: false, error}
+            outcome = {ok: false, error: {message: refusedPoint(error)}}
         }
         const passed = outcome.ok && outcome.value.exitCode === 0
         const output =

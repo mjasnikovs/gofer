@@ -171,6 +171,8 @@ test('a point that reaches outside the workspace is refused, not run', async () 
 
     assert.equal(results[0].passed, false)
     assert.match(results[0].output, /absolute path/u)
+    // The reason is confinement's; the way out is one a shell line can actually take.
+    assert.match(results[0].output, /has no tools of its own/u)
     // Refused before it ran, not after: only the second command ever reached the shell.
     assert.deepEqual(env.ran, ['godot --headless --script .gofer/checks/boss.gd'])
     assert.equal(results[1].passed, true)
