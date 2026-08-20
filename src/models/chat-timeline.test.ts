@@ -35,6 +35,53 @@ function replay(events: readonly AiStreamEvent[], from: Message = assistant()) {
 }
 
 describe('applyStreamEvent', () => {
+    /**
+     * Every point sends twice — once when it starts, once when it answers — so a reducer that
+     * appended would draw a running row and a finished row for the same check.
+     */
+    it('upserts a verification point by name and keeps the order it ran in', () => {
+        const message = replay([
+            {
+                type: 'verify-point',
+                name: 'the boss moves',
+                command: 'a',
+                status: 'running',
+                index: 0,
+                of: 2
+            },
+            {
+                type: 'verify-point',
+                name: 'it still starts',
+                command: 'b',
+                status: 'running',
+                index: 1,
+                of: 2
+            },
+            {
+                type: 'verify-point',
+                name: 'the boss moves',
+                command: 'a',
+                status: 'error',
+                index: 0,
+                of: 2,
+                output: 'actual=0'
+            },
+            {
+                type: 'verify-point',
+                name: 'it still starts',
+                command: 'b',
+                status: 'complete',
+                index: 1,
+                of: 2
+            }
+        ])
+
+        expect(message.verifyPoints).toEqual([
+            {name: 'the boss moves', command: 'a', status: 'error', output: 'actual=0'},
+            {name: 'it still starts', command: 'b', status: 'complete'}
+        ])
+    })
+
     it('keeps text and tool calls in the order they arrived', () => {
         const message = replay([
             {type: 'text-delta', delta: 'Let me look.'},

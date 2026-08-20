@@ -31,6 +31,27 @@ export type Message = Readonly<{
      */
     activity?: string
     attachments?: readonly ChatAttachment[]
+    /**
+     * The task's verification points, as they run and once they have answered.
+     *
+     * On the turn rather than on the task, because a point is only ever true of one turn's work:
+     * the same point is red before a fix and green after it, and a list held per task would show
+     * the older answer beside the newer reply that changed it.
+     */
+    verifyPoints?: readonly VerifyPoint[]
+}>
+
+/**
+ * One named check from the task's specification, and where it has got to.
+ *
+ * The statuses are `ChatToolCalls`' own, so the row needs no mapping: a point is a thing the turn
+ * did, drawn where the turn's other work is drawn.
+ */
+export type VerifyPoint = Readonly<{
+    name: string
+    command: string
+    status: 'running' | 'complete' | 'error'
+    output?: string
 }>
 
 export type ChatAttachment = Readonly<{
@@ -119,6 +140,22 @@ export type AiStreamEvent =
           usage: TokenUsage
           model: string
           agentMessages: readonly unknown[]
+      }>
+    /**
+     * One verification point starting, or answering.
+     *
+     * Sent per point rather than once at the end, because the run is the part worth watching: a
+     * point that boots a headless Godot is seconds of silence, and a list that only appears once
+     * every point has finished is a list nobody sees while it matters.
+     */
+    | Readonly<{
+          type: 'verify-point'
+          name: string
+          command: string
+          status: 'running' | 'complete' | 'error'
+          index: number
+          of: number
+          output?: string
       }>
     /**
      * The model's memory of this task, as it stands part-way through a turn.

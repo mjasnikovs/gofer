@@ -311,10 +311,15 @@ export function formatAnswers(settled) {
  * would otherwise "have" a verify block holding every line to the end of the document, and a
  * downstream reader treating those as commands is worse off than one told there are none.
  */
-function verifyLines(spec) {
+function verifyBlockBody(spec) {
     const match = /^VERIFY[ \t]*\n+```(?:sh|bash)?[ \t]*\n([\s\S]*?)\n```/mu.exec(spec ?? '')
-    if (!match) return null
-    const lines = match[1]
+    return match ? match[1] : null
+}
+
+function verifyLines(spec) {
+    const body = verifyBlockBody(spec)
+    if (body === null) return null
+    const lines = body
         .split('\n')
         .map(line => line.trim())
         .filter(line => line.length > 0 && !line.startsWith('#'))
@@ -342,6 +347,51 @@ export function parseVerifyBlock(spec) {
 export function declaresNoCommands(spec) {
     const lines = verifyLines(spec)
     return lines !== null && lines.length === 1 && lines[0] === NO_COMMANDS
+}
+
+/**
+ * The named points a spec's VERIFY block declares, or null when it declares none.
+ *
+ * A point is a command plus the name to call it by, and the name is the `#` comment written above
+ * it. Nothing else in the format changes: the fence, the `sh` tag and the `(none)` sentinel are
+ * what compose already writes, and the comment was already legal there — it was thrown away.
+ *
+ * The failure this closes: a run reports `npm run test:godot` and `godot --headless --script
+ * .gofer/checks/centipede.gd` as two shell strings, so a reader watching a task cannot tell which
+ * of them is the boss and which is the lint. Eleven planned tasks in one project wrote twelve
+ * command lines between them and three were ever run; a line nobody can name is a line nobody
+ * misses.
+ *
+ * A name labels the one command below it and no more. Two commands under one comment would
+ * otherwise be two rows with the same label, which is worse in a list than a row labelled by its
+ * own command — so an unnamed command falls back to naming itself, and a blank line clears a
+ * pending name so a comment cannot reach past a gap to a command it was not written for.
+ */
+export function parseVerifyPoints(spec) {
+    const body = verifyBlockBody(spec)
+    if (body === null) return null
+    const points = []
+    let pending = ''
+    for (const raw of body.split('\n')) {
+        const line = raw.trim()
+        if (line.length === 0) {
+            pending = ''
+            continue
+        }
+        if (line.startsWith('#')) {
+            pending = line.replace(/^#+[ \t]*/u, '').trim()
+            continue
+        }
+        // The sentinel is the block saying there is nothing to run. It is not a point, and a name
+        // written above it belongs to nothing.
+        if (line === NO_COMMANDS) {
+            pending = ''
+            continue
+        }
+        points.push({name: pending.length > 0 ? pending : line, command: line})
+        pending = ''
+    }
+    return points.length > 0 ? points : null
 }
 
 /** Everything before the first bare GOAL heading — the narration a model writes before answering. */

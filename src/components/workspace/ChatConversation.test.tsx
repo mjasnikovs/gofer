@@ -3,7 +3,7 @@ import {cleanup, render, screen} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {createRef} from 'react'
 import {ChatConversation} from './ChatConversation'
-import type {Message, ToolActivity} from '../../models/chat'
+import type {Message, ToolActivity, VerifyPoint} from '../../models/chat'
 
 /**
  * The row a slow call draws while it is still running.
@@ -135,5 +135,69 @@ describe('ChatConversation', () => {
         expect(await screen.findByText('250ms')).toBeTruthy()
         expect(await screen.findByText('scenes/player.tscn')).toBeTruthy()
         expect(screen.queryByText('scenes/player.tscn · 90s')).toBeNull()
+    })
+})
+
+/**
+ * Measured on a live run: two points went red and the turn ended "The verification passes. The code
+ * is already correct." The answer carries the verdict in its text now, and this is the other half —
+ * the points are on screen while they run, not only once they have all finished.
+ */
+describe('verification points', () => {
+    afterEach(cleanup)
+
+    function withPoints(points: readonly VerifyPoint[]) {
+        const message: Message = {
+            id: 2,
+            sender: 'assistant',
+            text: 'All done.',
+            timestamp: STARTED_AT,
+            status: 'complete',
+            verifyPoints: points
+        }
+        return (
+            <ChatConversation
+                attachmentPreviews={{}}
+                isStreaming={false}
+                messages={[message]}
+                scrollRef={createRef<HTMLElement>()}
+                onRetry={() => undefined}
+            />
+        )
+    }
+
+    it('says how many failed, and opens itself when one did', () => {
+        render(
+            withPoints([
+                {
+                    name: 'the boss moves',
+                    command: 'godot --headless',
+                    status: 'error',
+                    output: 'actual=0'
+                },
+                {name: 'it still starts', command: 'test -f project.godot', status: 'complete'}
+            ])
+        )
+
+        expect(screen.getByText('Verification failed — 1 of 2')).toBeTruthy()
+        // Opened, because a red point the reader has to click to find is a red point they miss.
+        expect(screen.getByText('the boss moves')).toBeTruthy()
+    })
+
+    it('counts up while the points are still running', () => {
+        render(
+            withPoints([
+                {name: 'the boss moves', command: 'a', status: 'complete'},
+                {name: 'it still starts', command: 'b', status: 'running'}
+            ])
+        )
+
+        expect(screen.getByText('Verifying 2 of 2')).toBeTruthy()
+    })
+
+    it('says so plainly when everything passed', () => {
+        render(withPoints([{name: 'the boss moves', command: 'a', status: 'complete'}]))
+
+        expect(screen.getByText('Verified — 1 of 1')).toBeTruthy()
     })
 })

@@ -16,7 +16,13 @@ import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {Thumbnail} from '@astryxdesign/core/Thumbnail'
 import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
-import type {ChatAttachment, Message, MessagePart, ToolActivity} from '../../models/chat'
+import type {
+    ChatAttachment,
+    Message,
+    MessagePart,
+    ToolActivity,
+    VerifyPoint
+} from '../../models/chat'
 import {messageParts} from '../../models/chat-timeline'
 
 type ChatConversationProps = Readonly<{
@@ -220,6 +226,50 @@ const ToolCallRow = memo(({now, tool}: {now?: number | undefined; tool: ToolActi
 })
 ToolCallRow.displayName = 'ToolCallRow'
 
+/**
+ * The task's verification points, drawn where the turn's other work is drawn.
+ *
+ * They are not tool calls, and they belong on this row anyway: a point is something the turn did,
+ * it has the same four states `ChatToolCalls` draws, and Astryx's own guidance is that these rows
+ * live inside an assistant message rather than as standalone UI.
+ *
+ * The failure this closes was measured on a live run. A point failed twice and the turn ended "The
+ * verification passes. The code is already correct." The answer now carries the verdict in its
+ * text, but a verdict that only arrives at the end is a verdict nobody watches: a point that boots
+ * a headless Godot is seconds of silence with nothing on screen saying what is being waited for.
+ */
+const VerifyPointsRow = memo(({points}: {points: readonly VerifyPoint[]}) => {
+    const failed = points.filter(point => point.status === 'error').length
+    const settled = points.filter(point => point.status !== 'running').length
+    // Named rather than counted, because the generated label is a bare count and the one thing a
+    // reader needs from a collapsed row is whether anything is red.
+    const label =
+        settled < points.length ? `Verifying ${String(settled + 1)} of ${String(points.length)}`
+        : failed > 0 ? `Verification failed — ${String(failed)} of ${String(points.length)}`
+        : `Verified — ${String(points.length)} of ${String(points.length)}`
+    // The verdict is its own line rather than the group's label. `ChatToolCalls` writes its own
+    // header once the group is open — "2 tool calls" — and the one thing a reader needs from this
+    // row is whether anything is red, which is not something to hand to a component's default.
+    return (
+        <VStack gap={1}>
+            {/* A failure is the stronger role, so it takes the stronger type. */}
+            <Text type={failed > 0 ? 'label' : 'supporting'}>{label}</Text>
+            <ChatToolCalls
+                style={TOOL_ROW_STYLE}
+                defaultIsExpanded={failed > 0}
+                calls={points.map(point => ({
+                    key: point.name,
+                    name: point.name,
+                    status: point.status,
+                    target: point.command,
+                    ...(point.status === 'error' && point.output && {errorMessage: point.output})
+                }))}
+            />
+        </VStack>
+    )
+})
+VerifyPointsRow.displayName = 'VerifyPointsRow'
+
 type ProseBubbleProps = Readonly<{
     isReasoning: boolean
     isStreaming: boolean
@@ -377,6 +427,13 @@ function AssistantTimeline({message}: {message: Message}) {
                     />
                 )
             })}
+            {/*
+             * After the words, because the points answer for what the words claim: the run that
+             * prompted this ended with "The verification passes" over two red points.
+             */}
+            {message.verifyPoints && message.verifyPoints.length > 0 ?
+                <VerifyPointsRow points={message.verifyPoints} />
+            :   null}
             {/*
              * The turn's indicator, for the stretches where no call is carrying one.
              *

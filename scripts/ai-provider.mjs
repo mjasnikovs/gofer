@@ -16,6 +16,8 @@ import {
     shouldCompact
 } from '@earendil-works/pi-agent-core/node'
 import {createModels, createProvider, isRetryableAssistantError} from '@earendil-works/pi-ai'
+import {runVerifyPoints, verifyPointsIn, verifyReport, verifySummary} from './verify-points.mjs'
+import {frozenPathsIn} from './frozen-paths.mjs'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
@@ -347,7 +349,7 @@ function bindTool(tool, context) {
  * cannot give it. It is passed in rather than built here because it needs the provider, and the
  * provider is not made until a turn starts.
  */
-export function createAgentTools(workspacePath, domains, host, extra = [], model) {
+export function createAgentTools(workspacePath, domains, host, extra = [], model, frozen = []) {
     const env = new NodeExecutionEnv({cwd: workspacePath})
     const context = {env}
     const confined = [
@@ -356,7 +358,7 @@ export function createAgentTools(workspacePath, domains, host, extra = [], model
         createEditTool(),
         createBashTool()
     ]
-        .map(tool => confineTool(tool, workspacePath))
+        .map(tool => confineTool(tool, workspacePath, frozen))
         .map(tool => bindTool(tool, context))
     const tools = [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra]
     return {env, tools: tools.map(tool => (canSeePictures(model) ? tool : withoutPictures(tool)))}
@@ -579,7 +581,10 @@ export async function runAgent({
         ],
         // The parent's own model, so a tool answering with a picture it cannot see costs it a sentence
         // rather than the whole request.
-        model
+        model,
+        // Read before the model is offered a single tool, so a frozen path is refused by the tool that
+        // would have written it rather than noticed after the commit.
+        frozenPathsIn(messages)
     )
     // Before the model is told anything: a tool that cannot answer stops the turn here, where the
     // reason can be read, rather than becoming a tool the model is offered and never calls.
@@ -799,6 +804,12 @@ export async function runAgent({
             :   () => agent.prompt(contextMessage(promptMessage, model))
         let recoveredOverflow = false
         let attempt = 0
+        let verifyAttempt = 0
+        let verifyResults
+        // Read once, before the model runs: the specification is already on the transcript when the
+        // turn starts, and a model that writes a VERIFY block into its own answer is describing
+        // what it did rather than agreeing to be held to it.
+        const verifyPoints = verifyPointsIn(messages)
         for (;;) {
             await resume()
             // A context overflow is recovered from once, not surfaced: the error is taken back off
@@ -825,7 +836,25 @@ export async function runAgent({
                 finalMessage = undefined
                 await agent.continue()
             }
-            if (finalMessage && finalMessage.stopReason !== 'error') break
+            if (finalMessage && finalMessage.stopReason !== 'error') {
+                // The turn is over as far as the model is concerned, and this is the last moment
+                // before `done` says so out loud. Running the points here rather than after the
+                // loop is what makes them a gate: the executor is already rooted in the worktree,
+                // the composer has not been released, and the model is still there to be asked
+                // again. After `done` it is none of those things.
+                if (!verifyPoints) break
+                verifyResults = await runVerifyPoints({points: verifyPoints, env, emit, signal})
+                const report = verifyReport(verifyResults)
+                if (report === undefined) break
+                // Told once, then let go. A model that cannot make its own checks pass on a second
+                // attempt is spending turns to write the same answer, and the red points are on the
+                // transcript either way — which is the thing that was missing.
+                if (verifyAttempt >= 1) break
+                verifyAttempt += 1
+                resume = () => agent.prompt(contextMessage({sender: 'user', text: report}, model))
+                finalMessage = undefined
+                continue
+            }
             const failure = turnFailure(finalMessage, agent)
             if (attempt >= retry.attempts || !isTransientFailure(failure, model)) {
                 throw new Error(failure.errorMessage)
@@ -853,9 +882,25 @@ export async function runAgent({
             resume = () => agent.continue()
         }
         if (finalMessage.stopReason === 'length') throw new Error(outOfRoom(finalMessage, model))
+        // The answer carries its own verdict. A turn whose points went red used to end with
+        // `stopReason: 'stop'` and whatever the model chose to say — measured live, that was "The
+        // verification passes" four seconds after the second failure. The transcript held the truth
+        // and the bubble held the opposite.
+        const verifyFailure = verifySummary(verifyResults)
+        const answered = textContent(finalMessage.content)
         const completion = {
             type: 'done',
-            text: textContent(finalMessage.content),
+            text: verifyFailure === undefined ? answered : `${answered}\n\n${verifyFailure}`,
+            verify:
+                verifyResults === undefined ? undefined : (
+                    {
+                        failed: verifyResults.filter(result => !result.passed).length,
+                        points: verifyResults.map(result => ({
+                            name: result.name,
+                            passed: result.passed
+                        }))
+                    }
+                ),
             thinking: finalMessage.content
                 .filter(part => part.type === 'thinking')
                 .map(part => part.thinking)
