@@ -11,6 +11,7 @@ import {
     parseAutoAnswer,
     parseQuestion,
     parseVerifyBlock,
+    parseVerifyPoints,
     refine,
     research,
     stripPreamble
@@ -294,6 +295,64 @@ test('a spec that declares no commands is verifiable, and the sentinel is not a 
     const both = 'VERIFY\n```sh\n(none)\nmake test\n```'
     assert.equal(declaresNoCommands(both), false)
     assert.deepEqual(parseVerifyBlock(both), ['make test'])
+})
+
+/**
+ * A verify point needs a name, because a list of shell strings is not something a person watching
+ * a task can read. Over one project's eleven planned tasks, twelve command lines were written and
+ * three were ever run — and none of them said what it was for.
+ *
+ * The name is the `#` comment the format already allowed and already discarded, so nothing about
+ * what compose writes has to change.
+ */
+test('a verify point takes its name from the comment above it', () => {
+    const named =
+        'GOAL\nA boss.\n\nVERIFY\n```sh\n'
+        + '# the boss registers every part it builds\n'
+        + 'godot --headless --script .gofer/checks/centipede.gd\n'
+        + '# the project still starts\n'
+        + 'godot --headless --quit-after 600\n'
+        + '```\n'
+
+    assert.deepEqual(parseVerifyPoints(named), [
+        {
+            name: 'the boss registers every part it builds',
+            command: 'godot --headless --script .gofer/checks/centipede.gd'
+        },
+        {name: 'the project still starts', command: 'godot --headless --quit-after 600'}
+    ])
+    // The gate above it reads the same block as it always did.
+    assert.deepEqual(parseVerifyBlock(named), [
+        'godot --headless --script .gofer/checks/centipede.gd',
+        'godot --headless --quit-after 600'
+    ])
+})
+
+test('a point with no comment names itself, and a gap ends a name', () => {
+    // Two rows labelled by one comment would be two rows with the same label, which is worse in a
+    // list than a row that says what it runs.
+    assert.deepEqual(parseVerifyPoints('VERIFY\n```sh\n# both\nmake a\nmake b\n```'), [
+        {name: 'both', command: 'make a'},
+        {name: 'make b', command: 'make b'}
+    ])
+    // A comment cannot reach across a blank line to a command it was not written above.
+    assert.deepEqual(parseVerifyPoints('VERIFY\n```sh\n# stale\n\nmake test\n```'), [
+        {name: 'make test', command: 'make test'}
+    ])
+    assert.deepEqual(parseVerifyPoints('VERIFY\n```sh\n###   hashes trimmed\nmake test\n```'), [
+        {name: 'hashes trimmed', command: 'make test'}
+    ])
+})
+
+test('a block that declares no commands declares no points', () => {
+    // The sentinel is the block saying there is nothing to run. A name written over it names
+    // nothing, and neither may become a row.
+    assert.equal(parseVerifyPoints('GOAL\nA thing.\n\nVERIFY\n```sh\n(none)\n```\n'), null)
+    assert.equal(parseVerifyPoints('VERIFY\n```sh\n# nothing to run\n(none)\n```'), null)
+    assert.equal(parseVerifyPoints('VERIFY\n```sh\n# only a comment\n```'), null)
+    // An unclosed fence is no block at all, exactly as the gate reads it.
+    assert.equal(parseVerifyPoints('VERIFY\n```sh\nmake test\n\nSTEPS\n1. more'), null)
+    assert.equal(parseVerifyPoints('GOAL\nA thing.\n'), null)
 })
 
 test('compose accepts a spec whose project has no command to run', async () => {
