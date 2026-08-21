@@ -239,6 +239,49 @@ function nameTheOperation(operations, entry) {
     return fitting.length === 1 ? {...entry, op: fitting[0].op} : entry
 }
 
+/**
+ * The tagged value a model wrapped twice, unwrapped.
+ *
+ * `{type: "vector2", value: {type: "vector2", value: [32, 48]}}` is what one live turn against a
+ * local Qwen3.6-27B wrote 51 times in 114 tool calls. The router refused every one of them by
+ * naming the payload it wanted, and the payload it wanted was inside the value it was handed.
+ *
+ * Only the same tag twice. Two different tags is not a wrapper anybody meant to write, and deciding
+ * which of them is the real one is not this layer's to do — the router refuses it and says what it
+ * received. A `resource`, whose payload is an object with a `path`, is untouched for the same
+ * reason: it is not a tag inside a tag.
+ */
+function unwrapDoubleTag(value) {
+    if (!isObject(value) || typeof value.type !== 'string') return value
+    const inner = value.value
+    if (!isObject(inner) || inner.type !== value.type) return value
+    const keys = Object.keys(inner)
+    if (keys.length !== 2 || !keys.includes('type') || !keys.includes('value')) return value
+    return unwrapDoubleTag({type: value.type, value: inner.value})
+}
+
+/**
+ * One entry with every value its operation declares as tagged unwrapped, however deep it sits.
+ *
+ * The parameter table is walked rather than the entry, so this can only reach a key the operation
+ * actually declares as a tagged value — `set_property`'s `value`, and the same key inside every
+ * entry of `set_properties`' list.
+ */
+function unwrapTaggedParams(params, entry) {
+    if (!Array.isArray(params) || !isObject(entry)) return entry
+    return params.reduce((shaped, param) => {
+        const held = shaped[param.name]
+        if (held === undefined) return shaped
+        if (param.kind === 'tagged') return {...shaped, [param.name]: unwrapDoubleTag(held)}
+        if (!Array.isArray(param.entry) || param.entry.length === 0) return shaped
+        if (param.kind === 'list' && Array.isArray(held))
+            return {...shaped, [param.name]: held.map(one => unwrapTaggedParams(param.entry, one))}
+        if (param.kind === 'object')
+            return {...shaped, [param.name]: unwrapTaggedParams(param.entry, held)}
+        return shaped
+    }, entry)
+}
+
 export function normalizeToolCalls(operations, args) {
     const raw = isObject(args) ? args : {}
     const listed = Array.isArray(raw.ops) ? raw.ops : [raw]
@@ -246,7 +289,16 @@ export function normalizeToolCalls(operations, args) {
         operations,
         listed.map(entry => normalizeEntry(operations, entry))
     )
-    return {ops: entries.map(entry => nameTheOperation(operations, entry))}
+    return {
+        ops: entries
+            .map(entry => nameTheOperation(operations, entry))
+            .map(entry =>
+                unwrapTaggedParams(
+                    operations.find(operation => operation.op === entry.op)?.params,
+                    entry
+                )
+            )
+    }
 }
 
 /**

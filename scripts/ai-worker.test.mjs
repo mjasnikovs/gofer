@@ -1060,6 +1060,114 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
     })
 })
 
+// The tagged value a model wrapped twice. One live turn against a local Qwen3.6-27B sent 51 of
+// these in 114 tool calls, and every one was refused by a sentence that named the shape it wanted
+// and never noticed that the shape it wanted was sitting inside the one it got.
+test('a tagged value wrapped twice is unwrapped rather than refused', () => {
+    const node = [
+        {
+            op: 'set_property',
+            params: [
+                {name: 'node', kind: 'text', required: true},
+                {name: 'property', kind: 'text', required: true},
+                {name: 'value', kind: 'tagged', required: true}
+            ]
+        },
+        {
+            op: 'set_properties',
+            params: [
+                {
+                    name: 'properties',
+                    kind: 'list',
+                    required: true,
+                    entry: [
+                        {name: 'node', kind: 'text', required: true},
+                        {name: 'property', kind: 'text', required: true},
+                        {name: 'value', kind: 'tagged', required: true}
+                    ]
+                }
+            ]
+        }
+    ]
+
+    const twice = tag => ({type: 'vector2', value: tag})
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/Player',
+                    property: 'position',
+                    value: twice({type: 'vector2', value: [32, 48]})
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/Player',
+                    property: 'position',
+                    value: {type: 'vector2', value: [32, 48]}
+                }
+            ]
+        }
+    )
+
+    // Inside a list parameter's entries too, which is where `set_properties` carries them.
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'set_properties',
+                    properties: [
+                        {
+                            node: '/Player',
+                            property: 'position',
+                            value: twice({type: 'vector2', value: [1, 2]})
+                        },
+                        {node: '/Player', property: 'visible', value: {type: 'bool', value: true}}
+                    ]
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'set_properties',
+                    properties: [
+                        {
+                            node: '/Player',
+                            property: 'position',
+                            value: {type: 'vector2', value: [1, 2]}
+                        },
+                        {node: '/Player', property: 'visible', value: {type: 'bool', value: true}}
+                    ]
+                }
+            ]
+        }
+    )
+
+    // Only the same tag twice. Two different tags is not a wrapper a caller meant to write, and
+    // guessing which of them is the real one is not this layer's to do.
+    const mixed = {
+        op: 'set_property',
+        node: '/Player',
+        property: 'position',
+        value: {type: 'vector2', value: {type: 'float', value: 1}}
+    }
+    assert.deepEqual(normalizeToolCalls(node, {ops: [mixed]}), {ops: [mixed]})
+
+    // And a value that was right is untouched, including one whose payload is an object of its own.
+    const resource = {
+        op: 'set_property',
+        node: '/Player',
+        property: 'script',
+        value: {type: 'resource', value: {path: 'res://scripts/player.gd'}}
+    }
+    assert.deepEqual(normalizeToolCalls(node, {ops: [resource]}), {ops: [resource]})
+})
+
 test('a call is a list, and a bare operation is a list of one', async () => {
     const calls = []
     const host = {
