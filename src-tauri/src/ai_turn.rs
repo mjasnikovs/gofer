@@ -1061,7 +1061,30 @@ fn handle_judge_event<R: Runtime>(
 /// prompt tells the model to start one when it says offline, and starting one that is already
 /// running answers `already_running`, which is a cheaper wrong turn than a silence it has to
 /// resolve with the call this replaces.
-fn describe_session<R: Runtime>(app: &AppHandle<R>) -> String {
+///
+/// The worktree's own path is the one field that is not here, and it used to be. It is the only
+/// place a model can learn the absolute path of a checkout named after a task id, and every tool
+/// that takes a path refuses one: `scripts/workspace-confinement.mjs` refuses an absolute path in
+/// a shell command outright, including one that points inside the worktree, because a command is a
+/// string and nothing tells that path from one that only starts the same way. So the sentence was
+/// handing the model a string the rest of Gofer will not accept, and the model used it.
+///
+/// Measured by `scripts/bench-prompt-line.mjs` against the local Qwen3.6-27B, with the real tool
+/// list — this file's catalogue plus pi's own read, write, edit and bash, whose descriptions say
+/// "(relative or absolute)" and are right about the first three. Twenty seeds an arm, arms
+/// interleaved inside one process, which is the only comparison that means anything here.
+///
+/// Asked to count the project's GDScript lines with the shell — work the worktree plainly holds —
+/// the arm with no path wrote a command the confinement rule refuses **0 of 20** times, in every
+/// run. The shipped sentence wrote one 7 to 20 times of 20, and every one of those named this path.
+/// Keeping the path and adding the rule beside it does not rescue it: 5 to 16. In the harder
+/// scenario, where the project genuinely lacks what was asked for, 19–20/20 falls to 12–16/20 —
+/// what is left there is the model searching wider with `find /`, a different mistake that no
+/// sentence about this session can make.
+///
+/// The rate moves with how the path is spelled, and the two spellings measured are a hair apart in
+/// the hard scenario and three times apart in the easy one. The sign never moves. Read the sign.
+pub(crate) fn describe_session<R: Runtime>(app: &AppHandle<R>) -> String {
     let Ok(Some(session)) = crate::godot_session_api::get_session(app) else {
         return "Editor session: offline. No editor is running.".to_owned();
     };
@@ -1070,12 +1093,12 @@ fn describe_session<R: Runtime>(app: &AppHandle<R>) -> String {
         .as_deref()
         .unwrap_or("unknown version");
     format!(
-        "Editor session: {}. Godot {version}, worktree {}.",
+        "Editor session: {}. Godot {version}. Every tool runs in the project root and takes paths \
+         the way the project spells them, never an absolute one.",
         serde_json::to_value(session.state)
             .ok()
             .and_then(|state| state.as_str().map(str::to_owned))
             .unwrap_or_else(|| "unknown".to_owned()),
-        session.worktree
     )
 }
 

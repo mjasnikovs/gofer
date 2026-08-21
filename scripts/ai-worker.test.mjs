@@ -1679,13 +1679,13 @@ test('the system prompt reaches the model as it arrived, with this turn’s memo
         tools: catalog,
         host: {call: () => Promise.resolve({})},
         memoryContext: 'The player is a cat.',
-        sessionContext: 'Editor session: ready. Godot 4.7.2, worktree /tmp/game.'
+        sessionContext: 'Editor session: ready. Godot 4.7.2.'
     })
     assert.equal(
         withSession,
         'Be brief. Never mention cats.'
             + '\n\nRelevant persistent project memory:\nThe player is a cat.'
-            + '\n\nEditor session: ready. Godot 4.7.2, worktree /tmp/game.'
+            + '\n\nEditor session: ready. Godot 4.7.2.'
     )
 
     // And a turn with no session to describe sends the prompt it arrived with.

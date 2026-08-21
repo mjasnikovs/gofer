@@ -515,6 +515,25 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         session_output()
     );
 
+    // The sentence the model is handed about this session, against the session it describes. It
+    // names the engine and the readiness and not the worktree's own path — that path is one every
+    // path-taking tool refuses, and naming it here is the only way a model can learn it. Measured:
+    // with it, twenty of twenty turns asked to use the shell wrote a command the confinement rule
+    // refused; without it, none did. See `ai_turn::describe_session`.
+    let described = crate::ai_turn::describe_session(journey.app.handle());
+    assert!(
+        described.starts_with("Editor session: ready. Godot 4.7.2"),
+        "the session sentence must name the readiness and the engine: {described}"
+    );
+    assert!(
+        !described.contains(&worktree.display().to_string()),
+        "the session sentence must not hand the model the worktree's absolute path: {described}"
+    );
+    assert!(
+        described.contains("never an absolute one"),
+        "the session sentence must say how a path is spelled instead: {described}"
+    );
+
     // 2. Inspect and mutate a scene, undo it, redo it, and explicitly save.
     let opened = journey.call("godot_scene", "open", json!({"path": SCENE_PATH}));
     assert_eq!(opened["scene"], SCENE_PATH);
