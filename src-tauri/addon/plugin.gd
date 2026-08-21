@@ -3733,6 +3733,21 @@ func _node_delete(params: Dictionary) -> Dictionary:
     var index := node.get_index()
     var root := _edited_root()
 
+    # The root has no parent to be detached from, so the delete ran, changed nothing, and came back
+    # as a read-back mismatch comparing a path to a name — which a live turn was sent and could not
+    # act on. Refused by name instead, with the two calls that do what it was reaching for.
+    if node == root:
+        return Params.error(
+            "cannot_delete_root",
+            (
+                "%s is the root of the edited scene, and a scene always has one. "
+                % node_path_str
+                + "To start a different scene use scene.create; to change this one's name use "
+                + "node.rename."
+            ),
+            {"node": node_path_str}
+        )
+
     var undo := _begin_action("Delete %s" % node.name)
     undo.add_do_method(self, "_do_detach", parent, node)
     undo.add_undo_method(self, "_do_attach", parent, node, root, index)

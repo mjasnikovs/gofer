@@ -375,6 +375,19 @@ fn every_node_command_answers_from_the_edited_tree() {
             .starts_with("node_not_found"),
         "a node reported deleted must be gone from the tree"
     );
+
+    // The root has no parent to be detached from, so this used to run, change nothing, and come
+    // back as a read-back mismatch comparing a path to a name — which a live turn was sent and
+    // could not act on. It is refused by name now, and the scene still has its root.
+    let at = session.revision();
+    let refused = session.error("node.delete", json!({"node": "/Stage"}), Some(at));
+    assert!(refused.starts_with("cannot_delete_root"), "{refused}");
+    assert!(refused.contains("scene.create"), "{refused}");
+    assert!(refused.contains("node.rename"), "{refused}");
+    assert_eq!(
+        session.call("node.inspect", json!({"node": "/Stage"}))["name"],
+        "Stage"
+    );
 }
 
 /// Painting and the two resource creators answer from what is on disk and in the layer.
