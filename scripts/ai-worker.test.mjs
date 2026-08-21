@@ -1489,6 +1489,26 @@ test('the system prompt reaches the model as it arrived, with this turn’s memo
         withTools,
         'Be brief. Never mention cats.\n\nRelevant persistent project memory:\nThe player is a cat.'
     )
+
+    // The editor session, last, because the prompt sends the model to the end of the instructions
+    // to read it. It replaces a call: the shipped prompt used to say "call godot_session status
+    // first, every time", and 58 of 72 recorded turns opened with exactly that — one round trip
+    // per turn for a state the backend already holds.
+    const withSession = await systemPrompt({
+        tools: catalog,
+        host: {call: () => Promise.resolve({})},
+        memoryContext: 'The player is a cat.',
+        sessionContext: 'Editor session: ready. Godot 4.7.2, worktree /tmp/game.'
+    })
+    assert.equal(
+        withSession,
+        'Be brief. Never mention cats.'
+            + '\n\nRelevant persistent project memory:\nThe player is a cat.'
+            + '\n\nEditor session: ready. Godot 4.7.2, worktree /tmp/game.'
+    )
+
+    // And a turn with no session to describe sends the prompt it arrived with.
+    assert.equal(await systemPrompt({sessionContext: undefined}), 'Be brief. Never mention cats.')
 })
 
 /**

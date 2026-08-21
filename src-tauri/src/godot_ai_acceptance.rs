@@ -468,6 +468,9 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
                 agent_messages: None,
                 is_retry: false,
                 memory_context: None,
+                // Filled by `run_ai_worker_with`, like the prompt beside it, from the editor this
+                // suite has bound.
+                session_context: None,
                 system_prompt: None,
             },
         },

@@ -147,6 +147,9 @@ fn live_agent_acceptance() {
                 agent_messages: None,
                 is_retry: false,
                 memory_context: None,
+                // Filled by `run_ai_worker_with`, like the prompt beside it, from the editor this
+                // suite has bound.
+                session_context: None,
                 system_prompt: None,
             },
         },

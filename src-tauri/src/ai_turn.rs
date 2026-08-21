@@ -175,6 +175,14 @@ pub(crate) enum WorkerJob {
         /// one, which happens to be empty" are different things to say, and only one of them is
         /// ever meant.
         system_prompt: Option<String>,
+        /// What the editor session is, in the sentence the prompt tells the model to read.
+        ///
+        /// The prompt used to say "call godot_session status first, every time", and the model
+        /// did: 58 of 72 recorded turns opened with that call, and in 54 it was the only call of
+        /// the ask that issued it. One round trip per turn — 4.2s median of waiting — for a state
+        /// this process already holds and can simply say. Filled by [`run_ai_worker_with`], for
+        /// the same reason the prompt is.
+        session_context: Option<String>,
     },
     Brief {
         /// The raw ask, as the user typed it when they made the task.
@@ -430,6 +438,7 @@ pub(crate) async fn run_turn(
                         crate::ai_tools::CATALOG,
                         settings.godot.strict_typing,
                     )),
+                    session_context: None,
                 },
             },
         )?;
@@ -1044,6 +1053,32 @@ fn handle_judge_event<R: Runtime>(
 /// It takes the turn rather than a request id and a channel because both belong to it, and because
 /// what used to be missing here is not a value but a lifetime: the gate this opens is closed by the
 /// turn's own `Drop`, so no path out of this function can leave it open.
+/// The editor session, in the sentence the prompt sends the model to read.
+///
+/// Every field here is one the model would otherwise have spent a call to learn, and the sentence
+/// is written the way the `godot_session status` answer reads so that a model which has seen one
+/// recognises the other. An unreadable session is reported as offline rather than omitted: the
+/// prompt tells the model to start one when it says offline, and starting one that is already
+/// running answers `already_running`, which is a cheaper wrong turn than a silence it has to
+/// resolve with the call this replaces.
+fn describe_session<R: Runtime>(app: &AppHandle<R>) -> String {
+    let Ok(Some(session)) = crate::godot_session_api::get_session(app) else {
+        return "Editor session: offline. No editor is running.".to_owned();
+    };
+    let version = session
+        .godot_version
+        .as_deref()
+        .unwrap_or("unknown version");
+    format!(
+        "Editor session: {}. Godot {version}, worktree {}.",
+        serde_json::to_value(session.state)
+            .ok()
+            .and_then(|state| state.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".to_owned()),
+        session.worktree
+    )
+}
+
 pub(crate) fn run_ai_worker_with<R: Runtime>(
     app: &AppHandle<R>,
     turn: &AiTurn,
@@ -1057,7 +1092,12 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     // The one place every turn passes through, so a request built without a prompt — an acceptance
     // suite, a test — still runs the agent Gofer ships rather than one with nothing said to it. A
     // brief is not filled in: its phases carry their own instructions and read no system prompt.
-    if let WorkerJob::Turn { system_prompt, .. } = &mut request.job {
+    if let WorkerJob::Turn {
+        system_prompt,
+        session_context,
+        ..
+    } = &mut request.job
+    {
         *system_prompt = Some(crate::agent_prompt::resolve(
             system_prompt.as_deref(),
             request.tools,
@@ -1065,6 +1105,7 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
                 .unwrap_or_default()
                 .strict_typing,
         ));
+        *session_context = Some(describe_session(app));
     }
     let worker = ai_worker_path()?;
     let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
@@ -1778,6 +1819,7 @@ mod tests {
                 agent_messages: Some(serde_json::json!([{"role": "user"}])),
                 is_retry: true,
                 memory_context: Some("what the project remembers".to_owned()),
+                session_context: Some("Editor session: offline. No editor is running.".to_owned()),
                 system_prompt: Some("the shipped agent prompt".to_owned()),
             },
             ..worker_request()
@@ -1797,12 +1839,17 @@ mod tests {
             encoded["systemPrompt"],
             serde_json::json!("the shipped agent prompt")
         );
+        assert_eq!(
+            encoded["sessionContext"],
+            serde_json::json!("Editor session: offline. No editor is running.")
+        );
         // Named once, not twice: a snake_case key beside the camelCase one is a worker reading the
         // one it understands while the other rides along unused.
         for stale in [
             "agent_messages",
             "is_retry",
             "memory_context",
+            "session_context",
             "system_prompt",
         ] {
             assert!(
@@ -1832,6 +1879,7 @@ mod tests {
                 is_retry: false,
                 memory_context: None,
                 system_prompt: None,
+                session_context: None,
             },
         }
     }
@@ -2183,6 +2231,13 @@ mod tests {
         // nothing to route on; the name is asserted here because nothing else fails when it is
         // wrong — the turn works, it just pays for the whole story again.
         assert_eq!(sent[0]["sessionId"], "task-1");
+        // The state the prompt sends the model to read, rather than the call it used to make: 58
+        // of 72 recorded turns opened with `godot_session status`, and in 54 it was the only call
+        // of the ask that issued it. Nothing is bound here, so what it must say is offline.
+        assert_eq!(
+            sent[0]["sessionContext"],
+            "Editor session: offline. No editor is running."
+        );
         let catalog = sent[0]["tools"]
             .as_array()
             .expect("the startup context carries the tool catalog");
