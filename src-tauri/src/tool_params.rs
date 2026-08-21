@@ -1648,6 +1648,14 @@ fn check_set(
     } else {
         (format!(" `{where_}`"), "key", "Each entry takes")
     };
+    // An operation whose every parameter is hidden has an empty signature, and the sentence then
+    // read `godot_scene reload has no \`x\` parameter. It takes .` — which a live run was sent.
+    // What the model needs to hear there is that the operation takes nothing at all.
+    let takes_shape = if shape.is_empty() {
+        format!("{takes} no parameters.")
+    } else {
+        format!("{takes} {shape}.")
+    };
 
     for key in object.keys() {
         if spec.iter().any(|param| param.name == key)
@@ -1660,7 +1668,7 @@ fn check_set(
             .unwrap_or_default();
         return Err(failure(
             "unknown_param",
-            format!("{call}{at} has no `{key}` {noun}. {takes} {shape}.{hint}"),
+            format!("{call}{at} has no `{key}` {noun}. {takes_shape}{hint}"),
             json!({"op": op, "param": path(where_, key), "takes": shape}),
         ));
     }
@@ -1671,7 +1679,7 @@ fn check_set(
                 return Err(failure(
                     "missing_param",
                     join(
-                        format!("{call}{at} requires `{}`. {takes} {shape}.", param.name),
+                        format!("{call}{at} requires `{}`. {takes_shape}", param.name),
                         param.note,
                     ),
                     json!({"op": op, "param": path(where_, param.name), "takes": shape}),
@@ -1927,14 +1935,25 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
         return Ok(());
     };
 
-    // The correction, with the model's own value already in it. A resource is the one that has cost
-    // real sessions: the path is right there in the wrong shape, so print the right shape holding
-    // that same path rather than a generic example it has to adapt.
-    let fix = if *payload == Payload::ResourcePath {
-        let path = inner.as_str().unwrap_or("res://…");
-        format!(" Send {{\"type\": \"resource\", \"value\": {{\"path\": \"{path}\"}}}}.")
-    } else {
-        String::new()
+    // The correction, with the model's own value already in it, wherever the value is recoverable
+    // from what arrived. A generic example is one the model has to adapt, and a live run showed
+    // what that costs: `{"x": 32, "y": 32}` for a vector2, thirteen times, each refused by a
+    // sentence that said what was wanted and never what to send.
+    let fix = match payload {
+        Payload::ResourcePath => {
+            let path = inner.as_str().unwrap_or("res://…");
+            format!(" Send {{\"type\": \"resource\", \"value\": {{\"path\": \"{path}\"}}}}.")
+        }
+        Payload::Numbers(count) => {
+            numbers_under_names(inner, *count).map_or_else(String::new, |numbers| {
+                let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
+                format!(
+                    " Send {{\"type\": \"{tag}\", \"value\": [{}]}}.",
+                    written.join(", ")
+                )
+            })
+        }
+        _ => String::new(),
     };
     Err(failure(
         "invalid_param",
@@ -1947,6 +1966,35 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
         ),
         json!({"param": here, "type": tag, "received": inner}),
     ))
+}
+
+/// The names a model reaches for when it writes a vector as an object, in the order the protocol
+/// wants the numbers in.
+///
+/// Only sets whose order is not a guess. `{x, y}` is a vector2 and `{r, g, b, a}` is a colour;
+/// a rect2's four numbers under any four names are not, so nothing is offered for those.
+const ORDERED_NAMES: [&[&str]; 4] = [
+    &["x", "y"],
+    &["x", "y", "z"],
+    &["x", "y", "z", "w"],
+    &["r", "g", "b", "a"],
+];
+
+/// The numbers of a vector written as an object, in protocol order, or nothing.
+fn numbers_under_names(inner: &Value, count: usize) -> Option<Vec<&serde_json::Number>> {
+    let object = inner.as_object()?;
+    if object.len() != count {
+        return None;
+    }
+    ORDERED_NAMES
+        .iter()
+        .filter(|names| names.len() == count)
+        .find_map(|names| {
+            names
+                .iter()
+                .map(|name| object.get(*name).and_then(Value::as_number))
+                .collect::<Option<Vec<&serde_json::Number>>>()
+        })
 }
 
 /// What arrived, in the words the failure uses. A model that is told only what was wanted has
@@ -1976,6 +2024,10 @@ fn describe(value: &Value) -> String {
 fn nearest(key: &str, spec: &[Param]) -> Option<&'static str> {
     let lowered = key.to_lowercase();
     spec.iter()
+        // A hidden parameter is one the prompt tells the model never to pass, so offering it as
+        // the near miss sends the model to write the one key it must not write. A live run was
+        // told `Did you mean \`expectedRevision\`?` about a key that was not one at all.
+        .filter(|param| !param.hidden)
         .find(|param| {
             let name = param.name.to_lowercase();
             name == lowered
@@ -2189,6 +2241,87 @@ mod tests {
             }),
         );
         assert!(refused.contains("an array of 2 numbers"), "{refused}");
+    }
+
+    /// A live run wrote `{"x": 32, "y": 32}` for a vector2 thirteen times and was refused thirteen
+    /// times. The sentence said what was wanted and never what to send, so the numbers it already
+    /// had were never handed back to it in the right shape.
+    #[test]
+    fn a_vector_written_as_an_object_is_refused_with_the_value_it_should_have_sent() {
+        let refused = message(
+            "godot_node",
+            "set_property",
+            json!({
+                "node": "/Player",
+                "property": "position",
+                "value": {"type": "vector2", "value": {"x": 32, "y": 48}}
+            }),
+        );
+        assert!(refused.contains("an object holding x, y"), "{refused}");
+        assert!(
+            refused.contains(r#"Send {"type": "vector2", "value": [32, 48]}"#),
+            "{refused}"
+        );
+
+        // The numbers keep the form they were written in, because a model comparing its own call
+        // against the correction should find its own numbers in it.
+        let colour = message(
+            "godot_node",
+            "set_property",
+            json!({
+                "node": "/Player",
+                "property": "modulate",
+                "value": {"type": "color", "value": {"r": 1, "g": 0.5, "b": 0.25, "a": 1}}
+            }),
+        );
+        assert!(
+            colour.contains(r#"Send {"type": "color", "value": [1, 0.5, 0.25, 1]}"#),
+            "{colour}"
+        );
+    }
+
+    /// Only where the order is not a guess. Four numbers under four names that are not a colour or
+    /// a vector could be a rect2 in either order, so nothing is offered rather than the wrong thing.
+    #[test]
+    fn numbers_under_names_nobody_can_order_are_left_without_a_correction() {
+        let refused = message(
+            "godot_node",
+            "set_property",
+            json!({
+                "node": "/Player",
+                "property": "rect",
+                "value": {"type": "rect2", "value": {"top": 0, "left": 1, "width": 2, "height": 3}}
+            }),
+        );
+        assert!(refused.contains("an array of 4 numbers"), "{refused}");
+        assert!(!refused.contains("Send {"), "{refused}");
+    }
+
+    /// `godot_scene reload` declares one parameter and it is hidden, so its signature is empty and
+    /// the sentence read `It takes .` — which is what a live run was sent.
+    #[test]
+    fn an_operation_with_nothing_to_take_says_so_rather_than_trailing_off() {
+        let refused = message("godot_scene", "reload", json!({"scene": "res://main.tscn"}));
+        assert!(refused.contains("It takes no parameters."), "{refused}");
+        assert!(!refused.contains("It takes ."), "{refused}");
+    }
+
+    /// The near miss must not point at a parameter the prompt tells the model never to pass. A live
+    /// run wrote a key that was not one at all and was answered `Did you mean `expectedRevision`?`.
+    #[test]
+    fn the_nearest_name_is_never_one_the_model_is_told_not_to_send() {
+        let refused = message(
+            "godot_node",
+            "create",
+            json!({
+                "parent": "/Level",
+                "type": "Sprite2D",
+                "name": "Coin",
+                "expectedRevisio": 1
+            }),
+        );
+        assert!(refused.contains("has no `expectedRevisio`"), "{refused}");
+        assert!(!refused.contains("Did you mean"), "{refused}");
     }
 
     #[test]
