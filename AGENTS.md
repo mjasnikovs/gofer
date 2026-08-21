@@ -64,6 +64,27 @@ table — to a real editor. Nothing it covers can break because of a commit, so 
 every change. Run it when the pinned version in `protocol/godot-artifacts.json` moves; a failure
 there is the engine having renamed something, and the fix is the sentence in `CATALOG`.
 
+## Asking a real model what it gets wrong
+
+`src-tauri/src/godot_live_agent.rs` puts one real turn — the real worker, the real router, one real
+editor — to whatever endpoint you point it at, and writes down every event it streamed. It asserts
+nothing, because a local LLM cannot be a fixture, and it does nothing at all unless
+`GOFER_LIVE_TASK` names an ask, so it costs the gate nothing.
+
+```
+GOFER_LIVE_TASK="…" GOFER_LIVE_OUT=/tmp/turn.json \
+  cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib \
+  -- live_agent_acceptance --test-threads=1 --nocapture
+```
+
+Read it by counting: a wrong parameter shape that repeats inside one turn is a defect in Gofer, and
+one that happens once is the model. That distinction found five of them. `dump_catalog_and_prompt`
+in the same file writes the catalog and prompt the worker receives, which is what a prompt A/B
+outside Rust has to be measured against.
+
+`wdio.live.conf.ts` asks a bigger question — the whole application, clicked — but it needs
+`WebKitWebDriver`, which several distributions do not package.
+
 ## Generated command surfaces
 
 Some command surfaces are emitted, not typed. Never hand-edit anything between a `GENERATED-BEGIN`
