@@ -129,6 +129,27 @@ describe('the sketches panel', () => {
     })
 
     /**
+     * A revision overwrites the layout under the same identifier, so the cache has to let go of it.
+     *
+     * `new_sketch_id` is per question, not per round: every revision of one question upserts the
+     * same row and rewrites both files in place. Cached forever, Refresh re-lists the rows and still
+     * draws round one under round three's label — and Send to chat pastes round one's markup.
+     */
+    it('forgets what it read when the list is refreshed', async () => {
+        const {read} = backend()
+        await open()
+
+        await userEvent.click(screen.getByText('Centered overlay'))
+        await flush()
+        await userEvent.click(screen.getByRole('button', {name: 'Refresh'}))
+        await flush()
+        await userEvent.click(screen.getByText('Centered overlay'))
+        await flush()
+
+        expect(read).toEqual(['question-1-run', 'question-1-run'])
+    })
+
+    /**
      * The one that would be silent if it were wrong.
      *
      * Both copies are the same layout to look at. Only one of them is buildable: the other is the

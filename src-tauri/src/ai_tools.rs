@@ -465,13 +465,16 @@ pub const CATALOG: &[ToolDomain] = &[
             ),
             operation(
                 "save",
-                "Writes a whole file and notifies the server. Use it to create a script, or to \
-                 replace one outright; to change part of one, `edit` is the call, and it does not \
-                 send the file back. A file that already exists is only written over what you have \
-                 read, so open it first — the router holds the hash that read answered with. A \
-                 script you are creating needs no read. `update` does not write anything: it \
-                 reports a buffer change to the language server, and this is the call that puts it \
-                 on disk.",
+                "Writes a whole file and answers with the file's diagnostics, the same way `edit` \
+                 does. Use it to create a script, or to replace one outright; to change part of \
+                 one, `edit` is the call, and it does not send the file back. A file that already \
+                 exists is only written over what you have read, so open it first — the router \
+                 holds the hash that read answered with. A script you are creating needs no read. \
+                 `update` does not write anything: it reports a buffer change to the language \
+                 server, and this is the call that puts it on disk. Do not follow this with a \
+                 `diagnostics` call about the same file: the verdict is already here. \
+                 `published: false` means the server had not spoken about the text yet, which is \
+                 not the same as the file being clean.",
             ),
             operation(
                 "close",
@@ -859,20 +862,13 @@ fn reply_answer(
     // Not part of the prose, and the design tool is the only thing that reads it: a child asking a
     // question does not need its own markup handed back, and putting it in the answer text would
     // charge the child for the drawing on every round. It rides here so the *parent* can be shown
-    // what was agreed. A skip reacted to nothing, so it carries nothing.
+    // what was agreed.
     //
-    // Words against several variants with no pick name nothing, and the first one is not a good
-    // guess at which — it is a one-in-three guess reported as a fact, and the fact becomes what
-    // somebody builds. One sketch is the exception, because there is nothing else it could be.
-    let chosen = if reply.skipped {
-        None
-    } else {
-        reply
-            .picked
-            .and_then(|index| sketches.get(index))
-            .or_else(|| sketches.first().filter(|_| sketches.len() == 1))
-            .map(|sketch| json!({"label": sketch.label, "html": sketch.html}))
-    };
+    // Which one that is comes from `chosen_sketch`, the same function that decides what is kept.
+    // Two rules would mean the panel showing a layout the asker was never told about, and each
+    // half would look right on its own.
+    let chosen = chosen_sketch(sketches, sketches, reply)
+        .map(|(sketch, _)| json!({"label": sketch.label, "html": sketch.html}));
     json!({
         "questionId": question_id,
         "skipped": reply.skipped,
@@ -930,8 +926,10 @@ fn keep_sketch<R: Runtime>(
 /// would be handed eighty kilobytes of base64 and the user would be shown a layout with its artwork
 /// missing — and neither would fail loudly enough for anybody to notice.
 ///
-/// A pick out of range falls back to the first rather than to nothing. The user chose *a* layout,
-/// and the number saying which is the renderer's, so a wrong one is our mistake to absorb.
+/// The one place the answer is decided, for the asker and for the sketches panel alike. It is read
+/// twice because the two used to decide it separately, and disagreed exactly where it mattered: the
+/// asker was correctly told nothing was chosen while the panel filed a guess under "the layout you
+/// chose".
 fn chosen_sketch<'a>(
     sketches: &'a [crate::ask::Sketch],
     shown: &'a [crate::ask::Sketch],
@@ -940,10 +938,16 @@ fn chosen_sketch<'a>(
     if reply.skipped {
         return None;
     }
-    let index = reply
-        .picked
-        .filter(|index| *index < sketches.len())
-        .unwrap_or(0);
+    // No pick at all is not the same as a pick that arrived wrong, and only the second is ours to
+    // absorb. Words against three variants name none of them, so nothing is kept: guessing the
+    // first is a one-in-three guess, and what is kept becomes what somebody builds. One sketch is
+    // the exception, because there is nothing else the words could have been about.
+    let index = match reply.picked {
+        Some(picked) if picked < sketches.len() => picked,
+        Some(_) => 0,
+        None if sketches.len() == 1 => 0,
+        None => return None,
+    };
     let source = sketches.get(index)?;
     // `resolve_sketch_assets` maps one to one, so this is the same sketch. Read rather than indexed
     // anyway: a panic here would cost the user the answer they have just given.
@@ -2061,8 +2065,8 @@ fn script_domain<R: Runtime>(
                 .get("path")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            let saved = match script::save_document(from_params(params)?) {
-                Ok(stamp) => to_value(stamp),
+            let saved = match script::save_and_publish(from_params(params)?) {
+                Ok(saved) => to_value(saved),
                 Err(error) => {
                     let failure = ToolFailure::from(error);
                     if let Some(path) = path.as_deref() {
@@ -2925,6 +2929,37 @@ mod tests {
         }
     }
 
+    /// What is saved and what the asker is told are the same layout, or the panel lies about it.
+    ///
+    /// `reply_answer` already refused to name a variant nobody picked, and calls it what it is: a
+    /// one-in-three guess reported as a fact. Kept under a different rule, that guess is written to
+    /// the sketches table anyway and the panel lists it under "The layout you chose".
+    #[test]
+    fn a_variant_nobody_picked_is_neither_kept_nor_reported() {
+        let sketch = |label: &str| crate::ask::Sketch {
+            label: label.to_owned(),
+            html: format!("<p>{label}</p>"),
+        };
+        let sketches = vec![sketch("Overlay"), sketch("Dock"), sketch("Rail")];
+        let reply = crate::ask::Reply {
+            text: "make the rows bigger".to_owned(),
+            picked: None,
+            blocked: Vec::new(),
+            skipped: false,
+            approved: false,
+        };
+
+        assert!(
+            chosen_sketch(&sketches, &sketches, &reply).is_none(),
+            "nothing may be kept for a choice that was never made"
+        );
+        assert_eq!(
+            reply_answer("question-1", &sketches, &reply, Vec::new())["sketch"],
+            Value::Null,
+            "and the asker is told the same"
+        );
+    }
+
     /// The two copies of a sketch are read by different readers, so they must not be crossed over.
     ///
     /// The window is shown the copy with the project's artwork in it. Whoever builds it is handed
@@ -2962,12 +2997,15 @@ mod tests {
         );
         assert_eq!(drawn, "data:b", "the window gets the copy it drew");
 
-        let (first, _) =
-            chosen_sketch(&sketches, &shown, &reply(None, false)).expect("the only candidate");
-        assert_eq!(
-            first.label, "Overlay",
-            "no pick keeps the first, which is the recommended one"
+        assert!(
+            chosen_sketch(&sketches, &shown, &reply(None, false)).is_none(),
+            "words against three variants name none of them, and the first is a guess"
         );
+
+        let one = &sketches[..1];
+        let (only, _) = chosen_sketch(one, &shown[..1], &reply(None, false))
+            .expect("one sketch is the only thing the words could be about");
+        assert_eq!(only.label, "Overlay");
 
         let (fallback, _) = chosen_sketch(&sketches, &shown, &reply(Some(9), false))
             .expect("a pick out of range still chose a layout");

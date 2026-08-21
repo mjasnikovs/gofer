@@ -379,6 +379,78 @@ test('a layout that was never agreed is not handed over as agreed', async () => 
 })
 
 /**
+ * An answer nobody approved must not read as an agreement.
+ *
+ * This is the defect the whole line exists for. The child stopped after one round — out of patience
+ * rather than out of ration — and wrote a confident specification anyway, and the parent read it and
+ * told the user they had agreed on a layout they had never even been asked to approve.
+ */
+test('a design the user never ended says so before it says anything else', async () => {
+    const tool = designTool({
+        models: scriptedModels([
+            {calls: [{name: 'ask_user', args: {question: 'which?', sketches: SKETCH}}]},
+            {text: 'The dock sits bottom-left.'}
+        ]),
+        host: {
+            call: name => {
+                if (name !== 'ask_user') return Promise.resolve({})
+                return Promise.resolve({
+                    questionId: 'question-1',
+                    approved: false,
+                    answer: 'bigger rows',
+                    sketch: {label: 'Bar across the top', html: '<p>a</p>'},
+                    sketches: 1
+                })
+            }
+        }
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.match(text, /^THE USER DID NOT AGREE THIS\./u)
+    assert.match(text, /shown 1 round/u)
+    assert.match(text, /proposal, not a decision/u)
+})
+
+/** A child that answered without asking anybody is the same lie with nobody in the room at all. */
+test('a design nobody was ever shown says nobody was shown it', async () => {
+    const tool = designTool({
+        models: scriptedModels([{text: 'The dock sits bottom-left.'}]),
+        host: {call: () => Promise.resolve({})}
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.match(text, /^THE USER DID NOT AGREE THIS\./u)
+    assert.match(text, /never shown anything at all/u)
+})
+
+/** And an approval says none of it, or the sentence would mean nothing where it matters. */
+test('an agreed design carries no warning', async () => {
+    const tool = designTool({
+        models: scriptedModels([
+            {calls: [{name: 'ask_user', args: {question: 'which?', sketches: SKETCH}}]},
+            {text: 'The dock sits bottom-left.'}
+        ]),
+        host: {
+            call: name => {
+                if (name !== 'ask_user') return Promise.resolve({})
+                return Promise.resolve({
+                    questionId: 'question-1',
+                    approved: true,
+                    sketch: {label: 'Bar across the top', html: '<p>a</p>'},
+                    sketches: 1
+                })
+            }
+        }
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.ok(!text.includes('DID NOT AGREE'))
+})
+
+/**
  * A picture the child could not be shown is a picture the parent has to be told about.
  *
  * A layout drawn without the screenshot it was asked about is wrong in a way only the person who

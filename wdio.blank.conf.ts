@@ -1,5 +1,5 @@
 import {execFileSync, spawnSync} from 'node:child_process'
-import {copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync} from 'node:fs'
+import {copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
 import {homedir, tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 
@@ -91,7 +91,82 @@ export const config: WebdriverIO.Config = {
         const settings = join(appDataDir, 'settings.json')
         // The run talks to whatever model the user configured, so it starts from their settings.
         if (existsSync(userSettings)) copyFileSync(userSettings, settings)
+        forceTheLocalModel(settings)
     }
+}
+
+/**
+ * Points the turn and every child it spawns at the local endpoint, whatever the user has selected.
+ *
+ * The settings copied in above carry whichever connection the user last chose in the application,
+ * and that is routinely a paid subscription. This loop exists to watch a *local* model spend turns
+ * on Gofer's tool surface: a run against a hosted model measures the hosted model, costs money per
+ * finding, and cannot be repeated cheaply enough to compare two builds. The stored `ai.local`
+ * profile is promoted to the active one, and the sub-agent is given the same connection, so no part
+ * of the run can reach off this machine.
+ *
+ * A settings file with no local profile is a stop, not a fallback. Silently running against the
+ * subscription is exactly the outcome this guards.
+ */
+function forceTheLocalModel(settings: string) {
+    if (!existsSync(settings)) throw new Error(`${settings} was never written`)
+    const stored = JSON.parse(readFileSync(settings, 'utf8')) as {
+        ai?: Record<string, unknown> & {local?: Record<string, unknown>}
+    }
+    const local = stored.ai?.local
+    if (!stored.ai || !local)
+        throw new Error(
+            'no `ai.local` profile in the copied settings; configure the local endpoint in Gofer '
+                + 'once, or this run would talk to a hosted model'
+        )
+    const subagent = (stored.ai['subagent'] ?? {}) as Record<string, unknown>
+    const connection = {
+        ...local,
+        connectionType: 'openai-compatible',
+        model: servedModel(String(local['baseUrl']), asText(local['model']))
+    }
+    stored.ai = {
+        ...stored.ai,
+        ...connection,
+        modelName: connection.model,
+        subagent: {...subagent, connection: {...connection, modelName: connection.model}}
+    }
+    writeFileSync(settings, JSON.stringify(stored, undefined, 2))
+    console.log(
+        `the run and its sub-agents talk to ${String(local['baseUrl'])} for ${connection.model}`
+    )
+}
+
+/** A stored field read back as the text it was written as, or nothing when it was never written. */
+function asText(value: unknown): string {
+    return typeof value === 'string' ? value : ''
+}
+
+/**
+ * The model id the endpoint is actually serving right now.
+ *
+ * A local host loads one `.gguf` and answers to its path, and swapping that file is a thing done
+ * between runs without touching Gofer. The stored profile then names a model the server has never
+ * heard of, and the whole run fails on its first request — for a reason that reads like the model
+ * misbehaving rather than like a stale settings file. Asking is cheap and it is the only source
+ * that cannot be out of date.
+ *
+ * A server that will not answer is a stop. The alternative is starting a run that cannot make a
+ * single request, and spending an hour discovering it.
+ */
+function servedModel(baseUrl: string, stored: string): string {
+    const answer = spawnSync('curl', ['--silent', '--max-time', '30', `${baseUrl}/models`], {
+        encoding: 'utf8'
+    })
+    if (answer.status !== 0)
+        throw new Error(`${baseUrl} did not answer; no run is possible: ${answer.stderr}`)
+    const served = (JSON.parse(answer.stdout) as {data?: {id?: string}[]}).data ?? []
+    const ids = served.map(entry => entry.id).filter(entry => entry !== undefined)
+    const first = ids[0]
+    if (first === undefined) throw new Error(`${baseUrl} is serving no model`)
+    if (ids.includes(stored)) return stored
+    console.log(`the settings name ${stored}; ${baseUrl} is serving ${first}`)
+    return first
 }
 
 /**

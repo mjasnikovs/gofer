@@ -94,10 +94,12 @@ const DESIGN_SYSTEM_PROMPT =
     + 'three variants that differ in a way a person sees at a glance.\n'
     + '3. Read what they say back. Revise, and ask again under the SAME questionId you were '
     + 'given, so they see one layout changing rather than a pile of them.\n'
-    + '4. They end it two ways. They press the button that says the design is agreed, or they '
-    + 'choose a sketch and say nothing else. Either one is the end: stop and write your answer. '
-    + 'Words about a sketch are a change to make, not approval. You may interrupt them only a few '
-    + 'times, so do not spend one on a change you were already told to make.\n'
+    + '4. There is ONE ending: they press the button that says the design is agreed. Until they '
+    + 'do you are not finished — picking a sketch, praising one, or saying nothing are the middle '
+    + 'of the design, not the end of it. Keep revising and showing until they press it, or until '
+    + 'you are told you have no asks left. Never decide on their behalf that it is agreed. You may '
+    + 'interrupt them only a few times, so do not spend one on a change you were already told to '
+    + 'make.\n'
     + '\n'
     + 'Your final message is the agreement, written down, and nothing else. Name each region, say '
     + 'where it is anchored, how big it is, and how much space is around it. Give the type sizes and '
@@ -175,6 +177,32 @@ function agreedSketch({label, html, approved}) {
         }. It is a picture of the result, not code to port: build it with the project's own nodes, `
         + 'and read it for what sits where, how big each region is and what the spacing is.\n\n'
         + `${html}`
+    )
+}
+
+/**
+ * Said first when the user never ended the design.
+ *
+ * The loop has exactly one ending that means agreement: the button on the card. Everything else is a
+ * child that stopped — out of ration, out of patience, or because it decided on the user's behalf
+ * that the last sketch was good enough. All three produce the same confident specification, and
+ * without this line the parent reads it as a decision and tells the user they agreed to it. That is
+ * what happened: a layout nobody approved came back as "agreed on a larger, readable squad list".
+ *
+ * Loud, and before the specification rather than after it. A caveat under a page of measurements is
+ * a caveat nobody acts on.
+ */
+function notAgreed({rounds, approved}) {
+    if (approved === true) return ''
+    const shown =
+        rounds > 0 ?
+            `They were shown ${String(rounds)} round${rounds === 1 ? '' : 's'} and never pressed `
+            + 'the button that ends a design.'
+        :   'They were never shown anything at all: not one sketch reached them.'
+    return (
+        `THE USER DID NOT AGREE THIS. ${shown} What follows is a proposal, not a decision. Say so `
+        + 'in your own words before you do anything with it, do not tell them it was agreed, and '
+        + 'show it to them yourself with ask_user before you build it.\n\n'
     )
 }
 
@@ -282,7 +310,7 @@ export function createDesignWithUserTool({
                         {
                             type: 'text',
                             text:
-                                `${result.text}${agreedSketch(agreed)}`
+                                `${notAgreed(agreed)}${result.text}${agreedSketch(agreed)}`
                                 + `${blindTo(images, model)}`
                                 + `\n\n${usageFooter(result, model)}`
                         }

@@ -49,7 +49,7 @@ describe('a sketch sent to the chat', () => {
         expect(message).toContain('<p>res://ui/panel.png</p>')
     })
 
-    /** The first line identifies the block, which is what a repeated paste is recognised by. */
+    /** A draft is read before it is sent, and a folded code fence says nothing about which one. */
     it('opens with a line that names which layout it is', () => {
         const [caption] = sketchMessage(SKETCH, '<p>a</p>').split('\n')
 

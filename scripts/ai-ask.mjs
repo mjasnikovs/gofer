@@ -190,8 +190,15 @@ function unresolvedLine(unresolved) {
     )
 }
 
-/** Everything that came back, as one paragraph: the verdict first, then the detail. */
-export function answerText(answer) {
+/**
+ * Everything that came back, as one paragraph: the verdict first, then the detail.
+ *
+ * `inDesign` is the difference between a question and a round of a design. Outside a loop a pick
+ * with no words is the whole answer, because there is nothing else the user could press. Inside one
+ * there is: the button that ends the design. So the same click means "this one, carry on" there,
+ * and reading it as the end is how a loop nobody agreed to came back saying it was agreed.
+ */
+export function answerText(answer, {inDesign = false} = {}) {
     const trailing = unresolvedLine(answer?.unresolved) + blockedLine(answer?.blocked)
     if (answer?.skipped === true) return SKIPPED + trailing
 
@@ -209,6 +216,12 @@ export function answerText(answer) {
     // is the user saying there is not going to be one. Words alongside it are the last note on a
     // layout that is already agreed, not a change to make.
     if (answer?.approved === true) parts.push(APPROVED)
+    else if (answer?.picked && !said && inDesign)
+        parts.push(
+            'That is which one they prefer, not the end of the design. They end it by pressing the '
+                + 'button that agrees it, and they have not. Improve this one and show it to them '
+                + 'again.'
+        )
     else if (answer?.picked && !said)
         parts.push(
             'They chose it and said nothing else, so that is the whole answer. Build it. Do not ask '
@@ -258,6 +271,7 @@ export function createAskUserTool({host, budget, sketchesRequired = false, sessi
         delete agreed.label
         delete agreed.html
         delete agreed.approved
+        delete agreed.rounds
     }
     return {
         name: ASK_USER_TOOL_NAME,
@@ -289,16 +303,25 @@ export function createAskUserTool({host, budget, sketchesRequired = false, sessi
             // The drawing the user reacted to, kept for whoever built this tool rather than put in
             // front of the model that drew it. Overwritten every round, so what is left at the end
             // is the last layout the user saw — which, when they ended the loop, is the agreed one.
-            if (agreed !== undefined && answer?.sketch?.html) {
-                agreed.label = answer.sketch.label
-                agreed.html = answer.sketch.html
-                agreed.approved = answer.approved === true
+            if (agreed !== undefined) {
+                // Counted whatever came back, including a skip. It is the design tool's only way to
+                // know the user was ever in the room: a child that answered without asking anybody
+                // leaves this at zero, and an agreement nobody was shown is the one thing that tool
+                // must not hand back as agreed.
+                agreed.rounds = (agreed.rounds ?? 0) + 1
+                if (answer?.sketch?.html) {
+                    agreed.label = answer.sketch.label
+                    agreed.html = answer.sketch.html
+                    agreed.approved = answer.approved === true
+                }
             }
             // The user pressed the button that ends the loop, so the ration is gone rather than
             // merely discouraged. `APPROVED` says why; this is what makes it true.
             if (answer?.approved === true && budget !== undefined) asked = budget
             return {
-                content: [{type: 'text', text: answerText(answer)}],
+                content: [
+                    {type: 'text', text: answerText(answer, {inDesign: sessionId !== undefined})}
+                ],
                 details: {
                     questionId: answer?.questionId,
                     skipped: answer?.skipped === true,

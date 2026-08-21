@@ -187,6 +187,48 @@ fn the_editor_serves_monaco_through_the_script_commands() {
         repaired[0].diagnostics
     );
 
+    // A whole-file write earns the same answer an anchor edit does. Creating a script is the one
+    // way a caller reaches a file that does not exist yet, and the question it has afterwards is
+    // the question an edit is already answered: does this parse. Answering only with the byte
+    // count spends a second call and a second wait to learn what this call already knew.
+    let created_path = "scripts/created_by_save.gd";
+    let broken_save = script::save_and_publish(SaveScriptRequest {
+        path: created_path.to_owned(),
+        text: "extends RefCounted\n\nfunc broken() -> int:\n\treturn 1 +\n".to_owned(),
+        expected_hash: None,
+    })
+    .expect("create the script");
+    assert_eq!(broken_save.path, created_path);
+    assert!(broken_save.bytes > 0, "a save reports what it wrote");
+    assert!(
+        broken_save.published,
+        "the server said nothing about the text this save wrote: {broken_save:?}"
+    );
+    assert!(
+        broken_save
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR)),
+        "the parse error must come back with the save that wrote it: {:?}",
+        broken_save.diagnostics
+    );
+
+    // And the repair clears it on the same call, so a caller never has to ask twice.
+    let fixed_save = script::save_and_publish(SaveScriptRequest {
+        path: created_path.to_owned(),
+        text: "extends RefCounted\n\nfunc broken() -> int:\n\treturn 1 + 1\n".to_owned(),
+        expected_hash: Some(broken_save.hash.clone()),
+    })
+    .expect("repair the script");
+    assert!(
+        fixed_save
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.severity != Some(DiagnosticSeverity::ERROR)),
+        "the repair must clear the parse error on the save itself: {:?}",
+        fixed_save.diagnostics
+    );
+
     let keeper = open_when_ready(KEEPER_PATH, &editor);
     assert!(keeper.text.contains("var total: int = 0"));
 

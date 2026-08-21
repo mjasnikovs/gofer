@@ -26,8 +26,16 @@ import {
  */
 const workspace = process.env.GOFER_WORKSPACE_DIR ?? ''
 
-/** The prompt. Identical between runs, or two runs are not comparable. */
-const PROMPT = 'Create a Mario World 1-1 level. Make it playable.'
+/**
+ * The prompt.
+ *
+ * Identical between runs of the same scenario, or two runs are not comparable. `GOFER_BLANK_PROMPT`
+ * names a different game to build: the defects this run is looking for are Gofer's, and a platform
+ * level exercises a different part of the tool surface than a top-down shooter or a puzzle grid
+ * does. The default stays the Mario level so an unparameterised run is still the baseline one.
+ */
+const PROMPT =
+    process.env['GOFER_BLANK_PROMPT'] ?? 'Create a Mario World 1-1 level. Make it playable.'
 
 /**
  * How long the model may work before the run is called off.

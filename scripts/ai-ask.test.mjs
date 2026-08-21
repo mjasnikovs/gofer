@@ -64,6 +64,22 @@ test('a pick with no note says so, so nothing asks the user to justify it', () =
 })
 
 /**
+ * Inside a design loop the same click means something else.
+ *
+ * There is a button that ends a design and picking a sketch is not it. Read as the end, one click on
+ * a variant the user liked came back to the parent as a whole layout they had agreed to.
+ */
+test('a pick inside a design loop is a preference, not the end of it', () => {
+    const text = answerText(
+        {questionId: 'question-1', picked: {index: 0, label: 'Bar across the top'}},
+        {inDesign: true}
+    )
+    assert.match(text, /not the end of the design/u)
+    assert.match(text, /show it to them again/u)
+    assert.doesNotMatch(text, /do not ask again/iu)
+})
+
+/**
  * What the policy refused is named in the text, not only in the details.
  *
  * The model reads content parts and nothing else, and the frame has no console for it to read
@@ -337,7 +353,12 @@ test('the layout the user reacted to is recorded without being read back to the 
 
     const answer = await tool.execute('id', {question: 'which?'})
 
-    assert.deepEqual(agreed, {label: 'Bar across the top', html: '<p>a</p>', approved: true})
+    assert.deepEqual(agreed, {
+        rounds: 1,
+        label: 'Bar across the top',
+        html: '<p>a</p>',
+        approved: true
+    })
     assert.ok(!answer.content[0].text.includes('<p>a</p>'))
 })
 
@@ -349,7 +370,7 @@ test('the layout the user reacted to is recorded without being read back to the 
  * retry would hand back a layout the user's final answer never saw.
  */
 test('a retried attempt inherits no layout from the attempt that failed', () => {
-    const agreed = {label: 'Stale', html: '<p>old</p>', approved: true}
+    const agreed = {rounds: 3, label: 'Stale', html: '<p>old</p>', approved: true}
 
     createAskUserTool({host: {call: () => Promise.resolve({})}, budget: 2, agreed})
 

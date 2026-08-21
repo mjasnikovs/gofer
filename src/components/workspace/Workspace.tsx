@@ -588,12 +588,12 @@ export function Workspace({
             },
             // A paragraph of its own, and once. A pasted block is a document, not a phrase: joined
             // onto the sentence somebody is mid-way through it would be neither readable nor
-            // separable again. The first line is what identifies it, so that is what a repeat is
-            // recognised by — comparing the whole block would miss nothing and cost kilobytes.
+            // separable again. The whole block is what a repeat is recognised by: its first line
+            // carries only the label the model chose, so two questions it named "Centered overlay"
+            // pasted one layout and dropped the other with nothing said.
             paste: (text: string) => {
                 setDraft(previous => {
-                    const caption = text.split('\n', 1)[0] ?? text
-                    if (previous.includes(caption)) return previous
+                    if (previous.includes(text)) return previous
                     return previous.trim() === '' ? text : `${previous.trimEnd()}\n\n${text}`
                 })
             }

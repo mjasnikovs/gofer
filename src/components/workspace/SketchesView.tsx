@@ -91,30 +91,46 @@ export function SketchesView() {
         }
     }, [reads])
 
+    /*
+     * The read is an effect rather than part of the click, because Refresh has to be able to undo it.
+     *
+     * A sketch identifier is per question, not per round: every revision of one layout upserts the
+     * same row and rewrites both files where they are. So a cache that is only ever added to draws
+     * round one under round three's label for the rest of the session, and Send to chat pastes round
+     * one's markup — which is the one thing on this screen that has to be the layout that was agreed.
+     * Refresh empties the cache, and this reads whatever is open again on its own.
+     */
+    useEffect(() => {
+        if (openId === undefined || html.has(openId)) return
+        let cancelled = false
+        void readProjectSketch(openId)
+            .then(body => {
+                if (!cancelled) setHtml(previous => new Map(previous).set(openId, body))
+            })
+            .catch((failure: unknown) => {
+                if (cancelled) return
+                const {message, code} = toSketchError(failure)
+                setReadFailure({id: openId, reason: `${message} (${code})`})
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [openId, html])
+
     const refresh = useCallback(() => {
         setIsLoading(true)
+        setHtml(new Map())
+        setReadFailure(undefined)
+        setBlocked([])
         setReads(count => count + 1)
     }, [])
 
-    const open = useCallback(
-        (value: string | string[]) => {
-            const chosen = Array.isArray(value) ? value[0] : value
-            const id = chosen === undefined || chosen === '' ? undefined : chosen
-            setOpenId(id)
-            setBlocked([])
-            setReadFailure(undefined)
-            if (id === undefined || html.has(id)) return
-            void readProjectSketch(id)
-                .then(body => {
-                    setHtml(previous => new Map(previous).set(id, body))
-                })
-                .catch((failure: unknown) => {
-                    const {message, code} = toSketchError(failure)
-                    setReadFailure({id, reason: `${message} (${code})`})
-                })
-        },
-        [html]
-    )
+    const open = useCallback((value: string | string[]) => {
+        const chosen = Array.isArray(value) ? value[0] : value
+        setOpenId(chosen === undefined || chosen === '' ? undefined : chosen)
+        setBlocked([])
+        setReadFailure(undefined)
+    }, [])
 
     const noteBlocked = useCallback((uri: string) => {
         setBlocked(previous => (previous.includes(uri) ? previous : [...previous, uri]))

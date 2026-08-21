@@ -334,6 +334,36 @@ pub fn update_document(request: UpdateScriptRequest) -> Result<ScriptStamp, LspE
 /// Writes the buffer through the workspace transaction, then reports the save to the server with
 /// the saved text. A file the renderer never opened is opened first, so the notification is legal.
 pub fn save_document(request: SaveScriptRequest) -> Result<ScriptStamp, LspError> {
+    let saved = write_and_synchronize(request)?;
+    Ok(ScriptStamp {
+        path: saved.path,
+        hash: Some(saved.hash),
+        bytes: Some(saved.bytes),
+        version: saved.version,
+    })
+}
+
+/// A file on disk and the document the server now holds for it, before anything is asked about it.
+///
+/// It carries the connection the write went through, because the connection is process-global and
+/// the editor may restart at any moment: a handle taken separately can already be dead by the time
+/// the write returns, and then the file is on disk but the question about it fails.
+struct SynchronizedSave<C = Arc<LspClient>> {
+    path: String,
+    uri: Url,
+    hash: String,
+    bytes: u64,
+    version: i32,
+    client: C,
+}
+
+/// The write itself, shared by the renderer's save and the agent's.
+///
+/// Split out because the two want different answers to the same act. Monaco subscribes to
+/// diagnostics and only needs the stamp back; the agent has no subscription and would otherwise
+/// have to ask in a second call. Neither may write differently from the other, which is what
+/// keeping one body of it guarantees.
+fn write_and_synchronize(request: SaveScriptRequest) -> Result<SynchronizedSave, LspError> {
     let (client, workspace) = connection()?;
     let stamp = workspace
         .write(
@@ -350,11 +380,71 @@ pub fn save_document(request: SaveScriptRequest) -> Result<ScriptStamp, LspError
     };
     client.save_document(&uri, &request.text)?;
     request_rescan(&request.path);
-    Ok(ScriptStamp {
+    Ok(SynchronizedSave {
         path: request.path,
-        hash: Some(stamp.hash),
-        bytes: Some(stamp.bytes),
+        uri,
+        hash: stamp.hash,
+        bytes: stamp.bytes,
         version,
+        client,
+    })
+}
+
+/// One saved file, answered with the verdict the server published for the text just written.
+///
+/// The same shape an anchor edit answers with, minus the count of anchors a whole-file write has
+/// no notion of. A save is the only way to create a script, so it is the call every new file
+/// arrives through, and "how many bytes did you write" is never the question its caller has next.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedScript {
+    pub path: String,
+    pub hash: String,
+    pub bytes: u64,
+    pub version: i32,
+    pub diagnostics: Vec<Diagnostic>,
+    /// False when the server published nothing for the saved text within the timeout, exactly as
+    /// in a `diagnostics` pull: an empty list here is silence, not a clean file.
+    pub published: bool,
+}
+
+/// Writes a whole file and answers with the verdict the server published for what was written.
+///
+/// The same deadline one `diagnostics` pull is given, spent inside the call that caused the
+/// publication rather than in a second call after it. A save is how every script is created, and
+/// the caller's next question is always whether it parses.
+pub fn save_and_publish(request: SaveScriptRequest) -> Result<SavedScript, LspError> {
+    let saved = write_and_synchronize(request)?;
+    published_save(
+        saved,
+        Duration::from_millis(DEFAULT_DIAGNOSTICS_WAIT_MS),
+        |client, uri, wait| client.diagnostics(uri, wait),
+    )
+}
+
+/// Answers a completed write with the verdict the server published for the text it wrote.
+///
+/// The question goes to the connection the write itself used, which the save carries, and taking
+/// one separately is the bug this shape prevents: the editor may restart during the write, and a
+/// handle taken before it answers `session_closed` afterwards. That failure arrives once the file
+/// is already on disk, so the caller is told a save that happened did not, records no hash for it,
+/// and its next save of the same file is refused as a conflict against a hash nobody holds.
+fn published_save<C>(
+    saved: SynchronizedSave<C>,
+    budget: Duration,
+    pull: impl FnOnce(&C, &Url, Duration) -> Result<Option<PublishDiagnosticsParams>, LspError>,
+) -> Result<SavedScript, LspError> {
+    let published = pull(&saved.client, &saved.uri, budget)?;
+    Ok(SavedScript {
+        path: saved.path,
+        hash: saved.hash,
+        bytes: saved.bytes,
+        version: saved.version,
+        diagnostics: published
+            .as_ref()
+            .map(|published| published.diagnostics.clone())
+            .unwrap_or_default(),
+        published: published.is_some(),
     })
 }
 
@@ -1160,6 +1250,72 @@ mod tests {
             allowances.iter().sum::<Duration>() <= budget,
             "{allowances:?}"
         );
+    }
+
+    /// A language-server connection the way the real cache hands one out: it can be closed under
+    /// the caller, and a closed one answers every question with `session_closed`.
+    #[derive(Clone)]
+    struct FakeClient {
+        closed: Arc<AtomicBool>,
+    }
+
+    impl FakeClient {
+        fn new() -> Self {
+            Self {
+                closed: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn close(&self) {
+            self.closed.store(true, Ordering::Release);
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::Acquire)
+        }
+    }
+
+    /// A save survives the editor restarting between the write and the question about it.
+    ///
+    /// The bug this pins costs the caller a file it did write. The client used to be taken before
+    /// the write and the diagnostics read from that handle afterwards, so a session that restarted
+    /// in between wrote the file through the new connection and then asked the dead one, which
+    /// answers `session_closed`. The tool call fails, the hash of what was written is never
+    /// recorded, and the next save of the same file is refused as a conflict against a hash nobody
+    /// holds.
+    #[test]
+    fn a_save_whose_client_reconnected_is_still_recorded() {
+        let stale = FakeClient::new();
+        // The editor restarts while the file is being written: the cache drops the closed client
+        // and the write goes through a fresh one.
+        stale.close();
+        let fresh = FakeClient::new();
+        let saved = SynchronizedSave {
+            path: "player.gd".to_owned(),
+            uri: Url::parse("file:///w/player.gd").expect("uri"),
+            hash: "written".to_owned(),
+            bytes: 12,
+            version: 3,
+            client: fresh.clone(),
+        };
+
+        let published = published_save(saved, Duration::from_millis(50), |client, uri, _| {
+            if client.is_closed() {
+                return Err(LspError::new("session_closed", "The LSP session is closed"));
+            }
+            Ok(Some(PublishDiagnosticsParams {
+                uri: uri.clone(),
+                diagnostics: Vec::new(),
+                version: Some(3),
+            }))
+        })
+        .expect("a file that reached disk is not lost because the editor restarted");
+
+        assert!(stale.is_closed());
+        // The hash is what the caller records; losing it is what makes the next save unwinnable.
+        assert_eq!(published.hash, "written");
+        assert_eq!(published.version, 3);
+        assert!(published.published);
     }
 
     fn edited(text: &str, edits: &[ScriptEdit]) -> Result<String, LspError> {

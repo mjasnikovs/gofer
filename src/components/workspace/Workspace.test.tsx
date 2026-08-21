@@ -11,6 +11,8 @@ import {flush} from '../../test/flush'
 import {installBackend} from '../../test/backend'
 import type {BriefEvent} from '../../models/brief'
 import type {Backend, BackendAnswers} from '../../test/backend'
+import {sketchMessage} from '../../models/sketch'
+import type {ProjectSketch} from '../../models/sketch'
 
 const tauri = createDesktopFake()
 
@@ -725,5 +727,115 @@ describe('Workspace planning with a picture attached', () => {
                 turn?.messages.at(-1) as {attachments?: readonly {name: string}[]} | undefined
             )?.attachments?.map(attachment => attachment.name)
         ).toEqual(['game-screenshot.png'])
+    })
+})
+
+/*
+ * Send to chat is the only way a saved layout reaches the agent: a sketch lives in Gofer's own data,
+ * which none of the agent's tools can read. The paste is guarded against a repeat, and the guard
+ * used to compare the first line of the message — whose only variable part is the label the model
+ * chose. Two questions it named the same thing produced the same first line, so the second layout
+ * was dropped with nothing said, and a draft that happened to quote that sentence dropped the first.
+ */
+describe('Workspace sending a saved sketch to the chat', () => {
+    /** Two questions, one name. Nothing stops the model from calling both of them the same thing. */
+    const PAUSE: ProjectSketch = {
+        id: 'question-1-run',
+        taskId: null,
+        questionId: 'question-1',
+        question: 'Where does the pause menu go?',
+        label: 'Centered overlay',
+        isApproved: true,
+        savedAt: 1_700_000_000_000
+    }
+
+    const INVENTORY: ProjectSketch = {
+        ...PAUSE,
+        id: 'question-2-run',
+        questionId: 'question-2',
+        question: 'Where does the inventory go?',
+        savedAt: 1_600_000_000_000
+    }
+
+    /** The buildable markup, which is what the paste is worth reading for. */
+    const SOURCE: Readonly<Record<string, string>> = {
+        'question-1-run': '<p>pause</p>',
+        'question-2-run': '<p>inventory</p>'
+    }
+
+    beforeEach(() => {
+        server = installBackend(tauri, {
+            answers: {
+                send_ai_message: runTurn,
+                list_project_sketches: () => [PAUSE, INVENTORY],
+                read_project_sketch: ({id}) => ({
+                    shown: '<p>drawn</p>',
+                    source: SOURCE[id] ?? null
+                })
+            }
+        })
+    })
+
+    /** Sends one layout the way the user does, and leaves the panel as it found it. */
+    async function sendSketch(user: ReturnType<typeof userEvent.setup>, question: RegExp) {
+        await user.click(screen.getByRole('button', {name: 'Design'}))
+        await flush()
+        await user.click(screen.getByText(question))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Send to chat'}))
+        await flush()
+        await user.click(screen.getByText(question))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Chat'}))
+        await flush()
+    }
+
+    /** Sends the draft, and reports the text the backend was handed — newlines and all. */
+    async function submitDraft(user: ReturnType<typeof userEvent.setup>) {
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.keyboard('{Enter}')
+        await flush()
+        return sent.at(-1)?.messages.at(-1)?.text ?? ''
+    }
+
+    it('pastes two saved sketches that happen to share a label', async () => {
+        const user = userEvent.setup()
+        render(<Workspace />)
+        await flush()
+
+        await sendSketch(user, /pause menu/u)
+        await sendSketch(user, /inventory/u)
+
+        const draft = await submitDraft(user)
+        expect(draft).toContain('<p>pause</p>')
+        expect(draft).toContain('<p>inventory</p>')
+    })
+
+    it('pastes a sketch into a draft that already quotes the sentence it opens with', async () => {
+        const user = userEvent.setup()
+        render(<Workspace />)
+        await flush()
+
+        const [caption = ''] = sketchMessage(PAUSE, '<p>pause</p>').split('\n')
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.paste(`${caption} And where does the HUD go?`)
+        await flush()
+        await sendSketch(user, /pause menu/u)
+
+        expect(await submitDraft(user)).toContain('<p>pause</p>')
+    })
+
+    it('adds nothing the second time the same sketch is sent', async () => {
+        const user = userEvent.setup()
+        render(<Workspace />)
+        await flush()
+
+        await sendSketch(user, /pause menu/u)
+        await sendSketch(user, /pause menu/u)
+
+        const draft = await submitDraft(user)
+        expect(draft.split('<p>pause</p>')).toHaveLength(2)
     })
 })
