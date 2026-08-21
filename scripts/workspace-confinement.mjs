@@ -312,9 +312,31 @@ async function withTheRegionTheFileHolds(workspacePath, toolName, params, error)
     return new Error(`${message} ${region}`)
 }
 
+/**
+ * The boundary, said where the model reads what a tool is for.
+ *
+ * pi's own descriptions say a path may be "relative or absolute", and for read, write and edit that
+ * is true here — `validateToolPath` resolves an absolute path and keeps it if it lands inside the
+ * worktree. For bash it is false, and pi's description says nothing at all about a boundary, so the
+ * model finds out by being refused. One live turn spent a call on `find /tmp/…/worktree`, and the
+ * measurement below spent eight of twenty.
+ *
+ * Measured with `scripts/bench-prompt-line.mjs`, twenty seeds an arm, arms interleaved inside one
+ * process, run twice. Asked for something the project does not hold, so a wider search is a
+ * reasonable thing to want, the shipped description wrote a command this rule refuses 8 of 20 and
+ * then 7 of 20; with this sentence, **0 of 20 both times**. Asked for something the project does
+ * hold, both arms wrote 0 of 20 — the sentence costs nothing where it is not needed.
+ */
+const BASH_IS_CONFINED =
+    ' It runs in the project root and can reach nothing outside it: every path in the command is'
+    + ' relative to that root, and an absolute path, or one that climbs out with .. or ~, is'
+    + ' refused before the command runs.'
+
 export function confineTool(tool, workspacePath, frozen = []) {
     return {
         ...tool,
+        description:
+            tool.name === 'bash' ? `${tool.description}${BASH_IS_CONFINED}` : tool.description,
         execute: async (id, params, signal, onUpdate, context) => {
             if (tool.name === 'bash') {
                 validateBashCommand(params.command)

@@ -23,6 +23,7 @@ async function workspace() {
 function fakeTool(name) {
     return {
         name,
+        description: `Does ${name} things.`,
         execute: async (_id, params) => params
     }
 }
@@ -205,6 +206,27 @@ test('allows workspace shell commands and rejects every explicit escape form', a
         'true; cd other'
     ])
         await assert.rejects(tool.execute('2', {command}), /Shell|workspace/iu)
+})
+
+test('says on the bash tool itself that it cannot leave the workspace', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+
+    // The rule is the only thing that tells the model where the shell may go, and the description
+    // pi ships says nothing about it — while read, write and edit say "relative or absolute", which
+    // is true of them and not of this. Measured: asked for something the project does not hold,
+    // eight of twenty turns wrote a command this rule refuses without the sentence, none with it.
+    const bash = confineTool(fakeTool('bash'), current.path)
+    assert.match(bash.description, /reach nothing outside it/u)
+    assert.match(bash.description, /refused before the command runs/u)
+
+    // And only bash. The other three do take an absolute path inside the worktree, so a sentence
+    // saying they do not would be false.
+    for (const name of ['read', 'write', 'edit'])
+        assert.equal(
+            confineTool(fakeTool(name), current.path).description,
+            fakeTool(name).description
+        )
 })
 
 test('lets a slash inside an argument be a slash', async context => {
