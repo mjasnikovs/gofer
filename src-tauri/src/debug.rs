@@ -573,6 +573,7 @@ mod tests {
 
     #[test]
     fn every_operation_is_refused_without_a_session() {
+        let _no_editor = godot_session::no_editor_bound();
         for request in [
             json!({"op": "status"}),
             json!({"op": "launch"}),

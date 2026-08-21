@@ -2146,6 +2146,9 @@ mod tests {
         // A turn closes the process-wide approval gate when it ends, so this waits its turn
         // behind the `approvals` tests rather than settling a prompt one of them is waiting on.
         let _gate = crate::approvals::serialize_gate_tests();
+        // `get_tree` is answered by the real session door, so the refusal it must produce is only
+        // this test's to assert while nothing else has an editor bound.
+        let _no_editor = crate::godot_session::no_editor_bound();
         let app = mock_app();
         // Two calls: one the router rejects outright, one that reaches a handler with no session.
         // Both must come back as structured failures on the same channel the events ride.

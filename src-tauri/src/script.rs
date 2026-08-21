@@ -1660,7 +1660,7 @@ mod tests {
 
     #[test]
     fn language_requests_without_a_session_are_retryable() {
-        disconnect();
+        let _no_editor = godot_session::no_editor_bound();
         let error = call(ScriptRequest::WorkspaceSymbols {
             query: String::new(),
         })

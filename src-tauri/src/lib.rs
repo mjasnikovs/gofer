@@ -1340,6 +1340,11 @@ mod tests {
         use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder};
         use tauri::webview::InvokeRequest;
 
+        // Every command below is answered by the process-wide session state, and three of the four
+        // assertions are about there being no session. That is only this test's to say while
+        // nothing else has an editor bound.
+        let _no_editor = crate::godot_session::no_editor_bound();
+
         let directory = TempDir::new().expect("temporary application data");
         let workspace = directory.path().join("workspace");
         fs::create_dir(&workspace).expect("create workspace");

@@ -808,6 +808,37 @@ fn now_millis() -> u64 {
 #[cfg(test)]
 pub(crate) static SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Holds the session lock and binds an editor that answers nothing, for a test whose subject is
+/// what happens when no session is active.
+///
+/// The lock on its own is not enough. It serializes the test against the ones that bind an editor,
+/// but what it then observes is still whatever the last of those left behind, and a test that
+/// asserts "no session" while another has one bound reads a different refusal — or no refusal at
+/// all. Binding absent makes the precondition the test's own, so the assertion is about the code
+/// under test rather than about cleanup order. The binding is released when the guard drops, before
+/// the lock it is holding.
+#[cfg(test)]
+pub(crate) fn no_editor_bound() -> NoEditorBound {
+    let lock = SESSION_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    bind(Some(Arc::new(ExternalEditor::absent())));
+    NoEditorBound { _lock: lock }
+}
+
+/// What [`no_editor_bound`] hands back. Unbinds on drop.
+#[cfg(test)]
+pub(crate) struct NoEditorBound {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for NoEditorBound {
+    fn drop(&mut self) {
+        bind(None);
+    }
+}
+
 /// How long the editor gets to close itself before [`stop`] kills it. A headless editor quit in
 /// well under a second when this was measured; the budget is for a machine under load.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(10);
