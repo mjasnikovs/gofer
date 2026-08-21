@@ -329,8 +329,26 @@ test('lets git read a scene it can only ever read', async context => {
     ])
         await assert.rejects(tool.execute('3', {command}), /godot_scene|godot_project/u)
 
+    // A pager on the end of a diff. The first version of this rule asked every part to be git,
+    // found `head`, and refused the whole thing; a live project spent a turn rewriting it.
+    for (const command of [
+        'git diff --stat && git diff -- main.tscn | head -80',
+        'git diff -- scenes/level_1.tscn | wc -l',
+        'git log --oneline -- scenes/level_1.tscn | grep fix'
+    ])
+        assert.deepEqual(await tool.execute('4', {command}), {command})
+
+    // A filter is exempt for what it cannot do to a path, so one that names a scene is not exempt,
+    // and neither is one with no git in the chain at all.
+    for (const command of [
+        'git diff --stat | grep -c . scenes/level_1.tscn',
+        'git status && head -20 project.godot',
+        'head -20 scenes/level_1.tscn'
+    ])
+        await assert.rejects(tool.execute('5', {command}), /godot_scene|godot_project/u)
+
     // And git is not a way past the other rules: an absolute path is still an absolute path.
-    await assert.rejects(tool.execute('4', {command: 'git diff -- /etc/passwd'}), /absolute/u)
+    await assert.rejects(tool.execute('6', {command: 'git diff -- /etc/passwd'}), /absolute/u)
 })
 
 /**

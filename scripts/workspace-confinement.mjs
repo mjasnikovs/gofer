@@ -110,17 +110,38 @@ const COMMAND_BREAK = /\|\||&&|[;&|\n\r]/u
 const REDIRECTS = /[<>]/u
 
 /**
+ * A filter that reads its input and has no way to name a file to write.
+ *
+ * What a diff gets piped into. `git diff --stat && git diff -- main.tscn | head -80` was refused by
+ * the first version of this rule, which asked every part to be git and found `head` — so a live
+ * project spent a turn on a pager. Deliberately short, and every word on it earns its place: `sort`
+ * and `uniq` both take an output file as an argument, `tee` is a writer, and `cat` is left off
+ * because reading a scene as text is what the read tool is for whether git is in the chain or not.
+ */
+const READS_A_PIPE = /^\s*(?:head|tail|wc|grep|nl|cut|tr)(?:\s|$)/u
+
+/**
  * Whether every part of this command reads through git and writes nothing.
  *
  * Judged part by part, because the command that was refused was two of them:
  * `git diff --check && git diff --stat -- scripts/main.gd main.tscn`. One part that writes anywhere
  * in a chain puts the whole command back under the ordinary rule, and a part that redirects writes
  * whatever git just read.
+ *
+ * A filter may sit in the chain, but only where it names no scene of its own: git is exempt because
+ * of what it cannot do to a path it is given, and `grep something main.tscn` is not git.
  */
 function readsOnlyThroughGit(command) {
     const parts = command.split(COMMAND_BREAK).filter(part => part.trim() !== '')
     return (
-        parts.length > 0 && parts.every(part => READ_ONLY_GIT.test(part) && !REDIRECTS.test(part))
+        parts.length > 0
+        && parts.some(part => READ_ONLY_GIT.test(part))
+        && parts.every(
+            part =>
+                (READ_ONLY_GIT.test(part)
+                    || (READS_A_PIPE.test(part) && !EDITOR_OWNED_IN_SHELL.test(part)))
+                && !REDIRECTS.test(part)
+        )
     )
 }
 
