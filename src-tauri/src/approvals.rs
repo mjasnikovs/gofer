@@ -357,12 +357,19 @@ fn take_pending(approval_id: &str) -> Option<std::sync::mpsc::Sender<bool>> {
     APPROVALS.take(approval_id)
 }
 
-/// Serializes every test that drives the process-wide gate, in this module and in [`crate::ai_turn`].
+/// Serializes every test that drives a gate a turn opens, wherever that test lives.
 ///
-/// The gate and the pending registry are one per process, and *ending a turn closes them* — so an
-/// `ai_turn` test that begins and drops an `AiTurn` settles the prompt an `approvals` test is
-/// waiting on, from another thread, with no call between the two to say so. It read as a flake in
-/// whichever of them lost: `approval_cancelled` where the test asked for `approval_timeout`.
+/// There are two registries — an approval and a question are different answers — but one schedule:
+/// [`crate::ai_turn`] opens both when a turn begins and closes both when it ends, and says so in
+/// the same breath. So this is one lock, not one per registry. An `ai_turn` test that begins and
+/// drops an `AiTurn` settles the prompt an `approvals` test is waiting on and empties the registry
+/// an [`crate::ask`] test is waiting on, from another thread, with no call between them to say so.
+///
+/// It read as a flake in whichever of them lost. `approval_cancelled` where the test asked for
+/// `approval_timeout`; `no question was ever registered` where the question had been registered and
+/// taken away again. `ask` kept a second lock of its own for a while, which serialized its tests
+/// against each other and against nothing else — the half of the problem that was never the hard
+/// half.
 ///
 /// Poisoning is taken rather than propagated, because a panic in one test is that test's failure,
 /// and re-raising it in every later one hides which test failed behind a `PoisonError`.

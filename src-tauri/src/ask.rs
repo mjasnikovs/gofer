@@ -580,14 +580,15 @@ mod tests {
         app
     }
 
-    /// `QUESTIONS` is one process-wide gate, so every test that touches it takes turns.
+    /// `QUESTIONS` is one process-wide gate, so every test that touches it takes turns — and it
+    /// shares that turn with the approval gate, because a turn opens and closes the two together.
     ///
-    /// Every test, not only the ones that open and close the gate — which is what it used to mean,
-    /// and it was not enough. A cancelling test drops the whole registry, so it can take the sender
-    /// out from under a test that had merely registered one, and that test then waits a second for a
-    /// reply nobody can send. It showed up as one unrelated skip test failing in a full run and
-    /// passing on its own.
-    static QUESTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// The lock lives in [`crate::approvals`] rather than here for that reason. A lock of our own
+    /// serialized these tests against each other and against nothing else, and the test that took
+    /// the question away was never one of these: it was an `ai_turn` test ending a turn.
+    fn serialize_question_tests() -> std::sync::MutexGuard<'static, ()> {
+        crate::approvals::serialize_gate_tests()
+    }
 
     /**
      * Blank text is the user pressing the button with nothing written, and that is a skip.
@@ -597,9 +598,7 @@ mod tests {
      */
     #[test]
     fn an_answer_of_only_whitespace_settles_the_question_as_a_skip() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let receiver = QUESTIONS.register("question-blank").expect("registered");
         respond_question(QuestionResponse {
             question_id: "question-blank".to_owned(),
@@ -617,9 +616,7 @@ mod tests {
     /// Text the user did write arrives trimmed, and a question only settles once.
     #[test]
     fn a_written_answer_arrives_and_the_question_stops_waiting() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let receiver = QUESTIONS.register("question-written").expect("registered");
         respond_question(QuestionResponse {
             question_id: "question-written".to_owned(),
@@ -647,9 +644,7 @@ mod tests {
     /// Pressing skip discards whatever was typed, rather than sending it as the decision.
     #[test]
     fn a_skip_beats_the_text_that_was_left_in_the_box() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let receiver = QUESTIONS.register("question-skipped").expect("registered");
         respond_question(QuestionResponse {
             question_id: "question-skipped".to_owned(),
@@ -669,9 +664,7 @@ mod tests {
     /// A card answered after its waiter is gone says so instead of reporting success.
     #[test]
     fn answering_a_question_whose_waiter_has_gone_is_reported_as_expired() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let receiver = QUESTIONS.register("question-expired").expect("registered");
         drop(receiver);
 
@@ -693,9 +686,7 @@ mod tests {
      */
     #[test]
     fn a_question_with_no_window_to_show_it_in_is_unavailable_at_once() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let app = tauri::test::mock_builder()
             .build(crate::app_context())
             .expect("build mock Tauri app");
@@ -723,9 +714,7 @@ mod tests {
      */
     #[test]
     fn a_question_asked_after_its_run_ended_is_cancelled_rather_than_waited_on() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let app = mock_app_with_a_window();
         cancel_user_prompts();
 
@@ -751,9 +740,7 @@ mod tests {
      */
     #[test]
     fn a_question_that_is_answered_hands_the_text_back_to_the_caller() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let app = mock_app_with_a_window();
         open_user_prompts();
 
@@ -804,9 +791,7 @@ mod tests {
      */
     #[test]
     fn ending_a_design_is_an_answer_rather_than_an_empty_reply() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let receiver = QUESTIONS.register("question-approved").expect("registered");
         respond_question(QuestionResponse {
             question_id: "question-approved".to_owned(),
@@ -906,9 +891,7 @@ mod tests {
      */
     #[test]
     fn a_question_carries_the_design_loop_it_belongs_to_and_usually_carries_none() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let app = mock_app_with_a_window();
         open_user_prompts();
 
@@ -954,9 +937,7 @@ mod tests {
     /// A sketch and a question are different waits, and the gate has to reach both.
     #[test]
     fn one_gate_covers_every_surface_a_turn_can_park_a_prompt_in() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         open_user_prompts();
         assert!(QUESTIONS.is_open());
         cancel_user_prompts();
@@ -972,9 +953,7 @@ mod tests {
      */
     #[test]
     fn a_reply_holding_nothing_settles_the_question_as_a_skip() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let receiver = QUESTIONS.register("question-empty").expect("registered");
         respond_question(QuestionResponse {
             question_id: "question-empty".to_owned(),
@@ -998,9 +977,7 @@ mod tests {
      */
     #[test]
     fn a_question_asked_twice_under_one_id_is_a_second_revision_of_the_same_thing() {
-        let _guard = QUESTION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let _guard = serialize_question_tests();
         let app = mock_app_with_a_window();
         open_user_prompts();
 
