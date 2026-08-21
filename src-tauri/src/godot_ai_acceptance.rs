@@ -716,3 +716,65 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("the second entry answers about the second node, not the first")
     );
 }
+
+/// The first mutation of a session lands, without a read before it.
+///
+/// The catalog tells the model the router holds the revision every mutation is checked against —
+/// "never pass it and never read the tree to fetch it". The ledger it is held in is in memory, so
+/// on the first call of a session it holds nothing, the router supplies nothing, and the addon
+/// refuses with `revision_conflict`. A live turn whose first act was `scene.create` was refused and
+/// then did the tree read the catalog told it not to do: 719 tool tokens and 2.6 seconds to learn a
+/// number the refusal itself carried.
+///
+/// The turn above cannot see this — it opens a scene first, which fills the ledger — and neither
+/// can the journey, which passes its own revision. Both start from a read, which is exactly the
+/// state this one refuses to start from.
+#[test]
+fn the_first_mutation_of_a_session_needs_no_read_before_it() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    // Whatever any earlier test in this process left behind. The point of the test is the empty
+    // ledger, so it is emptied rather than assumed.
+    crate::read_ledger::forget_worktree(&session.worktree);
+
+    let answer = ai_tools::dispatch(
+        app.handle(),
+        ai_tools::ToolRequest {
+            tool: "godot_node".to_owned(),
+            params: json!({"ops": [{
+                "op": "create",
+                "parent": "/AiFixture",
+                "name": "FirstMarker",
+                "type": "Marker2D",
+            }]}),
+        },
+    )
+    .unwrap_or_else(|failure| {
+        panic!(
+            "the first mutation was refused: {} {}",
+            failure.code, failure.message
+        )
+    });
+    assert_eq!(answer["ops"][0]["result"]["node"], "/AiFixture/FirstMarker");
+
+    // And the number it settled on is now the router's, so the mutation after it needs no read
+    // either — the retry has to leave the ledger where a normal answer would.
+    let again = ai_tools::dispatch(
+        app.handle(),
+        ai_tools::ToolRequest {
+            tool: "godot_node".to_owned(),
+            params: json!({"ops": [{
+                "op": "create",
+                "parent": "/AiFixture",
+                "name": "SecondMarker",
+                "type": "Marker2D",
+            }]}),
+        },
+    )
+    .expect("the mutation after the first needs no read either");
+    assert_eq!(again["ops"][0]["result"]["node"], "/AiFixture/SecondMarker");
+}

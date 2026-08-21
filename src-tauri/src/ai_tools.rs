@@ -2308,22 +2308,59 @@ fn rpc<R: Runtime>(
         ),
     };
     let timeout_ms = take_u64(&mut params, "timeoutMs");
-    let response = godot_session_api::call_godot(
-        app,
-        CallGodotRequest {
-            command: command.to_owned(),
-            params,
-            expected_revision,
-            expected_scene,
-            timeout_ms,
-        },
-    )?;
+    let request = CallGodotRequest {
+        command: command.to_owned(),
+        params,
+        expected_revision,
+        expected_scene,
+        timeout_ms,
+    };
+    let response = match godot_session_api::call_godot(app, request.clone()) {
+        Ok(answered) => answered,
+        Err(refusal) => {
+            let revision =
+                the_revision_a_first_mutation_was_refused_for(&refusal, expected_revision)
+                    .ok_or(refusal)?;
+            godot_session_api::call_godot(
+                app,
+                CallGodotRequest {
+                    expected_revision: Some(revision),
+                    ..request
+                },
+            )?
+        }
+    };
     let mut result = response.result;
     if let (Some(revision), Some(object)) = (response.revision, result.as_object_mut()) {
         object.insert("revision".to_owned(), json!(revision));
     }
     record_revision(app, &result);
     Ok(result)
+}
+
+/// The revision to retry at, when the router had none to supply and the addon refused for it.
+///
+/// A mutation is checked against the revision of the read it followed. The first call of a session
+/// follows no read: the ledger is in memory and empty, so the router supplies nothing and the addon
+/// refuses. The catalog tells the model the router holds that number and to never read the tree for
+/// it, so the model's only way out is the read the same sentence forbids — a refusal and a whole
+/// `scene.get_tree`, measured at 719 tool tokens and 2.6 seconds on a live turn whose first act was
+/// `scene.create`.
+///
+/// Only when the router supplied nothing. A revision it did supply, or one the caller passed, is a
+/// read this turn really made, and a conflict against it is the concurrent edit the guard exists to
+/// catch — retrying that would overwrite whatever moved the scene on.
+fn the_revision_a_first_mutation_was_refused_for(
+    refusal: &crate::godot_rpc::RpcError,
+    supplied: Option<u64>,
+) -> Option<u64> {
+    if supplied.is_some() || refusal.code != "revision_conflict" {
+        return None;
+    }
+    refusal
+        .details
+        .get("currentRevision")
+        .and_then(Value::as_u64)
 }
 
 /// The revision the last answer reported, for a call that named none.
