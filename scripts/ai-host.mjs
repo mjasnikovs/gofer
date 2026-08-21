@@ -113,6 +113,40 @@ function isObject(value) {
 }
 
 /**
+ * The parameter wrapper a model wrote under a key it invented, or nothing.
+ *
+ * `{"op": "set_autoload", "enabled": true, "path": "res://score.gd", "nameScore": {"name":
+ * "Score", "path": "res://score.gd"}}` is what one live turn wrote: the parameter it was about to
+ * write glued to the value it was about to write there, and the whole parameter set parked under
+ * the result. Refused, resent unchanged, then written as `pathScore` and refused again — three
+ * round trips, each answered "has no `nameScore` parameter … Did you mean `name`?", which is the
+ * near miss and not the shape.
+ *
+ * The same repair [`PARAM_KEYS`] already makes, for a wrapper whose name is not on that list.
+ * Narrow on purpose, and every clause is load-bearing: the key names no parameter, its object names
+ * only parameters and holds every required one, it is the only key in the entry that does, and the
+ * entry is missing a required parameter without it. A call that is already complete keeps its stray
+ * key and the refusal that names it — a model that wrote a whole wrapper deliberately did not also
+ * write the flat parameters.
+ */
+function gluedWrapperKey(declared, raw, namedBy) {
+    if (!Array.isArray(declared)) return undefined
+    const names = declared.map(param => param.name)
+    const required = declared.filter(param => param.required).map(param => param.name)
+    if (required.every(name => name in raw)) return undefined
+    const fitting = Object.entries(raw).filter(
+        ([key, held]) =>
+            key !== namedBy
+            && key !== 'ops'
+            && !names.includes(key)
+            && isObject(held)
+            && Object.keys(held).every(inner => names.includes(inner))
+            && required.every(name => name in held)
+    )
+    return fitting.length === 1 ? fitting[0][0] : undefined
+}
+
+/**
  * One entry of an `ops` list, out of whatever the model wrote for it.
  *
  * Every shape here was counted in the recorded turns of four projects, not imagined. A model that
@@ -134,9 +168,10 @@ function normalizeEntry(operations, args) {
     const only = operations.length === 1 ? operations[0].op : undefined
     const namedBy = OP_KEYS.find(key => typeof raw[key] === 'string')
     const op = namedBy ? raw[namedBy] : only
-    const wrapperKey = PARAM_KEYS.find(key => isObject(raw[key]))
-    const wrapped = wrapperKey ? raw[wrapperKey] : {}
     const declared = operations.find(operation => operation.op === op)?.params
+    const wrapperKey =
+        PARAM_KEYS.find(key => isObject(raw[key])) ?? gluedWrapperKey(declared, raw, namedBy)
+    const wrapped = wrapperKey ? raw[wrapperKey] : {}
     // An unknown key is only dropped when a wrapper was written as well, which is the shape this
     // filter was measured on: the parameters in their wrapper, and something else loose beside it.
     // With flat as the shape the schema asks for, a lone unknown key is not stray metadata — it is

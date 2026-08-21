@@ -1063,6 +1063,99 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
 // The tagged value a model wrapped twice. One live turn against a local Qwen3.6-27B sent 51 of
 // these in 114 tool calls, and every one was refused by a sentence that named the shape it wanted
 // and never noticed that the shape it wanted was sitting inside the one it got.
+/**
+ * Every repair in this layer leaves a call that was already right alone.
+ *
+ * The repairs are all "a model wrote this shape and meant that one", and each one is a licence to
+ * rewrite a call nobody is watching. This is the other half of that: the 93 distinct shapes sixteen
+ * real tasks produced, normalized against the declared contract, must come back meaning the same
+ * thing. Key order is not meaning — `op` moves to the end — so the comparison is on sorted keys.
+ */
+test('normalizing a recorded call changes nothing about what it says', async () => {
+    const domains = await declaredDomains()
+    const recorded = JSON.parse(
+        await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
+    )
+    const sorted = value =>
+        JSON.stringify(value, (key, held) =>
+            held && typeof held === 'object' && !Array.isArray(held) ?
+                Object.fromEntries(Object.entries(held).sort())
+            :   held
+        )
+    let checked = 0
+    for (const recordedCase of recorded.cases) {
+        const domain = domains.find(candidate => candidate.name === recordedCase.tool)
+        assert.ok(domain, `${recordedCase.tool} is recorded and is not declared`)
+        const normalized = normalizeToolCalls(domain.operations, {ops: recordedCase.ops})
+        assert.equal(
+            sorted(normalized.ops),
+            sorted(recordedCase.ops),
+            `${recordedCase.tool} ${JSON.stringify(recordedCase.ops.map(op => op.op))} was rewritten`
+        )
+        checked += 1
+    }
+    assert.ok(checked > 50, 'the fixture lost its cases')
+})
+
+test('a parameter set parked under an invented key is read as the wrapper it is', async () => {
+    const domains = await declaredDomains()
+    const project = domains.find(domain => domain.name === 'godot_project').operations
+    const script = domains.find(domain => domain.name === 'godot_script').operations
+
+    // What one live turn wrote, twice, then once more with the other parameter's name glued on.
+    assert.deepEqual(
+        normalizeToolCalls(project, {
+            ops: [
+                {
+                    op: 'set_autoload',
+                    enabled: true,
+                    path: 'res://score.gd',
+                    nameScore: {name: 'Score', path: 'res://score.gd'}
+                }
+            ]
+        }),
+        {ops: [{op: 'set_autoload', enabled: true, name: 'Score', path: 'res://score.gd'}]}
+    )
+    assert.deepEqual(
+        normalizeToolCalls(project, {
+            ops: [
+                {
+                    op: 'set_autoload',
+                    enabled: true,
+                    pathScore: {name: 'Score', path: 'res://score.gd'}
+                }
+            ]
+        }),
+        {ops: [{op: 'set_autoload', enabled: true, name: 'Score', path: 'res://score.gd'}]}
+    )
+
+    // A call already carrying every required parameter keeps its stray key, and the refusal that
+    // names it: a model that wrote a whole wrapper deliberately did not also write them flat.
+    const complete = {
+        op: 'save',
+        path: 'a.gd',
+        text: 'extends Node\n',
+        note: {path: 'b.gd', text: 'other'}
+    }
+    assert.deepEqual(normalizeToolCalls(script, {ops: [complete]}), {ops: [complete]})
+
+    // An object that does not hold every required parameter is not the parameter set.
+    const partial = {op: 'set_autoload', enabled: true, thinking: {name: 'Score'}}
+    assert.deepEqual(normalizeToolCalls(project, {ops: [partial]}), {ops: [partial]})
+
+    // An object holding a key no parameter is named after is not it either.
+    const extra = {op: 'set_autoload', held: {name: 'Score', path: 'a.gd', why: 'because'}}
+    assert.deepEqual(normalizeToolCalls(project, {ops: [extra]}), {ops: [extra]})
+
+    // Two that fit make it a guess, and a guess is left for the router to refuse by name.
+    const both = {
+        op: 'set_autoload',
+        one: {name: 'Score', path: 'a.gd'},
+        two: {name: 'Other', path: 'b.gd'}
+    }
+    assert.deepEqual(normalizeToolCalls(project, {ops: [both]}), {ops: [both]})
+})
+
 test('a parameter named with whitespace around it is named without it', async () => {
     // The real declared contract, not a fixture: the shapes below are what a live turn wrote, and
     // what makes them repairable is the parameter list the router will hold them to.
