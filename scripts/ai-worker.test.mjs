@@ -877,7 +877,24 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         {op: 'open', params: [{name: 'path', kind: 'text', required: true}]},
         {
             op: 'edit',
-            params: [{name: 'files', kind: 'list', required: true}]
+            params: [
+                {
+                    name: 'files',
+                    kind: 'list',
+                    required: true,
+                    entry: [
+                        {name: 'path', kind: 'text', required: true},
+                        {name: 'edits', kind: 'list', required: true}
+                    ]
+                }
+            ]
+        },
+        {
+            op: 'diagnostics',
+            params: [
+                {name: 'path', kind: 'text', required: true},
+                {name: 'timeoutMs', kind: 'int', required: false}
+            ]
         }
     ]
     const runtime = [
@@ -957,6 +974,90 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }),
         {ops: [{method: '_on_pressed', op: 'connect'}]}
     )
+
+    // One list parameter split across the `ops` list. Recorded four times in one project, always
+    // the same way: the first file inside a proper `edit` entry, and every file after it written
+    // as a sibling of that entry instead of a sibling of the first file. Every one was refused
+    // with `ops.1.op: must have required properties op` — a line that names neither the key that
+    // is wrong nor the list it belonged in — and the largest of them lost six files at once.
+    assert.deepEqual(
+        normalizeToolCalls(script, {
+            ops: [
+                {op: 'edit', files: [{path: 'a.gd', edits: [{oldText: 'x', newText: 'y'}]}]},
+                {path: 'b.gd', edits: [{oldText: 'p', newText: 'q'}]},
+                {path: 'c.gd', edits: [{oldText: 'm', newText: 'n'}]}
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'edit',
+                    files: [
+                        {path: 'a.gd', edits: [{oldText: 'x', newText: 'y'}]},
+                        {path: 'b.gd', edits: [{oldText: 'p', newText: 'q'}]},
+                        {path: 'c.gd', edits: [{oldText: 'm', newText: 'n'}]}
+                    ]
+                }
+            ]
+        }
+    )
+
+    // A stray that does not fit the list is left where it is. The router names the operation it is
+    // missing, which is a better sentence than a file folded into an edit it was never part of.
+    assert.deepEqual(
+        normalizeToolCalls(script, {
+            ops: [
+                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
+                {path: 'b.gd', text: 'extends Node'}
+            ]
+        }),
+        {
+            ops: [
+                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
+                {path: 'b.gd', text: 'extends Node'}
+            ]
+        }
+    )
+
+    // Nothing to fold into, and no operation shaped like it: the first entry of a call is nobody's
+    // stray, and a domain of several operations still cannot guess which one it meant.
+    assert.deepEqual(
+        normalizeToolCalls(script, {
+            ops: [
+                {path: 'b.gd', edits: []},
+                {op: 'open', path: 'a.gd'}
+            ]
+        }),
+        {
+            ops: [
+                {path: 'b.gd', edits: []},
+                {path: 'a.gd', op: 'open'}
+            ]
+        }
+    )
+
+    // The parameters written without the operation they belong to. The fifth recorded refusal was
+    // an `edit` followed by four of these, and `{path, timeoutMs}` is a pair only `diagnostics`
+    // takes — so the operation is not a guess, it is the only one the keys fit.
+    assert.deepEqual(
+        normalizeToolCalls(script, {
+            ops: [
+                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
+                {path: 'a.gd', timeoutMs: 5000}
+            ]
+        }),
+        {
+            ops: [
+                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
+                {path: 'a.gd', timeoutMs: 5000, op: 'diagnostics'}
+            ]
+        }
+    )
+
+    // A pair of operations the same keys fit is still a guess, and is left for the router to name.
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{path: 'a.gd'}, {path: 'b.gd'}]}), {
+        ops: [{path: 'a.gd'}, {path: 'b.gd'}]
+    })
 })
 
 test('a call is a list, and a bare operation is a list of one', async () => {

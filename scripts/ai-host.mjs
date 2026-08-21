@@ -167,10 +167,86 @@ function normalizeEntry(operations, args) {
  * rather than a refusal. That is the previous shape, and it is what a model reaches for when it
  * only wants one thing; refusing it would spend a round trip teaching a bracket.
  */
+/**
+ * The one list parameter of `op` whose entries look exactly like `keys`, or nothing.
+ *
+ * "Exactly" both ways: every required key of an entry is present, and every key present is one an
+ * entry declares. A stray carrying anything else is not one of these, and two parameters that both
+ * fit make it a guess — neither is folded.
+ */
+function listParamShapedLike(operations, op, keys) {
+    const params = operations.find(operation => operation.op === op)?.params
+    if (!Array.isArray(params)) return undefined
+    const fitting = params.filter(
+        param =>
+            param.kind === 'list'
+            && Array.isArray(param.entry)
+            && param.entry.length > 0
+            && param.entry.every(inner => !inner.required || keys.includes(inner.name))
+            && keys.every(key => param.entry.some(inner => inner.name === key))
+    )
+    return fitting.length === 1 ? fitting[0].name : undefined
+}
+
+/**
+ * The entries a model wrote beside the list they belong in, put back into it.
+ *
+ * A model asked for several files in one `godot_script edit` writes the first one properly and
+ * then, having opened a list already, writes the rest as siblings of the entry instead of siblings
+ * of the first file: `[{op: "edit", files: [a]}, b, c]` where it meant `[{op: "edit", files: [a, b,
+ * c]}]`. Recorded four times in one project, the largest losing six files at once, and every one
+ * refused by validation with `ops.1.op: must have required properties op` — which names the key
+ * that is missing and not the list it should have been in.
+ *
+ * Only a stray with no `op` at all is folded, only into the entry directly before it, and only when
+ * one list parameter of that entry's operation is shaped exactly like it. Anything else is left
+ * where it is: the router refuses it by name, which is a better sentence than a file quietly folded
+ * into an edit it was never part of.
+ */
+function foldStrayEntries(operations, entries) {
+    const kept = []
+    for (const entry of entries) {
+        const previous = kept.at(-1)
+        const name =
+            entry.op === undefined && previous !== undefined ?
+                listParamShapedLike(operations, previous.op, Object.keys(entry))
+            :   undefined
+        if (name === undefined || !Array.isArray(previous[name])) kept.push(entry)
+        else kept[kept.length - 1] = {...previous, [name]: [...previous[name], entry]}
+    }
+    return kept
+}
+
+/**
+ * The operation an entry named its parameters for but never named itself.
+ *
+ * A model that has written one entry properly writes the ones after it as parameters alone: an
+ * `edit` followed by four `{path, timeoutMs}`, which is the pair only `diagnostics` takes. The
+ * operation is read back out of the keys, and only when exactly one operation's parameters fit
+ * them exactly — every required parameter present, every key a parameter it declares. `{path}` on
+ * its own fits four operations and stays a guess, so it is left for the router to refuse by name.
+ */
+function nameTheOperation(operations, entry) {
+    if (entry.op !== undefined) return entry
+    const keys = Object.keys(entry)
+    if (keys.length === 0) return entry
+    const fitting = operations.filter(
+        operation =>
+            Array.isArray(operation.params)
+            && operation.params.every(param => !param.required || keys.includes(param.name))
+            && keys.every(key => operation.params.some(param => param.name === key))
+    )
+    return fitting.length === 1 ? {...entry, op: fitting[0].op} : entry
+}
+
 export function normalizeToolCalls(operations, args) {
     const raw = isObject(args) ? args : {}
     const listed = Array.isArray(raw.ops) ? raw.ops : [raw]
-    return {ops: listed.map(entry => normalizeEntry(operations, entry))}
+    const entries = foldStrayEntries(
+        operations,
+        listed.map(entry => normalizeEntry(operations, entry))
+    )
+    return {ops: entries.map(entry => nameTheOperation(operations, entry))}
 }
 
 /**
