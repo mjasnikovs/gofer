@@ -555,13 +555,102 @@ export function withoutPictures(tool) {
     }
 }
 
+/** One string, cut, saying how long it was. */
+function cutString(text, keep) {
+    return `${text.slice(0, Math.max(0, keep))}… [truncated, ${String(text.length)} characters]`
+}
+
+/** Every string in a value, with the path that reaches it. */
+function stringsIn(value) {
+    const found = []
+    const walk = (node, path) => {
+        if (typeof node === 'string') {
+            found.push({path, text: node})
+            return
+        }
+        if (Array.isArray(node)) {
+            node.forEach((item, index) => walk(item, [...path, index]))
+            return
+        }
+        if (node !== null && typeof node === 'object')
+            for (const [key, item] of Object.entries(node)) walk(item, [...path, key])
+    }
+    walk(value, [])
+    return found
+}
+
+function replaceAt(value, path, replacement) {
+    if (path.length === 0) return replacement
+    const [step, ...rest] = path
+    if (Array.isArray(value)) {
+        const copy = [...value]
+        copy[step] = replaceAt(value[step], rest, replacement)
+        return copy
+    }
+    return {...value, [step]: replaceAt(value[step], rest, replacement)}
+}
+
+/** The same answer with no string longer than `cap`. */
+function withStringsCappedAt(value, strings, cap) {
+    return strings.reduce(
+        (shaped, {path, text}) =>
+            text.length <= cap ? shaped : replaceAt(shaped, path, cutString(text, cap)),
+        value
+    )
+}
+
+/**
+ * The answer, small enough to send, with its structure intact.
+ *
+ * Slicing the serialized answer was what this did, and it cost the model whole operations. A call
+ * is a list, so a `[inspect, inspect, inspect]` whose first node carried a 380,000-character
+ * property was cut in the middle of that first entry: the second and third operations were not
+ * answered, not refused, and not mentioned — the model had asked three questions and could not tell
+ * that two of them were missing. Measured over one project's recorded turns: 71 answers were cut,
+ * 36 of them lists, and 23 operations produced nothing the model could see.
+ *
+ * The strings are cut instead, all of them to one length, which is the largest length they can all
+ * keep and still fit. Every operation keeps its entry, every entry keeps its keys, the JSON stays
+ * parseable, and each cut says inside itself how long the value really was — the sentence a model
+ * needs to decide whether to ask again for less. One length rather than one budget each, because a
+ * hundred scripts should each come back with its path and its first lines, not the first one whole
+ * and ninety-nine missing.
+ *
+ * The search is over that length rather than over the answer: the structure around the strings costs
+ * the same whatever they are cut to, so only the strings are measured again per candidate. An answer
+ * with no string in it long enough to cut — thousands of small keys — falls back to the slice, which
+ * is what every oversized answer used to get.
+ */
+function withinBudget(value, budget) {
+    const text = JSON.stringify(value ?? null)
+    if (text.length <= budget) return text
+    const strings = stringsIn(value)
+    if (strings.length === 0) return cutString(text, budget)
+    const structure =
+        text.length - strings.reduce((total, one) => total + JSON.stringify(one.text).length, 0)
+    const sizeAt = cap =>
+        strings.reduce(
+            (total, one) =>
+                total
+                + JSON.stringify(one.text.length <= cap ? one.text : cutString(one.text, cap))
+                    .length,
+            structure
+        )
+    let low = 0
+    let high = Math.max(...strings.map(one => one.text.length))
+    while (low < high) {
+        const middle = Math.ceil((low + high) / 2)
+        if (sizeAt(middle) <= budget) low = middle
+        else high = middle - 1
+    }
+    const shaped = JSON.stringify(withStringsCappedAt(value, strings, low) ?? null)
+    return shaped.length > budget ? cutString(shaped, budget) : shaped
+}
+
 export function toolResult(result) {
     const {described, images} = withoutTheirPixels(result)
-    let text = JSON.stringify(described ?? null)
-    if (text.length > MAX_TOOL_TEXT_CHARS)
-        text = `${text.slice(0, MAX_TOOL_TEXT_CHARS)}… [truncated, ${String(text.length)} characters]`
     return {
-        content: [{type: 'text', text}, ...images],
+        content: [{type: 'text', text: withinBudget(described, MAX_TOOL_TEXT_CHARS)}, ...images],
         details: result
     }
 }

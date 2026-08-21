@@ -1118,10 +1118,78 @@ test('captured frames become image content and large results are bounded', () =>
     assert.equal(JSON.parse(captured.content[0].text).frame.width, 320)
     assert.equal(captured.details.frame.data, 'iVBORw0KGgo=')
 
+    // The value that is too big is what gets cut, so the answer around it is still an answer: it
+    // parses, the key is still there, and the cut says how long the value really was.
     const huge = toolResult({nodes: 'x'.repeat(40_000)})
     assert.equal(huge.content.length, 1)
-    assert.match(huge.content[0].text, /… \[truncated, \d+ characters\]$/u)
+    assert.ok(huge.content[0].text.length <= 24_000)
+    assert.match(JSON.parse(huge.content[0].text).nodes, /… \[truncated, 40000 characters\]$/u)
     assert.equal(huge.details.nodes.length, 40_000)
+
+    // A call is a list, and one enormous entry used to take the whole list down with it: the
+    // serialized answer was sliced, so the second and third operations were not answered, not
+    // refused, and not mentioned. Every entry survives now, and only the value that was too big
+    // is short.
+    const listed = toolResult({
+        ops: [
+            {op: 'inspect', result: {node: '/Main', properties: {mesh: 'm'.repeat(60_000)}}},
+            {op: 'inspect', result: {node: '/Main/Player', properties: {position: '(0, 0)'}}},
+            {op: 'inspect', result: {node: '/Main/Camera', properties: {zoom: '(2, 2)'}}}
+        ]
+    })
+    const answered = JSON.parse(listed.content[0].text)
+    assert.equal(listed.content[0].text.length <= 24_000, true)
+    assert.equal(answered.ops.length, 3)
+    assert.deepEqual(
+        answered.ops.map(entry => entry.result.node),
+        ['/Main', '/Main/Player', '/Main/Camera']
+    )
+    assert.equal(answered.ops[1].result.properties.position, '(0, 0)')
+    assert.equal(answered.ops[2].result.properties.zoom, '(2, 2)')
+    assert.match(answered.ops[0].result.properties.mesh, /… \[truncated, 60000 characters\]$/u)
+
+    // Several large values in one answer are each cut, rather than the first one paying for all.
+    const two = toolResult({
+        ops: [
+            {op: 'open', result: {path: 'a.gd', text: 'a'.repeat(40_000)}},
+            {op: 'open', result: {path: 'b.gd', text: 'b'.repeat(40_000)}}
+        ]
+    })
+    const both = JSON.parse(two.content[0].text)
+    assert.equal(two.content[0].text.length <= 24_000, true)
+    assert.deepEqual(
+        both.ops.map(entry => entry.result.path),
+        ['a.gd', 'b.gd']
+    )
+    for (const entry of both.ops)
+        assert.match(entry.result.text, /… \[truncated, 40000 characters\]$/u)
+
+    // One length for all of them, not one budget each. A hundred scripts come back as a hundred
+    // paths with their first lines, rather than the first one whole and ninety-nine missing.
+    const listing = toolResult({
+        ops: [
+            {
+                op: 'list',
+                result: {
+                    files: Array.from({length: 100}, (_, index) => ({
+                        path: `scripts/s${String(index)}.gd`,
+                        text: 'x'.repeat(30_000)
+                    }))
+                }
+            }
+        ]
+    })
+    const files = JSON.parse(listing.content[0].text).ops[0].result.files
+    assert.equal(listing.content[0].text.length <= 24_000, true)
+    assert.equal(files.length, 100)
+    assert.equal(files[99].path, 'scripts/s99.gd')
+    assert.equal(new Set(files.map(file => file.text.length)).size, 1)
+
+    // Nothing long enough to cut, and still too big: the slice is the answer of last resort, and it
+    // is the behaviour every oversized answer used to get.
+    const many = toolResult(Object.fromEntries(Array.from({length: 4_000}, (_, i) => [`k${i}`, i])))
+    assert.ok(many.content[0].text.length <= 24_100)
+    assert.match(many.content[0].text, /… \[truncated, \d+ characters\]$/u)
 })
 
 /** A model that answers with one tool call, then with text once the tool result comes back. */
