@@ -2020,6 +2020,22 @@ fn repair_set(spec: &[Param], params: &mut Value) {
 /// `{"type": "float", "value": {"number": 3.5}}` and `{"type": "string", "value": {"text": "…"}}`,
 /// eight times in one live turn, under the protocol's own words for those kinds. One entry of the
 /// type the tag wants is not a shape with an order to guess at — it is the value, in a box.
+///
+/// **The key's own name is deliberately ignored, and narrowing this to a list of box words would
+/// be worse.** The concern is real on its face: `{"type": "int", "value": {"height": 720}}` written
+/// to `viewport_width` is accepted, saved, and reads back 720, so a name that contradicts the
+/// parameter is thrown away. Reproduced against a real editor, and then measured for how often a
+/// model actually writes one — twenty turns asked to set five properties, counted by
+/// `scripts/bench-prompt-line.mjs`:
+///
+/// 18 boxes were written under a word that is not a box word, and every one of them was a
+/// placeholder for the value itself — `{"base": 5}`, `{"n": 5}`, `{"a": true}`, `{"data": 5}`,
+/// `{"amount": 5}`, `{"state": true}` — carrying the right number. 15 were written under a box
+/// word. Not one named a different property. A box-word list would refuse eighteen correct calls in
+/// twenty turns to prevent a shape the model does not write.
+///
+/// An object of two is still refused, and says what it received, which is where a genuine
+/// width-for-height slip lands.
 fn sole_entry(value: &Value) -> Option<&Value> {
     let object = value.as_object()?;
     if object.len() != 1 {

@@ -326,6 +326,11 @@ async function withTheRegionTheFileHolds(workspacePath, toolName, params, error)
  * reasonable thing to want, the shipped description wrote a command this rule refuses 8 of 20 and
  * then 7 of 20; with this sentence, **0 of 20 both times**. Asked for something the project does
  * hold, both arms wrote 0 of 20 — the sentence costs nothing where it is not needed.
+ *
+ * It is also what makes `godot_session status` safe to answer with the worktree's own path, which
+ * it still does. Measured after this sentence landed, with the status answer as the turn's priming:
+ * an answer carrying the path and one without it both produced 0 refused commands of 20, in both
+ * scenarios. The path stopped mattering once the tool said where it may go.
  */
 const BASH_IS_CONFINED =
     ' It runs in the project root and can reach nothing outside it: every path in the command is'

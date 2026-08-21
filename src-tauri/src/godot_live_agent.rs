@@ -23,7 +23,8 @@
 //! ```
 //!
 //! with `GOFER_LIVE_TASK` set, `GOFER_LIVE_OUT` naming a file for the events, and
-//! `GOFER_LIVE_BASE_URL` / `GOFER_LIVE_MODEL` naming the endpoint — the defaults are a llama.cpp on
+//! `GOFER_LIVE_BASE_URL` / `GOFER_LIVE_MODEL` naming the endpoint, and `GOFER_LIVE_FIXTURE`
+//! naming a project to work on other than the bare one — the defaults are a llama.cpp on
 //! `127.0.0.1:8080`. `GOFER_LIVE_KEEP` copies the worktree out before its temporary directory goes,
 //! which is the only way to look at what the agent built.
 //!
@@ -41,9 +42,25 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use tempfile::TempDir;
 
+/// The project the turn works on.
+///
+/// `fixtures/godot-project` by default — a bare project, which is the right start for a turn about
+/// building something from nothing. It holds no art, so a task about tiles spends its first calls
+/// discovering that and making a texture, which measures error recovery rather than the tilemap
+/// path. `GOFER_LIVE_FIXTURE` names another directory to copy instead; `fixtures/live-project` is
+/// the one with an atlas, two scripts and a scene in it.
+fn live_worktree(directory: &TempDir) -> PathBuf {
+    let Ok(named) = std::env::var("GOFER_LIVE_FIXTURE") else {
+        return godot_editor_harness::fixture_worktree(directory);
+    };
+    let worktree = directory.path().join("worktree");
+    godot_editor_harness::copy_tree(&PathBuf::from(named), &worktree);
+    crate::paths::canonical(&worktree).expect("canonical worktree")
+}
+
 fn start_session() -> godot_editor_harness::Session {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    let worktree = live_worktree(&directory);
     let ledger = directory.path().join("ledger.json");
     godot_editor_harness::Session::start_on_worktree_with(
         worktree,
