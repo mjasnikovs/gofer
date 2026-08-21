@@ -33,6 +33,7 @@ import type {CenterTab, LayoutAction, ScriptViews, WorkspaceLayout} from '../../
 import {BottomPanel} from './BottomPanel'
 import {DocsView} from './DocsView'
 import {MemoryView} from './MemoryView'
+import {SketchesView} from './SketchesView'
 import {ExplorerPanel} from './ExplorerPanel'
 import {GameView} from './GameView'
 import {InspectorPanel} from './InspectorPanel'
@@ -503,6 +504,17 @@ function FrameRegions({
                                 value='memory'
                                 label='Memory'
                             />
+                            {/*
+                             * "Design" rather than "Sketches", and the reason is measured rather
+                             * than stylistic: at the default panel widths this strip has 358 pixels
+                             * and six labels, and "Sketches" needs 373. There is no slack left, so
+                             * a seventh view — or a longer label on any of these six — needs the
+                             * overflow `TabMenu` rather than another word.
+                             */}
+                            <Tab
+                                value='sketches'
+                                label='Design'
+                            />
                         </TabList>
                         <StackItem size='fill'>
                             {layout.centerTab === 'chat' ?
@@ -523,7 +535,9 @@ function FrameRegions({
                                 <GameView />
                             : layout.centerTab === 'docs' ?
                                 <DocsView />
-                            :   <MemoryView />}
+                            : layout.centerTab === 'memory' ?
+                                <MemoryView />
+                            :   <SketchesView />}
                         </StackItem>
                         <Divider />
                         <VStack

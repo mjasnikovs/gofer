@@ -10,6 +10,7 @@ import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {TextArea} from '@astryxdesign/core/TextArea'
 import {describeBlocked, remoteReferences} from '../../services/sketch-regions'
+import {SKETCH_CANVAS} from '../../models/sketch'
 import {SketchFrame} from './SketchFrame'
 import type {UserQuestionPrompt, UserQuestionResponse} from '../../models/brief'
 
@@ -35,15 +36,6 @@ type UserQuestionDialogProps = Readonly<{
 const TEXT_WIDTH = 520
 const SKETCH_WIDTH = '96vw'
 const SKETCH_MAX_HEIGHT = '94vh'
-
-/**
- * The size a sketch is drawn at before it is shrunk to fit its column.
- *
- * A game's layout is a fixed number of pixels. Reflowed into whatever width the column happens to
- * have, it is a different design from the one being judged; drawn at its own width it is cut off by
- * the column edge, which is what shipped first.
- */
-const SKETCH_CANVAS = {width: 1280, height: 720}
 
 /**
  * Asks the user one thing the agent could not settle, with or without pictures.

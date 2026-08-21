@@ -248,8 +248,17 @@ export function answerText(answer) {
  * remember to send it would forget on the round that mattered, and every ordinary question — which
  * is nearly all of them — must carry no session at all.
  */
-export function createAskUserTool({host, budget, sketchesRequired = false, sessionId}) {
+export function createAskUserTool({host, budget, sketchesRequired = false, sessionId, agreed}) {
     let asked = 0
+    // Cleared as the tool is built, which is once per attempt. A delegation that showed a sketch and
+    // then died on a stream timeout is retried from nothing, and the record has to start from
+    // nothing with it — otherwise the retry hands back a layout from a run the user's final answer
+    // never saw.
+    if (agreed !== undefined) {
+        delete agreed.label
+        delete agreed.html
+        delete agreed.approved
+    }
     return {
         name: ASK_USER_TOOL_NAME,
         label: 'ask the user',
@@ -277,6 +286,14 @@ export function createAskUserTool({host, budget, sketchesRequired = false, sessi
                 asked += 1
             }
             const answer = await host.call(ASK_USER_TOOL_NAME, request, signal)
+            // The drawing the user reacted to, kept for whoever built this tool rather than put in
+            // front of the model that drew it. Overwritten every round, so what is left at the end
+            // is the last layout the user saw — which, when they ended the loop, is the agreed one.
+            if (agreed !== undefined && answer?.sketch?.html) {
+                agreed.label = answer.sketch.label
+                agreed.html = answer.sketch.html
+                agreed.approved = answer.approved === true
+            }
             // The user pressed the button that ends the loop, so the ration is gone rather than
             // merely discouraged. `APPROVED` says why; this is what makes it true.
             if (answer?.approved === true && budget !== undefined) asked = budget

@@ -58,15 +58,21 @@ async function installDesktop(page: Page, state: VisualState) {
          * shipped — a column sized by its own 1280-wide sketch, a badge pushing one column three
          * pixels down, a button below the fold — was invisible to jsdom and obvious here.
          */
+        /**
+         * A pause menu, drawn the way a model draws one.
+         *
+         * Shared by the question card and the sketches tab, because both draw the same kind of
+         * thing and a grey box would prove neither of them scales a real layout correctly.
+         */
+        const sketch = (accent: string, name: string) =>
+            `<style>body{margin:0;width:1280px;height:720px;background:#0d1020;`
+            + `font-family:monospace;color:#dbe4ff}`
+            + `.p{position:absolute;top:180px;left:${name === 'Side Panel' ? '900px' : '440px'};`
+            + `width:380px;padding:24px;border:2px solid ${accent};background:#141a35}`
+            + `h1{color:${accent};font-size:34px;letter-spacing:6px;margin:0 0 20px}`
+            + `b{display:block;padding:12px;margin:8px 0;border:1px solid ${accent}}</style>`
+            + `<div class="p"><h1>PAUSED</h1><b>RESUME</b><b>OPTIONS</b><b>QUIT</b></div>`
         window.__GOFER_TEST_ASK__ = (sketches: number, design?: {revision: number}) => {
-            const sketch = (accent: string, name: string) =>
-                `<style>body{margin:0;width:1280px;height:720px;background:#0d1020;`
-                + `font-family:monospace;color:#dbe4ff}`
-                + `.p{position:absolute;top:180px;left:${name === 'Side Panel' ? '900px' : '440px'};`
-                + `width:380px;padding:24px;border:2px solid ${accent};background:#141a35}`
-                + `h1{color:${accent};font-size:34px;letter-spacing:6px;margin:0 0 20px}`
-                + `b{display:block;padding:12px;margin:8px 0;border:1px solid ${accent}}</style>`
-                + `<div class="p"><h1>PAUSED</h1><b>RESUME</b><b>OPTIONS</b><b>QUIT</b></div>`
             emit('ai-question-request', {
                 questionId: 'question-1',
                 question: 'Which pause menu layout do you prefer?',
@@ -121,6 +127,32 @@ async function installDesktop(page: Page, state: VisualState) {
                     return undefined
                 }
                 if (command === 'list_project_tasks') return []
+                if (command === 'list_project_sketches')
+                    return [
+                        {
+                            id: 'question-1-run',
+                            taskId: 'task-1',
+                            questionId: 'question-1',
+                            question: 'Which pause menu layout do you prefer?',
+                            label: 'Centered Overlay',
+                            isApproved: true,
+                            savedAt: 1_700_000_000_000
+                        },
+                        {
+                            id: 'question-2-run',
+                            taskId: 'task-1',
+                            questionId: 'question-2',
+                            question: 'Where does the inventory dock sit?',
+                            label: 'Side Panel',
+                            isApproved: false,
+                            savedAt: 1_600_000_000_000
+                        }
+                    ]
+                if (command === 'read_project_sketch')
+                    return {
+                        shown: sketch('#4f8cff', 'Centered Overlay'),
+                        source: sketch('#4f8cff', 'Centered Overlay')
+                    }
                 if (command === 'get_godot_session') return undefined
                 if (command === 'start_godot_session')
                     return {
@@ -836,6 +868,33 @@ test('the card between two design rounds', async ({page}) => {
     await expect(page.getByText('Design in progress')).toBeHidden()
 })
 
+/**
+ * The end of a design, which is not the same as the end of the loop.
+ *
+ * "Complete and handoff" answers the last round and nothing more is coming, but the loop stays open
+ * for as long as the child takes to write the agreement down — minutes, on a local model. Held on
+ * the session alone, the user watched a "Redrawing your layout" spinner over a design they had just
+ * finished, and the card cannot be dismissed: a stray Escape between rounds would end a real one.
+ */
+test('the card lets go when the user hands the design off', async ({page}) => {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => {
+        window.__GOFER_TEST_HOLD_TURN__ = true
+    })
+    await page.getByRole('combobox', {name: 'Message input'}).fill('Design the pause menu')
+    await page.getByRole('combobox', {name: 'Message input'}).press('Enter')
+    await page.evaluate(() => window.__GOFER_TEST_DESIGN__?.('design-1'))
+    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2, {revision: 2}))
+    await page.getByRole('button', {name: 'Choose Side Panel'}).click()
+    await page.getByRole('button', {name: 'Complete and handoff'}).click()
+
+    // The turn is still running and the loop was never closed. The card goes anyway.
+    await expect(page.getByText('Design in progress')).toBeHidden()
+    await expect(page.getByRole('button', {name: 'Choose Side Panel'})).toBeHidden()
+})
+
 /** The zoom: one sketch as large as the window allows, and one way out. */
 test('a sketch zoomed', async ({page}) => {
     await installDesktop(page, 'streaming')
@@ -944,6 +1003,31 @@ test('docs tab', async ({page}) => {
     await page.getByRole('button', {name: 'Search'}).click()
     await expect(page.getByText('move_and_slide')).toBeVisible()
     await stableScreenshot(page, 'docs-tab.png')
+})
+
+/**
+ * The layout somebody agreed, found again.
+ *
+ * `hasSketch` is not optional here. A sketch is a sandboxed frame with no `allow-scripts`, and the
+ * accessibility pass waits on it forever otherwise — the same reason the question card's shots pass
+ * it.
+ */
+test('sketches tab', async ({page}) => {
+    await openSession(page)
+    await page.getByRole('button', {name: 'Design', exact: true}).click()
+    await page.getByText('Centered Overlay').click()
+    await expect(page.getByRole('button', {name: 'Send to chat'})).toBeVisible()
+    await stableScreenshot(page, 'sketches-tab.png', false, true)
+})
+
+/** The viewer that makes a 1280-wide layout readable in a 330-wide column. */
+test('sketch viewer', async ({page}) => {
+    await openSession(page)
+    await page.getByRole('button', {name: 'Design', exact: true}).click()
+    await page.getByText('Centered Overlay').click()
+    await page.getByRole('button', {name: /full size/}).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await stableScreenshot(page, 'sketch-viewer.png', false, true)
 })
 
 test('tool approval dialog', async ({page}) => {

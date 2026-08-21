@@ -485,7 +485,7 @@ test('a delegation is asked about the pictures it was given', async context => {
         images: [{type: 'image', data: 'aGk=', mimeType: 'image/png'}],
         workspacePath: workspace.path,
         models,
-        model
+        model: {...model, input: ['text', 'image']}
     })
 
     assert.equal(outcome.kind, 'ok')
@@ -493,6 +493,33 @@ test('a delegation is asked about the pictures it was given', async context => {
     assert.deepEqual(asked.content, [
         {type: 'text', text: 'What is wrong with this screen?'},
         {type: 'image', data: 'aGk=', mimeType: 'image/png'}
+    ])
+})
+
+/**
+ * A model that never said it reads pictures is sent none, whatever the caller passed.
+ *
+ * The refusal is not a soft one — the provider rejects the whole request, so an unchecked image
+ * ends the child at its first step rather than costing it a detail. Enforced here rather than at
+ * each call site, because a caller that forgets is a caller whose delegation never runs at all.
+ */
+test('a child that cannot read pictures is sent none', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const models = scriptedModels([{text: 'the menu is off centre'}])
+
+    const outcome = await runSubagentOutcome({
+        progress: noProgress,
+        prompt: 'What is wrong with this screen?',
+        images: [{type: 'image', data: 'aGk=', mimeType: 'image/png'}],
+        workspacePath: workspace.path,
+        models,
+        model
+    })
+
+    assert.equal(outcome.kind, 'ok')
+    assert.deepEqual(models.contexts[0].messages.at(-1).content, [
+        {type: 'text', text: 'What is wrong with this screen?'}
     ])
 })
 

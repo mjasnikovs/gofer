@@ -406,7 +406,7 @@ const REACHING_CHILD_TOOLS = {
     },
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
         createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
-    ask_user: ({host, asks, sketchesRequired = false, sessionId}) => {
+    ask_user: ({host, asks, sketchesRequired = false, sessionId, agreed}) => {
         if (!host) {
             throw new Error(
                 'A child was asked for ask_user without the tool host that answers it. '
@@ -421,7 +421,7 @@ const REACHING_CHILD_TOOLS = {
                     + 'while a person is thinking.'
             )
         }
-        return createAskUserTool({host, budget: asks, sketchesRequired, sessionId})
+        return createAskUserTool({host, budget: asks, sketchesRequired, sessionId, agreed})
     }
 }
 
@@ -454,10 +454,22 @@ export function createChildTools(
                 tool.execute(id, params, signal, onUpdate, context)
         }))
         // The child's own model, which may not be the parent's and may not have its eyes.
-        .map(tool => (deps.model?.input?.includes('image') === true ? tool : withoutPictures(tool)))
+        .map(tool => (readsImages(deps.model) ? tool : withoutPictures(tool)))
         .map(tool => underCommandClock(tool, {timeoutMs: bounds.commandTimeoutMs, timers}))
     assertChildTools(tools, toolNames)
     return {env, tools}
+}
+
+/**
+ * Can this model be shown a picture?
+ *
+ * Read off the model rather than assumed, because a model that cannot is not lenient about it: the
+ * provider refuses the whole request, so an unchecked image ends the child at its first step rather
+ * than going unnoticed in it. A model that says nothing about its inputs is taken at its word — no
+ * claim to read images is not a claim to read them.
+ */
+export function readsImages(model) {
+    return Array.isArray(model?.input) && model.input.includes('image')
 }
 
 /**
@@ -656,6 +668,11 @@ async function attemptSubagent({
         toolNames,
         deps: {...deps, model}
     })
+    // Dropped here rather than at each call site, because the failure is the same one everywhere and
+    // it is not a soft one: a picture sent to a text-only model has the provider refuse the whole
+    // request, so an unchecked image ends the child at its first step instead of costing it a
+    // detail. Every caller may pass what it has and let the model decide.
+    const pictures = readsImages(model) ? images : []
 
     let requests = 0
     let overran = false
@@ -748,7 +765,7 @@ async function attemptSubagent({
 
     try {
         silence.start()
-        await agent.prompt(prompt, images)
+        await agent.prompt(prompt, pictures)
         // Asked before anything else, and never retried: a stopped turn is the user's decision, not
         // a fault, and asking again would spend the machine they just asked to stop spending.
         if (signal?.aborted) throw new SubagentStopped('the turn was stopped')

@@ -68,7 +68,9 @@ function explorer(
     )
     render(
         add ?
-            <ChatReferenceContext.Provider value={{add}}>{panel}</ChatReferenceContext.Provider>
+            <ChatReferenceContext.Provider value={{add, paste: () => undefined}}>
+                {panel}
+            </ChatReferenceContext.Provider>
         :   panel
     )
     return {call, ...handlers}

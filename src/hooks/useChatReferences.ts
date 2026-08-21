@@ -11,6 +11,17 @@ import type {ChatReference} from '../utils/chat-references'
  */
 export type ChatReferenceSink = Readonly<{
     add: (reference: ChatReference) => void
+    /**
+     * Puts a block of text into the draft as its own paragraph.
+     *
+     * Separate from `add` because it is a different gesture, not a longer one. A reference is a
+     * pointer — a node path, a worktree path — that the agent resolves for itself, and it reads as a
+     * few words inside a sentence somebody is writing. This is the case where there is nothing to
+     * point at: a saved sketch lives in Gofer's own data, which the agent's tools cannot reach, so
+     * the only way to hand one over is to paste it. The caller words the block, including whatever
+     * caption says what it is.
+     */
+    paste: (text: string) => void
 }>
 
 export const ChatReferenceContext = createContext<ChatReferenceSink | undefined>(undefined)

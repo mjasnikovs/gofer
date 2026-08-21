@@ -1,12 +1,14 @@
 import {useEffect, useState} from 'react'
 import {isTauri, listen} from '../services/desktop'
-import type {UserQuestionPrompt} from '../models/brief'
+import type {UserQuestionPrompt, UserQuestionResponse} from '../models/brief'
 
 type DesignSessionOptions = Readonly<{
     /** The questions currently waiting, oldest first. The card is drawn from the first of them. */
     questions: readonly UserQuestionPrompt[]
     /** Whether a turn is running at all. The net under a close that never arrives. */
     isTurnRunning: boolean
+    /** Where an answer goes. Wrapped rather than called directly, so this hook sees the last one. */
+    onAnswer: (response: UserQuestionResponse) => void
 }>
 
 /**
@@ -33,9 +35,23 @@ type DesignSessionOptions = Readonly<{
  * took the card and the first one's rounds stopped holding — a bug that only appears on the rare
  * turn, which is the kind worth spending a `Set` on.
  */
-export function useDesignSession({questions, isTurnRunning}: DesignSessionOptions) {
+export function useDesignSession({questions, isTurnRunning, onAnswer}: DesignSessionOptions) {
     const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set())
     const [held, setHeld] = useState<UserQuestionPrompt>()
+    /*
+     * The loops the user has ended, which is not the same as the loops that have closed.
+     *
+     * Pressing "Complete and handoff" answers the last question and nothing more arrives, but the
+     * loop stays open for as long as the child takes to write the agreement down — minutes, on a
+     * local model. Held on the session alone, the card spent all of that showing a spinner that
+     * said "Redrawing your layout" over a design the user had just finished, with no way out of it:
+     * the card cannot be dismissed, because a stray Escape between rounds would end a real design.
+     *
+     * So an approval is remembered here and the hold stops the moment it is given. It cannot
+     * suppress a real question — `prompt` below still shows anything that is actually waiting — it
+     * only takes away the standing-in.
+     */
+    const [agreed, setAgreed] = useState<ReadonlySet<string>>(() => new Set())
 
     useEffect(() => {
         if (!isTauri()) return
@@ -67,6 +83,12 @@ export function useDesignSession({questions, isTurnRunning}: DesignSessionOption
                     return rest
                 })
                 setHeld(previous => (previous?.designSession === sessionId ? undefined : previous))
+                setAgreed(previous => {
+                    if (!previous.has(sessionId)) return previous
+                    const rest = new Set(previous)
+                    rest.delete(sessionId)
+                    return rest
+                })
             })
         )
         return () => {
@@ -81,7 +103,10 @@ export function useDesignSession({questions, isTurnRunning}: DesignSessionOption
     // Asked of the value, never of its absence. The backend used to send this field as `null` for
     // every ordinary question, and `null` is not `undefined`.
     const isLive = (sessionId?: string) =>
-        isTurnRunning && typeof sessionId === 'string' && open.has(sessionId)
+        isTurnRunning
+        && typeof sessionId === 'string'
+        && open.has(sessionId)
+        && !agreed.has(sessionId)
 
     /*
      * Compared during render rather than set from an effect. An effect would hold the previous
@@ -96,10 +121,28 @@ export function useDesignSession({questions, isTurnRunning}: DesignSessionOption
     if (isLive(asking?.designSession) && asking !== held) setHeld(asking)
     else if (!isLive(held?.designSession) && held !== undefined) setHeld(undefined)
     if (!isTurnRunning && open.size > 0) setOpen(new Set())
+    if (!isTurnRunning && agreed.size > 0) setAgreed(new Set())
 
     // Only between rounds. A question on screen is the card's own content; this is what stands in
     // for it while the next one is being drawn.
     const redrawing = asking === undefined && isLive(held?.designSession) ? held : undefined
 
-    return {prompt: asking ?? redrawing, isRedrawing: redrawing !== undefined}
+    /*
+     * Answering, with the one thing this hook has to see going past.
+     *
+     * The response carries a question, not a session, so the session is read off the question that
+     * is on screen — which is the one being answered, because the card only ever shows one.
+     */
+    const answer = (response: UserQuestionResponse) => {
+        // Asked of the value, the same way `isLive` asks. `??` would read a question the backend
+        // sent with a null session as having none of its own and charge its answer to the held
+        // loop — which is the null hazard this file already carries a comment about.
+        const session =
+            typeof asking?.designSession === 'string' ? asking.designSession : held?.designSession
+        if (response.approved === true && typeof session === 'string' && session !== '')
+            setAgreed(previous => new Set(previous).add(session))
+        onAnswer(response)
+    }
+
+    return {prompt: asking ?? redrawing, isRedrawing: redrawing !== undefined, answer}
 }

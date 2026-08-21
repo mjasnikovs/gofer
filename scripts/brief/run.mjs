@@ -17,7 +17,7 @@
  */
 
 import {createModelContext} from '../ai-provider.mjs'
-import {createChildTools, eventProgress, runSubagentOutcome} from '../ai-subagent.mjs'
+import {createChildTools, eventProgress, readsImages, runSubagentOutcome} from '../ai-subagent.mjs'
 import {probeTools} from '../ai-reachability.mjs'
 import {BRIEF_PHASES} from './catalogue.mjs'
 import {PhaseFailed, PhaseStopped, compose, grill, refine, research} from './phases.mjs'
@@ -111,14 +111,12 @@ export function searchConfigured(settings, braveApiKey) {
 /**
  * Can this model be shown a picture?
  *
- * Read off the model rather than assumed, because a model that cannot is not lenient about it: the
- * provider refuses the whole request, so an unchecked image ends the phase rather than going
- * unnoticed in it. A model that says nothing about its inputs is taken at its word — no claim to
- * read images is not a claim to read them.
+ * Re-exported rather than written again. It was written twice, identically, and two copies of one
+ * capability check is one of them being right after somebody widens it — a provider that advertises
+ * its eyes under another word would be understood by one caller and not the other, for the same
+ * model.
  */
-export function readsImages(model) {
-    return Array.isArray(model?.input) && model.input.includes('image')
-}
+export {readsImages}
 
 /** The backend's `{data, mimeType}` pairs, as the content blocks a prompt carries. */
 export function asImageContent(images) {

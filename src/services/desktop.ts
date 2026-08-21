@@ -20,6 +20,7 @@ import type {
 } from '../models/brief'
 import type {HealthRemedyRequest, HealthReport} from '../models/health'
 import type {MemoryEdit, MemoryJudgeEvent, ProjectMemory} from '../models/memory'
+import type {ProjectSketch, SketchHtml} from '../models/sketch'
 import type {UnsavedWork} from '../models/unsaved-work'
 import type {
     DeleteWorkspacePathRequest,
@@ -194,6 +195,9 @@ export type DesktopCommandMap = Readonly<{
     // Every memory, each already checked against the files the workspace has now. The check is not
     // a second command: it is one directory walk, and one nobody would press a button for.
     list_project_memory: CommandSpec<undefined, readonly ProjectMemory[]>
+    // Named, not drawn: a sketch's markup is fetched one at a time, because the copy the user
+    // looked at has the project's artwork inlined into it.
+    list_project_sketches: CommandSpec<undefined, readonly ProjectSketch[]>
     list_project_tasks: CommandSpec<undefined, readonly TaskSummary[]>
     list_workspace_files: CommandSpec<undefined, readonly WorkspaceEntry[]>
     load_chat: CommandSpec<{taskId: string | undefined}, StoredChat>
@@ -216,6 +220,7 @@ export type DesktopCommandMap = Readonly<{
     read_clipboard_image: CommandSpec<undefined, ClipboardImage | null>
     read_godot_logs: CommandSpec<{query: GodotLogQuery}, GodotLogPage>
     // Remembered interface state, as the JSON the renderer wrote. Absent when nothing is stored.
+    read_project_sketch: CommandSpec<{id: string}, SketchHtml>
     read_project_state: CommandSpec<{key: string}, string | null>
     read_task_brief: CommandSpec<{taskId: string}, BriefRun | null>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>

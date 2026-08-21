@@ -20,6 +20,7 @@ import {
     cannedModels,
     DESIGN_TOOL_NAMES,
     PROBE_PROMPT,
+    readsImages,
     runSubagent,
     toolProgress,
     usageFooter
@@ -84,6 +85,9 @@ const DESIGN_SYSTEM_PROMPT =
     + 'cannot change anything: you have no write tool, no edit tool and no access to the Godot '
     + 'editor.\n'
     + '\n'
+    + 'Any pictures beside this brief are the ones the user attached to the ask. They are what is '
+    + 'there now, or what they want it to look like. Read them before you draft.\n'
+    + '\n'
     + 'How to work:\n'
     + '1. Read enough of the project to know what this layout belongs to. Be quick about it.\n'
     + '2. Draft the layout as HTML and ask about it. When there is a real choice to make, show two or '
@@ -141,6 +145,57 @@ async function tellWindow(host, sessionId, state, signal) {
 }
 
 /**
+ * The layout that was agreed, drawn, appended to the agreement written down.
+ *
+ * The child is told not to paste its markup and that stays right: it would spend the child's own
+ * output on it, on the round it should be summarising, and `cutAnswer` would truncate it mid-tag.
+ * This is the same drawing arriving the other way — copied by the tool, after the answer is whole,
+ * from what the window already had. Nothing is retyped and nothing can be cut in half.
+ *
+ * It is here because prose was not enough. A description of a dock — seven tiles, a cap column, the
+ * gaps between them — reads as complete and still leaves the builder guessing at what the user
+ * actually looked at, and the first build off one came back "close, but not really".
+ *
+ * Only on an approval, and that is the whole of the rule. Every other ending — a ration spent, a
+ * loop the user walked away from, a child that gave up — leaves behind a last sketch they did not
+ * agree to and may have rejected in as many words. Appended anyway, under a sentence saying they
+ * agreed it, it is the one layout they turned down arriving as the one to build.
+ *
+ * What bounds it is `MAX_SKETCH_CHARS` in `src-tauri/src/ai_tools.rs`, which refuses a sketch over
+ * eight thousand characters before it is ever shown. Not `maxAnswerChars`, which cut the child's
+ * words before this was added to them — and deliberately not re-cut here, because half a layout is
+ * worse to build from than none. The markup is the model's own, not the copy the window inlined the
+ * project's artwork into: that one is eighty kilobytes of base64 saying nothing.
+ */
+function agreedSketch({label, html, approved}) {
+    if (approved !== true || typeof html !== 'string' || html === '') return ''
+    return (
+        `\n\nThis is the layout they agreed, as it was drawn for them${
+            label ? ` ("${label}")` : ''
+        }. It is a picture of the result, not code to port: build it with the project's own nodes, `
+        + 'and read it for what sits where, how big each region is and what the spacing is.\n\n'
+        + `${html}`
+    )
+}
+
+/**
+ * Said out loud when the child was designing blind.
+ *
+ * The brief's worker says the same thing on its own log, for the same reason: a layout drawn
+ * without the screenshot it was asked about is wrong in a way only the person who attached the
+ * screenshot can see. A silent drop is how this tool's first build failed, and a second silent drop
+ * for a different reason would look exactly like the first.
+ */
+function blindTo(images, model) {
+    if (images.length === 0 || readsImages(model)) return ''
+    return (
+        `\n\nThe ${String(images.length)} picture${images.length === 1 ? '' : 's'} attached to the `
+        + `ask never reached the design loop: ${model.name || model.id} cannot read one. This `
+        + 'layout was agreed from the project files alone, so say so before you build it.'
+    )
+}
+
+/**
  * @param host the tool channel back to Rust, which holds the window the sketches appear in
  *
  * Everything else is the parent's own — one provider, one connection, one model per session — for
@@ -155,7 +210,16 @@ export function createDesignWithUserTool({
     streamOptions,
     settings,
     timers,
-    host
+    host,
+    /**
+     * The pictures the user attached to the message that started this turn.
+     *
+     * A design brief is written about something the user can see, and for the first build it was
+     * something only the *parent* could see: the screenshot went into the parent's context and the
+     * child was handed a sentence saying "the provided screenshot", with nothing provided. It then
+     * drew from the project files alone, and what came back was close and not right.
+     */
+    images = []
 }) {
     return {
         name: DESIGN_TOOL_NAME,
@@ -181,10 +245,16 @@ export function createDesignWithUserTool({
             // runs out of ration ends the same way from the user's side: nothing more is coming.
             // The probe opens none — it must not put anything on screen.
             const sessionId = probing ? undefined : nextSessionId()
+            // The probe carries none: it draws nothing and shows nobody. A child whose model has
+            // no eyes drops them in `runSubagent`, which is where every caller's images pass.
+            const pictures = probing ? [] : images
+            // What the user agreed, filled in by `ask_user` round by round. Read once, below.
+            const agreed = {}
             await tellWindow(host, sessionId, 'open', signal)
             try {
                 const result = await runSubagent({
                     prompt: probing ? PROBE_PROMPT : params.brief,
+                    images: pictures,
                     systemPrompt: DESIGN_SYSTEM_PROMPT,
                     toolNames: DESIGN_TOOL_NAMES,
                     workspacePath,
@@ -199,11 +269,23 @@ export function createDesignWithUserTool({
                     // A ration, not a rule. Nothing else in the system can see a delegation spending
                     // somebody's attention: the parent is never told a dialog opened, and no clock
                     // ticks while a person is looking at one.
-                    deps: {host, asks: probing ? 1 : shows, sketchesRequired: true, sessionId}
+                    deps: {
+                        host,
+                        asks: probing ? 1 : shows,
+                        sketchesRequired: true,
+                        sessionId,
+                        agreed
+                    }
                 })
                 return {
                     content: [
-                        {type: 'text', text: `${result.text}\n\n${usageFooter(result, model)}`}
+                        {
+                            type: 'text',
+                            text:
+                                `${result.text}${agreedSketch(agreed)}`
+                                + `${blindTo(images, model)}`
+                                + `\n\n${usageFooter(result, model)}`
+                        }
                     ],
                     details: {turns: result.turns, usage: result.usage}
                 }

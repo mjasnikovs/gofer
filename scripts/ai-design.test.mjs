@@ -164,11 +164,17 @@ test('the ration and the session both reach the child through the same deps', ()
  */
 function scriptedModels(script) {
     let turn = 0
+    const seen = []
     return {
         get turns() {
             return turn
         },
-        streamSimple: requested => {
+        /** Every context the child was run with, so a test can ask what it was actually sent. */
+        get seen() {
+            return seen
+        },
+        streamSimple: (requested, context) => {
+            seen.push(context)
             const step = script[Math.min(turn, script.length - 1)]
             turn += 1
             const calls = step.calls ?? []
@@ -299,4 +305,179 @@ test('a model that asks again after approval is answered rather than shown', asy
     await tool.execute('id', {brief: 'a pause menu'})
 
     assert.equal(asks.length, 1, 'the user was interrupted once and then not again')
+})
+
+/**
+ * The agreement in words, and the drawing it is about.
+ *
+ * The child is still told not to paste its markup, and that is still right: it would spend the
+ * child's own output on the round it should be summarising. This is the same drawing arriving the
+ * other way — copied by the tool from what the window already had, after the answer is whole. It is
+ * here because prose alone was not enough. A description of a dock reads as complete and still
+ * leaves the builder guessing at what the user looked at, and the first build off one came back
+ * close and wrong.
+ */
+test('the layout the user agreed comes back drawn as well as described', async () => {
+    const tool = designTool({
+        models: scriptedModels([
+            {calls: [{name: 'ask_user', args: {question: 'which?', sketches: SKETCH}}]},
+            {text: 'The dock sits bottom-left, 576x84.'}
+        ]),
+        host: {
+            call: name => {
+                if (name !== 'ask_user') return Promise.resolve({})
+                return Promise.resolve({
+                    questionId: 'question-1',
+                    approved: true,
+                    picked: {index: 0, label: 'Bar across the top'},
+                    sketch: {label: 'Bar across the top', html: '<p>the agreed one</p>'},
+                    sketches: 1
+                })
+            }
+        }
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.match(text, /The dock sits bottom-left/u, 'the agreement in words is still first')
+    assert.match(text, /<p>the agreed one<\/p>/u, 'and the drawing is under it')
+    assert.match(text, /Bar across the top/u, 'named, so it can be talked about')
+})
+
+/**
+ * A layout the user turned down is not appended, whatever else is true.
+ *
+ * Every ending that is not an approval leaves a last sketch behind, and the user may have rejected
+ * it in as many words. Handed over under a sentence saying they agreed it, it is the one layout
+ * they said no to arriving as the one to build.
+ */
+test('a layout that was never agreed is not handed over as agreed', async () => {
+    const tool = designTool({
+        models: scriptedModels([
+            {calls: [{name: 'ask_user', args: {question: 'which?', sketches: SKETCH}}]},
+            {text: 'They asked for changes and then stopped answering.'}
+        ]),
+        host: {
+            call: name => {
+                if (name !== 'ask_user') return Promise.resolve({})
+                return Promise.resolve({
+                    questionId: 'question-1',
+                    approved: false,
+                    answer: 'no, much wider',
+                    picked: {index: 0, label: 'Bar across the top'},
+                    sketch: {label: 'Bar across the top', html: '<p>REJECTED</p>'},
+                    sketches: 1
+                })
+            }
+        }
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.ok(!text.includes('REJECTED'), 'the rejected layout must not be handed over')
+    assert.ok(!text.includes('they agreed'))
+})
+
+/**
+ * A picture the child could not be shown is a picture the parent has to be told about.
+ *
+ * A layout drawn without the screenshot it was asked about is wrong in a way only the person who
+ * attached the screenshot can see, and a silent drop is how the first build of this tool failed.
+ */
+test('a design agreed without the pictures says so', async () => {
+    const tool = designTool({
+        models: scriptedModels([{text: 'Agreed.'}]),
+        images: [{type: 'image', data: 'AAAA', mimeType: 'image/png'}],
+        host: {call: () => Promise.resolve({})}
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.match(text, /never reached the design loop/u)
+    assert.match(text, /project files alone/u)
+})
+
+/** A child that can see is told nothing, because nothing went missing. */
+test('a design agreed with the pictures says nothing about them', async () => {
+    const tool = designTool({
+        model: {...model, input: ['text', 'image']},
+        models: scriptedModels([{text: 'Agreed.'}]),
+        images: [{type: 'image', data: 'AAAA', mimeType: 'image/png'}],
+        host: {call: () => Promise.resolve({})}
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.ok(!text.includes('never reached the design loop'))
+})
+
+/** A loop that showed nothing back appends nothing: there is no drawing to hand over. */
+test('an answer with no drawing behind it appends nothing', async () => {
+    const tool = designTool({
+        models: scriptedModels([
+            {calls: [{name: 'ask_user', args: {question: 'which?', sketches: SKETCH}}]},
+            {text: 'They walked away.'}
+        ]),
+        host: {
+            call: name =>
+                Promise.resolve(
+                    name === 'ask_user' ? {questionId: 'question-1', skipped: true} : {}
+                )
+        }
+    })
+
+    const {text} = (await tool.execute('id', {brief: 'a squad dock'})).content[0]
+
+    assert.match(text, /They walked away\./u)
+    assert.ok(!text.includes('they agreed'), 'nothing was agreed, so nothing is claimed to be')
+})
+
+/**
+ * The screenshot the ask came with reaches the child.
+ *
+ * It did not, for the first build, and nothing said so. The picture went into the parent's context
+ * and the child was handed a brief saying "the provided screenshot" with nothing provided — so it
+ * drew from the project files alone and what came back was close and not right.
+ */
+test('the pictures the user attached are what the child designs against', async () => {
+    const picture = {type: 'image', data: 'AAAA', mimeType: 'image/png'}
+    const models = scriptedModels([{text: 'Agreed.'}])
+    const tool = designTool({
+        model: {...model, input: ['text', 'image']},
+        models,
+        images: [picture],
+        host: {call: () => Promise.resolve({})}
+    })
+
+    await tool.execute('id', {brief: 'a squad dock'})
+
+    const parts = models.seen[0].messages.flatMap(message =>
+        Array.isArray(message.content) ? message.content : []
+    )
+    assert.deepEqual(
+        parts.filter(part => part.type === 'image'),
+        [picture]
+    )
+})
+
+/**
+ * A child whose model has no eyes is sent none.
+ *
+ * Not a detail lost: the provider refuses the whole request, so an unchecked picture would end the
+ * design loop at its first step rather than at its worst draft.
+ */
+test('a child that cannot see is sent no pictures at all', async () => {
+    const models = scriptedModels([{text: 'Agreed.'}])
+    const tool = designTool({
+        models,
+        images: [{type: 'image', data: 'AAAA', mimeType: 'image/png'}],
+        host: {call: () => Promise.resolve({})}
+    })
+
+    await tool.execute('id', {brief: 'a squad dock'})
+
+    const parts = models.seen[0].messages.flatMap(message =>
+        Array.isArray(message.content) ? message.content : []
+    )
+    assert.equal(parts.filter(part => part.type === 'image').length, 0)
 })

@@ -19,6 +19,7 @@ const send = (name: string, payload: unknown) => {
 beforeEach(() => {
     tauri.invoke.mockReset()
     tauri.listen.mockReset()
+    answered.mockReset()
     handlers.clear()
     installDesktopFake(tauri)
     tauri.listen.mockImplementation(async (name, handler) => {
@@ -45,9 +46,11 @@ const round = (over: Partial<UserQuestionPrompt> = {}): UserQuestionPrompt => ({
     ...over
 })
 
+const answered = vi.fn()
+
 const mount = (questions: readonly UserQuestionPrompt[] = [], isTurnRunning = true) =>
     renderHook(props => useDesignSession(props), {
-        initialProps: {questions, isTurnRunning}
+        initialProps: {questions, isTurnRunning, onAnswer: answered}
     })
 
 /*
@@ -73,7 +76,7 @@ describe('holding one design loop on screen', () => {
         await flush()
         send('ai-design-opened', {sessionId: 'design-1'})
 
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
 
         expect(view.result.current.prompt?.questionId).toBe('q-1')
         expect(view.result.current.isRedrawing).toBe(true)
@@ -83,7 +86,7 @@ describe('holding one design loop on screen', () => {
         const view = mount([round()])
         await flush()
         send('ai-design-opened', {sessionId: 'design-1'})
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
 
         send('ai-design-closed', {sessionId: 'design-1'})
 
@@ -101,11 +104,71 @@ describe('holding one design loop on screen', () => {
         const view = mount([round()])
         await flush()
         send('ai-design-opened', {sessionId: 'design-1'})
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
 
-        view.rerender({questions: [], isTurnRunning: false})
+        view.rerender({questions: [], isTurnRunning: false, onAnswer: answered})
 
         expect(view.result.current.prompt).toBeUndefined()
+    })
+
+    /*
+     * "Complete and handoff" is the end, and the card has to know it.
+     *
+     * The loop stays open afterwards for as long as the child takes to write the agreement down.
+     * Held on the session alone the user watched a "Redrawing your layout" spinner over a design
+     * they had just finished, with no way to dismiss it.
+     */
+    it('lets go the moment the user says the design is agreed', async () => {
+        const view = mount([round()])
+        await flush()
+        send('ai-design-opened', {sessionId: 'design-1'})
+
+        act(() => {
+            view.result.current.answer({questionId: 'q-1', picked: 0, approved: true})
+        })
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
+
+        expect(answered).toHaveBeenCalledWith({questionId: 'q-1', picked: 0, approved: true})
+        expect(view.result.current.prompt).toBeUndefined()
+        expect(view.result.current.isRedrawing).toBe(false)
+    })
+
+    /** An ordinary round still holds: only an approval ends the loop early. */
+    it('keeps holding when the user sends changes rather than agreeing', async () => {
+        const view = mount([round()])
+        await flush()
+        send('ai-design-opened', {sessionId: 'design-1'})
+
+        act(() => {
+            view.result.current.answer({questionId: 'q-1', answer: 'wider', picked: 0})
+        })
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
+
+        expect(view.result.current.isRedrawing).toBe(true)
+    })
+
+    /*
+     * An approval cannot hide a question somebody is waiting on.
+     *
+     * The child's ration is spent the moment it is approved, so this should not happen — but if it
+     * ever does, a question with no card is a turn nobody can finish.
+     */
+    it('still shows a question that arrives after the design was agreed', async () => {
+        const view = mount([round()])
+        await flush()
+        send('ai-design-opened', {sessionId: 'design-1'})
+
+        act(() => {
+            view.result.current.answer({questionId: 'q-1', picked: 0, approved: true})
+        })
+        view.rerender({
+            questions: [round({questionId: 'q-2', revision: 2})],
+            isTurnRunning: true,
+            onAnswer: answered
+        })
+
+        expect(view.result.current.prompt?.questionId).toBe('q-2')
+        expect(view.result.current.isRedrawing).toBe(false)
     })
 
     /** An ordinary question is unchanged: answered, gone, and no card left behind. */
@@ -116,7 +179,7 @@ describe('holding one design loop on screen', () => {
 
         expect(view.result.current.prompt?.questionId).toBe('q-1')
 
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
 
         expect(view.result.current.prompt).toBeUndefined()
         expect(view.result.current.isRedrawing).toBe(false)
@@ -151,17 +214,18 @@ describe('holding one design loop on screen', () => {
         send('ai-design-opened', {sessionId: 'design-2'})
 
         // A round of the loop that opened FIRST, which is the one a single identifier forgot.
-        view.rerender({questions: [round()], isTurnRunning: true})
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [round()], isTurnRunning: true, onAnswer: answered})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
         expect(view.result.current.isRedrawing).toBe(true)
         expect(view.result.current.prompt?.designSession).toBe('design-1')
 
         // And a round of the second, held under its own identifier rather than replacing the first.
         view.rerender({
             questions: [round({questionId: 'q-2', designSession: 'design-2'})],
-            isTurnRunning: true
+            isTurnRunning: true,
+            onAnswer: answered
         })
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
         expect(view.result.current.prompt?.questionId).toBe('q-2')
     })
 
@@ -171,8 +235,8 @@ describe('holding one design loop on screen', () => {
         await flush()
         send('ai-design-opened', {sessionId: 'design-1'})
         send('ai-design-opened', {sessionId: 'design-2'})
-        view.rerender({questions: [round()], isTurnRunning: true})
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [round()], isTurnRunning: true, onAnswer: answered})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
 
         send('ai-design-closed', {sessionId: 'design-2'})
 
@@ -185,7 +249,7 @@ describe('holding one design loop on screen', () => {
         const view = mount([round()])
         await flush()
         send('ai-design-opened', {sessionId: 'design-1'})
-        view.rerender({questions: [], isTurnRunning: true})
+        view.rerender({questions: [], isTurnRunning: true, onAnswer: answered})
 
         send('ai-design-closed', {sessionId: 'design-0'})
 

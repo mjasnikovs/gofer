@@ -328,6 +328,24 @@ function subagentModelFor(settings, models, parent) {
     }
 }
 
+/**
+ * The pictures the ask came with, as content blocks.
+ *
+ * The last user message only, and that is a decision rather than a shortcut. A design is asked for
+ * in the same breath as the screenshot it is about, so that message is where the picture is; an
+ * older one is a screenshot of something else, and a brief carrying it silently is worse than one
+ * carrying nothing. Empty is the ordinary case.
+ */
+function askedAbout(messages) {
+    const asking = messages.at(-1)
+    if (asking?.sender !== 'user' || !Array.isArray(asking.images)) return []
+    return asking.images.map(image => ({
+        type: 'image',
+        data: image.data,
+        mimeType: image.mimeType
+    }))
+}
+
 function contextMessage(message, model) {
     if (message.sender === 'user') {
         const images = Array.isArray(message.images) ? message.images : []
@@ -602,7 +620,8 @@ export async function runAgent({
                         thinkingLevel: subagent.thinkingLevel,
                         streamOptions,
                         settings: settings.subagent,
-                        host
+                        host,
+                        images: askedAbout(messages)
                     })
                 ]
             :   [])

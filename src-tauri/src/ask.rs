@@ -33,6 +33,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
@@ -294,6 +295,25 @@ pub fn cancel_user_prompts() {
 /// invent: the parameter is only ever echoed back, never chosen.
 pub fn new_question_id() -> String {
     QUESTIONS.next_id()
+}
+
+/// The name a question's sketch is kept under: stable across its revisions, unique across runs.
+///
+/// A question identifier is a counter seeded at one *per process*, so every run's first question is
+/// `question-1`. Keyed on that alone, run two overwrote run one's saved layout — which nobody saw,
+/// because nothing read the folder back until there was a screen for it.
+///
+/// The run segment is minted once and shared, so the two halves say the two things that matter. The
+/// question half keeps a revision replacing its predecessor in place, which is the whole contract of
+/// the store: a ten-round design leaves one file holding what was actually agreed. The run half
+/// keeps yesterday's ten rounds out of today's.
+///
+/// Hex and hyphens only, which is what `storage::is_sketch_id_byte` allows, because this value
+/// becomes a filename.
+pub fn new_sketch_id(question_id: &str) -> String {
+    static RUN: OnceLock<String> = OnceLock::new();
+    let run = RUN.get_or_init(|| uuid::Uuid::now_v7().simple().to_string());
+    format!("{question_id}-{run}")
 }
 
 /// The number this asking is, counting from one, remembering it for the next.

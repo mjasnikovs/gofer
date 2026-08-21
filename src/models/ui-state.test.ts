@@ -46,6 +46,18 @@ describe('toWorkspaceLayout', () => {
     })
 
     /*
+     * A tab is two lists, and forgetting the second is silent.
+     *
+     * The union is what the compiler checks and the array is what a stored value is checked
+     * against. A tab added to one and not the other type-checks, renders, and then resets itself to
+     * Chat the next time the project is opened — which reads as the window losing its place.
+     */
+    it('remembers every tab the centre column has', () => {
+        for (const tab of ['chat', 'scripts', 'game', 'docs', 'memory', 'sketches'] as const)
+            expect(toWorkspaceLayout({...STORED, centerTab: tab}).centerTab).toBe(tab)
+    })
+
+    /*
      * The stored value outlives the version that wrote it. A tab that has since been removed, a
      * width the responsive contract no longer allows, and a half-written record all reach this,
      * and none of them is a reason to throw the rest of the layout away.

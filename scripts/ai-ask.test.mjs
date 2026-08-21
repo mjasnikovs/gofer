@@ -312,3 +312,46 @@ test('a design question carries the loop session, not the one the model sent', a
 
     assert.equal(seen.designSession, 'design-7')
 })
+
+/**
+ * The drawing the user reacted to, kept for the tool that built this rather than for the model.
+ *
+ * It is not in the answer text and must not be: the child drew it, and charging it for its own
+ * markup on every round is the cost this whole seam exists to avoid.
+ */
+test('the layout the user reacted to is recorded without being read back to the child', async () => {
+    const agreed = {}
+    const tool = createAskUserTool({
+        host: {
+            call: () =>
+                Promise.resolve({
+                    questionId: 'question-1',
+                    approved: true,
+                    sketch: {label: 'Bar across the top', html: '<p>a</p>'},
+                    sketches: 1
+                })
+        },
+        budget: 2,
+        agreed
+    })
+
+    const answer = await tool.execute('id', {question: 'which?'})
+
+    assert.deepEqual(agreed, {label: 'Bar across the top', html: '<p>a</p>', approved: true})
+    assert.ok(!answer.content[0].text.includes('<p>a</p>'))
+})
+
+/**
+ * A retry starts from nothing, and the record starts from nothing with it.
+ *
+ * `createAskUserTool` runs once per attempt, so this is where the clearing belongs. A delegation
+ * that showed a sketch and then died on a stream timeout would otherwise leave it behind, and the
+ * retry would hand back a layout the user's final answer never saw.
+ */
+test('a retried attempt inherits no layout from the attempt that failed', () => {
+    const agreed = {label: 'Stale', html: '<p>old</p>', approved: true}
+
+    createAskUserTool({host: {call: () => Promise.resolve({})}, budget: 2, agreed})
+
+    assert.deepEqual(agreed, {})
+})

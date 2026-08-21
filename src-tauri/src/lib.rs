@@ -400,6 +400,32 @@ fn list_project_memory(app: AppHandle) -> Result<Vec<project_memory::CheckedMemo
     project_memory::list_checked_memories(&storage, workspace_snapshot(&app).as_ref())
 }
 
+/// How many saved layouts the panel is handed at once.
+///
+/// One file per question, and a question is something a person sat and answered, so a project with
+/// hundreds is a project that has been designed in for months. Generous rather than tuned: the row
+/// carries no markup, which is the reason a limit here is cheap in the first place.
+const SKETCH_LIST_LIMIT: usize = 200;
+
+/// Every layout the user has agreed, most recently saved first.
+///
+/// The markup is not in the answer. A sketch drawn with the project's own artwork inlined runs to
+/// tens of kilobytes, and a list of forty would carry all of it to draw one — so this names them and
+/// `read_project_sketch` fetches the one that gets opened.
+#[tauri::command(async)]
+fn list_project_sketches(app: AppHandle) -> Result<Vec<storage::SketchRecord>, CommandError> {
+    project_storage(&app)?.sketches().list(SKETCH_LIST_LIMIT)
+}
+
+/// Both copies of one saved layout: the one to draw, and the one to hand to a builder.
+///
+/// `id` is the only value in this feature that arrives from the window and becomes a filename, so
+/// the store checks its shape before it touches the disk.
+#[tauri::command(async)]
+fn read_project_sketch(app: AppHandle, id: String) -> Result<storage::SketchHtml, CommandError> {
+    project_storage(&app)?.sketches().read(&id)
+}
+
 /// Stores one memory the user wrote or corrected, and answers with it checked.
 ///
 /// Editing is the same upsert a finished turn uses, so an edited row loses its vector the moment
@@ -1151,6 +1177,7 @@ pub fn run() {
         list_ai_models,
         judge_project_memory,
         list_project_memory,
+        list_project_sketches,
         list_project_tasks,
         list_workspace_files,
         load_chat,
@@ -1166,6 +1193,7 @@ pub fn run() {
         read_clipboard_image,
         read_godot_logs,
         read_task_brief,
+        read_project_sketch,
         read_project_state,
         read_workspace_file,
         read_workspace_thumbnail,

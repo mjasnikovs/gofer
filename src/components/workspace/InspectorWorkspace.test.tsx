@@ -91,7 +91,8 @@ async function renderWithChatReferences(added: ChatReference[]) {
             value={{
                 add: reference => {
                     added.push(reference)
-                }
+                },
+                paste: () => undefined
             }}
         >
             <InspectorWorkspace
@@ -171,7 +172,7 @@ describe('InspectorWorkspace', () => {
 
         for (const label of ['Scene', 'Runtime', 'Files'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
-        for (const label of ['Chat', 'Scripts', 'Game', 'Docs', 'Memory'])
+        for (const label of ['Chat', 'Scripts', 'Game', 'Docs', 'Memory', 'Design'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
         for (const label of ['Node', 'Project', 'Editor'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
@@ -657,6 +658,17 @@ describe('InspectorWorkspace', () => {
             screen.getByText('ERROR: Invalid call in a session that already stopped')
         ).toBeInTheDocument()
         expect(screen.getByText(/run session-0/)).toBeInTheDocument()
+    })
+
+    /** The tab draws its own view, not the one the ternary happens to end on. */
+    it('opens the sketches panel from its own tab', async () => {
+        backend()
+        const user = userEvent.setup()
+        await renderWorkspace()
+
+        await user.click(screen.getByRole('button', {name: 'Design'}))
+
+        expect(screen.getByRole('radio', {name: /All/u})).toBeInTheDocument()
     })
 
     it('cites documentation by chapter, because retrieval exposes no URL', async () => {

@@ -179,7 +179,11 @@ export function Workspace({
     // A design loop asks about one layout several times. Left as ordinary questions the card would
     // close on every answer and reopen once the agent had redrawn, so the user would watch their own
     // modal flicker rather than one design change. This keeps it on screen for the whole loop.
-    const design = useDesignSession({questions, isTurnRunning: isBusy})
+    const design = useDesignSession({
+        questions,
+        isTurnRunning: isBusy,
+        onAnswer: answerQuestion
+    })
 
     const hasConversation = messages.length > 0
     /*
@@ -581,6 +585,17 @@ export function Workspace({
         () => ({
             add: (reference: ChatReference) => {
                 setDraft(previous => appendReference(previous, reference))
+            },
+            // A paragraph of its own, and once. A pasted block is a document, not a phrase: joined
+            // onto the sentence somebody is mid-way through it would be neither readable nor
+            // separable again. The first line is what identifies it, so that is what a repeat is
+            // recognised by — comparing the whole block would miss nothing and cost kilobytes.
+            paste: (text: string) => {
+                setDraft(previous => {
+                    const caption = text.split('\n', 1)[0] ?? text
+                    if (previous.includes(caption)) return previous
+                    return previous.trim() === '' ? text : `${previous.trimEnd()}\n\n${text}`
+                })
             }
         }),
         [setDraft]
@@ -629,7 +644,7 @@ export function Workspace({
                         {...(approvals[0] && {prompt: approvals[0]})}
                     />
                     <UserQuestionDialog
-                        onAnswer={answerQuestion}
+                        onAnswer={design.answer}
                         isRedrawing={design.isRedrawing}
                         {...(design.prompt && {prompt: design.prompt})}
                     />

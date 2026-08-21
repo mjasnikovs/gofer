@@ -782,19 +782,24 @@ fn ask_user<R: Runtime>(app: &AppHandle<R>, params: &Value) -> Result<Value, Too
 
     // Resolved before anything is shown, so the user judges a layout with the game's own artwork in
     // it rather than with the window's default typeface.
-    let (sketches, unresolved) = resolve_sketch_assets(app, sketches);
+    //
+    // The model's own markup is kept beside the resolved copy, because the two are read by different
+    // readers. The window is shown the resolved one, so a sprite is a sprite. The agent that asked
+    // for the design is handed the original: inlining turns a 2KB layout into 80KB of base64 that
+    // says nothing a builder can act on, and `res://` is the path it has to build against anyway.
+    let (shown, unresolved) = resolve_sketch_assets(app, sketches.clone());
 
     match crate::ask::ask_question(
         app,
         &question_id,
         question,
         options,
-        sketches.clone(),
+        shown.clone(),
         why,
         design_session,
     ) {
         crate::ask::Answer::Answered(reply) => {
-            keep_sketch(app, &question_id, &sketches, &reply);
+            keep_sketch(app, &question_id, question, &sketches, &shown, &reply);
             Ok(reply_answer(&question_id, &sketches, &reply, unresolved))
         }
         crate::ask::Answer::TimedOut => Err(ToolFailure::new(
@@ -849,12 +854,32 @@ fn reply_answer(
         .picked
         .filter(|index| *index < sketches.len())
         .map(|index| json!({"index": index, "label": sketches[index].label}));
+    // The layout the user reacted to, as the model wrote it.
+    //
+    // Not part of the prose, and the design tool is the only thing that reads it: a child asking a
+    // question does not need its own markup handed back, and putting it in the answer text would
+    // charge the child for the drawing on every round. It rides here so the *parent* can be shown
+    // what was agreed. A skip reacted to nothing, so it carries nothing.
+    //
+    // Words against several variants with no pick name nothing, and the first one is not a good
+    // guess at which — it is a one-in-three guess reported as a fact, and the fact becomes what
+    // somebody builds. One sketch is the exception, because there is nothing else it could be.
+    let chosen = if reply.skipped {
+        None
+    } else {
+        reply
+            .picked
+            .and_then(|index| sketches.get(index))
+            .or_else(|| sketches.first().filter(|_| sketches.len() == 1))
+            .map(|sketch| json!({"label": sketch.label, "html": sketch.html}))
+    };
     json!({
         "questionId": question_id,
         "skipped": reply.skipped,
         "approved": reply.approved,
         "answer": reply.text,
         "picked": picked,
+        "sketch": chosen,
         "sketches": sketches.len(),
         "blocked": reply.blocked,
         "unresolved": unresolved,
@@ -865,23 +890,67 @@ fn reply_answer(
 ///
 /// Best effort, and silent. The caller is a tool call somebody is waiting on: a project with no
 /// storage open, or a full disk, must cost an artefact rather than the answer itself.
+///
+/// Both copies are kept, at the same index, because they are read by different readers. The window
+/// gets the one with the project's artwork inlined, which is the only copy worth drawing again; a
+/// builder gets the model's own markup, because the inlined one is base64 that says nothing.
+///
+/// The empty case is not an edge. Every question asked in words reaches this function, and must
+/// leave nothing behind — which is what `chosen_sketch` answering `None` means.
 fn keep_sketch<R: Runtime>(
     app: &AppHandle<R>,
     question_id: &str,
+    question: &str,
     sketches: &[crate::ask::Sketch],
+    shown: &[crate::ask::Sketch],
     reply: &crate::ask::Reply,
 ) {
-    if reply.skipped || sketches.is_empty() {
+    let Some((source, shown_html)) = chosen_sketch(sketches, shown, reply) else {
         return;
+    };
+    let Ok(storage) = crate::workspace::project_storage(app) else {
+        return;
+    };
+    let task_id = storage.tasks().active().ok().flatten();
+    let _ = storage.sketches().keep(&crate::storage::KeptSketch {
+        sketch_id: &crate::ask::new_sketch_id(question_id),
+        question_id,
+        task_id: task_id.as_deref(),
+        question,
+        label: &source.label,
+        shown_html,
+        source_html: &source.html,
+        is_approved: reply.approved,
+    });
+}
+
+/// Which sketch the answer was about, in both of its copies.
+///
+/// The two are taken at the same index and that is the whole of the rule. Crossed over, a builder
+/// would be handed eighty kilobytes of base64 and the user would be shown a layout with its artwork
+/// missing — and neither would fail loudly enough for anybody to notice.
+///
+/// A pick out of range falls back to the first rather than to nothing. The user chose *a* layout,
+/// and the number saying which is the renderer's, so a wrong one is our mistake to absorb.
+fn chosen_sketch<'a>(
+    sketches: &'a [crate::ask::Sketch],
+    shown: &'a [crate::ask::Sketch],
+    reply: &crate::ask::Reply,
+) -> Option<(&'a crate::ask::Sketch, &'a str)> {
+    if reply.skipped {
+        return None;
     }
-    let chosen = reply
+    let index = reply
         .picked
-        .and_then(|index| sketches.get(index))
-        .or_else(|| sketches.first());
-    let Some(sketch) = chosen else { return };
-    if let Ok(storage) = crate::workspace::project_storage(app) {
-        let _ = storage.sketches().keep(question_id, &sketch.html);
-    }
+        .filter(|index| *index < sketches.len())
+        .unwrap_or(0);
+    let source = sketches.get(index)?;
+    // `resolve_sketch_assets` maps one to one, so this is the same sketch. Read rather than indexed
+    // anyway: a panic here would cost the user the answer they have just given.
+    let shown_html = shown
+        .get(index)
+        .map_or(source.html.as_str(), |sketch| sketch.html.as_str());
+    Some((source, shown_html))
 }
 
 /// The most variants one showing may hold.
@@ -2856,6 +2925,67 @@ mod tests {
         }
     }
 
+    /// The two copies of a sketch are read by different readers, so they must not be crossed over.
+    ///
+    /// The window is shown the copy with the project's artwork in it. Whoever builds it is handed
+    /// the model's own markup, because the inlined one is base64 that says nothing. Swapped, both
+    /// are wrong and neither fails: a builder gets noise and the user judges a layout with its
+    /// sprites missing.
+    #[test]
+    fn a_kept_sketch_takes_both_copies_from_the_chosen_one() {
+        let sketch = |label: &str, html: &str| crate::ask::Sketch {
+            label: label.to_owned(),
+            html: html.to_owned(),
+        };
+        let sketches = vec![
+            sketch("Overlay", "res://a.png"),
+            sketch("Dock", "res://b.png"),
+        ];
+        let shown = vec![sketch("Overlay", "data:a"), sketch("Dock", "data:b")];
+        let reply = |picked: Option<usize>, skipped: bool| crate::ask::Reply {
+            text: String::new(),
+            picked,
+            blocked: Vec::new(),
+            skipped,
+            approved: false,
+        };
+
+        let (source, drawn) =
+            chosen_sketch(&sketches, &shown, &reply(Some(1), false)).expect("the picked sketch");
+        assert_eq!(
+            source.label, "Dock",
+            "the pick chooses which sketch was kept"
+        );
+        assert_eq!(
+            source.html, "res://b.png",
+            "a builder gets the model's own markup"
+        );
+        assert_eq!(drawn, "data:b", "the window gets the copy it drew");
+
+        let (first, _) =
+            chosen_sketch(&sketches, &shown, &reply(None, false)).expect("the only candidate");
+        assert_eq!(
+            first.label, "Overlay",
+            "no pick keeps the first, which is the recommended one"
+        );
+
+        let (fallback, _) = chosen_sketch(&sketches, &shown, &reply(Some(9), false))
+            .expect("a pick out of range still chose a layout");
+        assert_eq!(
+            fallback.label, "Overlay",
+            "a number the renderer got wrong is absorbed"
+        );
+
+        assert!(
+            chosen_sketch(&sketches, &shown, &reply(Some(0), true)).is_none(),
+            "a skip is not a choice and must leave nothing behind"
+        );
+        assert!(
+            chosen_sketch(&[], &[], &reply(None, false)).is_none(),
+            "every question asked in words reaches this and must keep nothing"
+        );
+    }
+
     /// A question with no sketches is the ordinary case, and must not be refused for having none.
     #[test]
     fn a_question_in_words_needs_no_sketches() {
@@ -2914,6 +3044,79 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(stray["picked"], Value::Null);
+    }
+
+    /**
+     * The agreed layout goes back to whoever asked for the design, as the model drew it.
+     *
+     * The prose the design child writes reads as complete and is not: a builder handed "seven tiles,
+     * a cap column, four-pixel gaps" still has to guess at what the user actually looked at, and the
+     * first build off one came back close and wrong. The markup is the drawing itself, and it rides
+     * on the answer so nothing has to retype it.
+     */
+    #[test]
+    fn the_layout_the_user_reacted_to_rides_back_with_the_answer() {
+        let sketches = vec![
+            crate::ask::Sketch {
+                label: "Bar across the top".to_owned(),
+                html: "<p>a</p>".to_owned(),
+            },
+            crate::ask::Sketch {
+                label: "Side rail".to_owned(),
+                html: "<p>b</p>".to_owned(),
+            },
+        ];
+        let picked = reply_answer(
+            "question-1",
+            &sketches,
+            &crate::ask::Reply {
+                picked: Some(1),
+                approved: true,
+                ..crate::ask::Reply::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(picked["sketch"]["html"], json!("<p>b</p>"));
+        assert_eq!(picked["sketch"]["label"], json!("Side rail"));
+
+        // Words against one layout are a reaction to that layout, because there is no other.
+        let said = reply_answer(
+            "question-1",
+            &sketches[..1],
+            &crate::ask::Reply {
+                text: "tighter".to_owned(),
+                ..crate::ask::Reply::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(said["sketch"]["html"], json!("<p>a</p>"));
+
+        // Words against three, with no pick, name none of them. Answering with the first is a guess
+        // reported as a fact, and it is the fact somebody builds.
+        let unpicked = reply_answer(
+            "question-1",
+            &sketches,
+            &crate::ask::Reply {
+                text: "tighter".to_owned(),
+                ..crate::ask::Reply::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(unpicked["sketch"], Value::Null);
+
+        // A skip reacted to nothing, and a question in words has nothing to react to.
+        let skipped = reply_answer(
+            "question-1",
+            &sketches,
+            &crate::ask::Reply {
+                skipped: true,
+                ..crate::ask::Reply::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(skipped["sketch"], Value::Null);
+        let wordy = reply_answer("question-1", &[], &crate::ask::Reply::default(), Vec::new());
+        assert_eq!(wordy["sketch"], Value::Null);
     }
 
     /**
