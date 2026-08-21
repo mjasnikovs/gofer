@@ -185,24 +185,24 @@ pub const CATALOG: &[ToolDomain] = &[
     },
     ToolDomain {
         name: "godot_scene",
-        description: "The edited scene in the editor — never the running game's scene tree. The \
-                      mutations here need expectedRevision like the node ones do, and the revision \
-                      is whatever the last get_tree — or godot_session get_state — reported, so \
-                      start with one of those rather than guessing.",
+        description: "The edited scene in the editor — never the running game's scene tree. Every \
+                      mutation here is checked against the scene's revision, and the router supplies \
+                      that number from the last answer that carried one, so never pass it and never \
+                      read the tree to fetch it.",
         operations: &[
             operation("list", "Lists the scene files in the project."),
             operation("open", "Opens a scene."),
             operation(
                 "create",
-                "Creates a scene and opens it. The \
-                 revision is the one the scene being *replaced* is at — creating a scene discards \
-                 whatever is unsaved in the open one, which is what the revision is guarding — so \
-                 read godot_scene get_tree first even though the new scene does not exist yet.",
+                "Creates a scene and opens it. It is checked against the revision of the scene \
+                 being *replaced*, because creating a scene discards whatever is unsaved in the \
+                 open one — which is what the check is for. The router holds that number already.",
             ),
             operation(
                 "get_tree",
-                "Returns the edited scene hierarchy and its revision. Read this before every \
-                 mutation: its `revision` is the `expectedRevision` the mutation needs.",
+                "Returns the edited scene hierarchy and its revision. Read it to see what the \
+                 scene holds, not to fetch a revision: every mutation is checked against a number \
+                 the router already has, and answers with the next one.",
             ),
             operation("save", "Saves the edited scene."),
             operation("save_as", "Saves the edited scene to a new path."),
@@ -215,9 +215,10 @@ pub const CATALOG: &[ToolDomain] = &[
     ToolDomain {
         name: "godot_node",
         description: "Node authoring inside the edited scene. Every mutation is undoable and every \
-                      one of them needs expectedRevision — the `revision` the last godot_scene \
-                      get_tree reported. A mutation without it is refused, so read the tree, then \
-                      mutate, then read it again for the next one. Paths are the scene's own, like \
+                      one of them is checked against the scene's revision — which the router \
+                      supplies from the last answer that carried one, and every mutation's own \
+                      answer carries the next. So mutate, then mutate again: there is no revision to \
+                      pass and no tree to re-read between them. Paths are the scene's own, like \
                       /Level1 or /Level1/Ground.",
         operations: &[
             operation(
@@ -4071,6 +4072,52 @@ mod tests {
         let names: std::collections::HashSet<&str> =
             CATALOG.iter().map(|domain| domain.name).collect();
         assert_eq!(names.len(), CATALOG.len(), "tool names must be unique");
+    }
+
+    /// Whether prose is naming a parameter rather than using an English word that happens to match.
+    ///
+    /// Half the parameter names are ordinary words — `scene`, `path`, `node`, `name` — and every
+    /// description is written in sentences about scenes and nodes. What identifies a parameter is
+    /// either a name no sentence would contain (`expectedRevision`, `timeoutMs`) or backticks
+    /// around it, which is how every summary that does mean the key writes it.
+    fn names_the_parameter(prose: &str, name: &str) -> bool {
+        prose.contains(&format!("`{name}`"))
+            || (name.chars().any(char::is_uppercase) && prose.contains(name))
+    }
+
+    /// A hidden parameter is one the router fills in and a call never carries. Prose that names one
+    /// is telling the model to write the single key it must not write.
+    ///
+    /// Both scene domains did, for long enough to be measured: `godot_node` said "every one of them
+    /// needs expectedRevision … a mutation without it is refused, so read the tree, then mutate,
+    /// then read it again for the next one", which is a round trip per mutation for a number the
+    /// router already holds. The prompt has said the opposite the whole time — "supplied by the
+    /// router, so never ask for it or pass it" — and a live turn, caught between them, wrote
+    /// `expectedRevision` into two calls and was refused for the key it wrote around it.
+    #[test]
+    fn no_summary_names_a_parameter_the_router_supplies() {
+        for domain in CATALOG {
+            for operation in domain.operations {
+                let Some(spec) = crate::tool_params::params_of(domain.name, operation.op) else {
+                    continue;
+                };
+                for param in spec.iter().filter(|param| param.hidden) {
+                    assert!(
+                        !names_the_parameter(domain.description, param.name),
+                        "{} names the hidden `{}` in its description",
+                        domain.name,
+                        param.name
+                    );
+                    assert!(
+                        !names_the_parameter(operation.summary, param.name),
+                        "{}.{} names the hidden `{}` in its summary",
+                        domain.name,
+                        operation.op,
+                        param.name
+                    );
+                }
+            }
+        }
     }
 
     #[test]
