@@ -261,6 +261,43 @@ function unwrapDoubleTag(value) {
 }
 
 /**
+ * One entry whose parameter names were written with whitespace around them, written without it.
+ *
+ * `{"op": "connect_signal", "node ": "/Coin", "signal ": "body_entered", "method": "…"}` is what
+ * one live turn wrote three times: the same call, refused three times by name, resent unchanged
+ * twice. The router already knew the answer — its refusal reads "has no `node ` parameter … Did you
+ * mean `node`?" — and a correction a model reads and resends unchanged is one that cannot help it.
+ *
+ * The parameter table is walked rather than the entry, so a padded key is only ever renamed onto a
+ * name the operation declares, and never onto one the entry already carries. Recursion follows the
+ * declared structure alone, so it reaches `set_properties`' entries and stops at a tagged value —
+ * whose payload may be a dictionary whose keys are the caller's own.
+ */
+function trimPaddedKeys(params, entry) {
+    if (!Array.isArray(params) || !isObject(entry)) return entry
+    const shaped = Object.fromEntries(
+        Object.entries(entry).map(([key, held]) => {
+            const trimmed = key.trim()
+            const renameable =
+                trimmed !== key
+                && !(trimmed in entry)
+                && params.some(param => param.name === trimmed)
+            return [renameable ? trimmed : key, held]
+        })
+    )
+    return params.reduce((walked, param) => {
+        const held = walked[param.name]
+        if (held === undefined || !Array.isArray(param.entry) || param.entry.length === 0)
+            return walked
+        if (param.kind === 'list' && Array.isArray(held))
+            return {...walked, [param.name]: held.map(one => trimPaddedKeys(param.entry, one))}
+        if (param.kind === 'object')
+            return {...walked, [param.name]: trimPaddedKeys(param.entry, held)}
+        return walked
+    }, shaped)
+}
+
+/**
  * One entry with every value its operation declares as tagged unwrapped, however deep it sits.
  *
  * The parameter table is walked rather than the entry, so this can only reach a key the operation
@@ -292,12 +329,10 @@ export function normalizeToolCalls(operations, args) {
     return {
         ops: entries
             .map(entry => nameTheOperation(operations, entry))
-            .map(entry =>
-                unwrapTaggedParams(
-                    operations.find(operation => operation.op === entry.op)?.params,
-                    entry
-                )
-            )
+            .map(entry => {
+                const declared = operations.find(operation => operation.op === entry.op)?.params
+                return unwrapTaggedParams(declared, trimPaddedKeys(declared, entry))
+            })
     }
 }
 

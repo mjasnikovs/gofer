@@ -1063,6 +1063,94 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
 // The tagged value a model wrapped twice. One live turn against a local Qwen3.6-27B sent 51 of
 // these in 114 tool calls, and every one was refused by a sentence that named the shape it wanted
 // and never noticed that the shape it wanted was sitting inside the one it got.
+test('a parameter named with whitespace around it is named without it', async () => {
+    // The real declared contract, not a fixture: the shapes below are what a live turn wrote, and
+    // what makes them repairable is the parameter list the router will hold them to.
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node').operations
+
+    // Three times in one turn, the same call resent unchanged after being refused by name.
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'connect_signal',
+                    'node ': '/Coin',
+                    'signal ': 'body_entered',
+                    method: '_on_body_entered'
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'connect_signal',
+                    node: '/Coin',
+                    signal: 'body_entered',
+                    method: '_on_body_entered'
+                }
+            ]
+        }
+    )
+
+    // Inside a list parameter's entries, the same way a double tag is unwrapped there.
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'set_properties',
+                    properties: [
+                        {
+                            ' node': '/Player',
+                            property: 'visible',
+                            value: {type: 'bool', value: true}
+                        }
+                    ]
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'set_properties',
+                    properties: [
+                        {node: '/Player', property: 'visible', value: {type: 'bool', value: true}}
+                    ]
+                }
+            ]
+        }
+    )
+
+    // A padded key the operation does not declare is left where it is, for the router to refuse by
+    // name — trimming it would invent a parameter and be refused for that instead.
+    assert.deepEqual(
+        normalizeToolCalls(node, {ops: [{op: 'connect_signal', 'signaller ': '/Coin'}]}),
+        {
+            ops: [{op: 'connect_signal', 'signaller ': '/Coin'}]
+        }
+    )
+
+    // A padded key beside the real one is left alone too: the entry already carries the name, and
+    // the model wrote the unpadded one deliberately.
+    assert.deepEqual(
+        normalizeToolCalls(node, {ops: [{op: 'connect_signal', node: '/Coin', 'node ': '/Other'}]}),
+        {ops: [{op: 'connect_signal', node: '/Coin', 'node ': '/Other'}]}
+    )
+
+    // A dictionary payload's keys are the caller's own, and the walk stops at a tagged value rather
+    // than reaching into one.
+    const padded = {
+        type: 'dictionary',
+        value: [{key: {type: 'string', value: 'node '}, value: {type: 'int', value: 1}}]
+    }
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [{op: 'set_property', node: '/P', property: 'meta', value: padded}]
+        }),
+        {ops: [{op: 'set_property', node: '/P', property: 'meta', value: padded}]}
+    )
+})
+
 test('a tagged value wrapped twice is unwrapped rather than refused', () => {
     const node = [
         {
