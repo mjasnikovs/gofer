@@ -50,7 +50,7 @@ const GODOT_PROMPT: &str = r#"Godot engine (a Gofer-managed editor, reached thro
 Editing the project:
 - Scenes and project.godot belong to the editor: change them with godot_scene, godot_node and godot_project, never by writing the file as text — the write, edit and bash tools refuse those paths
 - GDScript belongs to the language server: the write and edit tools refuse a .gd, because a file written behind the server leaves Godot running the old code
-- Never guess a script filename: godot_script list names every script in the project, and is the call to make before opening, reading or writing one whose path you were not given
+{typing}- Never guess a script filename: godot_script list names every script in the project, and is the call to make before opening, reading or writing one whose path you were not given
 - Every other file is yours to write
 - Create a script with godot_script save, then godot_script diagnostics on the same path — a script that does not parse stops its scene from loading, and the language server is the only thing that says so immediately
 - godot_script open, close and diagnostics each take a list of paths: after writing several scripts, name them all in one diagnostics call, not one call per script
@@ -73,13 +73,34 @@ Approvals:
 - approval_denied means they said no: do not retry, ask what to do instead"#;
 
 /// The prompt Gofer ships for this catalog.
-pub fn default_prompt(tools: &[ToolDomain]) -> String {
+pub fn default_prompt(tools: &[ToolDomain], strict_typing: bool) -> String {
     if tools.iter().any(|domain| domain.name.starts_with("godot_")) {
-        let godot = GODOT_PROMPT.replace("{engine}", &engine_line());
+        let typing = if strict_typing {
+            format!("{STRICT_TYPING_LINE}\n")
+        } else {
+            String::new()
+        };
+        let godot = GODOT_PROMPT
+            .replace("{engine}", &engine_line())
+            .replace("{typing}", &typing);
         return format!("{BASE_PROMPT}\n\n{godot}");
     }
     BASE_PROMPT.to_owned()
 }
+
+/// Added when the project enforces strict typing, which is the rule Gofer ships turned on.
+///
+/// With `debug/gdscript/warnings/untyped_declaration` at Error — which is what
+/// [`crate::godot_policy`] sets — `var x = 1` is a parse error and the script does not load. The
+/// model was never told. In one recorded project 400 of 601 Godot error events were exactly that,
+/// across 27 of 79 runs, and a live turn wrote `const SPEED = 200.0` and
+/// `func _physics_process(delta):` into a player script and reported zero diagnostics.
+///
+/// Measured before it was written, interleaved against a local Qwen3.6-27B in one process, scored
+/// by whether every declaration in the script the model wrote carries a type: the shipped prompt
+/// wrote fully typed GDScript 3 times in 10 and this one 9 times in 10. The failure it removes is
+/// always the same line — `var visual = $PlayerVisual`, a node lookup bound to an untyped `var`.
+const STRICT_TYPING_LINE: &str = "- This project treats GDScript warnings as errors, so untyped code does not parse: give every var, const, parameter and return an explicit type, and cast a Variant before you use it";
 
 /// The one line of the prompt the user does not own: which engine this build is pinned to.
 ///
@@ -134,10 +155,10 @@ fn refresh_engine_line(prompt: &str) -> String {
 }
 
 /// What a turn sends: the project's own prompt, or the shipped one when the project stored none.
-pub fn resolve(stored: Option<&str>, tools: &[ToolDomain]) -> String {
+pub fn resolve(stored: Option<&str>, tools: &[ToolDomain], strict_typing: bool) -> String {
     match stored {
         Some(prompt) if !prompt.trim().is_empty() => refresh_engine_line(prompt),
-        _ => default_prompt(tools),
+        _ => default_prompt(tools, strict_typing),
     }
 }
 
@@ -145,8 +166,8 @@ pub fn resolve(stored: Option<&str>, tools: &[ToolDomain]) -> String {
 ///
 /// A project that stores the default text would freeze it: a later Gofer that teaches the agent
 /// about a new tool would never reach that project. Storing nothing keeps it following the ship.
-pub fn is_default(prompt: &str, tools: &[ToolDomain]) -> bool {
-    prompt.trim() == default_prompt(tools).trim()
+pub fn is_default(prompt: &str, tools: &[ToolDomain], strict_typing: bool) -> bool {
+    prompt.trim() == default_prompt(tools, strict_typing).trim()
 }
 
 #[cfg(test)]
@@ -169,7 +190,7 @@ mod tests {
             "- My own rule, which is mine to keep\n"
         );
 
-        let sent = resolve(Some(customized), CATALOG);
+        let sent = resolve(Some(customized), CATALOG, true);
 
         assert!(
             sent.contains(crate::godot_session::REQUIRED_ENGINE_VERSION),
@@ -193,23 +214,23 @@ mod tests {
     #[test]
     fn a_prompt_that_names_no_engine_is_not_given_one() {
         let plain = "You are Gofer.\n- One rule.";
-        assert_eq!(resolve(Some(plain), CATALOG), plain);
+        assert_eq!(resolve(Some(plain), CATALOG, true), plain);
     }
 
     #[test]
     fn the_godot_half_is_added_only_when_those_tools_are_offered() {
-        let shipped = default_prompt(CATALOG);
+        let shipped = default_prompt(CATALOG, true);
         assert!(shipped.starts_with("You are Gofer"));
         assert!(shipped.contains("godot_session status"));
         assert!(shipped.contains("godot_docs_search"));
-        assert_eq!(default_prompt(&[]), BASE_PROMPT);
+        assert_eq!(default_prompt(&[], true), BASE_PROMPT);
         // The sub-agent is a Node tool, registered in `ai-provider.mjs` for every session and
         // absent from the Rust catalog. So its instructions belong to the base half: gated on the
         // Godot tools they would vanish from a build that has none, while the tool stayed.
-        assert!(default_prompt(&[]).contains("subagent"));
+        assert!(default_prompt(&[], true).contains("subagent"));
         // The same holds for the two web tools, which are also Node-side and also always present.
-        assert!(default_prompt(&[]).contains("web_search"));
-        assert!(default_prompt(&[]).contains("web_fetch"));
+        assert!(default_prompt(&[], true).contains("web_search"));
+        assert!(default_prompt(&[], true).contains("web_fetch"));
         // And the Godot half still sends engine questions to the local docs rather than the web:
         // the shipped 4.7 documentation is on this machine and the web is a worse answer for it.
         assert!(shipped.contains("godot_docs_search"));
@@ -220,7 +241,7 @@ mod tests {
     /// and a placeholder left unreplaced is a prompt that says `{version}` to the model.
     #[test]
     fn the_prompt_names_the_pinned_engine_and_the_date_it_was_released() {
-        let shipped = default_prompt(CATALOG);
+        let shipped = default_prompt(CATALOG, true);
         assert!(shipped.contains(&format!(
             "Version {} {}, released {}",
             crate::godot_session::REQUIRED_ENGINE_VERSION,
@@ -234,15 +255,51 @@ mod tests {
         assert!(shipped.contains("newer than your training data"));
     }
 
+    /// The rule the model was never told about, and the only line of the prompt that depends on a
+    /// setting.
+    ///
+    /// A project with the rule off is not told GDScript warnings are errors, because there they are
+    /// not — and a placeholder left behind would say `{typing}` to the model, which is the failure
+    /// the engine-line test guards against for the same reason.
+    #[test]
+    fn the_strict_typing_rule_is_in_the_prompt_only_where_it_is_enforced() {
+        let enforced = default_prompt(CATALOG, true);
+        let relaxed = default_prompt(CATALOG, false);
+        assert!(
+            enforced.contains("treats GDScript warnings as errors"),
+            "{enforced}"
+        );
+        assert!(
+            !relaxed.contains("treats GDScript warnings as errors"),
+            "{relaxed}"
+        );
+        assert!(!enforced.contains("{typing}"));
+        assert!(!relaxed.contains("{typing}"));
+
+        // One line, and nothing else moved: the rest of the prompt is the same text either way.
+        let without: Vec<&str> = enforced
+            .lines()
+            .filter(|line| !line.contains("treats GDScript warnings as errors"))
+            .collect();
+        assert_eq!(without, relaxed.lines().collect::<Vec<&str>>());
+
+        // A build with no Godot tools ships neither the Godot block nor this line.
+        assert!(!default_prompt(&[], true).contains("treats GDScript warnings as errors"));
+    }
+
     #[test]
     fn a_stored_prompt_is_sent_whole_and_a_blank_one_is_not_stored_at_all() {
-        assert_eq!(resolve(Some("Be brief."), CATALOG), "Be brief.");
-        assert_eq!(resolve(Some("   "), CATALOG), default_prompt(CATALOG));
-        assert_eq!(resolve(None, CATALOG), default_prompt(CATALOG));
+        assert_eq!(resolve(Some("Be brief."), CATALOG, true), "Be brief.");
+        assert_eq!(
+            resolve(Some("   "), CATALOG, true),
+            default_prompt(CATALOG, true)
+        );
+        assert_eq!(resolve(None, CATALOG, true), default_prompt(CATALOG, true));
         assert!(is_default(
-            &format!("\n{}\n", default_prompt(CATALOG)),
-            CATALOG
+            &format!("\n{}\n", default_prompt(CATALOG, true)),
+            CATALOG,
+            true
         ));
-        assert!(!is_default("Be brief.", CATALOG));
+        assert!(!is_default("Be brief.", CATALOG, true));
     }
 }

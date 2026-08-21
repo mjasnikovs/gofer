@@ -428,6 +428,7 @@ pub(crate) async fn run_turn(
                             .map_err(|failure| failure.message)?
                             .as_deref(),
                         crate::ai_tools::CATALOG,
+                        settings.godot.strict_typing,
                     )),
                 },
             },
@@ -1060,6 +1061,9 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
         *system_prompt = Some(crate::agent_prompt::resolve(
             system_prompt.as_deref(),
             request.tools,
+            crate::settings::read_godot_settings(app)
+                .unwrap_or_default()
+                .strict_typing,
         ));
     }
     let worker = ai_worker_path()?;

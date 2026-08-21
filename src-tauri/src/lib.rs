@@ -967,17 +967,28 @@ struct AgentPromptResponse {
     default_prompt: String,
 }
 
-fn agent_prompt_response(stored: Option<String>) -> AgentPromptResponse {
+fn agent_prompt_response(stored: Option<String>, strict_typing: bool) -> AgentPromptResponse {
     AgentPromptResponse {
-        prompt: agent_prompt::resolve(stored.as_deref(), ai_tools::CATALOG),
-        default_prompt: agent_prompt::default_prompt(ai_tools::CATALOG),
+        prompt: agent_prompt::resolve(stored.as_deref(), ai_tools::CATALOG, strict_typing),
+        default_prompt: agent_prompt::default_prompt(ai_tools::CATALOG, strict_typing),
     }
+}
+
+/// Whether this project enforces strict typing, which decides one line of the prompt.
+///
+/// Read the way the router reads it, and unreadable settings answer with the shipped rules rather
+/// than with no rules: a prompt that quietly dropped the line would tell the model nothing about a
+/// rule that is still being enforced underneath it.
+fn strict_typing<R: Runtime>(app: &AppHandle<R>) -> bool {
+    settings::read_godot_settings(app)
+        .unwrap_or_default()
+        .strict_typing
 }
 
 #[tauri::command(async)]
 fn read_agent_prompt(app: AppHandle) -> Result<AgentPromptResponse, CommandError> {
     let stored = project_storage(&app)?.project().read_agent_prompt()?;
-    Ok(agent_prompt_response(stored))
+    Ok(agent_prompt_response(stored, strict_typing(&app)))
 }
 
 /// Stores this project's prompt, or forgets it when the text is the one Gofer ships.
@@ -989,7 +1000,9 @@ fn save_agent_prompt(app: AppHandle, prompt: String) -> Result<AgentPromptRespon
             "System prompts cannot exceed 64 KiB",
         ));
     }
-    let stored = if prompt.trim().is_empty() || agent_prompt::is_default(&prompt, ai_tools::CATALOG)
+    let enforced = strict_typing(&app);
+    let stored = if prompt.trim().is_empty()
+        || agent_prompt::is_default(&prompt, ai_tools::CATALOG, enforced)
     {
         None
     } else {
@@ -998,7 +1011,7 @@ fn save_agent_prompt(app: AppHandle, prompt: String) -> Result<AgentPromptRespon
     project_storage(&app)?
         .project()
         .write_agent_prompt(stored.as_deref())?;
-    Ok(agent_prompt_response(stored))
+    Ok(agent_prompt_response(stored, enforced))
 }
 
 #[tauri::command]
