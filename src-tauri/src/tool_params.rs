@@ -2014,22 +2014,45 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     }
 }
 
+/// The only value in an object of one entry, or nothing.
+///
+/// A model that reads `value: tagged` and the kind beside it writes the kind back into the value:
+/// `{"type": "float", "value": {"number": 3.5}}` and `{"type": "string", "value": {"text": "…"}}`,
+/// eight times in one live turn, under the protocol's own words for those kinds. One entry of the
+/// type the tag wants is not a shape with an order to guess at — it is the value, in a box.
+fn sole_entry(value: &Value) -> Option<&Value> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object.values().next()
+}
+
 fn repair_tagged(held: &mut Value) {
     let Some(tag) = held.get("type").and_then(Value::as_str) else {
         return;
     };
-    let Some((_, Payload::Numbers(count))) = TAGS.iter().find(|(name, _)| *name == tag) else {
+    let Some((_, payload)) = TAGS.iter().find(|(name, _)| *name == tag) else {
         return;
     };
     let Some(inner) = held.get("value") else {
         return;
     };
-    let Some(numbers) = numbers_under_names(inner, *count) else {
+    let repaired = match payload {
+        Payload::Numbers(count) => numbers_under_names(inner, *count)
+            .map(|numbers| Value::Array(numbers.into_iter().cloned().map(Value::Number).collect())),
+        Payload::Numeric => sole_entry(inner).filter(|one| one.is_number()).cloned(),
+        Payload::Str => sole_entry(inner).filter(|one| one.is_string()).cloned(),
+        Payload::Boolean => sole_entry(inner).filter(|one| one.is_boolean()).cloned(),
+        // `resource` carries an object on purpose, `array` and `dictionary` carry their own lists,
+        // and `null` takes anything. None of them is a value in a box.
+        _ => None,
+    };
+    let Some(repaired) = repaired else {
         return;
     };
-    let listed = Value::Array(numbers.into_iter().cloned().map(Value::Number).collect());
     if let Some(object) = held.as_object_mut() {
-        object.insert("value".to_owned(), listed);
+        object.insert("value".to_owned(), repaired);
     }
 }
 
@@ -2362,6 +2385,42 @@ mod tests {
         );
     }
 
+    /// The kind word, written back into the value.
+    ///
+    /// A model that reads `value: tagged` and the kind beside it wrote
+    /// `{"type": "float", "value": {"number": 3.5}}` and `{"type": "string", "value": {"text": …}}`
+    /// eight times in one live turn — the protocol's own words for those kinds, used as a key.
+    #[test]
+    fn a_scalar_written_in_a_box_is_taken_out_of_it() {
+        let boxed = |value: Value| {
+            let mut written =
+                json!({"node": "/Main/Player", "property": "rotation", "value": value});
+            repair("godot_node", "set_property", &mut written);
+            written["value"].clone()
+        };
+        assert_eq!(
+            boxed(json!({"type": "float", "value": {"number": 3.5}})),
+            json!({"type": "float", "value": 3.5})
+        );
+        assert_eq!(
+            boxed(json!({"type": "string", "value": {"text": "Coin"}})),
+            json!({"type": "string", "value": "Coin"})
+        );
+        assert_eq!(
+            boxed(json!({"type": "bool", "value": {"value": true}})),
+            json!({"type": "bool", "value": true})
+        );
+
+        // One entry, and of the type the tag wants. Two entries is a shape, and one entry of the
+        // wrong type is not the value in a box — both are left for the refusal to name.
+        for wrong in [
+            json!({"type": "float", "value": {"number": 3.5, "unit": "degrees"}}),
+            json!({"type": "float", "value": {"number": "3.5"}}),
+        ] {
+            assert_eq!(boxed(wrong.clone()), wrong);
+        }
+    }
+
     /// Everything the table cannot order is left exactly as it arrived, for `check` to refuse.
     ///
     /// The same run wrote `an object holding x` for a float and `an object holding origin, x, y`
@@ -2370,7 +2429,6 @@ mod tests {
     #[test]
     fn a_value_nobody_can_order_is_left_for_the_refusal_to_name() {
         for (property, value) in [
-            ("rotation", json!({"type": "float", "value": {"x": 1.5}})),
             (
                 "transform",
                 json!({"type": "transform2d", "value": {"origin": [0, 0], "x": [1, 0], "y": [0, 1]}}),
