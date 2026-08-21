@@ -71,6 +71,9 @@ editor — to whatever endpoint you point it at, and writes down every event it 
 nothing, because a local LLM cannot be a fixture, and it does nothing at all unless
 `GOFER_LIVE_TASK` names an ask, so it costs the gate nothing.
 
+It is the cheap half of the question: no release build, no window, about a minute a turn. The
+expensive half is `wdio.live.conf.ts`, which drives the whole application by clicking it.
+
 ```
 GOFER_LIVE_TASK="…" GOFER_LIVE_OUT=/tmp/turn.json \
   cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib \
@@ -82,8 +85,10 @@ one that happens once is the model. That distinction found five of them. `dump_c
 in the same file writes the catalog and prompt the worker receives, which is what a prompt A/B
 outside Rust has to be measured against.
 
-`wdio.live.conf.ts` asks a bigger question — the whole application, clicked — but it needs
-`WebKitWebDriver`, which several distributions do not package.
+`wdio.live.conf.ts` needs `tauri-driver` on PATH — `cargo install tauri-driver`, no root — and says
+so by name when it is missing. It also runs `which WebKitWebDriver` and warns when there is none;
+that warning is not a blocker, and a full sweep has run on a machine that has no such binary
+anywhere on it.
 
 ## Generated command surfaces
 
