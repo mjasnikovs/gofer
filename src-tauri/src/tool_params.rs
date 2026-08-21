@@ -1968,6 +1968,71 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
     ))
 }
 
+/// The values a model wrote in a shape the protocol does not take, rewritten into the one it does.
+///
+/// Repair rather than refusal, because the refusal was tried. `{"type": "vector2", "value": {"x":
+/// 32, "y": 48}}` is what one live turn wrote thirteen times in a single run; the refusal was then
+/// taught to print the exact value to send instead, and the next run wrote it four more times in a
+/// row, each answered with `Send {"type": "vector2", "value": [32, 48]}` and each ignored. A
+/// correction a model will not read is one that cannot help it, and the numbers were never in doubt.
+///
+/// Only where the order is not a guess — the same table the correction is printed from — and only
+/// for a parameter the operation declares as a tagged value, so this can never reach a key that
+/// means something else. Everything it does not recognise is left exactly as it arrived, for
+/// [`check`] to refuse by name.
+///
+/// The structure of a call is repaired a layer above this, in the worker's `prepareArguments`:
+/// which operation an entry is, which list it belongs in, where its wrapper went. That layer needs
+/// the parameter list and nothing else. This one needs the tag table, which is here.
+pub fn repair(domain: &str, op: &str, params: &mut Value) {
+    let Some(spec) = params_of(domain, op) else {
+        return;
+    };
+    repair_set(spec, params);
+}
+
+fn repair_set(spec: &[Param], params: &mut Value) {
+    let Some(object) = params.as_object_mut() else {
+        return;
+    };
+    for param in spec {
+        let Some(held) = object.get_mut(param.name) else {
+            continue;
+        };
+        match param.kind {
+            Kind::Tagged => repair_tagged(held),
+            Kind::List if !param.entry.is_empty() => {
+                if let Some(items) = held.as_array_mut() {
+                    for item in items {
+                        repair_set(param.entry, item);
+                    }
+                }
+            }
+            Kind::Object if !param.entry.is_empty() => repair_set(param.entry, held),
+            _ => {}
+        }
+    }
+}
+
+fn repair_tagged(held: &mut Value) {
+    let Some(tag) = held.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    let Some((_, Payload::Numbers(count))) = TAGS.iter().find(|(name, _)| *name == tag) else {
+        return;
+    };
+    let Some(inner) = held.get("value") else {
+        return;
+    };
+    let Some(numbers) = numbers_under_names(inner, *count) else {
+        return;
+    };
+    let listed = Value::Array(numbers.into_iter().cloned().map(Value::Number).collect());
+    if let Some(object) = held.as_object_mut() {
+        object.insert("value".to_owned(), listed);
+    }
+}
+
 /// The names a model reaches for when it writes a vector as an object, in the order the protocol
 /// wants the numbers in.
 ///
@@ -2243,9 +2308,106 @@ mod tests {
         assert!(refused.contains("an array of 2 numbers"), "{refused}");
     }
 
+    /// The shape the correction could not stop, repaired instead.
+    ///
+    /// Every value here was written by a live turn against a local Qwen3.6-27B driving a real
+    /// editor: a vector2 and a float on `set_property`, a vector2 inside `set_properties`.
+    #[test]
+    fn a_vector_written_as_an_object_is_repaired_before_it_is_checked() {
+        let mut one = json!({
+            "node": "/Main/Player",
+            "property": "position",
+            "value": {"type": "vector2", "value": {"x": 32, "y": 48}}
+        });
+        repair("godot_node", "set_property", &mut one);
+        assert_eq!(one["value"], json!({"type": "vector2", "value": [32, 48]}));
+        assert!(check("godot_node", "set_property", &one).is_ok());
+
+        // Inside a list parameter's entries, and beside an entry that was already right.
+        let mut listed = json!({
+            "properties": [
+                {
+                    "node": "/Main/Floor",
+                    "property": "position",
+                    "value": {"type": "vector2", "value": {"x": 0, "y": -100}}
+                },
+                {
+                    "node": "/Main/Floor",
+                    "property": "visible",
+                    "value": {"type": "bool", "value": true}
+                }
+            ]
+        });
+        repair("godot_node", "set_properties", &mut listed);
+        assert_eq!(
+            listed["properties"][0]["value"],
+            json!({"type": "vector2", "value": [0, -100]})
+        );
+        assert_eq!(
+            listed["properties"][1]["value"],
+            json!({"type": "bool", "value": true})
+        );
+        assert!(check("godot_node", "set_properties", &listed).is_ok());
+
+        // A colour, whose four names are the other order the table knows.
+        let mut colour = json!({
+            "node": "/Main/Player",
+            "property": "modulate",
+            "value": {"type": "color", "value": {"r": 1, "g": 0.5, "b": 0.25, "a": 1}}
+        });
+        repair("godot_node", "set_property", &mut colour);
+        assert_eq!(
+            colour["value"],
+            json!({"type": "color", "value": [1, 0.5, 0.25, 1]})
+        );
+    }
+
+    /// Everything the table cannot order is left exactly as it arrived, for `check` to refuse.
+    ///
+    /// The same run wrote `an object holding x` for a float and `an object holding origin, x, y`
+    /// for a transform2d. Neither is a vector written under names; both are the model inventing a
+    /// shape, and a guess at what it meant would be worse than the sentence that names it.
+    #[test]
+    fn a_value_nobody_can_order_is_left_for_the_refusal_to_name() {
+        for (property, value) in [
+            ("rotation", json!({"type": "float", "value": {"x": 1.5}})),
+            (
+                "transform",
+                json!({"type": "transform2d", "value": {"origin": [0, 0], "x": [1, 0], "y": [0, 1]}}),
+            ),
+            (
+                "rect",
+                json!({"type": "rect2", "value": {"top": 0, "left": 1, "width": 2, "height": 3}}),
+            ),
+        ] {
+            let mut written = json!({"node": "/Main/Player", "property": property, "value": value});
+            let before = written.clone();
+            repair("godot_node", "set_property", &mut written);
+            assert_eq!(written, before, "{property}");
+            assert!(
+                check("godot_node", "set_property", &written).is_err(),
+                "{property}"
+            );
+        }
+
+        // And a value that was already right is not touched.
+        let mut right = json!({
+            "node": "/Main/Player",
+            "property": "script",
+            "value": {"type": "resource", "value": {"path": "res://scripts/player.gd"}}
+        });
+        let before = right.clone();
+        repair("godot_node", "set_property", &mut right);
+        assert_eq!(right, before);
+    }
+
     /// A live run wrote `{"x": 32, "y": 32}` for a vector2 thirteen times and was refused thirteen
     /// times. The sentence said what was wanted and never what to send, so the numbers it already
     /// had were never handed back to it in the right shape.
+    ///
+    /// An agent call no longer reaches this: [`repair`] runs first and the value is already an
+    /// array by the time `check` sees it. The sentence is still what the renderer and the addon's
+    /// own backstop answer with, and it is still what a shape the repair declines comes back as.
     #[test]
     fn a_vector_written_as_an_object_is_refused_with_the_value_it_should_have_sent() {
         let refused = message(

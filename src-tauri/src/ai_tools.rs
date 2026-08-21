@@ -1233,7 +1233,15 @@ fn dispatch_under<R: Runtime>(
     if request.params.get(PROBE_KEY).and_then(Value::as_bool) == Some(true) {
         return probe(domain.name);
     }
-    let entries = requested_operations(domain, &request.params)?;
+    let mut entries = requested_operations(domain, &request.params)?;
+
+    // The shapes a model writes that mean exactly one thing, put into the shape the protocol takes,
+    // before anything is held to it. See `tool_params::repair` for why this is a repair and not a
+    // refusal: the refusal was tried, and it printed the right answer into a call that was made
+    // again unchanged four times.
+    for entry in &mut entries {
+        crate::tool_params::repair(domain.name, &entry.op, &mut entry.params);
+    }
 
     // Everything that can refuse the call is answered before any of it runs. A list applied half
     // way and then refused is the worst of both: the model cannot tell what landed, and the
