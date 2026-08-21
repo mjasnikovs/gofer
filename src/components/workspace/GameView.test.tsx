@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {cleanup, render, screen, waitFor} from '@testing-library/react'
+import {act, cleanup, render, screen, waitFor} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {GameView} from './GameView'
 import {InEditorSession} from '../../test/editor-session'
@@ -25,6 +25,15 @@ function surface(state: GodotSessionState) {
             view.rerender(inSession(next))
         }
     })
+}
+
+/** A promise this test settles itself, so the order of an answer and a re-render is not a race. */
+function deferred<T>() {
+    let settle!: (value: T) => void
+    const promise = new Promise<T>(resolve => {
+        settle = resolve
+    })
+    return {promise, settle}
 }
 
 /** Astryx keeps a refusing button focusable, so it says so with ARIA rather than the attribute. */
@@ -82,11 +91,18 @@ describe('the game surface', () => {
     it('shows the frame of the run it has just started', async () => {
         const user = userEvent.setup()
         const call = surface('ready')
-        call.mockImplementation(() => Promise.resolve({frame: FRAME}))
+        // The answer is held rather than resolved, because the order is the whole subject: the
+        // editor moves into playing while Run's own call is still in flight, and the frame that
+        // call answers with belongs to the run that bump describes. Resolving it immediately left
+        // that order to a microtask, and under the load of a full gate it came out the other way —
+        // the panel said "No frame captured" over a game it had just started.
+        const held = deferred<{frame: typeof FRAME}>()
+        call.mockImplementation(() => held.promise)
         await user.click(screen.getByRole('button', {name: 'Run'}))
-        // Starting the game is what moves the editor into playing, and the panel is re-rendered
-        // with that state around the answer rather than after it.
         call.replay('playing')
+        await act(async () => {
+            held.settle({frame: FRAME})
+        })
 
         await waitFor(() => {
             expect(screen.getByAltText(/the running game/i)).toBeInTheDocument()
