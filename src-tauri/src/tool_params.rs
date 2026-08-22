@@ -2090,6 +2090,7 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     // meant, because one guess in a sentence beats none; this renames only when the key could
     // have meant exactly one, and only when that parameter is not already there. Anything else is
     // left where it is for `check` to refuse by name, with the hint still saying what to try.
+    put_the_pair_back(spec, object);
     let wanted: Vec<(String, &'static str)> = object
         .keys()
         .filter(|key| {
@@ -2314,6 +2315,65 @@ fn torn_object(key: &str, value: Option<&Value>) -> String {
     )
 }
 
+/// Puts back a parameter whose whole `'name': 'value',` fragment tore into the key.
+///
+/// [`only_one_meaning`] renames a torn key only when the *value beside it* carries a letter or a
+/// digit, because `"name': ": ", "` would otherwise register an autoload called `, `. That rule is
+/// right and this is the case it cannot reach: the value is not beside the key, it is **inside**
+/// it.
+///
+/// ```text
+/// "node': '/GameLevel/Ground', ": ", "
+/// ```
+///
+/// The model rendered a Python dictionary into its JSON — `{'node': '/GameLevel/Ground', …}` — and
+/// one whole pair became a key, with the leftover comma and space as its value. The path is not
+/// wreckage; it is the thing the call was about. One live turn building a large project met this
+/// **thirteen times**: six `set_cells`, four `set_property`, three `create`, each carrying the node
+/// path it wanted.
+///
+/// Only when every part of it is unambiguous: the name is a real parameter of this operation, that
+/// parameter takes a string, it is not already there, and no second torn key names it too. Anything
+/// else is left for the refusal, which already prints the whole fragment.
+fn put_the_pair_back(spec: &[Param], object: &mut serde_json::Map<String, Value>) {
+    let found: Vec<(String, &'static str, String)> = object
+        .keys()
+        .filter(|key| !spec.iter().any(|param| param.name == key.as_str()))
+        .filter_map(|key| {
+            let (name, value) = a_quoted_pair(key)?;
+            let param = spec
+                .iter()
+                .find(|param| !param.hidden && param.name == name)?;
+            fits(param.kind, &Value::String(value.to_owned()))
+                .then(|| (key.clone(), param.name, value.to_owned()))
+        })
+        .filter(|(_, name, _)| !object.contains_key(*name))
+        .collect();
+    for (torn, name, value) in &found {
+        if found.iter().filter(|(_, other, _)| other == name).count() > 1 {
+            continue;
+        }
+        object.remove(torn.as_str());
+        object.insert((*name).to_owned(), Value::String(value.clone()));
+    }
+}
+
+/// A key that is a whole `name': 'value',` fragment, read back as the two it was.
+///
+/// Deliberately strict. The quotes have to be there — `name': null, ` and `parent**: false, ` carry
+/// no value to recover and stay refused — and nothing may follow the closing quote but a comma and
+/// whitespace.
+fn a_quoted_pair(key: &str) -> Option<(&str, &str)> {
+    let (name, rest) = key.split_once('\'')?;
+    if !could_be_a_name(name) {
+        return None;
+    }
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let (value, tail) = rest.strip_prefix('\'')?.split_once('\'')?;
+    let tail = tail.trim();
+    (tail.is_empty() || tail == ",").then_some((name, value))
+}
+
 /// The one parameter a key could have been meant as, or nothing when it could have been two.
 ///
 /// A key that is not shaped like a name has torn out of an object, and then the value beside it
@@ -2424,6 +2484,69 @@ mod tests {
     /// a third of everything it did — each answered with ``Did you mean `name`?`` and each resent
     /// unchanged. `tile` is the counter-case the catalogue actually holds: `create_tileset` takes
     /// both `tileSize` and `tiles`, so `tile` names neither and stays for `check` to refuse.
+    /*
+     * A whole `'name': 'value',` fragment that tore into a key is put back as both.
+     *
+     * `only_one_meaning` renames a torn key only when the value *beside* it carries a letter or a
+     * digit — otherwise `"name': ": ", "` registers an autoload called `, `. This is the case that
+     * rule cannot reach: the value is inside the key, not beside it. One live turn building a large
+     * project met it thirteen times — six `set_cells`, four `set_property`, three `create` — each
+     * key carrying the node path the call was about, with `", "` as its value.
+     */
+    #[test]
+    fn a_pair_that_tore_into_its_key_is_put_back() {
+        let mut torn = json!({
+            "node': '/GameLevel/Ground', ": ", ",
+            "cells": [{"x": 0, "y": 0, "atlas": [0, 0]}]
+        });
+        repair("godot_node", "set_cells", &mut torn);
+        assert_eq!(torn["node"], json!("/GameLevel/Ground"), "{torn}");
+        assert!(torn.get("node': '/GameLevel/Ground', ").is_none(), "{torn}");
+        check_ok("godot_node", "set_cells", torn);
+
+        // Both halves of one call, and a `create` shape from the same turn.
+        let mut two = json!({
+            "parent': '/GameLevel', ": ", ",
+            "type": "Node2D",
+            "name": "Pickups"
+        });
+        repair("godot_node", "create", &mut two);
+        assert_eq!(two["parent"], json!("/GameLevel"), "{two}");
+        check_ok("godot_node", "create", two);
+
+        // Nothing to recover: these carry no quoted value and stay refused, which is the rule
+        // `only_one_meaning` already gets right.
+        for (op, key) in [
+            ("set_cells", "node': null, "),
+            ("create", "parent**: false, "),
+            ("create", "parent: '/A'"),
+        ] {
+            let mut hopeless = json!({key.to_owned(): ", "});
+            repair("godot_node", op, &mut hopeless);
+            assert!(
+                hopeless.get(key).is_some(),
+                "{key} must not be recovered: {hopeless}"
+            );
+        }
+
+        // A name that is not a parameter of this operation is not one to put back.
+        let mut elsewhere = json!({"nonesuch': '/A', ": ", "});
+        repair("godot_node", "set_cells", &mut elsewhere);
+        assert!(elsewhere.get("nonesuch': '/A', ").is_some(), "{elsewhere}");
+
+        // A parameter already carrying a value is not overwritten by a fragment.
+        let mut held = json!({"node': '/Wrong', ": ", ", "node": "/Right",
+                              "cells": [{"x": 0, "y": 0, "atlas": [0, 0]}]});
+        repair("godot_node", "set_cells", &mut held);
+        assert_eq!(held["node"], json!("/Right"), "{held}");
+
+        // And a parameter that does not take a string is left alone: the fragment carries text.
+        let mut wrong_kind = json!({"index': '3', ": ", ", "parent": "/A", "type": "Node2D",
+                                    "name": "N"});
+        repair("godot_node", "create", &mut wrong_kind);
+        assert!(wrong_kind.get("index").is_none(), "{wrong_kind}");
+    }
+
     /*
      * A lone value in a list is the value, in a box.
      *
