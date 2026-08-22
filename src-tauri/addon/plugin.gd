@@ -1635,9 +1635,35 @@ func _readback_error(
     described["found"] = str(found)
     return Params.error(
         "readback_mismatch",
-        "%s: the write asked for %s and Godot holds %s" % [what, str(wanted), str(found)],
+        (
+            "%s: the write asked for %s and Godot holds %s%s"
+            % [what, str(wanted), str(found), _instead_of(String(details.get("property", "")))]
+        ),
         described
     )
+
+## The properties a caller reaches for that no scene can hold, and the ones that do the same job.
+##
+## `anchors_preset` is the inspector's own control rather than a value a node stores. Measured on a
+## real 4.7.2 editor: a `Panel` under a `Control`, a `VBoxContainer`, a `Panel` inside one, and a
+## preset out of range — every write reads back 0, and the four anchors under it do not move either.
+## Setting those four directly works exactly as asked. So the write is honestly refused; what was
+## missing is the sentence saying which four to write instead.
+##
+## Watched in three live turns, all of them laying out a UI: a full-screen panel is the commonest
+## thing anyone asks a Control for, and this is the property everybody reaches for to get one.
+const NO_SCENE_HOLDS := {
+    "anchors_preset":
+    (
+        " `anchors_preset` is the editor inspector's own control and no scene stores it, so this"
+        + " write can never take. Set anchor_left, anchor_top, anchor_right and anchor_bottom"
+        + " instead — 0 and 1 are the edges, so 0, 0, 1, 1 is the whole parent — with offset_right"
+        + " and offset_bottom at 0 to sit flush."
+    ),
+}
+
+func _instead_of(property: String) -> String:
+    return String(NO_SCENE_HOLDS.get(property, ""))
 
 ## Whether a value read back out of Godot is the value that was written into it.
 ##

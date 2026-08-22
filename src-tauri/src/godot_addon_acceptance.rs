@@ -2341,3 +2341,107 @@ fn undo_answers_for_the_editors_history_across_a_scene_switch() {
         "redo must restore the node"
     );
 }
+
+/*
+ * A full-screen panel: the refusal names the four properties that do the job.
+ *
+ * `anchors_preset` is the inspector's own control and no scene stores it. Measured here and in
+ * three shapes beside it — a `Panel` under a `Control`, a `VBoxContainer`, a `Panel` inside one,
+ * and a preset out of range — every write reads back 0, and the anchors under it do not move. It is
+ * also the property every model reaches for, because a full-screen panel is the commonest thing
+ * anyone asks a `Control` for: three live UI turns hit it.
+ *
+ * So the write stays refused, and the refusal carries the way onward. The second half of this test
+ * is that way onward actually working.
+ */
+#[test]
+fn the_preset_no_scene_holds_names_the_anchors_that_do() {
+    let mut session = Session::start();
+    let scene = "res://anchors.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/anchors", "name": "Target", "type": "Panel"}),
+    );
+
+    let refused = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/anchors/Target",
+            "property": "anchors_preset",
+            "value": {"type": "int", "value": 15},
+        }),
+        Some(session.revision()),
+    );
+    assert!(
+        refused.starts_with("readback_mismatch"),
+        "a write no scene can hold is still a failed write: {refused}"
+    );
+    for named in [
+        "anchor_left",
+        "anchor_top",
+        "anchor_right",
+        "anchor_bottom",
+        "offset_right",
+        "offset_bottom",
+    ] {
+        assert!(
+            refused.contains(named),
+            "the refusal must name {named}: {refused}"
+        );
+    }
+
+    // And what it names works, which is the half that makes the sentence worth reading.
+    let at = |name: &str, value: f64| {
+        json!({
+            "node": "/anchors/Target",
+            "property": name,
+            "value": {"type": "float", "value": value},
+        })
+    };
+    session.mutate(
+        "node.set_properties",
+        json!({
+            "scene": scene,
+            "properties": [
+                at("anchor_left", 0.0),
+                at("anchor_top", 0.0),
+                at("anchor_right", 1.0),
+                at("anchor_bottom", 1.0),
+                at("offset_right", 0.0),
+                at("offset_bottom", 0.0),
+            ],
+        }),
+    );
+    let held = session.call(
+        "node.inspect",
+        json!({"scene": scene, "node": "/anchors/Target"}),
+    );
+    let properties = held["properties"].as_array().expect("properties");
+    let value_of = |want: &str| {
+        properties
+            .iter()
+            .find(|one| one["name"] == want)
+            .map(|one| one["value"]["value"].clone())
+            .unwrap_or(Value::Null)
+    };
+    assert_eq!(value_of("anchor_right"), json!(1.0));
+    assert_eq!(value_of("anchor_bottom"), json!(1.0));
+
+    // An ordinary refusal is unchanged: only the property that cannot be written gains a sentence.
+    let ordinary = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/anchors/Target",
+            "property": "nothing_of_the_sort",
+            "value": {"type": "int", "value": 1},
+        }),
+        Some(session.revision()),
+    );
+    assert!(!ordinary.contains("anchor_left"), "{ordinary}");
+}
