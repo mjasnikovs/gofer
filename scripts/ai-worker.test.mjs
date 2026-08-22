@@ -784,11 +784,12 @@ async function declaredDomains() {
 }
 
 /**
- * Every distinct `ops` shape a model wrote across sixteen real tasks validates against the schema.
+ * Every distinct `ops` shape a model wrote across real work validates against the schema.
  *
- * `fixtures/recorded-tool-calls.json` is 712 calls from a live project reduced to their 93 distinct
- * operation lists. The Rust gate has its own pass over the same file; this one is the layer above
- * it, where the agent loop refuses a call before the router ever sees it.
+ * `fixtures/recorded-tool-calls.json` is 712 calls from a live project reduced to their distinct
+ * operation lists, and 178 more from five live turns against a real editor. The Rust gate has its
+ * own pass over the same file; this one is the layer above it, where the agent loop refuses a call
+ * before the router ever sees it.
  */
 test('every recorded ops shape validates against the advertised schema', async () => {
     const recorded = JSON.parse(
@@ -808,6 +809,32 @@ test('every recorded ops shape validates against the advertised schema', async (
         checked += 1
     }
     assert.ok(checked > 50, 'the fixture lost its cases')
+})
+
+/**
+ * Every shape the same recording needed repairing into, repaired into exactly that.
+ *
+ * The `repairs` half of the fixture is the calls a model wrote that the router would have refused
+ * as written. All nine are the same one: a tagged value wrapped in a second copy of its own tag.
+ * Across those five turns the model wrote 86 tagged values, 41 of them double-wrapped, and 22 of
+ * the 41 spelled the inner tag with the engine's capital — `{type: "string", value: {type:
+ * "String", …}}`. Those 22 were refused, because the unwrapper compared the two tags exactly.
+ */
+test('every recorded shape the normalizer repairs is repaired into the shape it names', async () => {
+    const recorded = JSON.parse(
+        await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
+    )
+    const domains = await declaredDomains()
+    assert.ok(recorded.repairs.length > 5, 'the fixture lost its repairs')
+    for (const repair of recorded.repairs) {
+        const domain = domains.find(candidate => candidate.name === repair.tool)
+        assert.ok(domain, `${repair.tool} is recorded and is not advertised`)
+        assert.deepEqual(
+            normalizeToolCalls(domain.operations, {ops: repair.ops}),
+            {ops: repair.repaired},
+            `${repair.tool} ${JSON.stringify(repair.ops).slice(0, 120)}`
+        )
+    }
 })
 
 /**
@@ -1295,6 +1322,55 @@ test('a tagged value wrapped twice is unwrapped rather than refused', () => {
         }
     )
 
+    // The protocol's word outside and the engine's inside. One live turn wrote
+    // `{type: "string", value: {type: "String", value: "Resume"}}` and was refused sixteen times
+    // over twelve minutes, while `{type: "bool", value: {type: "bool", value: false}}` in the same
+    // call went straight through. No two protocol tags differ only in case, so folding it is safe,
+    // and the value that comes out carries the lowercase spelling whichever side wrote it.
+    for (const wrapper of [
+        {type: 'string', value: {type: 'String', value: 'Resume'}},
+        {type: 'String', value: {type: 'string', value: 'Resume'}}
+    ])
+        assert.deepEqual(
+            normalizeToolCalls(node, {
+                ops: [{op: 'set_property', node: '/Resume', property: 'text', value: wrapper}]
+            }),
+            {
+                ops: [
+                    {
+                        op: 'set_property',
+                        node: '/Resume',
+                        property: 'text',
+                        value: {type: 'string', value: 'Resume'}
+                    }
+                ]
+            }
+        )
+
+    // Two tags that are genuinely different are still left for the router, which says what it got.
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/Player',
+                    property: 'speed',
+                    value: {type: 'int', value: {type: 'float', value: 1}}
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/Player',
+                    property: 'speed',
+                    value: {type: 'int', value: {type: 'float', value: 1}}
+                }
+            ]
+        }
+    )
+
     // Inside a list parameter's entries too, which is where `set_properties` carries them.
     assert.deepEqual(
         normalizeToolCalls(node, {
@@ -1474,8 +1550,44 @@ test('captured frames become image content and large results are bounded', () =>
     assert.equal(files[99].path, 'scripts/s99.gd')
     assert.equal(new Set(files.map(file => file.text.length)).size, 1)
 
-    // Nothing long enough to cut, and still too big: the slice is the answer of last resort, and it
-    // is the behaviour every oversized answer used to get.
+    // An answer that is repetition rather than one big value: the list loses its tail, and every
+    // entry that stays is whole.
+    //
+    // Capping cannot reach the budget here and every cap makes it worse: `godot_node inspect` on a
+    // Control is four hundred short properties whose longest string is 35 characters, and
+    // `… [truncated, N characters]` is 28. Measured on exactly that answer before this: the search
+    // bottomed out, every property name became `… [truncated, 35 characters]`, the result was
+    // sliced anyway, and what reached the model was 24,031 characters of unparseable rubble
+    // claiming 45,680 characters had been dropped — more than the answer had ever held.
+    const wide = toolResult({
+        ops: [
+            {
+                op: 'inspect',
+                result: {
+                    path: '/Main/Panel',
+                    type: 'PanelContainer',
+                    properties: Array.from({length: 400}, (_, i) => ({
+                        name: `theme_override_constants/margin_${String(i)}`,
+                        value: {type: 'int', value: i},
+                        stored: false
+                    }))
+                }
+            }
+        ]
+    })
+    assert.ok(wide.content[0].text.length <= 24_000)
+    const inspected = JSON.parse(wide.content[0].text).ops[0].result
+    assert.equal(inspected.type, 'PanelContainer', 'the keys around the list all survive')
+    assert.ok(inspected.properties.length > 40, 'a useful number of entries survives whole')
+    assert.deepEqual(
+        inspected.properties[0],
+        {name: 'theme_override_constants/margin_0', value: {type: 'int', value: 0}, stored: false},
+        'and the ones that survive are untouched, names and all'
+    )
+    assert.match(inspected.properties.at(-1), /^… \[truncated, \d+ more entries\]$/u)
+
+    // Nothing long enough to cut, no list to shorten, and still too big: the slice is the answer of
+    // last resort, and it is the behaviour every oversized answer used to get.
     const many = toolResult(Object.fromEntries(Array.from({length: 4_000}, (_, i) => [`k${i}`, i])))
     assert.ok(many.content[0].text.length <= 24_100)
     assert.match(many.content[0].text, /… \[truncated, \d+ characters\]$/u)

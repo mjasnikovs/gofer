@@ -207,6 +207,14 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     // under the root window — and it stays a separate concept from the edited scene's tree.
     let tree = session.call("runtime.get_tree", json!({}));
     assert_eq!(tree["truncated"], false);
+    // Whether the tree is paused, which belongs to the SceneTree and not to any node — so
+    // `inspect_node` cannot reach it. Two live turns asked for it as a property of `/root` and were
+    // told `/root has no property 'paused'`, which is true and no use. It rides with the tree
+    // because the tree is what gets asked for.
+    assert_eq!(
+        tree["paused"], false,
+        "a game nobody paused reports the tree it actually has: {tree}"
+    );
     let names: Vec<&str> = tree["root"]["children"]
         .as_array()
         .expect("root children")
@@ -259,6 +267,23 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     assert!(
         capped["frames"].as_i64().expect("frames") < 100_000,
         "the duration has to end a frame count it outlives: {capped}"
+    );
+
+    // And the game the wait is waiting on is actually running.
+    //
+    // It was not. Both fixtures set `window/size/no_focus` so a test game cannot take the
+    // developer's keystrokes, and an X11 window that is never focused is never given a vblank —
+    // so every frame Godot waited for one and timed out at about half a second. Measured
+    // interleaved: 2.0 frames a second with the setting, 1125 without it, 3200 with it and vsync
+    // off. Every runtime test above this line, and every live agent verifying its own game, was
+    // watching something that rendered five frames in four seconds. The fixtures now cap at 60,
+    // so half a second is thirty frames; five is a long way under that and a long way over the one
+    // the throttle allowed.
+    let rate = session.call("runtime.wait", json!({"ms": 500}));
+    assert!(
+        rate["frames"].as_i64().expect("frames") > 5,
+        "half a second of game time has to be more than a handful of frames, or the game under \
+         test is not running: {rate}"
     );
 
     // The edited scene cannot be mutated while the game is playing, and the refusal has to say

@@ -257,7 +257,14 @@ export function validateBashCommand(command) {
         /\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)(?![\w-])/gu,
         'standard-stream'
     )
-    if (/(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|\/)/u.test(probed))
+    // And a lone `/` with a space after it is a division sign, not a path. `1 / 2` opens an
+    // argument with a slash exactly the way `/etc/passwd` does, and the rule refused both — so
+    // `python3 -c "print(math.sin(2 * math.pi * i / 44100))"`, `awk '{print $1 / $2}'` and
+    // `echo $((10 / 2))` were all told they named an absolute path. A live turn met it generating
+    // a .wav and never got the file written. A path has something after its slash; arithmetic has
+    // whitespace. `ls /` — a slash at the end of the command — is still the root and still refused,
+    // because arithmetic needs a right-hand side and a bare root reference does not.
+    if (/(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|\/(?!\s))/u.test(probed))
         throw new Error(
             'Shell commands take paths relative to the workspace, and this one names an absolute '
                 + 'path or one that climbs out. The shell already runs in the workspace root, so '
@@ -337,6 +344,27 @@ const BASH_IS_CONFINED =
     + ' relative to that root, and an absolute path, or one that climbs out with .. or ~, is'
     + ' refused before the command runs.'
 
+/**
+ * How long a shell command may run before the turn takes its request back.
+ *
+ * pi's bash tool takes a timeout and defaults to none: "Timeout in seconds (optional, no default
+ * timeout)". A model never sets one, so a command that does not return holds the turn until
+ * something outside kills it. Watched live: `godot --headless --script scripts/main.gd` — an editor
+ * with no `--quit`, which never exits — ran for **seventeen minutes** while the turn sat on it, and
+ * the run had nothing else to show for its budget.
+ *
+ * Two minutes is chosen against what real commands cost in the recordings: the slowest honest one
+ * is a headless import at 2.6 seconds, and a `godot --headless --run` the agent bounded itself was
+ * given 5. Nothing legitimate is near this. A command that genuinely needs longer can still say so,
+ * because the parameter is the model's and this only fills it in when it was left out.
+ */
+const SHELL_DEADLINE_SECONDS = 120
+
+/** The same call, with a deadline on it when the caller named none. */
+function withADeadline(params) {
+    return params?.timeout === undefined ? {...params, timeout: SHELL_DEADLINE_SECONDS} : params
+}
+
 export function confineTool(tool, workspacePath, frozen = []) {
     return {
         ...tool,
@@ -346,7 +374,7 @@ export function confineTool(tool, workspacePath, frozen = []) {
             if (tool.name === 'bash') {
                 validateBashCommand(params.command)
                 refuseFrozenShellWrite(params.command, frozen)
-                return tool.execute(id, params, signal, onUpdate, context)
+                return tool.execute(id, withADeadline(params), signal, onUpdate, context)
             }
             const resolved = {...params, path: worktreePath(params.path)}
             await validateToolPath(workspacePath, resolved.path)

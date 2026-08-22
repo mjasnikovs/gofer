@@ -290,19 +290,94 @@ impl AddonStager {
 }
 
 /// Reports who owns `addons/gofer` in this worktree.
+///
+/// The manifest answers it whenever it parses — including when it names somebody else, which is
+/// the case this refusal exists for. Only when it is missing or unreadable do the contents answer,
+/// because a manifest is a file like any other and a session that dies mid-write leaves a broken
+/// one — after which every `godot_session start` answers
+/// `addon_stage_failed: addons/gofer exists but was not installed by Gofer`, for ever, about a
+/// directory Gofer itself put there. Watched in a live turn: three starts refused, and the agent
+/// only got its editor back by running `rm -rf addons/gofer` on a guess. Reproduced without an
+/// editor by truncating the manifest.
+///
+/// Reading the contents is safe because it is a question about *names*, not versions: a directory
+/// holding nothing but files Gofer stages — and the `.uid` sidecars Godot writes beside them — is
+/// Gofer's, whatever state its manifest is in. One file Gofer never writes and it is somebody
+/// else's, which is the case this refusal exists for and which stays refused.
 pub fn managed_state(workspace: &Workspace) -> Result<Managed, FileError> {
-    if !workspace.resolve(ADDON_DIRECTORY)?.exists() {
+    let directory = workspace.resolve(ADDON_DIRECTORY)?;
+    if !directory.exists() {
         return Ok(Managed::Absent);
     }
-    let manifest = match workspace.read(MANIFEST_PATH) {
-        Ok(contents) => contents,
-        Err(error) if error.code == "not_found" => return Ok(Managed::Foreign),
-        Err(_) => return Ok(Managed::Foreign),
-    };
-    match serde_json::from_str::<AddonManifest>(&manifest.text) {
-        Ok(manifest) if manifest.managed_by == MANAGED_BY => Ok(Managed::Gofer(manifest)),
-        _ => Ok(Managed::Foreign),
+    // An empty `addons/gofer` is nobody's addon. It is the husk a session that died left behind,
+    // and it is what a live turn actually met: `ls addons/gofer/` printed nothing, and
+    // `godot_session start` still answered `addons/gofer exists but was not installed by Gofer`
+    // until the agent guessed at `rm -rf addons/gofer`. Absent is the truth about it, and staging
+    // then proceeds the way it does into a worktree that never had one.
+    if std::fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none()) {
+        return Ok(Managed::Absent);
     }
+    // A manifest that parses answers outright, either way. Somebody else saying they own this is
+    // the case the refusal is for, and no amount of familiar-looking filenames overrules it.
+    if let Ok(contents) = workspace.read(MANIFEST_PATH)
+        && let Ok(manifest) = serde_json::from_str::<AddonManifest>(&contents.text)
+    {
+        return Ok(if manifest.managed_by == MANAGED_BY {
+            Managed::Gofer(manifest)
+        } else {
+            Managed::Foreign
+        });
+    }
+    if holds_only_gofers_own_files(workspace) {
+        // The manifest is gone or unreadable and everything beside it is ours. Answering with the
+        // manifest this build would write lets `stage` replace the lot, which is the repair.
+        return Ok(Managed::Gofer(manifest()));
+    }
+    Ok(Managed::Foreign)
+}
+
+/// Whether `addons/gofer` is the addon Gofer stages, judged by the names in it.
+///
+/// Both halves, and both matter. **Every** file Gofer installs has to be there — a directory
+/// holding only a `gofer.manifest.json` nobody can parse is not a staged addon, it is a file
+/// somebody left in a folder, and it stays refused. And **nothing else** may be there, beyond the
+/// `.uid` sidecars Godot writes beside the scripts it imports, because one file Gofer never writes
+/// is somebody's work and that is what this refusal is for.
+///
+/// Names only, never contents: a file that differs is an addon from another Gofer version, which
+/// staging replaces anyway.
+fn holds_only_gofers_own_files(workspace: &Workspace) -> bool {
+    let Ok(directory) = workspace.resolve(ADDON_DIRECTORY) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return false;
+    };
+    let ours: Vec<String> = ADDON_FILES
+        .iter()
+        .filter_map(|(path, _)| {
+            Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .collect();
+    let manifest_name = Path::new(MANIFEST_PATH)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let bare = name.strip_suffix(".uid").unwrap_or(&name).to_owned();
+        if bare == manifest_name {
+            continue;
+        }
+        if !ours.contains(&bare) {
+            return false;
+        }
+        found.push(bare);
+    }
+    ours.iter().all(|one| found.contains(one))
 }
 
 pub fn manifest() -> AddonManifest {
@@ -842,6 +917,75 @@ mod tests {
             _home: home,
             _directory: directory,
         }
+    }
+
+    /// A manifest a dying session left half-written must not brick every start after it.
+    ///
+    /// Watched live: the session closed mid-request, and the next three `godot_session start`
+    /// calls answered `addon_stage_failed: addons/gofer exists but was not installed by Gofer` —
+    /// about a directory Gofer had staged itself. The agent got its editor back by guessing at
+    /// `rm -rf addons/gofer`. Reproduced here by truncating the manifest, which is what a write cut
+    /// short leaves.
+    #[test]
+    fn a_broken_manifest_over_gofers_own_files_is_still_gofers() {
+        let fixture = fixture();
+        fixture
+            .stager
+            .stage(&fixture.workspace)
+            .expect("first stage");
+        let held = fixture.workspace.read(MANIFEST_PATH).expect("the manifest");
+        fixture
+            .workspace
+            .write(MANIFEST_PATH, "{\"managedBy\"", Some(&held.hash))
+            .expect("truncate the manifest");
+
+        assert!(
+            matches!(
+                managed_state(&fixture.workspace).expect("state"),
+                Managed::Gofer(_)
+            ),
+            "a directory holding only Gofer's own files is Gofer's, manifest or no manifest"
+        );
+
+        // And the shape a live turn actually met: the directory survives with nothing in it. That
+        // is not somebody's addon, it is a husk, and `ls addons/gofer/` printing nothing is what
+        // the agent saw before it resorted to `rm -rf`.
+        for path in staged_files() {
+            ignore_missing(fixture.workspace.delete(&path, None)).expect("empty it out");
+            ignore_missing(fixture.workspace.delete(&format!("{path}.uid"), None)).expect("uid");
+        }
+        assert_eq!(
+            managed_state(&fixture.workspace).expect("state"),
+            Managed::Absent,
+            "an empty addons/gofer is nobody's addon"
+        );
+        fixture
+            .stager
+            .stage(&fixture.workspace)
+            .expect("staging into the husk is the repair");
+
+        // And the ledger of the session that staged it is gone too, which is what a second process
+        // sees. Staging has to succeed anyway: that is the repair.
+        let orphaned = AddonStager::new(fixture._home.path().join("another-ledger.json"));
+        orphaned
+            .stage(&fixture.workspace)
+            .expect("a leftover Gofer addon is restaged rather than refused");
+
+        // One file Gofer never writes, over a manifest that is broken again: somebody else's.
+        let restaged = fixture.workspace.read(MANIFEST_PATH).expect("the manifest");
+        fixture
+            .workspace
+            .write(MANIFEST_PATH, "{", Some(&restaged.hash))
+            .expect("break it again");
+        fixture
+            .workspace
+            .write("addons/gofer/their_own_plugin.gd", "extends Node\n", None)
+            .expect("a file of theirs");
+        assert_eq!(
+            managed_state(&fixture.workspace).expect("state"),
+            Managed::Foreign,
+            "a directory with somebody else's work in it stays refused"
+        );
     }
 
     fn project_text(fixture: &Fixture) -> String {

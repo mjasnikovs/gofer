@@ -285,14 +285,24 @@ function nameTheOperation(operations, entry) {
  * which of them is the real one is not this layer's to do — the router refuses it and says what it
  * received. A `resource`, whose payload is an object with a `path`, is untouched for the same
  * reason: it is not a tag inside a tag.
+ *
+ * The same tag, whatever case it is written in, because the two spellings are the protocol's and
+ * the engine's. `{type: "string", value: {type: "String", value: "Resume"}}` is one wrapper written
+ * by one model that knew both words: the protocol tag outside and Godot's own class name inside.
+ * It was refused sixteen times in one live turn — the same call resent unchanged, then split into
+ * single properties and resent again — and cost that turn most of its twelve minutes, while the
+ * `bool` beside it in the same call went through. Every tag the protocol carries is lowercase and
+ * no two of them differ only in case, so the comparison folds case and the unwrapped value keeps
+ * the lowercase spelling whichever side wrote it.
  */
 function unwrapDoubleTag(value) {
     if (!isObject(value) || typeof value.type !== 'string') return value
     const inner = value.value
-    if (!isObject(inner) || inner.type !== value.type) return value
+    if (!isObject(inner) || typeof inner.type !== 'string') return value
+    if (inner.type.toLowerCase() !== value.type.toLowerCase()) return value
     const keys = Object.keys(inner)
     if (keys.length !== 2 || !keys.includes('type') || !keys.includes('value')) return value
-    return unwrapDoubleTag({type: value.type, value: inner.value})
+    return unwrapDoubleTag({type: value.type.toLowerCase(), value: inner.value})
 }
 
 /**
@@ -372,6 +382,17 @@ export function normalizeToolCalls(operations, args) {
 }
 
 /**
+ * What goes inside a tagged value, said where the model is filling that field in.
+ *
+ * A live turn wrote `{type: "string", value: {type: "String", value: "Resume"}}` and was refused
+ * sixteen times over twelve minutes. Across five such turns 41 of 86 tagged values were wrapped
+ * twice. `normalizeToolCall` unwraps them; this stops most of them being written.
+ */
+const TAGGED_PAYLOAD =
+    'The payload is the bare value itself: a string, a number, an array of numbers, or {path} for'
+    + ' a resource. Never a second {type, value} pair around it.'
+
+/**
  * One parameter's kind as JSON Schema, from the kind the router enforces.
  *
  * The two are generated from the same table, so what the model is shown and what the call is held
@@ -400,11 +421,19 @@ function jsonSchemaOfKind(kind) {
         case 'choice':
             return {type: 'string', enum: kind.of ?? []}
         case 'tagged':
-            // The protocol's own `{type, value}` pair. `value` is deliberately unconstrained: what
-            // it may hold depends on `type`, and only the engine knows whether it fits.
+            // The protocol's own `{type, value}` pair. `value` carries no type, deliberately: what
+            // it may hold depends on `type`, and only the engine knows whether it fits. What it
+            // carries instead is the one sentence that stops the pair being written twice.
+            //
+            // Measured interleaved against a local Qwen3.6-27B, 15 seeds, one scenario that sets
+            // three properties: the shipped schema wrote a double-wrapped value in 12 turns of 15
+            // and in 36 of the 45 values it wrote. The same sentence appended to the operation's
+            // summary instead — where the tags are already listed with correct examples — reached
+            // 10 of 15. Here it reached 0 of 15 and 0 of 45. Prose the model reads is not prose the
+            // model is held to; this is the field it fills in.
             return {
                 type: 'object',
-                properties: {type: {type: 'string'}, value: {}},
+                properties: {type: {type: 'string'}, value: {description: TAGGED_PAYLOAD}},
                 required: ['type', 'value']
             }
         case 'either':
@@ -682,6 +711,28 @@ function cutString(text, keep) {
     return `${text.slice(0, Math.max(0, keep))}… [truncated, ${String(text.length)} characters]`
 }
 
+/** One list, shortened, with a last entry saying how many are missing. */
+function cutList(items, keep) {
+    const kept = items.slice(0, Math.max(0, keep))
+    return [...kept, `… [truncated, ${String(items.length - kept.length)} more entries]`]
+}
+
+/** Every list in a value, longest first, with the path that reaches it. */
+function listsIn(value) {
+    const found = []
+    const walk = (node, path) => {
+        if (Array.isArray(node)) {
+            found.push({path, items: node})
+            node.forEach((item, index) => walk(item, [...path, index]))
+            return
+        }
+        if (node !== null && typeof node === 'object')
+            for (const [key, item] of Object.entries(node)) walk(item, [...path, key])
+    }
+    walk(value, [])
+    return found.sort((one, other) => other.items.length - one.items.length)
+}
+
 /** Every string in a value, with the path that reaches it. */
 function stringsIn(value) {
     const found = []
@@ -738,16 +789,52 @@ function withStringsCappedAt(value, strings, cap) {
  * hundred scripts should each come back with its path and its first lines, not the first one whole
  * and ninety-nine missing.
  *
- * The search is over that length rather than over the answer: the structure around the strings costs
- * the same whatever they are cut to, so only the strings are measured again per candidate. An answer
- * with no string in it long enough to cut — thousands of small keys — falls back to the slice, which
- * is what every oversized answer used to get.
+ * Capping cannot save every answer, and on one shape it makes things worse: four hundred short
+ * properties whose longest string is 35 characters, where the marker that replaces one is 28. There
+ * the lists are shortened instead, longest first, and each says how many entries went — see
+ * [`withLongestListsShortened`]. The slice is what is left for an answer with neither a long string
+ * nor a list in it, thousands of small keys and nothing to cut, which is what every oversized answer
+ * used to get.
  */
 function withinBudget(value, budget) {
     const text = JSON.stringify(value ?? null)
     if (text.length <= budget) return text
     const strings = stringsIn(value)
     if (strings.length === 0) return cutString(text, budget)
+    const capped = withStringsCappedAt(value, strings, largestCapThatFits(value, strings, budget))
+    const shaped = JSON.stringify(capped ?? null)
+    if (shaped.length <= budget) return shaped
+
+    // Capping alone was not enough, so start again from the answer as it arrived rather than from
+    // the wreckage. Trimming lists keeps every string it keeps whole, and an answer whose problem
+    // is repetition — four hundred properties, a thousand cells — is far more readable as sixty
+    // whole entries and a count than as four hundred stubs.
+    const trimmed = withLongestListsShortened(value, budget)
+    const shortened = JSON.stringify(trimmed ?? null)
+    if (shortened.length <= budget) return shortened
+    // Both, for an answer that is long lists of long strings.
+    return withinBudgetOfLastResort(trimmed, budget)
+}
+
+/** Strings capped over an already-shortened answer, and the slice only if even that will not fit. */
+function withinBudgetOfLastResort(value, budget) {
+    const strings = stringsIn(value)
+    const text = JSON.stringify(value ?? null)
+    if (strings.length === 0) return text.length > budget ? cutString(text, budget) : text
+    const shaped = JSON.stringify(
+        withStringsCappedAt(value, strings, largestCapThatFits(value, strings, budget)) ?? null
+    )
+    return shaped.length > budget ? cutString(text, budget) : shaped
+}
+
+/**
+ * The longest every string can be cut to and still leave the whole answer inside the budget.
+ *
+ * Searched over that length rather than over the answer: the structure around the strings costs the
+ * same whatever they are cut to, so only the strings are measured again per candidate.
+ */
+function largestCapThatFits(value, strings, budget) {
+    const text = JSON.stringify(value ?? null)
     const structure =
         text.length - strings.reduce((total, one) => total + JSON.stringify(one.text).length, 0)
     const sizeAt = cap =>
@@ -765,8 +852,54 @@ function withinBudget(value, budget) {
         if (sizeAt(middle) <= budget) low = middle
         else high = middle - 1
     }
-    const shaped = JSON.stringify(withStringsCappedAt(value, strings, low) ?? null)
-    return shaped.length > budget ? cutString(shaped, budget) : shaped
+    return low
+}
+
+/**
+ * The answer with its longest list shortened until the whole thing fits, and its shape still intact.
+ *
+ * Capping strings cannot save an answer that is mostly structure. `godot_node inspect` on a Control
+ * is four hundred short properties: a 38,719-character answer whose longest string is 35 characters,
+ * so there is no cap that helps — and every cap makes it *worse*, because `… [truncated, N
+ * characters]` is 28 characters and most of the strings are shorter than that. Measured on exactly
+ * that answer: the search bottomed out, every property name became `… [truncated, 35 characters]`,
+ * and the result was sliced anyway. What the model received was 24,031 characters of unparseable
+ * rubble claiming 45,680 characters had been dropped — more than the answer had ever held.
+ *
+ * The list is what to cut there, because the entries are the repetition. The longest one loses its
+ * tail, then the next longest, and each says how many entries went. Every key survives, every entry
+ * that survives is whole, and the JSON still parses — which is the promise the string capping was
+ * written to keep and cannot keep alone.
+ *
+ * The slice is still the last resort, for an answer with neither a long string nor a list in it.
+ */
+function withLongestListsShortened(value, budget) {
+    let shaped = value
+    for (const {path} of listsIn(value)) {
+        const items = at(shaped, path)
+        if (!Array.isArray(items) || items.length < 2) continue
+        let low = 0
+        let high = items.length - 1
+        while (low < high) {
+            const middle = Math.ceil((low + high) / 2)
+            const fits =
+                JSON.stringify(replaceAt(shaped, path, cutList(items, middle)) ?? null).length
+                <= budget
+            if (fits) low = middle
+            else high = middle - 1
+        }
+        shaped = replaceAt(shaped, path, cutList(items, low))
+        if (JSON.stringify(shaped ?? null).length <= budget) return shaped
+    }
+    return shaped
+}
+
+/** The value at a path, or undefined where the path does not reach one. */
+function at(value, path) {
+    return path.reduce(
+        (held, step) => (held === undefined || held === null ? undefined : held[step]),
+        value
+    )
 }
 
 export function toolResult(result) {

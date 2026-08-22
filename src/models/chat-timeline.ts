@@ -58,17 +58,26 @@ export function withoutActivity(message: Message): Message {
  * A turn that ends early takes its unfinished tool calls with it. The backend stops streaming the
  * moment it is cancelled, so no `tool-end` is ever coming for a call still in flight: left alone it
  * would spin forever and read as an agent that is still working.
+ *
+ * The reason goes after whatever the call had already said, not instead of it. A call that reports
+ * progress has an `output` before it has an answer, and taking the first of the two left the
+ * progress standing as the result: one recorded row reads `Working — 2 steps so far: bash: pwd; …`
+ * as a sub-agent's whole answer to a question about a shader, marked failed, saying nothing about
+ * why. Both halves are worth keeping — the steps are what it managed, the reason is why there is
+ * no answer under them — and the row is stored with the chat, so whichever is dropped is dropped
+ * for good.
  */
 export function settleRunningTools(message: Message, reason: string): Message {
     if (!message.tools?.some(tool => tool.status === 'running' || tool.status === 'pending')) {
         return message
     }
     const endedAt = Date.now()
+    const settled = (output?: string) => (output === undefined ? reason : `${output}\n\n${reason}`)
     return {
         ...message,
         tools: message.tools.map(tool =>
             tool.status === 'running' || tool.status === 'pending' ?
-                {...tool, status: 'error' as const, output: tool.output ?? reason, endedAt}
+                {...tool, status: 'error' as const, output: settled(tool.output), endedAt}
             :   tool
         )
     }

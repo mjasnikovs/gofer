@@ -368,6 +368,37 @@ describe('settleRunningTools', () => {
         }
         expect(settleRunningTools(message, 'stopped')).toBe(message)
     })
+
+    /**
+     * A call that was reporting progress keeps what it said and is told why it stopped.
+     *
+     * One recorded row is a sub-agent asked why a blue tileset renders green, ended after two
+     * steps, and stored with `Working — 2 steps so far: bash: pwd; …` as its answer. The reason it
+     * ended was never written down, because the output it already had was taken instead.
+     */
+    it('adds the reason to a call that had already said something, rather than instead of it', () => {
+        const message: Message = {
+            ...assistant(),
+            tools: [
+                {
+                    id: 'a',
+                    name: 'subagent',
+                    status: 'running',
+                    startedAt: 1,
+                    output: 'Working — 2 steps so far:\nbash: pwd'
+                },
+                {id: 'b', name: 'bash', status: 'pending', startedAt: 1}
+            ]
+        }
+
+        const settled = settleRunningTools(message, 'The turn ended before this call finished.')
+
+        expect(settled.tools?.[0]?.output).toBe(
+            'Working — 2 steps so far:\nbash: pwd\n\nThe turn ended before this call finished.'
+        )
+        expect(settled.tools?.[1]?.output).toBe('The turn ended before this call finished.')
+        expect(settled.tools?.map(tool => tool.status)).toEqual(['error', 'error'])
+    })
 })
 
 describe('retryPlan', () => {

@@ -22,7 +22,8 @@
 //!   -- live_agent_acceptance --test-threads=1 --nocapture
 //! ```
 //!
-//! with `GOFER_LIVE_TASK` set, `GOFER_LIVE_OUT` naming a file for the events, and
+//! with `GOFER_LIVE_TASK` set, `GOFER_LIVE_OUT` naming a file for the events — its `.jsonl` sibling
+//! gets each event as it arrives, so a turn killed on a budget still leaves what it saw — and
 //! `GOFER_LIVE_BASE_URL` / `GOFER_LIVE_MODEL` naming the endpoint, and `GOFER_LIVE_FIXTURE`
 //! naming a project to work on other than the bare one — the defaults are a llama.cpp on
 //! `127.0.0.1:8080`. `GOFER_LIVE_KEEP` copies the worktree out before its temporary directory goes,
@@ -50,12 +51,52 @@ use tempfile::TempDir;
 /// path. `GOFER_LIVE_FIXTURE` names another directory to copy instead; `fixtures/live-project` is
 /// the one with an atlas, two scripts and a scene in it.
 fn live_worktree(directory: &TempDir) -> PathBuf {
-    let Ok(named) = std::env::var("GOFER_LIVE_FIXTURE") else {
-        return godot_editor_harness::fixture_worktree(directory);
+    let worktree = match std::env::var("GOFER_LIVE_FIXTURE") {
+        Err(_) => godot_editor_harness::fixture_worktree(directory),
+        Ok(named) => {
+            let worktree = directory.path().join("worktree");
+            godot_editor_harness::copy_tree(&PathBuf::from(named), &worktree);
+            crate::paths::canonical(&worktree).expect("canonical worktree")
+        }
     };
-    let worktree = directory.path().join("worktree");
-    godot_editor_harness::copy_tree(&PathBuf::from(named), &worktree);
-    crate::paths::canonical(&worktree).expect("canonical worktree")
+    make_it_a_repository(&worktree);
+    worktree
+}
+
+/// Gives the worktree a Git repository, because without one the agent can lock itself out.
+///
+/// `godot_session start` resolves the active task's workspace, and that resolution needs a repo:
+/// a plain copy answers `The project is not a Git repository`, which reaches the model as
+/// `no_active_task_workspace: A Godot session can only start for an active task branch`. The
+/// session this harness binds up front works anyway — until the agent calls `godot_session stop`,
+/// which the catalogue offers it, and then there is no way back.
+///
+/// One live turn did exactly that. It spent three refusals guessing at what "active" meant, then
+/// `rm -rf .godot`, then `git init`, then a commit — and only then could it start an editor again,
+/// with twenty of its thirty minutes gone. The agent's recovery was right; the door should not have
+/// been there. In the desktop application it is not: a task always has a repository behind it.
+///
+/// Failures are ignored on purpose. This is the harness making its fixture look like a real
+/// checkout, and a machine without `git` should still be able to run a turn.
+fn make_it_a_repository(worktree: &std::path::Path) {
+    let git = |arguments: &[&str]| {
+        let _ = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(worktree)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.email", "live@gofer.test"]);
+    git(&["config", "user.name", "Gofer live sweep"]);
+    git(&["add", "-A"]);
+    git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "The fixture, as the turn found it",
+    ]);
 }
 
 fn start_session() -> godot_editor_harness::Session {
@@ -125,13 +166,30 @@ fn live_agent_acceptance() {
         );
     }
 
+    // Every event twice: held for the report, and appended to a sibling `.jsonl` as it arrives.
+    //
+    // The report is written when the turn returns, and a turn that does not return writes nothing.
+    // One run spent twenty-four minutes on a debugging task, was killed on its budget, and left an
+    // empty directory — a whole turn of the evidence this file exists to collect, gone because the
+    // only write was at the end. Appending is O(1) per event, so the running cost is a line.
+    let trace = out.with_extension("jsonl");
+    let _ = std::fs::remove_file(&trace);
     let events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&events);
     let stream = tauri::ipc::Channel::new(move |payload| {
-        if let Ok(value) = payload.deserialize::<serde_json::Value>()
-            && let Ok(mut held) = recorded.lock()
-        {
-            held.push(value);
+        if let Ok(value) = payload.deserialize::<serde_json::Value>() {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&trace)
+                && let Ok(line) = serde_json::to_string(&value)
+            {
+                use std::io::Write;
+                let _ = writeln!(file, "{line}");
+            }
+            if let Ok(mut held) = recorded.lock() {
+                held.push(value);
+            }
         }
         Ok(())
     });

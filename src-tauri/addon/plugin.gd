@@ -3456,7 +3456,13 @@ func _attached_node(
 func _node_instantiate(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
     var parent_path: String = params.get("parent", "")
-    var path: String = params.get("path", "")
+    # Named the way the editor names it, before anything is loaded or compared. Godot answers
+    # `scene_file_path` as `res://scenes/coin.tscn` whatever the caller wrote, so a caller who
+    # wrote `scenes/coin.tscn` — which `ResourceLoader` accepts and which every other scene command
+    # here already normalises — placed the instance correctly and was then told
+    # `readback_mismatch: the write asked for scenes/coin.tscn and Godot holds res://scenes/coin.tscn`
+    # about the scene it had just placed. Watched once, in a live turn building three coins.
+    var path := _as_resource_path(params.get("path", ""))
     var node_name: String = params.get("name", "")
     var index: int = params.get("index", -1)
 
@@ -4660,13 +4666,32 @@ func _undo_reparent(node: Node, old_parent: Node, owner: Node, old_index: int) -
 ## editor has open, whose paths start at the scene's own root. Two trees, two processes, one node
 ## with two names — so a path that arrives with `/root/` in front of it is not a missing node, it
 ## is the other tool's spelling, and saying so costs one sentence.
+##
+## Two more spellings reach here, both watched in one live turn against a real editor, and neither
+## is a node path at all. `/root` on its own is the running tree's root, named where this scene's
+## root was meant; `res://scenes/main.tscn` is the scene the model had just opened, sent where a
+## node inside it was meant. Repeating either back says only that it is absent, which is the one
+## thing the caller already knew. Both are answered with the name the root actually has, because
+## that is the fact that repairs them — every node path in the edited scene begins with it.
 func _node_not_found_error(path: String) -> Dictionary:
     var message := "Node %s was not found in the edited scene" % path
+    var root := _edited_root()
+    var root_path: String = "/" + String(root.name) if root != null else ""
     if path.begins_with("/root/") and _find_node(path.substr(5)) != null:
         message = (
             "%s. It is there as %s: a path that starts at /root is how godot_runtime names the"
             + " running game, which is a different tree in a different process."
         ) % [message, path.substr(5)]
+    elif (path == "/root" or path == "/root/") and not root_path.is_empty():
+        message = (
+            "%s. /root is how godot_runtime names the running game's root, which is a different"
+            + " tree in a different process; this scene's root is %s."
+        ) % [message, root_path]
+    elif path.begins_with("res://") and not root_path.is_empty():
+        message = (
+            "%s. That names a scene file, not a node inside one: this scene's root is %s, and"
+            + " every node path here starts there."
+        ) % [message, root_path]
     return {
         "_gofer_error": {
             "code": "node_not_found",

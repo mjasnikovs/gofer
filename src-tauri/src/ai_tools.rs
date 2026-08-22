@@ -380,11 +380,13 @@ pub const CATALOG: &[ToolDomain] = &[
         operations: &[
             operation(
                 "list",
-                "Lists every file in the task worktree with its size. `hashes: true` reads every \
-                 file so that a later delete of one is refused if it changed in the meantime. \
-                 The router holds what it read; you never see it and never pass it. That is a read \
-                 of the whole project, so ask for it before deleting files you have not opened, \
-                 not to look around.",
+                "Lists the files in the task worktree with their sizes. `under` narrows it to one \
+                 directory — `assets`, named the way the project names it — and without it you get \
+                 the whole worktree, which is a lot to read to see one folder. `hashes: true` \
+                 reads every file so that a later delete of one is refused if it changed in the \
+                 meantime. The router holds what it read; you never see it and never pass it. That \
+                 is a read of the whole project, so ask for it before deleting files you have not \
+                 opened, not to look around.",
             ),
             operation(
                 "rescan",
@@ -573,7 +575,12 @@ pub const CATALOG: &[ToolDomain] = &[
                 "Reports whether a game is running, its helper is ready, and the debugger has it \
                  paused at an error.",
             ),
-            operation("get_tree", "Returns the running game's scene tree."),
+            operation(
+                "get_tree",
+                "Returns the running game's scene tree, and `paused`: whether the tree is paused \
+                 right now. That one belongs to the SceneTree rather than to any node, so \
+                 `inspect_node` cannot reach it and this is the only call that reports it.",
+            ),
             operation(
                 "inspect_node",
                 "Inspects a running node. `properties` is the list of \
@@ -1254,6 +1261,13 @@ fn dispatch_under<R: Runtime>(
         crate::tool_params::check(domain.name, &entry.op, &entry.params)
             .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
 
+        // A game the debugger started is not one the editor is playing, so `runtime.run`'s own
+        // guard cannot see it. Answered here, where both are known.
+        if domain.name == "godot_runtime" {
+            refuse_a_second_game(&entry.op, crate::debug::holds_a_game())
+                .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
+        }
+
         // The user's rules are answered before the user's approvals, because a rule they already
         // answered is not a question to ask them again: `game_embed_mode` is gated below, and a
         // prompt offering to undo a ticked box is a worse outcome than a refusal.
@@ -1737,6 +1751,29 @@ fn forget_a_vanished_file<R: Runtime>(app: &AppHandle<R>, path: &str, failure: &
     }
 }
 
+/// A directory named the way the project names it, whichever way it was written.
+///
+/// `res://` and stray slashes are taken off, because a model that has been reading scene paths all
+/// turn writes `res://assets` as readily as `assets`, and both mean the same folder.
+///
+/// The `params.get("under")` that feeds this stays written out in each arm that takes it:
+/// `tool_drift` reads those arms' own source to hold them to the catalogue, and a lookup moved
+/// behind a helper is a parameter that check can no longer see.
+fn named_directory(named: &str) -> String {
+    named
+        .trim_start_matches("res://")
+        .trim_matches('/')
+        .to_owned()
+}
+
+/// Whether one worktree-relative path sits inside that directory. No directory means every path.
+fn is_under(path: &str, under: Option<&str>) -> bool {
+    under.is_none_or(|under| {
+        path.strip_prefix(under)
+            .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
 fn resource_domain<R: Runtime>(
     app: &AppHandle<R>,
     op: &str,
@@ -1752,8 +1789,17 @@ fn resource_domain<R: Runtime>(
                 .get("hashes")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // One directory, the way `godot_script list` takes one. A live turn asked for
+            // `{"op": "list", "path": "assets"}` — the wrong key, and there was no right one — and
+            // fell back to `bash find`. The whole-project answer averages fourteen thousand
+            // characters and has been truncated, which is a lot to pay to see one folder.
+            let under = params
+                .get("under")
+                .and_then(Value::as_str)
+                .map(named_directory);
             let files: Vec<Value> = files::scan(workspace.root())
                 .into_iter()
+                .filter(|(path, _)| is_under(path, under.as_deref()))
                 .map(|(path, stamp)| {
                     let hash = if with_hashes {
                         workspace.hash_of(&path).ok().flatten()
@@ -1988,21 +2034,14 @@ fn script_domain<R: Runtime>(
             let workspace = crate::active_workspace(app)?;
             // Matched as a prefix of the relative path rather than resolved: a path that resolves
             // is a path that can leave the worktree.
-            let under = params.get("under").and_then(Value::as_str).map(|named| {
-                named
-                    .trim_start_matches("res://")
-                    .trim_matches('/')
-                    .to_owned()
-            });
+            let under = params
+                .get("under")
+                .and_then(Value::as_str)
+                .map(named_directory);
             let files: Vec<Value> = files::scan(workspace.root())
                 .into_iter()
                 .filter(|(path, _)| path.ends_with(".gd"))
-                .filter(|(path, _)| {
-                    under.as_ref().is_none_or(|under| {
-                        path.strip_prefix(under.as_str())
-                            .is_some_and(|rest| rest.starts_with('/'))
-                    })
-                })
+                .filter(|(path, _)| is_under(path, under.as_deref()))
                 .map(|(path, stamp)| json!({"path": path, "bytes": stamp.bytes}))
                 .collect();
             Ok(json!({"files": files}))
@@ -2146,6 +2185,29 @@ fn script_domain<R: Runtime>(
     }
 }
 
+/// Refuses a launch the debugger already made, before the editor is asked to make a second one.
+///
+/// `runtime.run` guards on `EditorInterface.is_playing_scene()`, and a game the debug adapter
+/// started is not a scene the editor is playing — so the guard passed and `play_main_scene()` ran
+/// on top of it. What came back was `runtime_not_running: The game started and then stopped before
+/// it was ready`, which is not what happened and gives the caller nowhere to go. A live debugging
+/// turn met it twice and spent the seven calls between them trying to launch the project from the
+/// shell, every one refused by the workspace rule.
+fn refuse_a_second_game(op: &str, debugger_holds_a_game: bool) -> Result<(), ToolFailure> {
+    if !matches!(op, "run" | "restart") || !debugger_holds_a_game {
+        return Ok(());
+    }
+    Err(ToolFailure {
+        code: "already_running".to_owned(),
+        message: "The debugger is already running this game. Read it where it is with godot_debug \
+                  — stack_trace, scopes, variables — or end it with godot_debug terminate. \
+                  godot_runtime run would start a second one beside it."
+            .to_owned(),
+        retryable: false,
+        details: json!({"op": op}),
+    })
+}
+
 fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
     // A breakpoint names a script, so it meets the same two conventions the script domain does.
     let request: DebugRequest = from_tagged_params(op, accept_resource_paths(params))?;
@@ -2220,12 +2282,48 @@ fn docs_domain<R: Runtime>(
 /// the addon's own runtime script leaves the game running and its helper never loading, so the
 /// launch times out while the editor is still playing, for ever. Without the output the message
 /// reads as "wait a little longer", and there is nothing to wait for.
-const GAME_IS_NOT_ANSWERING: [&str; 4] = [
+const GAME_IS_NOT_ANSWERING: [&str; 5] = [
     "runtime_broke",
     "runtime_not_running",
     "runtime_slow_start",
     "runtime_timeout",
+    // The editor, not the game. `session_closed` is what every call answers once the RPC socket
+    // has gone, and on its own it says only that — see `editor_crashed` for what it is usually
+    // hiding.
+    "session_closed",
 ];
+
+/// What Godot prints as it dies of a signal.
+const CRASH_MARKER: &str = "Program crashed with signal";
+
+/// The crash line, when the editor died rather than merely stopped answering.
+///
+/// Godot 4.7.2 segfaults when it is asked to play a project whose script will not parse. Watched
+/// three times in one night, always the same four lines:
+///
+/// ```text
+/// SCRIPT ERROR: Parse Error: Function "add_child_node()" not found in base self.
+/// ERROR: Failed to load script "res://scripts/spawner.gd" with error "Parse error".
+/// ERROR: Parameter "t" is null.
+/// handle_crash: Program crashed with signal 11
+/// ```
+///
+/// What reached the model was `session_closed: The RPC session closed`, which is true and tells it
+/// nothing — so it retried, and retried, and two of those three runs never finished. A crash is not
+/// something to retry, and it is not the caller's mistake; the engine is the thing that broke, and
+/// saying so is the difference between restarting the session and arguing with it.
+///
+/// Read without a severity floor on purpose. `handle_crash:` arrives on the editor's stderr and is
+/// not classified as an error line, so the reader that carries error lines never sees it.
+fn editor_crashed() -> Option<String> {
+    let page = godot_session::read_logs(&LogQuery {
+        contains: Some(CRASH_MARKER.to_owned()),
+        limit: Some(MAX_CARRIED_SCAN),
+        ..LogQuery::default()
+    })
+    .ok()?;
+    page.entries.last().map(|entry| entry.message.clone())
+}
 
 /// Puts the error that ended the game into the failure the model is about to read.
 ///
@@ -2247,6 +2345,14 @@ const GAME_IS_NOT_ANSWERING: [&str; 4] = [
 /// least to spare. So the lines travel with the failure instead of being described.
 fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -> ToolFailure {
     if !GAME_IS_NOT_ANSWERING.contains(&failure.code.as_str()) {
+        return failure;
+    }
+    if let Some(crash) = editor_crashed() {
+        failure.message = format!(
+            "{}\n\nThe Godot editor itself died: {crash}. That is the engine crashing, not this \
+             call — retrying it will not help. Start a new session with godot_session start.",
+            failure.message.trim_end()
+        );
         return failure;
     }
     let printed = last_session_errors(CARRIED_ERROR_LINES);
@@ -3805,13 +3911,81 @@ mod tests {
         );
     }
 
-    /// Every distinct `ops` shape a model wrote across sixteen real tasks, and not one refused.
+    /// A launch the debugger already made is refused before the editor is asked for a second one.
     ///
-    /// `fixtures/recorded-tool-calls.json` is 712 calls from a live project, reduced to the 93
-    /// distinct lists of operation names among them. Ten of those calls — eight shapes, marked
-    /// `refusedBefore` — were refused by the rule this replaced, and every one of them was two
-    /// different operations rather than a repeat. The fixture is the evidence, so the fixture is
-    /// the test: what a model actually sends is what the gate has to let through.
+    /// `runtime.run` guards on `is_playing_scene()`, which a debug-adapter launch does not set, so
+    /// the editor started a second game beside the first and answered `runtime_not_running: The
+    /// game started and then stopped before it was ready`. A live debugging turn met that twice and
+    /// spent the seven calls in between trying to launch the project from the shell.
+    #[test]
+    fn a_game_the_debugger_started_is_not_launched_again() {
+        for op in ["run", "restart"] {
+            let refused = super::refuse_a_second_game(op, true)
+                .expect_err("a second game must be refused while the debugger holds one");
+            assert_eq!(refused.code, "already_running");
+            assert!(
+                refused.message.contains("godot_debug terminate"),
+                "{refused:?}"
+            );
+            assert!(
+                refused.message.contains("stack_trace"),
+                "and says the game can be read where it is: {refused:?}"
+            );
+            assert!(super::refuse_a_second_game(op, false).is_ok());
+        }
+        // Everything else the runtime tool does is about the game that is already there.
+        for op in ["stop", "get_state", "get_tree", "capture", "input", "wait"] {
+            assert!(super::refuse_a_second_game(op, true).is_ok(), "{op}");
+        }
+    }
+
+    /// One directory, however it is spelled, and no directory means the whole worktree.
+    ///
+    /// The rule both `list` operations narrow by. A live turn asked `godot_resource list` for one
+    /// folder with the only key it could think of — `{"op": "list", "path": "assets"}` — was
+    /// refused because there was no such parameter, and fell back to `bash find`.
+    #[test]
+    fn a_listing_narrowed_to_a_directory_holds_only_what_is_under_it() {
+        for spelling in ["assets", "res://assets", "/assets/", "res://assets/"] {
+            let under = Some(super::named_directory(spelling));
+            assert!(
+                super::is_under("assets/tiles.png", under.as_deref()),
+                "{spelling}"
+            );
+            assert!(
+                super::is_under("assets/Effects/hit.png", under.as_deref()),
+                "a directory holds what is under it, at any depth: {spelling}"
+            );
+            assert!(
+                !super::is_under("scripts/main.gd", under.as_deref()),
+                "{spelling}"
+            );
+            // A sibling whose name merely starts the same way is not inside it.
+            assert!(
+                !super::is_under("assetsold/tiles.png", under.as_deref()),
+                "{spelling}"
+            );
+            // The directory itself is not one of the files in it.
+            assert!(!super::is_under("assets", under.as_deref()), "{spelling}");
+        }
+        assert!(
+            super::is_under("anything/at/all.png", None),
+            "no directory named is every file"
+        );
+    }
+
+    /// Every distinct `ops` shape a model wrote across real work, and not one refused.
+    ///
+    /// `fixtures/recorded-tool-calls.json` is 712 calls from a live project reduced to their
+    /// distinct lists of operation names, and 178 more from five `live_agent_acceptance` turns
+    /// against a real 4.7.2 editor. Ten of the first set — eight shapes, marked `refusedBefore` —
+    /// were refused by the rule this replaced, and every one of them was two different operations
+    /// rather than a repeat. The fixture is the evidence, so the fixture is the test: what a model
+    /// actually sends is what the gate has to let through.
+    ///
+    /// The nine shapes under `repairs` are deliberately not here. Those are calls the normalizer
+    /// rewrites before the router sees them, so the raw form is expected to be refused; the JS side
+    /// holds them to the shape they must be rewritten into.
     #[test]
     fn no_shape_a_model_recorded_is_refused_by_the_gate() {
         let recorded: Value = serde_json::from_slice(
@@ -3840,6 +4014,23 @@ mod tests {
             gate(tool, &ops).unwrap_or_else(|failure| {
                 panic!("{tool} {ops:?} was refused: {}", failure.message)
             });
+            // And every parameter beside those names, down the path the router really takes:
+            // repair, then check. The gate above reads only the operation names, so a recorded call
+            // could carry a value the router refuses and this fixture would still pass — which is
+            // the half the shapes that cost live turns actually live in. Running the repair too is
+            // what makes this a net under it: a rename that reached a key it should not have would
+            // show up here as a call that used to be accepted and is not any more.
+            for entry in case["ops"].as_array().expect("case ops") {
+                let mut params = entry.clone();
+                if let Some(object) = params.as_object_mut() {
+                    object.remove("op");
+                }
+                let op = entry["op"].as_str().expect("an op name");
+                crate::tool_params::repair(tool, op, &mut params);
+                crate::tool_params::check(tool, op, &params).unwrap_or_else(|failure| {
+                    panic!("{tool} {op} was refused: {}", failure.message)
+                });
+            }
         }
         assert_eq!(
             previously_refused, 8,
@@ -4303,6 +4494,57 @@ mod tests {
         assert!(
             carried.message.contains("scripts/generate_assets.gd"),
             "the failure named no file to go and fix: {}",
+            carried.message
+        );
+    }
+
+    /// When the editor itself dies, the failure says so instead of describing a game.
+    ///
+    /// Godot 4.7.2 segfaults on being asked to play a project whose script will not parse. Watched
+    /// three times in one night, and what reached the model was `session_closed: The RPC session
+    /// closed` — true, and no help at all: two of those three runs spent their whole budget
+    /// retrying a call that could never work.
+    ///
+    /// The crash line arrives on the editor's stderr and is not classified as an error, which is
+    /// why the reader that carries error lines never saw it and why this one reads without a floor.
+    #[test]
+    fn an_editor_that_crashed_is_named_as_the_thing_that_broke() {
+        let _guard = session_test_lock();
+        given_the_session_printed(&[
+            (
+                godot_session::LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Function \"add_child_node()\" not found in base self.",
+            ),
+            (
+                godot_session::LogSource::EditorError,
+                "handle_crash: Program crashed with signal 11",
+            ),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "session_closed",
+            "The RPC session closed",
+        ));
+
+        assert_eq!(carried.code, "session_closed");
+        assert!(
+            carried.message.contains("The RPC session closed"),
+            "the failure lost what it already said: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("Program crashed with signal 11"),
+            "the crash has to be in it: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("godot_session start"),
+            "and the one thing worth doing about it: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("retrying it will not help"),
+            "a crash is not something to retry: {}",
             carried.message
         );
     }

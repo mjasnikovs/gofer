@@ -435,6 +435,35 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         "an unknown node must be refused"
     );
 
+    // Four spellings that are not a missing node but the other tool's, or no node path at all.
+    // Every one was written by a real model at a real editor. The refusal for each has to carry
+    // the spelling that works, because repeating the path back says only what the caller knew.
+    let refused =
+        |node: &str| session.error("node.inspect", json!({"scene": scene, "node": node}), None);
+    let the_runtime_spelling = refused("/root/refusals/Sprite");
+    assert!(
+        the_runtime_spelling.contains("/refusals/Sprite")
+            && the_runtime_spelling.contains("godot_runtime"),
+        "a /root/ path that is in the scene must be answered with the name it has here: \
+         {the_runtime_spelling}"
+    );
+    let the_runtime_root = refused("/root");
+    assert!(
+        the_runtime_root.contains("/refusals") && the_runtime_root.contains("godot_runtime"),
+        "/root on its own is the running game's root, and the answer must name this scene's: \
+         {the_runtime_root}"
+    );
+    let a_scene_path = refused(scene);
+    assert!(
+        a_scene_path.contains("/refusals") && a_scene_path.contains("scene file"),
+        "a res:// path names a scene, not a node in one, and the answer must say so: \
+         {a_scene_path}"
+    );
+    assert!(
+        refused("/refusals/Missing").starts_with("node_not_found"),
+        "an ordinary missing node still gets the plain refusal"
+    );
+
     // Nothing above may have changed the scene.
     assert_eq!(
         session.revision(),
@@ -1087,6 +1116,20 @@ fn the_addon_places_instances_of_a_saved_scene() {
         vec!["Brick1".to_owned(), "Brick2".to_owned()]
     );
 
+    // A path written the way the project spells it, which is what the tools tell the model to
+    // write. Godot answers `scene_file_path` as `res://…` however it was asked, so the read-back
+    // compared `brick.tscn` against `res://brick.tscn` and refused a scene it had just placed
+    // correctly — watched in a live turn building three coins.
+    let bare = session.mutate(
+        "node.instantiate",
+        json!({"parent": "/level", "path": "brick.tscn", "name": "Brick3"}),
+    );
+    assert_eq!(bare["node"], "/level/Brick3");
+    assert_eq!(
+        bare["path"], "res://brick.tscn",
+        "the answer names the scene the way the editor does: {bare}"
+    );
+
     session.mutate("scene.save", json!({}));
     let saved = std::fs::read_to_string(session.worktree.join("level.tscn"))
         .expect("the saved level must exist on disk");
@@ -1096,8 +1139,8 @@ fn the_addon_places_instances_of_a_saved_scene() {
     );
     assert_eq!(
         saved.matches("instance=ExtResource(").count(),
-        2,
-        "both placements must be instances: {saved}"
+        3,
+        "all three placements must be instances: {saved}"
     );
     // A copy would write the brick's own children into this file. An instance does not, which is
     // exactly what makes one edit to brick.tscn reach every placement of it.
@@ -1106,10 +1149,11 @@ fn the_addon_places_instances_of_a_saved_scene() {
         "an instance must not write the source scene's children into the level: {saved}"
     );
 
+    // One undo takes back one placement, and the third brick was placed last.
     session.mutate("session.undo", json!({}));
     assert_eq!(
         child_names(&session.call("scene.get_tree", json!({}))),
-        vec!["Brick1".to_owned()],
+        vec!["Brick1".to_owned(), "Brick2".to_owned()],
         "undo must take the placement back"
     );
 }

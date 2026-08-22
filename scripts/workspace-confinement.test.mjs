@@ -28,6 +28,15 @@ function fakeTool(name) {
     }
 }
 
+/**
+ * What the tool underneath receives for a shell command the caller gave no deadline.
+ *
+ * `confineTool` fills one in, because pi's bash tool defaults to none and a command that never
+ * returns holds the whole turn. The test below owns that number; every other test here only has to
+ * say that the command reached the tool unchanged beside it.
+ */
+const asRun = command => ({command, timeout: 120})
+
 test('allows existing and new paths that remain in the workspace', async context => {
     const current = await workspace()
     context.after(current.remove)
@@ -195,7 +204,7 @@ test('allows workspace shell commands and rejects every explicit escape form', a
     context.after(current.remove)
     const tool = confineTool(fakeTool('bash'), current.path)
 
-    assert.deepEqual(await tool.execute('1', {command: 'npm test'}), {command: 'npm test'})
+    assert.deepEqual(await tool.execute('1', {command: 'npm test'}), asRun('npm test'))
     for (const command of [
         undefined,
         '',
@@ -244,7 +253,60 @@ test('lets a slash inside an argument be a slash', async context => {
         "awk -F/ '{print $1}' scripts/main.gd",
         'echo "speed = 100/2" >> scripts/notes.txt'
     ])
-        assert.deepEqual(await tool.execute('1', {command}), {command})
+        assert.deepEqual(await tool.execute('1', {command}), asRun(command))
+})
+
+test('gives a shell command a deadline, so one that never returns cannot hold the turn', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+
+    // pi's bash tool takes a timeout and defaults to none — "Timeout in seconds (optional, no
+    // default timeout)" — and a model never sets one. Watched live: the agent ran
+    // `godot --headless --script scripts/main.gd`, an editor with no `--quit`, which never exits.
+    // It held the turn for seventeen minutes and the run had nothing else to show for its budget.
+    assert.deepEqual(await tool.execute('1', {command: 'npm run build'}), {
+        command: 'npm run build',
+        timeout: 120
+    })
+
+    // A caller that named its own deadline keeps it, however long or short. The parameter is the
+    // model's; this only fills it in when it was left out.
+    for (const timeout of [5, 900])
+        assert.deepEqual(await tool.execute('2', {command: 'godot --headless --import', timeout}), {
+            command: 'godot --headless --import',
+            timeout
+        })
+})
+
+test('lets a command divide, which is not a path', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    const tool = confineTool(fakeTool('bash'), current.path)
+
+    // Observed live. A slash that opens an argument is an absolute path, and `1 / 2` opens one
+    // exactly the way `/etc/passwd` does — so every spaced division was refused as "this one names
+    // an absolute path or one that climbs out". A turn asked to generate a .wav wrote the maths to
+    // do it, was refused, and never got the file written. A path has something after its slash;
+    // arithmetic has whitespace.
+    for (const command of [
+        'python3 -c "print(1 / 2)"',
+        'python3 -c "print(math.sin(2 * math.pi * i / 44100))"',
+        "awk '{print $1 / $2}' data.txt",
+        'echo $((10 / 2))',
+        'echo "a / b"'
+    ])
+        assert.deepEqual(await tool.execute('1', {command}), asRun(command))
+
+    // A slash with something after it is still a path, and a slash at the end of a command is
+    // still the root: arithmetic needs a right-hand side and a bare root reference does not.
+    for (const command of [
+        'ls /',
+        'cat /etc/shadow',
+        'x=/tmp/a echo hi',
+        'echo hi | cat /etc/hosts'
+    ])
+        await assert.rejects(tool.execute('2', {command}), /Shell|workspace/iu)
 })
 
 test('lets a command throw output away the way every shell does', async context => {
@@ -266,7 +328,7 @@ test('lets a command throw output away the way every shell does', async context 
         'godot --headless 1>/dev/null 2>&1',
         'cat scripts/player.gd >/dev/stdout'
     ])
-        assert.deepEqual(await tool.execute('1', {command}), {command})
+        assert.deepEqual(await tool.execute('1', {command}), asRun(command))
 
     // A real path under `/dev` is still a path out of the workspace, and still refused.
     for (const command of ['cat /dev/sda', 'cat /dev/nullify', 'cat /devious/secret'])
@@ -289,10 +351,11 @@ test('refuses a shell command that names what the editor owns', async context =>
         await assert.rejects(tool.execute('1', {command}), /godot_scene|godot_project/u)
 
     // The rest of the project is the agent's to work with from a shell.
-    assert.deepEqual(await tool.execute('2', {command: 'cat scripts/player.gd'}), {
-        command: 'cat scripts/player.gd'
-    })
-    assert.deepEqual(await tool.execute('3', {command: 'ls scenes'}), {command: 'ls scenes'})
+    assert.deepEqual(
+        await tool.execute('2', {command: 'cat scripts/player.gd'}),
+        asRun('cat scripts/player.gd')
+    )
+    assert.deepEqual(await tool.execute('3', {command: 'ls scenes'}), asRun('ls scenes'))
 })
 
 test('refuses a shell command whose whole job is to wait', async context => {
@@ -312,7 +375,7 @@ test('refuses a shell command whose whole job is to wait', async context => {
         'cat scripts/sleep.gd',
         'grep -rn sleeper scripts'
     ])
-        assert.deepEqual(await tool.execute('2', {command}), {command})
+        assert.deepEqual(await tool.execute('2', {command}), asRun(command))
 })
 
 test('lets git read a scene it can only ever read', async context => {
@@ -328,7 +391,7 @@ test('lets git read a scene it can only ever read', async context => {
         'git show HEAD:project.godot',
         'git blame scenes/level_1.tscn'
     ])
-        assert.deepEqual(await tool.execute('1', {command}), {command})
+        assert.deepEqual(await tool.execute('1', {command}), asRun(command))
 
     // One writing part anywhere in the chain puts the whole command back under the ordinary rule,
     // and a subcommand that is not on the list was never exempt.
@@ -358,7 +421,7 @@ test('lets git read a scene it can only ever read', async context => {
         'git diff -- scenes/level_1.tscn | wc -l',
         'git log --oneline -- scenes/level_1.tscn | grep fix'
     ])
-        assert.deepEqual(await tool.execute('4', {command}), {command})
+        assert.deepEqual(await tool.execute('4', {command}), asRun(command))
 
     // A filter is exempt for what it cannot do to a path, so one that names a scene is not exempt,
     // and neither is one with no git in the chain at all.

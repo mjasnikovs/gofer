@@ -974,6 +974,12 @@
             "op": "list",
             "params": [
                 {
+                    "name": "under",
+                    "kind": "text",
+                    "required": false,
+                    "note": "A directory to list, named the way the project names it \u2014 `assets`, not its full path. Omit it for every file in the worktree."
+                },
+                {
                     "name": "hashes",
                     "kind": "flag",
                     "required": false

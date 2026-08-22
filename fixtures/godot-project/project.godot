@@ -5,6 +5,9 @@ config_version=5
 [application]
 
 config/name="Gofer Protocol Fixture"
+; And a cap, so a game left running while the agent thinks does not spin a core at three thousand
+; frames a second. 60 is what the tests around it are pretending to watch.
+run/max_fps=60
 run/main_scene="res://main.tscn"
 
 [display]
@@ -15,6 +18,13 @@ window/size/viewport_height=180
 ; Without this the window takes focus the moment it maps, so the next keystroke goes into the game
 ; instead of the terminal or editor the developer was typing in.
 window/size/no_focus=true
+; And without this it renders at two frames a second. An X11 window that is never focused is never
+; given a vblank, so every frame Godot waits for one and times out at about half a second. The two
+; settings only bite together, which is why neither looks wrong on its own: measured interleaved on
+; this fixture, no_focus alone was 2.0 fps, no_focus off was 1125, and no_focus with vsync off was
+; 3195. Nothing here is looking at a display, so there is nothing to synchronise to - and a runtime
+; wait that advances five frames in four seconds is a game the tests around it are not running.
+window/vsync/vsync_mode=0
 
 [rendering]
 

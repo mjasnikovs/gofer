@@ -239,7 +239,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 /// and repeating it here would be a second one. An operation absent from this table is not checked
 /// — absence means unchecked, never "takes nothing" — which is why a new operation that wants
 /// checking has to be added rather than merely written.
-// GENERATED-BEGIN op-params sha256:e68d94ca984de323
+// GENERATED-BEGIN op-params sha256:54dc6cdc50a5c0a9
 pub const TABLE: &[OpParams] = &[
     op("godot_session", "status", Answers::Rust, &[]),
     op("godot_session", "start", Answers::Rust, &[]),
@@ -714,7 +714,13 @@ pub const TABLE: &[OpParams] = &[
         "godot_resource",
         "list",
         Answers::Rust,
-        &[opt("hashes", Flag)],
+        &[
+            noted(
+                opt("under", Text),
+                "A directory to list, named the way the project names it — `assets`, not its full path. Omit it for every file in the worktree.",
+            ),
+            opt("hashes", Flag),
+        ],
     ),
     op(
         "godot_resource",
@@ -1668,7 +1674,10 @@ fn check_set(
             .unwrap_or_default();
         return Err(failure(
             "unknown_param",
-            format!("{call}{at} has no `{key}` {noun}. {takes_shape}{hint}"),
+            format!(
+                "{call}{at} has no `{key}` {noun}. {takes_shape}{hint}{}",
+                torn_object(key, object.get(key))
+            ),
             json!({"op": op, "param": path(where_, key), "takes": shape}),
         ));
     }
@@ -1995,6 +2004,41 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     let Some(object) = params.as_object_mut() else {
         return;
     };
+    // A key onto the parameter it was plainly meant to be, before anything is held to it.
+    //
+    // The refusal already worked this out: ``set_autoload has no `nameSettings` parameter … Did
+    // you mean `name`?``. One live turn was told that nineteen times and resent the same call
+    // unchanged every time — a third of everything it did — with the sentence naming the answer
+    // in front of it each time. That is the same finding that made a whitespace-padded key a
+    // repair rather than a refusal.
+    //
+    // Narrower than the hint, on purpose. The hint names the *first* parameter a key could have
+    // meant, because one guess in a sentence beats none; this renames only when the key could
+    // have meant exactly one, and only when that parameter is not already there. Anything else is
+    // left where it is for `check` to refuse by name, with the hint still saying what to try.
+    let wanted: Vec<(String, &'static str)> = object
+        .keys()
+        .filter(|key| {
+            !spec.iter().any(|param| param.name == key.as_str())
+                && !UNIVERSAL.contains(&key.as_str())
+        })
+        .filter_map(|key| {
+            only_one_meaning(key, object.get(key), spec).map(|name| (key.clone(), name))
+        })
+        .filter(|(_, name)| !object.contains_key(*name))
+        .collect();
+    // Two wrong keys that both read as the same parameter are two answers, so neither is taken.
+    // Whichever won would be whichever the map happened to iterate first, and a rename nobody can
+    // predict is worse than the refusal that names both.
+    for (wrong, right) in &wanted {
+        let contested = wanted.iter().filter(|(_, name)| name == right).count() > 1;
+        if contested {
+            continue;
+        }
+        if let Some(held) = object.remove(wrong.as_str()) {
+            object.insert((*right).to_owned(), held);
+        }
+    }
     for param in spec {
         let Some(held) = object.get_mut(param.name) else {
             continue;
@@ -2122,23 +2166,108 @@ fn describe(value: &Value) -> String {
     }
 }
 
+/// What to add when the key is not a name at all, but a piece of an object that came apart.
+///
+/// `{"name': ": ", ", "op": "set_autoload", "path": "res://…"}` is a model whose JSON tore
+/// mid-line: the key swallowed a quote and a colon and the value is the fragment left over. The
+/// name it meant never reached the wire. Sixteen of these across two live turns, thirteen of them
+/// one call resent unchanged, and the autoload was never registered in either.
+///
+/// The refusal already ended `Did you mean \`name\`?`, and that is the wrong advice here — nothing
+/// was misnamed, the object was mis-written, and a model told it picked the wrong word goes looking
+/// for a better word. Measured interleaved against a local Qwen3.6-27B, 15 seeds, the same torn
+/// call and the same refusal, scored on whether the next call carries a well-formed `name`:
+/// **the shipped sentence 0 of 15, this one 15 of 15**. What the shipped arm does instead is
+/// abandon the call — it answers with `godot_script list` and `godot_scene get_tree` and never
+/// tries the autoload again, which is exactly what both live turns did.
+///
+/// Only for a key that could not have been a name. An ordinary typo is a word, and for that the
+/// hint above is the right answer and this would be nonsense.
+fn torn_object(key: &str, value: Option<&Value>) -> String {
+    if could_be_a_name(key) {
+        return String::new();
+    }
+    let Some(carried) = value.and_then(|held| serde_json::to_string(held).ok()) else {
+        return String::new();
+    };
+    // A long value is not the evidence; the shape of it is. The whole point is that it is a scrap.
+    if carried.chars().count() > 60 {
+        return String::new();
+    }
+    format!(
+        " It arrived carrying {carried}, so what went wrong is the object you wrote rather than \
+         the word you chose: write the whole call again."
+    )
+}
+
+/// The one parameter a key could have been meant as, or nothing when it could have been two.
+///
+/// A key that is not shaped like a name has torn out of an object, and then the value beside it
+/// decides. Both halves are real, and they are told apart by what arrived, not by the key:
+///
+/// - `"path:": "scripts/main.gd"` — a stray colon on the key, and the path itself is intact. The
+///   model meant `path` and can be given it.
+/// - `"name': ": ", "` — the key swallowed a quote and a colon and the value is the comma and space
+///   left over. Renaming that registers an autoload called `, `.
+///
+/// So a torn key is renamed only when its value carries a letter or a digit. Punctuation on its own
+/// is the wreckage, and every torn value in the recordings is exactly `", "`. I had this the other
+/// way round first — refusing every torn key — and a live debugger turn showed what that costs:
+/// three refusals of `path:` in a row, each carrying the path it wanted.
+fn only_one_meaning(key: &str, value: Option<&Value>, spec: &[Param]) -> Option<&'static str> {
+    if !could_be_a_name(key) && !carries_a_value(value) {
+        return None;
+    }
+    let mut fitting = spec
+        .iter()
+        .filter(|param| !param.hidden && reads_as(key, param));
+    let first = fitting.next()?;
+    fitting.next().is_none().then_some(first.name)
+}
+
+/// Whether what arrived is a value at all, rather than punctuation left over from a torn object.
+///
+/// One letter or digit anywhere in it. `", "` has none; `"scripts/main.gd"`, `"ticks"` and every
+/// real value do. A non-string — a number, a flag, a list — is a value by arriving at all.
+fn carries_a_value(value: Option<&Value>) -> bool {
+    match value {
+        None => false,
+        Some(Value::String(held)) => held.chars().any(|one| one.is_alphanumeric()),
+        Some(Value::Null) => false,
+        Some(_) => true,
+    }
+}
+
+/// Whether a written key is shaped like a parameter name: a letter or underscore, then more of
+/// those or digits. Every name in the table is one, and no torn-off fragment of JSON is.
+fn could_be_a_name(key: &str) -> bool {
+    let mut characters = key.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|held| held.is_ascii_alphanumeric() || held == '_')
+}
+
+/// Whether one written key reads as one declared parameter. The rule [`nearest`] offers hints by.
+fn reads_as(key: &str, param: &Param) -> bool {
+    let lowered = key.to_lowercase();
+    let name = param.name.to_lowercase();
+    name == lowered
+        || name.starts_with(&lowered)
+        || lowered.starts_with(&name)
+        || lowered.replace('_', "") == name.replace('_', "")
+}
+
 /// The accepted name closest to one that was not accepted, when a single edit reaches it. Typos and
 /// case slips are the whole population here — `nodePath` for `node`, `Value` for `value` — so a
 /// cheap prefix-and-case comparison finds them without a distance matrix.
 fn nearest(key: &str, spec: &[Param]) -> Option<&'static str> {
-    let lowered = key.to_lowercase();
     spec.iter()
         // A hidden parameter is one the prompt tells the model never to pass, so offering it as
         // the near miss sends the model to write the one key it must not write. A live run was
         // told `Did you mean \`expectedRevision\`?` about a key that was not one at all.
         .filter(|param| !param.hidden)
-        .find(|param| {
-            let name = param.name.to_lowercase();
-            name == lowered
-                || name.starts_with(&lowered)
-                || lowered.starts_with(&name)
-                || lowered.replace('_', "") == name.replace('_', "")
-        })
+        .find(|param| reads_as(key, param))
         .map(|param| param.name)
 }
 
@@ -2172,6 +2301,98 @@ mod tests {
         check(domain, op, &params)
             .expect_err("the call is refused")
             .message
+    }
+
+    /// A key that could only have meant one parameter is put onto it, and one that could have
+    /// meant two is not.
+    ///
+    /// `nameSettings` for `name` is a live turn's own mistake, made nineteen times in one turn —
+    /// a third of everything it did — each answered with ``Did you mean `name`?`` and each resent
+    /// unchanged. `tile` is the counter-case the catalogue actually holds: `create_tileset` takes
+    /// both `tileSize` and `tiles`, so `tile` names neither and stays for `check` to refuse.
+    #[test]
+    fn a_key_that_can_only_have_meant_one_parameter_is_put_onto_it() {
+        let mut written = json!({
+            "nameSettings": "SettingsManager",
+            "path": "res://scripts/settings_manager.gd",
+            "enabled": true
+        });
+        repair("godot_project", "set_autoload", &mut written);
+        assert_eq!(
+            written,
+            json!({
+                "name": "SettingsManager",
+                "path": "res://scripts/settings_manager.gd",
+                "enabled": true
+            })
+        );
+        check_ok("godot_project", "set_autoload", written);
+
+        // Two parameters it could have been is not one, so nothing moves and the refusal stands.
+        let mut ambiguous = json!({"path": "res://t.tres", "texture": "res://t.png", "tile": 16});
+        repair("godot_resource", "create_tileset", &mut ambiguous);
+        assert_eq!(ambiguous["tile"], json!(16), "{ambiguous}");
+        assert!(
+            message("godot_resource", "create_tileset", ambiguous).contains("`tile`"),
+            "an ambiguous key is still refused by name"
+        );
+
+        // A parameter already written is never overwritten by a near miss for it.
+        let mut both = json!({"name": "Real", "nameSettings": "Other", "path": "res://a.gd"});
+        repair("godot_project", "set_autoload", &mut both);
+        assert_eq!(both["name"], json!("Real"));
+        assert_eq!(both["nameSettings"], json!("Other"));
+
+        // A torn key whose value survived is put back: `"path:": "scripts/main.gd"` is a stray
+        // colon on the key and an intact path beside it. A live debugger turn wrote this three
+        // times in a row and was refused three times.
+        let mut colon = json!({"line": 13});
+        colon["path:"] = json!("scripts/main.gd");
+        repair("godot_debug", "breakpoint_locations", &mut colon);
+        assert_eq!(colon["path"], json!("scripts/main.gd"), "{colon}");
+        check_ok("godot_debug", "breakpoint_locations", colon);
+
+        // A key that is not shaped like a name is left where it is, however well it reads as one.
+        // This is what a model writes when its JSON comes apart: the key carries the quote and the
+        // comma from the line it lost, and its value is the wreckage. Five of these in the
+        // recordings, and renaming would put `", "` into `method` and call it a well-formed call.
+        let mut torn = json!({"signal": "coin_collected", "binds": []});
+        torn["method\": \"_on_coin_collected\", "] = json!(", ");
+        repair("godot_node", "connect_signal", &mut torn);
+        assert!(torn.get("method").is_none(), "{torn}");
+        let refused = message("godot_node", "connect_signal", torn);
+        assert!(
+            refused.contains("_on_coin_collected"),
+            "the refusal names the broken key rather than a parameter it was folded onto: {refused}"
+        );
+        // And says what arrived under it, which is what tells a model its object tore rather than
+        // that it picked a wrong word. Measured: 0 of 15 recoveries without this line, 15 of 15
+        // with it.
+        assert!(
+            refused.contains(r#"It arrived carrying ", ""#),
+            "the refusal quotes the scrap that arrived: {refused}"
+        );
+
+        // An ordinary typo is a word, and there the near-miss hint is the right answer on its own.
+        let typo = json!({"nameSettings": "A", "path": "res://a.gd", "name": "Taken"});
+        let hinted = message("godot_project", "set_autoload", typo);
+        assert!(hinted.contains("Did you mean `name`?"), "{hinted}");
+        assert!(!hinted.contains("It arrived carrying"), "{hinted}");
+
+        // Two wrong keys that both read as the same parameter are two answers, so neither moves.
+        let mut contested = json!({"nameSettings": "A", "nameOfIt": "B", "path": "res://a.gd"});
+        repair("godot_project", "set_autoload", &mut contested);
+        assert_eq!(contested["nameSettings"], json!("A"), "{contested}");
+        assert_eq!(contested["nameOfIt"], json!("B"), "{contested}");
+        assert!(contested.get("name").is_none(), "{contested}");
+
+        // Inside an entry of a list parameter, at the position that entry declares.
+        let mut nested = json!({
+            "files": [{"pathName": "scripts/a.gd", "edits": [{"oldText": "a", "newText": "b"}]}]
+        });
+        repair("godot_script", "edit", &mut nested);
+        assert_eq!(nested["files"][0]["path"], json!("scripts/a.gd"));
+        check_ok("godot_script", "edit", nested);
     }
 
     /// The failure this whole module exists for. The old answer was

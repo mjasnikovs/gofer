@@ -508,9 +508,9 @@ fn squeeze(text: &str) -> Squeezed {
 /// three times and with nothing four times, and never once with the wrong region — the two it
 /// could not reach were a stale idea of the file's content, which no amount of whitespace
 /// forgiveness reaches.
-fn anchor_not_found(path: &str, text: &str, old_text: &str) -> LspError {
+fn anchor_not_found(at: &str, path: &str, text: &str, old_text: &str) -> LspError {
     let unmatched = format!(
-        "`oldText` is not in {path}. The file may already hold the change, or the anchor may \
+        "`{at}` is not in {path}. The file may already hold the change, or the anchor may \
          differ in whitespace. Read the file and anchor on text it currently has."
     );
     let haystack = squeeze(text);
@@ -534,7 +534,7 @@ fn anchor_not_found(path: &str, text: &str, old_text: &str) -> LspError {
         return LspError::new(
             "anchor_not_found",
             format!(
-                "`oldText` is not in {path}. Apart from whitespace it matches {} regions, at lines \
+                "`{at}` is not in {path}. Apart from whitespace it matches {} regions, at lines \
                  {}, so it still names no single region. Quote one of them from the file, with a \
                  neighbouring line.",
                 lines.len(),
@@ -554,7 +554,7 @@ fn anchor_not_found(path: &str, text: &str, old_text: &str) -> LspError {
         return LspError::new(
             "anchor_not_found",
             format!(
-                "`oldText` is not in {path}, but apart from whitespace it matches lines \
+                "`{at}` is not in {path}, but apart from whitespace it matches lines \
                  {first_line} to {last_line}, which are too long to quote here. They open with \
                  `{opening}`. Read those lines and anchor on what they hold."
             ),
@@ -563,7 +563,7 @@ fn anchor_not_found(path: &str, text: &str, old_text: &str) -> LspError {
     LspError::new(
         "anchor_not_found",
         format!(
-            "`oldText` is not in {path}. Apart from whitespace it matches lines {first_line} to \
+            "`{at}` is not in {path}. Apart from whitespace it matches lines {first_line} to \
              {last_line}, which the file holds as:\n\n{held}\n\nAnchor on that text exactly, or \
              read the file again if it is not the region you meant."
         ),
@@ -575,35 +575,60 @@ fn anchor_not_found(path: &str, text: &str, old_text: &str) -> LspError {
 /// Offsets are taken against the original text and applied back to front, so an earlier
 /// replacement never moves a later anchor. Ambiguity is refused rather than resolved: an anchor
 /// that matches twice names two regions, and picking one would be a guess about which.
-fn apply_edits(path: &str, text: &str, edits: &[ScriptEdit]) -> Result<String, LspError> {
+///
+/// Every refusal names the edit by its position in the call — `files[1].edits[0].oldText` — because
+/// a call carries several. Every anchor refusal recorded in one live project came from a call
+/// holding two edits for the named file, and the sentence said only which file, so the caller had
+/// to work out which half of its own call was being refused before it could fix it. The router's
+/// other refusals have named the position since the parameter contract landed; this one did not.
+///
+/// A repeated anchor is answered with the lines it matched, for the same reason the near-miss
+/// branch of [`anchor_not_found`] is: "extend it until it is unique" is a search, and the numbers
+/// turn it into arithmetic. The offsets are already in hand at that point.
+fn apply_edits(
+    file_index: usize,
+    path: &str,
+    text: &str,
+    edits: &[ScriptEdit],
+) -> Result<String, LspError> {
     if edits.is_empty() {
         return Err(LspError::new(
             "no_edits",
-            format!("{path} carries an empty `edits` list, so the call asks for nothing."),
+            format!(
+                "`files[{file_index}]` is {path}, and its `edits` list is empty, so the call asks \
+                 for nothing."
+            ),
         ));
     }
     let mut spans = Vec::with_capacity(edits.len());
-    for edit in edits {
+    for (edit_index, edit) in edits.iter().enumerate() {
+        let at = format!("files[{file_index}].edits[{edit_index}].oldText");
         if edit.old_text.is_empty() {
             return Err(LspError::new(
                 "empty_anchor",
                 format!(
-                    "An edit of {path} has an empty `oldText`. An anchor is the text being \
-                     replaced; to add a line, anchor on the line it goes next to and put both in \
-                     `newText`."
+                    "`{at}` is empty, in {path}. An anchor is the text being replaced; to add a \
+                     line, anchor on the line it goes next to and put both in `newText`."
                 ),
             ));
         }
         let mut found = text.match_indices(edit.old_text.as_str());
         let Some((start, _)) = found.next() else {
-            return Err(anchor_not_found(path, text, &edit.old_text));
+            return Err(anchor_not_found(&at, path, text, &edit.old_text));
         };
-        if found.next().is_some() {
+        let others: Vec<usize> = found.map(|(offset, _)| offset).collect();
+        if !others.is_empty() {
+            let lines: Vec<String> = std::iter::once(start)
+                .chain(others)
+                .map(|offset| (text[..offset].matches('\n').count() + 1).to_string())
+                .collect();
             return Err(LspError::new(
                 "anchor_not_unique",
                 format!(
-                    "`oldText` appears more than once in {path}, so it names no single region. \
-                     Extend the anchor with a surrounding line until it is unique."
+                    "`{at}` is in {path} {} times, at lines {}, so it names no single region. \
+                     Extend it with a neighbouring line until it names the one you meant.",
+                    lines.len(),
+                    lines.join(", ")
                 ),
             ));
         }
@@ -676,9 +701,9 @@ pub fn edit_documents(request: EditScriptRequest) -> Result<Vec<EditedScript>, L
         ));
     }
     let mut planned = Vec::with_capacity(request.files.len());
-    for file in &request.files {
+    for (file_index, file) in request.files.iter().enumerate() {
         let contents = workspace.read(&file.path).map_err(file_error)?;
-        let updated_text = apply_edits(&file.path, &contents.text, &file.edits)?;
+        let updated_text = apply_edits(file_index, &file.path, &contents.text, &file.edits)?;
         planned.push(PlannedFile {
             path: file.path.clone(),
             original_hash: contents.hash,
@@ -1319,7 +1344,7 @@ mod tests {
     }
 
     fn edited(text: &str, edits: &[ScriptEdit]) -> Result<String, LspError> {
-        apply_edits("player.gd", text, edits)
+        apply_edits(0, "player.gd", text, edits)
     }
 
     /// Several anchors in one call are the whole point of the operation, and the one way to get
@@ -1374,6 +1399,58 @@ mod tests {
                 .expect_err("a file with no edits asks for nothing")
                 .code,
             "no_edits"
+        );
+    }
+
+    /// A refusal names the edit being refused, and a repeated anchor names the lines it matched.
+    ///
+    /// Both halves are the same failure. Every anchor refusal recorded in one live project came
+    /// from a call carrying two edits for the named file, so `oldText is not in scripts/main.gd`
+    /// left the caller to work out which of its own two edits was meant. And `anchor_not_unique`
+    /// said "extend the anchor until it is unique" without saying where the other matches were,
+    /// while the near-miss branch four lines above it had been naming them for a week.
+    #[test]
+    fn an_anchor_refusal_names_the_edit_and_where_it_matched() {
+        let text = "extends Node\n\nfunc a():\n\tpass\n\nfunc b():\n\tpass\n";
+
+        let repeated = apply_edits(
+            1,
+            "unit.gd",
+            text,
+            &[edit("func a():", "func c():"), edit("\tpass", "\treturn")],
+        )
+        .expect_err("the second anchor is in the file twice");
+
+        assert_eq!(repeated.code, "anchor_not_unique");
+        assert!(
+            repeated.message.contains("`files[1].edits[1].oldText`"),
+            "the refused edit is named by its position in the call: {}",
+            repeated.message
+        );
+        // Lines 4 and 7 — the two bodies. Counting them is what makes "extend it" a fixable
+        // instruction rather than a search.
+        assert!(
+            repeated.message.contains("2 times, at lines 4, 7"),
+            "every match is counted and placed: {}",
+            repeated.message
+        );
+
+        let missing = apply_edits(0, "unit.gd", text, &[edit("func c():", "func d():")])
+            .expect_err("the anchor is not there");
+        assert_eq!(missing.code, "anchor_not_found");
+        assert!(
+            missing.message.contains("`files[0].edits[0].oldText`"),
+            "a missing anchor is named the same way: {}",
+            missing.message
+        );
+
+        let empty = apply_edits(2, "unit.gd", text, &[edit("", "func c():\n")])
+            .expect_err("an empty anchor names the whole file");
+        assert_eq!(empty.code, "empty_anchor");
+        assert!(
+            empty.message.contains("`files[2].edits[0].oldText`"),
+            "and so is an empty one: {}",
+            empty.message
         );
     }
 

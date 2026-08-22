@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -205,6 +206,25 @@ struct Connection {
 
 static CONNECTION: Mutex<Option<Connection>> = Mutex::new(None);
 
+/// Whether a game is running because the debugger started one.
+///
+/// `godot_runtime run` asks the editor `is_playing_scene()`, and a game the debug adapter launched
+/// is not one the editor is playing — so the guard passed, `play_main_scene()` ran, a second game
+/// collided with the first, and the model was told
+/// `runtime_not_running: The game started and then stopped before it was ready`. A live debugging
+/// turn met exactly that, twice, and read it as "the engine is broken": it spent the next seven
+/// calls trying to launch the project from the shell, every one of them refused by the workspace
+/// rule, before coming back and doing it the way that already worked.
+///
+/// So the router asks here first. Set when a launch is answered, cleared by terminate, disconnect,
+/// and the supervisor dropping the session — every way the game can go.
+static DEBUGGER_HOLDS_A_GAME: AtomicBool = AtomicBool::new(false);
+
+/// Whether the debugger has a game of its own running right now.
+pub fn holds_a_game() -> bool {
+    DEBUGGER_HOLDS_A_GAME.load(Ordering::Relaxed)
+}
+
 /// Answers one debugger request, connecting to the active session's adapter on first use.
 pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
     let (client, workspace, events) = connection()?;
@@ -224,7 +244,10 @@ pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
         DebugRequest::Launch {
             play_args,
             breakpoints,
-        } => launch(&client, &workspace, play_args, breakpoints),
+        } => {
+            refuse_a_second_launch(holds_a_game())?;
+            launch(&client, &workspace, play_args, breakpoints)
+        }
         DebugRequest::Attach => {
             client.attach()?;
             client.configuration_done()?;
@@ -301,10 +324,12 @@ pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
         }
         DebugRequest::Terminate => {
             client.terminate()?;
+            DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Disconnect { terminate_debuggee } => {
             client.disconnect(terminate_debuggee.unwrap_or(true))?;
+            DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
             Ok(DebugResponse::Acknowledged)
         }
     }
@@ -313,6 +338,7 @@ pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
 /// Drops the cached adapter connection. The session supervisor calls this when a session stops, so
 /// the next debug request reconnects rather than talking to a dead editor.
 pub fn disconnect() {
+    DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
     let previous = CONNECTION.lock().ok().and_then(|mut slot| slot.take());
     if let Some(connection) = previous {
         connection.client.shutdown();
@@ -327,6 +353,28 @@ pub fn disconnect() {
 /// pending and then forgets it, leaving the launch behind it unspawned and unanswered — a game
 /// that never starts and a request that only ends at its own timeout. Writing the launch on this
 /// thread rather than on one that may not have been scheduled yet is what rules that out.
+/// Refuses a launch on top of a game the debugger is already running.
+///
+/// What a model reaches for when a wait times out is another launch. Watched in one live turn:
+/// **seven `launch` calls with no `terminate` between them**, and nine `stop_timeout`s around them.
+/// Every new game arrives carrying the breakpoints of the launch that made it, so a wait left over
+/// from the launch before is waiting for a stop that the game it is watching was never told to
+/// make — and the answer to that is not a ninth launch.
+///
+/// The twin of the guard `godot_runtime run` takes for the same game from the other side. Both name
+/// the ways out rather than only the refusal.
+fn refuse_a_second_launch(holds_a_game: bool) -> Result<(), DapError> {
+    if !holds_a_game {
+        return Ok(());
+    }
+    Err(DapError::new(
+        "already_launched",
+        "The debugger is already running a game. Let it go on with continue, stop it where it is \
+         with pause, or end it with terminate — and restart is the one call that replaces a running \
+         game with a fresh one.",
+    ))
+}
+
 fn launch(
     client: &DapClient,
     workspace: &Workspace,
@@ -357,6 +405,7 @@ fn launch(
     if let Some(error) = install_error {
         return Err(error);
     }
+    DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
     Ok(DebugResponse::Launched {
         breakpoints: verified,
     })
@@ -511,6 +560,27 @@ fn poisoned() -> DapError {
 
 #[cfg(test)]
 mod tests {
+    /// A launch on top of a live game is refused, and the refusal names every way onward.
+    ///
+    /// One live debugging turn made seven launches with no terminate between them. Each new game
+    /// carries the breakpoints of the launch that made it, so the waits left over from earlier
+    /// launches time out — nine of them in that turn — and the model answers a timed-out wait with
+    /// another launch.
+    #[test]
+    fn a_launch_on_top_of_a_running_game_is_refused() {
+        let refused = super::refuse_a_second_launch(true)
+            .expect_err("a second launch must be refused while one game is running");
+        assert_eq!(refused.code, "already_launched");
+        for onward in ["continue", "pause", "terminate", "restart"] {
+            assert!(
+                refused.message.contains(onward),
+                "the refusal has to name {onward}: {}",
+                refused.message
+            );
+        }
+        assert!(super::refuse_a_second_launch(false).is_ok());
+    }
+
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;

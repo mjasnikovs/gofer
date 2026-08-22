@@ -184,7 +184,17 @@ func _op_tree(params: Dictionary) -> Dictionary:
     _tree_budget = clampi(budget, 1, MAX_TREE_NODES)
     _tree_depth = clampi(levels, 0, MAX_TREE_DEPTH)
     var summary := _runtime_node_summary(start, 0)
-    return _succeed({"truncated": _tree_truncated, "root": summary})
+    # `paused` rides along because nothing else carries it and the tree is what gets asked for.
+    #
+    # It belongs to the SceneTree, which is not a Node, so `inspect_node` cannot reach it: two live
+    # turns asked for it as a property of `/root` and were told `/root has no property 'paused'`,
+    # which is true and useless. The only other way to it is `godot_debug evaluate`, which means
+    # attaching a debugger to read one boolean. A pause menu is the commonest reason to want it.
+    return _succeed({
+        "truncated": _tree_truncated,
+        "root": summary,
+        "paused": get_tree().paused,
+    })
 
 func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
     _tree_nodes_seen += 1
