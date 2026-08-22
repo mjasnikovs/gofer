@@ -99,9 +99,11 @@ fn make_it_a_repository(worktree: &std::path::Path) {
     ]);
 }
 
-fn start_session() -> godot_editor_harness::Session {
-    let directory = TempDir::new().expect("temporary directory");
-    let worktree = live_worktree(&directory);
+/// Launches the editor on a worktree the caller has already prepared and settled.
+///
+/// Split from the preparation because staging must be the *last* thing that touches
+/// `project.godot`. See [`live_agent_acceptance`] for what happens when it is not.
+fn start_session(directory: TempDir, worktree: PathBuf) -> godot_editor_harness::Session {
     let ledger = directory.path().join("ledger.json");
     godot_editor_harness::Session::start_on_worktree_with(
         worktree,
@@ -139,18 +141,36 @@ fn live_agent_acceptance() {
         .unwrap_or_else(|_| "http://127.0.0.1:8080/v1".to_owned());
     let model = std::env::var("GOFER_LIVE_MODEL").unwrap_or_else(|_| "local".to_owned());
 
-    let session = start_session();
+    // The project database is opened before the editor, and this order is the whole run.
+    //
+    // Opening a project creates its first task, and creating a task moves the checkout onto that
+    // task's branch — cut from the base, so whatever was loose in the working tree is committed to
+    // the base branch and left there. `ProjectStorage::open` is allowed to do that because in the
+    // application it runs before any editor exists, so there is nothing staged to lose.
+    //
+    // Started the other way round, the addon is staged first and that switch throws it away:
+    // `GoferRuntime` goes into a commit on `master` and the task branch begins without it. The
+    // editor keeps running with the plugin it loaded, so nothing looks wrong — until a game is
+    // launched, boots with no runtime helper, and every `godot_runtime` call waits for a helper
+    // that can never announce. A live turn spent seventeen calls in that loop: `run` answering
+    // `runtime_slow_start`, `get_state` answering `running: true, runtimeReady: false`, `wait`
+    // answering `runtime_not_running`, over and over, about a game that was on screen the whole
+    // time.
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = live_worktree(&directory);
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage =
+        crate::storage::ProjectStorage::open(data.path(), &worktree).expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+    let session = start_session(directory, worktree);
     // The rules a real session applies when it goes ready. Without them the strict-typing policy
     // Gofer ships turned on is simply absent, and a run measures a project nobody has.
     for call in crate::godot_policy::policy_calls(&crate::settings::GodotSettings::default()) {
         let answered = session.try_call(call.command, call.params.clone(), None);
         println!("policy {} -> {answered:?}", call.command);
     }
-    let app = mock_app();
-    let data = TempDir::new().expect("temporary application data");
-    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
-        .expect("open project storage");
-    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
 
     // The user's own retrieval cache and the real retrieve worker, so `godot_docs_search` answers
     // out of the real corpus. A fixture worker would answer canned passages, and the agent is told

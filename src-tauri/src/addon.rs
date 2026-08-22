@@ -857,6 +857,33 @@ fn add_autoload(lines: &mut Vec<String>) -> AutoloadRecord {
     }
 }
 
+/// Whether `project.godot` no longer registers the runtime helper a launched game loads.
+///
+/// Answered from the file rather than from the editor, because the two disagree exactly when this
+/// matters. The editor read `project.godot` once at startup and keeps its settings in memory; the
+/// game is a separate process that reads the file again at launch. Anything that rewrites the file
+/// under a live session — a branch switch, a merge, an external edit, the agent's own `git` — takes
+/// the autoload away from the game while the editor still believes it is there.
+///
+/// The game then boots without a helper, and every `godot_runtime` call waits for an announcement
+/// that can never come. Watched live for seventeen calls: `run` answering `runtime_slow_start`,
+/// `get_state` answering `running: true, runtimeReady: false`, `wait` answering
+/// `runtime_not_running`, about a game that was on screen the whole time.
+///
+/// `true` only when the file was read and the entry is genuinely absent. A file that cannot be read
+/// answers `false`, because a diagnosis is worth saying only when it is known.
+pub fn runtime_helper_missing(worktree: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(worktree.join(PROJECT_FILE)) else {
+        return false;
+    };
+    let lines = split_lines(&text);
+    let Some(bounds) = section_bounds(&lines, AUTOLOAD_SECTION) else {
+        return true;
+    };
+    !find_key(&lines, bounds, AUTOLOAD_NAME)
+        .is_some_and(|index| lines[index].contains(AUTOLOAD_TARGET))
+}
+
 fn remove_autoload(lines: &mut Vec<String>, record: &AutoloadRecord) {
     if !record.added {
         return;
@@ -917,6 +944,55 @@ mod tests {
             _home: home,
             _directory: directory,
         }
+    }
+
+    /*
+     * The autoload going missing under a live session is something Gofer can see.
+     *
+     * A live turn spent seventeen calls on this: a branch switch after staging took the two lines
+     * out of `project.godot`, so every game launched afterwards booted with no runtime helper.
+     * `godot_runtime run` answered `runtime_slow_start`, `get_state` answered
+     * `running: true, runtimeReady: false`, `wait` answered `runtime_not_running`, round and round,
+     * about a game that was on screen the whole time. Nothing anywhere named the cause.
+     */
+    #[test]
+    fn a_project_that_lost_the_staged_autoload_says_so() {
+        let fixture = fixture();
+        assert!(
+            runtime_helper_missing(fixture.workspace.root()),
+            "an unstaged project has no helper, and that is the honest answer"
+        );
+
+        fixture.stager.stage(&fixture.workspace).expect("stage");
+        assert!(
+            !runtime_helper_missing(fixture.workspace.root()),
+            "a staged project registers the helper"
+        );
+
+        // What a checkout of a branch cut before staging leaves behind: the addon's files are Git
+        // ignored and survive, and the one file Git tracks goes back to what it was.
+        fs::write(fixture.workspace.root().join(PROJECT_FILE), PROJECT).expect("rewrite");
+        assert!(
+            runtime_helper_missing(fixture.workspace.root()),
+            "the entry is gone from the file the game reads"
+        );
+
+        // An `[autoload]` section holding somebody else's autoload is not Gofer's helper either,
+        // and neither is the name pointed at another script.
+        fs::write(
+            fixture.workspace.root().join(PROJECT_FILE),
+            format!("{PROJECT}\n[autoload]\n\nGoferRuntime=\"*res://mine.gd\"\n"),
+        )
+        .expect("rewrite");
+        assert!(
+            runtime_helper_missing(fixture.workspace.root()),
+            "the name alone is not the helper; it has to be Gofer's script"
+        );
+
+        // A worktree with no project file at all answers `false`. Nothing was read, so there is
+        // nothing to claim.
+        let empty = TempDir::new().expect("empty directory");
+        assert!(!runtime_helper_missing(empty.path()));
     }
 
     /// A manifest a dying session left half-written must not brick every start after it.

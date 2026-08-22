@@ -2355,6 +2355,15 @@ fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -> ToolFailu
         );
         return failure;
     }
+    // Not for `session_closed`. That one is about the editor, and an editor that has gone takes the
+    // staged autoload with it — so the check below would be right about the file and wrong about
+    // what happened.
+    if failure.code.starts_with("runtime_")
+        && let Some(missing) = the_helper_is_not_installed()
+    {
+        failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
+        return failure;
+    }
     let printed = last_session_errors(CARRIED_ERROR_LINES);
     if printed.is_empty() {
         return failure;
@@ -2365,6 +2374,30 @@ fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -> ToolFailu
         printed.join("\n")
     );
     failure
+}
+
+/// Says so when the game cannot possibly answer, because its helper is not in the project any more.
+///
+/// The other three explanations a runtime failure carries all come out of the session output. This
+/// one is not in it: the game boots, runs, and prints nothing wrong — it simply has no
+/// `GoferRuntime` autoload, so nothing inside it ever announces itself. Every runtime call then
+/// waits its full deadline and answers with advice to wait longer, for ever.
+///
+/// See [`crate::addon::runtime_helper_missing`] for what takes the autoload away under a session
+/// that is still running, and why the file rather than the editor is what gets read.
+fn the_helper_is_not_installed() -> Option<String> {
+    let worktree = godot_session::current_info()?.worktree;
+    if !crate::addon::runtime_helper_missing(std::path::Path::new(&worktree)) {
+        return None;
+    }
+    Some(
+        "The game has no Gofer runtime helper to answer with: project.godot no longer registers \
+         the GoferRuntime autoload, so nothing in the game can reply and waiting will not change \
+         that. Something rewrote project.godot after this session staged it — a branch switch, a \
+         merge, or an edit to the file. Restart the editor with godot_session stop then \
+         godot_session start, which stages it again."
+            .to_owned(),
+    )
 }
 
 /// How many of the session's last errors travel with a runtime failure.
@@ -4444,6 +4477,89 @@ mod tests {
             retryable: true,
             details: json!({}),
         }
+    }
+
+    /*
+     * A game whose helper is not in the project is told so, rather than told to wait.
+     *
+     * `runtime_slow_start` was written for a helper that is late, and it says the right thing to a
+     * caller whose game is still starting: read `get_state`, do not stop it. A helper that is not
+     * installed reads the same and never resolves — `get_state` answers
+     * `running: true, runtimeReady: false` for ever, `wait` answers `runtime_not_running` about a
+     * game that is plainly running, and the advice is to keep asking. A live turn spent seventeen
+     * calls in that loop and produced nothing.
+     *
+     * The session output cannot explain it, because there is no error: the game boots and runs
+     * perfectly, with nothing inside it that can answer.
+     */
+    #[test]
+    fn a_game_with_no_runtime_helper_is_told_that_and_not_to_wait() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(godot_session::LogSource::Editor, "GOFER_ADDON_READY:2")]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            "config_version=5\n\n[application]\n\nconfig/name=\"Fixture\"\n",
+        )
+        .expect("a project with no autoload section");
+        godot_session::bind(Some(std::sync::Arc::new(
+            godot_session::ExternalEditor::at(0, 0, worktree.path()),
+        )));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet.",
+        ));
+
+        godot_session::bind(None);
+        assert_eq!(carried.code, "runtime_slow_start");
+        assert!(
+            carried.message.contains("GoferRuntime"),
+            "the failure named nothing to fix: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("godot_session start"),
+            "the failure offered no way out: {}",
+            carried.message
+        );
+    }
+
+    /*
+     * And a staged project keeps the failure it already had.
+     *
+     * The sentence above is a diagnosis, so it must not be attached to a game whose helper is
+     * simply late — which is every ordinary `runtime_slow_start` and the reason that code exists.
+     */
+    #[test]
+    fn a_staged_project_is_not_accused_of_losing_its_helper() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(godot_session::LogSource::Editor, "GOFER_ADDON_READY:2")]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            format!(
+                "config_version=5\n\n[autoload]\n\n{}=\"{}\"\n",
+                crate::addon::AUTOLOAD_NAME,
+                crate::addon::AUTOLOAD_TARGET
+            ),
+        )
+        .expect("a staged project");
+        godot_session::bind(Some(std::sync::Arc::new(
+            godot_session::ExternalEditor::at(0, 0, worktree.path()),
+        )));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet.",
+        ));
+
+        godot_session::bind(None);
+        assert!(
+            !carried.message.contains("GoferRuntime"),
+            "a staged project was accused of losing its helper: {}",
+            carried.message
+        );
     }
 
     /**
