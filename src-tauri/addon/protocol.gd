@@ -340,6 +340,21 @@ static func fit_to_declared_type(value: Variant, declared: int) -> Dictionary:
     # protocol carries a StringName or a NodePath.
     if declared == TYPE_FLOAT and typeof(value) == TYPE_INT:
         return decoded(float(value))
+    # And the mirror, which was missing. JSON has one number type, so a caller writing 1 for an
+    # `int` property reaches here as 1.0 whenever its serialiser renders whole numbers with a point
+    # — and Godot's own `Object.set` takes that perfectly well. Watched live: a menu turn wrote
+    # `alignment: 1.0` on a VBoxContainer and was answered `expected int, received float` about a
+    # number that is an integer.
+    #
+    # Only a whole one. A fraction dropped on the way into an `int` is a silent loss, and a caller
+    # that meant 1.5 is better told than quietly given 1.
+    if declared == TYPE_INT and typeof(value) == TYPE_FLOAT:
+        var number: float = value
+        if is_finite(number) and is_equal_approx(number, floor(number)):
+            return decoded(int(number))
+        return decode_failed(
+            "expected int, received %s, which is not a whole number" % str(number)
+        )
     if typeof(value) == TYPE_STRING and declared in [TYPE_STRING_NAME, TYPE_NODE_PATH]:
         return decoded(type_convert(value, declared))
     if typeof(value) == TYPE_ARRAY and PACKED_ARRAY_ELEMENTS.has(declared):

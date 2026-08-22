@@ -124,6 +124,27 @@ func _test_declared_types(protocol: GDScript, failures: Array[String]) -> void:
     var mismatched: Dictionary = protocol.call("fit_to_declared_type", "12", TYPE_INT)
     if mismatched["ok"]:
         failures.append("A string must not fit an int")
+    # The mirror of the widening above. JSON has one number type, so a caller writing 1 for an
+    # `int` property reaches here as 1.0 whenever its serialiser renders whole numbers with a
+    # point. Watched live: `alignment: 1.0` on a VBoxContainer, answered `expected int, received
+    # float` about a number that is an integer.
+    var narrowed: Dictionary = protocol.call("fit_to_declared_type", 1.0, TYPE_INT)
+    if not narrowed["ok"] or typeof(narrowed["value"]) != TYPE_INT or narrowed["value"] != 1:
+        failures.append("A whole float must fit an int")
+    var negative: Dictionary = protocol.call("fit_to_declared_type", -3.0, TYPE_INT)
+    if not negative["ok"] or negative["value"] != -3:
+        failures.append("A negative whole float must fit an int")
+    # And a fraction must not: dropping it is a silent loss, and a caller that meant 1.5 is better
+    # told than quietly given 1.
+    var fractional: Dictionary = protocol.call("fit_to_declared_type", 1.5, TYPE_INT)
+    if fractional["ok"]:
+        failures.append("A fractional float must not fit an int")
+    if not str(fractional.get("message", "")).contains("whole"):
+        failures.append("A refused fraction must say what is wrong with it")
+    for wild in [INF, -INF, NAN]:
+        var boundless: Dictionary = protocol.call("fit_to_declared_type", wild, TYPE_INT)
+        if boundless["ok"]:
+            failures.append("%s must not fit an int" % str(wild))
     var untyped: Dictionary = protocol.call("fit_to_declared_type", "anything", TYPE_NIL)
     if not untyped["ok"] or untyped["value"] != "anything":
         failures.append("An undeclared type must take the value as it is")
