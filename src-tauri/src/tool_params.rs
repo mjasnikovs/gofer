@@ -239,7 +239,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 /// and repeating it here would be a second one. An operation absent from this table is not checked
 /// — absence means unchecked, never "takes nothing" — which is why a new operation that wants
 /// checking has to be added rather than merely written.
-// GENERATED-BEGIN op-params sha256:54dc6cdc50a5c0a9
+// GENERATED-BEGIN op-params sha256:a80309e80c5c3353
 pub const TABLE: &[OpParams] = &[
     op("godot_session", "status", Answers::Rust, &[]),
     op("godot_session", "start", Answers::Rust, &[]),
@@ -1180,7 +1180,38 @@ pub const TABLE: &[OpParams] = &[
         "input",
         Answers::Addon("runtime.input"),
         &[noted(
-            speaking(need("events", List), GODOT_KEY_NAME),
+            shaped(
+                speaking(need("events", List), GODOT_KEY_NAME),
+                &[
+                    noted(
+                        need(
+                            "kind",
+                            Kind::Choice(&[
+                                "key",
+                                "mouse_button",
+                                "mouse_motion",
+                                "joypad_button",
+                                "joypad_motion",
+                            ]),
+                        ),
+                        "Which of the five an event is. Checked here rather than in the game: an event with no kind used to cross the socket and come back as `Input event kind '' is not supported`, which names nothing to send instead. One live turn wrote it 22 times.",
+                    ),
+                    speaking(opt("key", Text), GODOT_KEY_NAME),
+                    noted(
+                        opt("pressed", Flag),
+                        "Held down unless this says otherwise, so the release is a second event carrying false.",
+                    ),
+                    noted(
+                        opt("button", Kind::Either(&[Text, Int])),
+                        "A mouse button by name - left, right, middle, wheel_up, wheel_down - or an index; a joypad button is an index.",
+                    ),
+                    opt("position", List),
+                    opt("relative", List),
+                    opt("axis", Int),
+                    opt("value", Number),
+                    opt("device", Int),
+                ],
+            ),
             "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event.",
         )],
     ),
@@ -1567,9 +1598,12 @@ pub fn signature(params: &[Param]) -> String {
                         signature(param.entry)
                     ),
                 },
-                // A vocabulary is printed wherever it applies, kind or not. `key` sits inside each
-                // entry of an `events` list, so no kind can name it — and the note on `Kind` above
-                // is the measurement that says a signature carries this better than a sentence.
+                // A vocabulary is printed wherever it applies, and the note on `Kind` above is the
+                // measurement that says a signature carries this better than a sentence beside it.
+                //
+                // `like` rather than the `|` list a `Choice` gets, because a vocabulary is a sample
+                // and a choice is the whole set: every key name Godot knows would be a signature
+                // nobody could read, and `F7` is as valid as the twenty-five spelled here.
                 _ if !param.vocabulary.is_empty() => {
                     let quoted: Vec<String> = param
                         .vocabulary
@@ -1577,7 +1611,7 @@ pub fn signature(params: &[Param]) -> String {
                         .map(|word| format!("\"{word}\""))
                         .collect();
                     format!(
-                        "{}{mark}: {} of {{kind, key: {}}}",
+                        "{}{mark}: {} like {}",
                         param.name,
                         short(param.kind),
                         quoted.join("|")

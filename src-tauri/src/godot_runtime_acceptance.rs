@@ -383,6 +383,35 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
             .starts_with("unsupported_value"),
         "an unknown key must be refused by the helper, not injected"
     );
+    // The five kinds are the whole vocabulary and a caller that got one wrong has nowhere else to
+    // read them. A live turn building a playable game sent an event with no kind at all and was
+    // answered `Input event kind '' is not supported` twenty-two times running. The parameter
+    // contract refuses that before it reaches this socket now; the helper still has to say it.
+    for (sent, expected) in [
+        (
+            json!({"events": [{"key": "A"}]}),
+            "An input event needs a kind",
+        ),
+        (
+            json!({"events": [{"kind": "keyboard", "key": "A"}]}),
+            "is not one of",
+        ),
+    ] {
+        let refused = session.error("runtime.input", sent, None);
+        assert!(refused.contains(expected), "{refused}");
+        for named in [
+            "key",
+            "mouse_button",
+            "mouse_motion",
+            "joypad_button",
+            "joypad_motion",
+        ] {
+            assert!(
+                refused.contains(named),
+                "the refusal must name {named}: {refused}"
+            );
+        }
+    }
     assert!(
         session
             .error(

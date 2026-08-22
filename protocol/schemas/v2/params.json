@@ -1936,7 +1936,73 @@
                     "kind": "list",
                     "required": true,
                     "note": "Each event is {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true}, and the release is a second event.",
-                    "vocabulary": "godotKeyName"
+                    "vocabulary": "godotKeyName",
+                    "entry": [
+                        {
+                            "name": "kind",
+                            "kind": "choice",
+                            "of": [
+                                "key",
+                                "mouse_button",
+                                "mouse_motion",
+                                "joypad_button",
+                                "joypad_motion"
+                            ],
+                            "required": true,
+                            "note": "Which of the five an event is. Checked here rather than in the game: an event with no kind used to cross the socket and come back as `Input event kind '' is not supported`, which names nothing to send instead. One live turn wrote it 22 times."
+                        },
+                        {
+                            "name": "key",
+                            "kind": "text",
+                            "required": false,
+                            "vocabulary": "godotKeyName"
+                        },
+                        {
+                            "name": "pressed",
+                            "kind": "flag",
+                            "required": false,
+                            "note": "Held down unless this says otherwise, so the release is a second event carrying false."
+                        },
+                        {
+                            "name": "button",
+                            "kind": "either",
+                            "of": [
+                                {
+                                    "kind": "text"
+                                },
+                                {
+                                    "kind": "int"
+                                }
+                            ],
+                            "required": false,
+                            "note": "A mouse button by name - left, right, middle, wheel_up, wheel_down - or an index; a joypad button is an index."
+                        },
+                        {
+                            "name": "position",
+                            "kind": "list",
+                            "required": false
+                        },
+                        {
+                            "name": "relative",
+                            "kind": "list",
+                            "required": false
+                        },
+                        {
+                            "name": "axis",
+                            "kind": "int",
+                            "required": false
+                        },
+                        {
+                            "name": "value",
+                            "kind": "number",
+                            "required": false
+                        },
+                        {
+                            "name": "device",
+                            "kind": "int",
+                            "required": false
+                        }
+                    ]
                 }
             ],
             "command": "runtime.input"

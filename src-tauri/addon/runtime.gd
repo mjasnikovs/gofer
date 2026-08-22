@@ -334,6 +334,12 @@ func _op_monitors(params: Dictionary) -> Dictionary:
 ## An event may carry an optional `device`, which lands on the built event unchanged. The engine
 ## rewrites the default device of an event it receives, so this is the only way a game can tell
 ## injected input apart from whatever the desktop delivered to its window at the same moment.
+## The five an event may be. Named in the refusal, because a caller that got one wrong has nowhere
+## else to read them.
+const EVENT_KINDS: Array[String] = [
+    "key", "mouse_button", "mouse_motion", "joypad_button", "joypad_motion"
+]
+
 func _decode_runtime_events(raw: Variant) -> Dictionary:
     if typeof(raw) != TYPE_ARRAY:
         return _decode_failed("events must be an array of input event objects")
@@ -401,7 +407,18 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 )
                 events.append(axis_event)
             _:
-                return _decode_failed("Input event kind '%s' is not supported" % kind)
+                # Named, because the kinds are the whole vocabulary and a caller that got one wrong
+                # has nowhere else to read them. A live turn sent an event with no kind at all and
+                # was answered `Input event kind '' is not supported` twenty-two times running —
+                # true, and naming nothing to send instead. The parameter contract refuses this
+                # before it reaches the socket now; this is what answers anything that gets past it.
+                if kind.is_empty():
+                    return _decode_failed(
+                        "An input event needs a kind: one of %s" % ", ".join(EVENT_KINDS)
+                    )
+                return _decode_failed(
+                    "Input event kind '%s' is not one of %s" % [kind, ", ".join(EVENT_KINDS)]
+                )
         var device: Variant = (entry as Dictionary).get("device", null)
         if device != null:
             if typeof(device) != TYPE_INT and typeof(device) != TYPE_FLOAT:

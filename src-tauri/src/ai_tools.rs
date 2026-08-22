@@ -591,13 +591,11 @@ pub const CATALOG: &[ToolDomain] = &[
             operation(
                 "input",
                 "Injects input and captures the result. Each event names its kind and \
-                 its key, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the \
-                 release as a second event, or the key stays down. The named keys are in the \
-                 signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. The other \
-                 kinds are mouse_button ({button: \"left\"|\"right\"|\"middle\"|\"wheel_up\"|\
-                 \"wheel_down\" or an index, position?: [x, y], pressed?}), mouse_motion \
-                 ({position?: [x, y], relative?: [x, y]}), joypad_button ({button, pressed?}) and \
-                 joypad_motion ({axis, value}). Any event may carry a `device` integer. This \
+                 the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \
+                 \"pressed\": true} — send the release as a second event, or the key stays down. \
+                 The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as \
+                 they read. A mouse button is named left, right, middle, wheel_up or wheel_down, \
+                 or given as an index. A position is [x, y]. This \
                  drives the Input Map, so it is how you check that a level you built can actually \
                  be played.",
             ),
@@ -1259,6 +1257,7 @@ fn dispatch_under<R: Runtime>(
         // `Protocol.decode`, in the editor, across a socket — and its answer reached the model as
         // one flattened sentence with no example in it. See `tool_params`.
         crate::tool_params::check(domain.name, &entry.op, &entry.params)
+            .map_err(|failure| the_whole_file(domain.name, &entry.op, failure))
             .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
 
         // A game the debugger started is not one the editor is playing, so `runtime.run`'s own
@@ -2018,6 +2017,40 @@ fn one_or_many(mut answers: Vec<Value>, batched: bool) -> Value {
     }
     // A single path always produced exactly one answer: `named_scripts` refuses an empty call.
     answers.pop().unwrap_or(Value::Null)
+}
+
+/// Names the operation that needs no anchors, when an edit call arrives in a shape it cannot use.
+///
+/// `godot_script edit` carries the largest nested payload of any operation — a list of files, each
+/// holding a list of before-and-after strings that are whole functions — and it is where this
+/// model's JSON tears most often. `files[0] requires path` is the second commonest refusal in every
+/// recorded live turn: nine of them across five turns, three of those inside one call sequence.
+///
+/// It is not a misunderstanding of the shape. Asked directly, twelve seeds out of twelve wrote
+/// `files[{path, edits}]` correctly. The turn that met it three times said so itself, in the middle
+/// of the run:
+///
+/// > The JSON structure is getting mangled. Let me just save the whole file:
+///
+/// — and `godot_script save`, which takes one path and one string, worked immediately. So there is
+/// nothing here to repair: the intended text never reaches the wire, and a router that guessed a
+/// path would be writing a guess into somebody's script. What can be done is name the way out that
+/// this run took four calls to find on its own.
+fn the_whole_file(tool: &str, op: &str, failure: ToolFailure) -> ToolFailure {
+    let shape = matches!(
+        failure.code.as_str(),
+        "missing_param" | "unknown_param" | "invalid_param"
+    );
+    if !shape || tool != "godot_script" || op != "edit" {
+        return failure;
+    }
+    let mut failure = failure;
+    failure.message = format!(
+        "{} If this call keeps arriving in a shape it cannot use, godot_script save writes the \
+         whole file as one string and needs no anchors at all.",
+        failure.message.trim_end()
+    );
+    failure
 }
 
 fn script_domain<R: Runtime>(
@@ -4440,6 +4473,168 @@ mod tests {
         assert_eq!(take_u64(&mut params, "expectedRevision"), Some(7));
         assert_eq!(take_u64(&mut params, "timeoutMs"), Some(500));
         assert_eq!(params, json!({"path": "res://main.tscn"}));
+    }
+
+    /*
+     * An input event with no kind is refused here, with the five it could be.
+     *
+     * `events` had no entry contract, so an event crossed the socket unchecked and the game
+     * answered `Input event kind '' is not supported` — true, and naming nothing to send instead.
+     * One live turn building a playable game wrote it **twenty-two times running**, the largest
+     * single loop in any recorded turn.
+     */
+    #[test]
+    fn an_input_event_with_no_kind_is_told_what_the_kinds_are() {
+        let app = unattended_app();
+        let refused = dispatch_under(
+            app.handle(),
+            call("godot_runtime", "input", json!({"events": [{"key": "A"}]})),
+            &crate::settings::GodotSettings::default(),
+        )
+        .expect_err("an event with no kind is refused");
+        assert_eq!(refused.code, "missing_param");
+        for named in [
+            "key",
+            "mouse_button",
+            "mouse_motion",
+            "joypad_button",
+            "joypad_motion",
+        ] {
+            assert!(
+                refused.message.contains(named),
+                "the refusal must name {named}: {}",
+                refused.message
+            );
+        }
+
+        // A kind that is not one of the five is refused by the same contract rather than by the
+        // game, so this never reaches an editor either.
+        let wrong = dispatch_under(
+            app.handle(),
+            call(
+                "godot_runtime",
+                "input",
+                json!({"events": [{"kind": "keyboard", "key": "A"}]}),
+            ),
+            &crate::settings::GodotSettings::default(),
+        )
+        .expect_err("a kind outside the five is refused");
+        assert!(wrong.message.contains("mouse_motion"), "{}", wrong.message);
+
+        // And every key the decoder reads is still accepted: a contract that refused one of these
+        // would break the calls that work. Refused for having no session, which is past the shape.
+        let complete = dispatch_under(
+            app.handle(),
+            call(
+                "godot_runtime",
+                "input",
+                json!({"events": [
+                    {"kind": "key", "key": "A", "pressed": false, "device": 16},
+                    {"kind": "mouse_button", "button": "left", "position": [4, 5]},
+                    {"kind": "mouse_button", "button": 3},
+                    {"kind": "mouse_motion", "position": [1, 2], "relative": [3, 4]},
+                    {"kind": "joypad_button", "button": 2, "pressed": true},
+                    {"kind": "joypad_motion", "axis": 1, "value": -0.5},
+                ]}),
+            ),
+            &crate::settings::GodotSettings::default(),
+        )
+        .expect_err("no session is active");
+        assert_ne!(complete.code, "missing_param", "{}", complete.message);
+        assert_ne!(complete.code, "unknown_param", "{}", complete.message);
+        assert_ne!(complete.code, "invalid_param", "{}", complete.message);
+    }
+
+    /*
+     * A torn edit is told about the operation that needs no anchors.
+     *
+     * `godot_script edit` carries the largest nested payload of any operation and is where this
+     * model's JSON tears most often — `files[0] requires path` is the second commonest refusal in
+     * every recorded live turn, nine across five of them. The turn that met it three times worked
+     * it out itself, four calls later: "The JSON structure is getting mangled. Let me just save the
+     * whole file". That sentence is now in the refusal.
+     */
+    #[test]
+    fn a_torn_edit_is_told_about_the_call_that_needs_no_anchors() {
+        let torn = the_whole_file(
+            "godot_script",
+            "edit",
+            ToolFailure::new(
+                "missing_param",
+                "godot_script edit `files[0]` requires `path`.",
+            ),
+        );
+        assert_eq!(torn.code, "missing_param");
+        assert!(torn.message.contains("requires `path`"), "{}", torn.message);
+        assert!(
+            torn.message.contains("godot_script save"),
+            "the refusal offered no way out: {}",
+            torn.message
+        );
+
+        // Only a shape refusal. A file that is not there, or a hash that moved, is a fact about the
+        // worktree rather than about the call, and `save` is no answer to either.
+        for code in ["file_conflict", "not_found", "connect_failed"] {
+            let other = the_whole_file(
+                "godot_script",
+                "edit",
+                ToolFailure::new(code, "something else went wrong"),
+            );
+            assert!(
+                !other.message.contains("godot_script save"),
+                "{code} must not be answered with save: {}",
+                other.message
+            );
+        }
+
+        // And no other operation. `godot_node create` has a shape of its own and `save` is not a
+        // word about it.
+        let elsewhere = the_whole_file(
+            "godot_node",
+            "create",
+            ToolFailure::new("missing_param", "godot_node create requires `parent`."),
+        );
+        assert!(
+            !elsewhere.message.contains("godot_script save"),
+            "{}",
+            elsewhere.message
+        );
+        let other_op = the_whole_file(
+            "godot_script",
+            "save",
+            ToolFailure::new("missing_param", "godot_script save requires `path`."),
+        );
+        assert!(
+            !other_op.message.contains("needs no anchors"),
+            "{}",
+            other_op.message
+        );
+
+        // And through the router, on the shape three separate turns actually wrote: the edits in
+        // place and no path anywhere. The parameter contract is checked before any domain runs, so
+        // this is the only place the sentence can be attached and the only place to prove it is.
+        let app = unattended_app();
+        let refused = dispatch_under(
+            app.handle(),
+            call(
+                "godot_script",
+                "edit",
+                json!({"files": [{"edits": [{"oldText": "a", "newText": "b"}]}]}),
+            ),
+            &crate::settings::GodotSettings::default(),
+        )
+        .expect_err("an entry with no path is refused");
+        assert_eq!(refused.code, "missing_param");
+        assert!(
+            refused.message.contains("This one carries edits."),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("godot_script save"),
+            "{}",
+            refused.message
+        );
     }
 
     #[test]
