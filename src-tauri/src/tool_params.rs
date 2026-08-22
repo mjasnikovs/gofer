@@ -1688,7 +1688,11 @@ fn check_set(
                 return Err(failure(
                     "missing_param",
                     join(
-                        format!("{call}{at} requires `{}`. {takes_shape}", param.name),
+                        format!(
+                            "{call}{at} requires `{}`. {takes_shape}{}",
+                            param.name,
+                            what_it_carries(object)
+                        ),
                         param.note,
                     ),
                     json!({"op": op, "param": path(where_, param.name), "takes": shape}),
@@ -1699,6 +1703,42 @@ fn check_set(
         }
     }
     Ok(())
+}
+
+/// The keys an object did arrive with, so a missing one is a difference rather than an absence.
+///
+/// `godot_script edit \`files[0]\` requires \`path\`` is the second commonest refusal in the recorded
+/// live turns and the only frequent one that says nothing about what was sent — an `unknown_param`
+/// carries the value that arrived, and this carried the shape that was wanted and no more. Three
+/// separate turns hit it, in three separate sessions, and none of the traces can say what shape
+/// they wrote, because nothing anywhere recorded it.
+///
+/// The names alone, never the values: an edit's `oldText` is a whole function, and a refusal is not
+/// where to put one back.
+fn what_it_carries(object: &serde_json::Map<String, Value>) -> String {
+    if object.is_empty() {
+        return " This one is empty.".to_owned();
+    }
+    const SHOWN: usize = 8;
+    const LONGEST: usize = 40;
+    let named: Vec<String> = object
+        .keys()
+        .take(SHOWN)
+        .map(|key| {
+            if key.chars().count() <= LONGEST {
+                key.clone()
+            } else {
+                format!("{}…", key.chars().take(LONGEST).collect::<String>())
+            }
+        })
+        .collect();
+    let rest = object.len().saturating_sub(named.len());
+    let more = if rest == 0 {
+        String::new()
+    } else {
+        format!(" and {rest} more")
+    };
+    format!(" This one carries {}{more}.", named.join(", "))
 }
 
 /// Where a parameter sits, written the way the model wrote it: `files[0].edits[1].oldText`.
@@ -2532,6 +2572,56 @@ mod tests {
             refused.contains("{node: text, property: text, value: tagged}"),
             "{refused}"
         );
+        // And what did arrive, which is the difference between the two shapes rather than the
+        // absence of one key.
+        assert!(
+            refused.contains("This one carries expectedRevision, node, value."),
+            "{refused}"
+        );
+    }
+
+    /*
+     * A missing parameter names the keys that were sent instead.
+     *
+     * `godot_script edit \`files[0]\` requires \`path\`` is the second commonest refusal in the
+     * recorded live turns and was the only frequent one saying nothing about what arrived. Three
+     * separate turns in three separate sessions hit it, and not one of their traces can say what
+     * shape they wrote.
+     */
+    #[test]
+    fn a_missing_parameter_names_what_did_arrive() {
+        // The shape three live turns actually wrote: the edits in place and the path somewhere
+        // else. Every key it does carry is one the entry takes, so nothing else in the refusal
+        // says what is different about it.
+        let pathless = message(
+            "godot_script",
+            "edit",
+            json!({"files": [{"edits": [{"oldText": "var a := 1", "newText": "var a := 2"}]}]}),
+        );
+        assert!(
+            pathless.contains("`files[0]` requires `path`"),
+            "{pathless}"
+        );
+        assert!(pathless.contains("This one carries edits."), "{pathless}");
+
+        // An empty object says so rather than listing nothing.
+        let empty = message("godot_script", "edit", json!({"files": [{}]}));
+        assert!(empty.contains("This one is empty."), "{empty}");
+
+        // A wide object is counted rather than recited, and a key long enough to be wreckage is
+        // cut: a refusal is not the place to hand a torn call back in full.
+        let mut wide = serde_json::Map::new();
+        for index in 0..13 {
+            wide.insert(format!("k{index:02}"), json!(1));
+        }
+        let counted = super::what_it_carries(&wide);
+        assert!(counted.contains("and 5 more."), "{counted}");
+
+        let mut torn = serde_json::Map::new();
+        torn.insert("x".repeat(120), json!(1));
+        let cut = super::what_it_carries(&torn);
+        assert!(cut.contains('…'), "{cut}");
+        assert!(!cut.contains(&"x".repeat(120)), "{cut}");
     }
 
     #[test]
