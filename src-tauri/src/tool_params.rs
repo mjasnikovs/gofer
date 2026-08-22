@@ -2117,6 +2117,7 @@ fn repair_set(spec: &[Param], params: &mut Value) {
         let Some(held) = object.get_mut(param.name) else {
             continue;
         };
+        unbox_the_one(param.kind, held);
         match param.kind {
             Kind::Tagged => repair_tagged(held),
             Kind::List if !param.entry.is_empty() => {
@@ -2129,6 +2130,45 @@ fn repair_set(spec: &[Param], params: &mut Value) {
             Kind::Object if !param.entry.is_empty() => repair_set(param.entry, held),
             _ => {}
         }
+    }
+}
+
+/// Takes a lone value out of the list a model wrapped it in.
+///
+/// The same reasoning as [`sole_entry`], one shape along: a parameter that takes one thing, given a
+/// list of exactly one thing of that kind, has been handed the value in a box. There is no order to
+/// guess at and nothing to choose between.
+///
+/// Watched live in one turn building a large project: `godot_node add_to_group \`node\` takes a
+/// string, and this one was an array of 1` — four times, and once more for `set_cells`. Every one
+/// of them held the single node path the call was about.
+///
+/// A parameter whose kind already allows a list is left alone: `godot_resource rescan` takes one
+/// path or several on purpose, and unwrapping there would change what was asked. So is a list of
+/// two, which is a shape rather than a box, and a list of one holding the wrong kind, which is not
+/// the value at all. Both stay for the refusal to name.
+fn unbox_the_one(kind: Kind, held: &mut Value) {
+    if fits(kind, held) || fits(Kind::List, held) && allows_a_list(kind) {
+        return;
+    }
+    let Some(items) = held.as_array() else {
+        return;
+    };
+    let [only] = items.as_slice() else {
+        return;
+    };
+    if !fits(kind, only) {
+        return;
+    }
+    *held = only.clone();
+}
+
+/// Whether a kind takes a list itself, and so must never have one unwrapped out from under it.
+fn allows_a_list(kind: Kind) -> bool {
+    match kind {
+        Kind::List => true,
+        Kind::Either(kinds) => kinds.iter().any(|one| allows_a_list(*one)),
+        _ => false,
     }
 }
 
@@ -2384,6 +2424,51 @@ mod tests {
     /// a third of everything it did — each answered with ``Did you mean `name`?`` and each resent
     /// unchanged. `tile` is the counter-case the catalogue actually holds: `create_tileset` takes
     /// both `tileSize` and `tiles`, so `tile` names neither and stays for `check` to refuse.
+    /*
+     * A lone value in a list is the value, in a box.
+     *
+     * Watched live in one turn building a large project: `godot_node add_to_group `node` takes a
+     * string, and this one was an array of 1` — four times, and once more for `set_cells`. Every one
+     * held the single node path the call was about.
+     */
+    #[test]
+    fn a_lone_value_in_a_list_comes_out_of_it() {
+        let mut boxed = json!({"node": ["/Player"], "group": "players"});
+        repair("godot_node", "add_to_group", &mut boxed);
+        assert_eq!(boxed, json!({"node": "/Player", "group": "players"}));
+        check_ok("godot_node", "add_to_group", boxed);
+
+        // Two is a shape, not a box: nothing is chosen between them.
+        let mut two = json!({"node": ["/A", "/B"], "group": "players"});
+        repair("godot_node", "add_to_group", &mut two);
+        assert_eq!(two["node"], json!(["/A", "/B"]), "{two}");
+        assert!(message("godot_node", "add_to_group", two).contains("`node`"));
+
+        // One of the wrong kind is not the value at all.
+        let mut wrong = json!({"node": [7], "group": "players"});
+        repair("godot_node", "add_to_group", &mut wrong);
+        assert_eq!(wrong["node"], json!([7]), "{wrong}");
+
+        // A parameter that takes a list itself keeps it. `godot_resource rescan` takes one path or
+        // several on purpose, and unwrapping there would change what was asked.
+        let mut listed = json!({"path": ["res://a.png"]});
+        repair("godot_resource", "rescan", &mut listed);
+        assert_eq!(listed["path"], json!(["res://a.png"]), "{listed}");
+        check_ok("godot_resource", "rescan", listed);
+
+        // And an entry inside a list is repaired the same way, because `repair_set` walks in.
+        let mut nested = json!({
+            "properties": [{"node": ["/Player"], "property": "position",
+                            "value": {"type": "vector2", "value": [1, 2]}}]
+        });
+        repair("godot_node", "set_properties", &mut nested);
+        assert_eq!(
+            nested["properties"][0]["node"],
+            json!("/Player"),
+            "{nested}"
+        );
+    }
+
     #[test]
     fn a_key_that_can_only_have_meant_one_parameter_is_put_onto_it() {
         let mut written = json!({
