@@ -38,6 +38,15 @@ use tempfile::TempDir;
 const PROBE_SCRIPT: &str = "extends Node2D\n\nvar counter := 0\n\n@onready var label: Label = $Label\n\nfunc _process(_delta: float) -> void:\n\t_tick(1)\n\nfunc _tick(amount: int) -> void:\n\tcounter += amount\n\tlabel.text = \"ticks: %d\" % counter\n";
 /// 1-based, matching the editor UI: the `counter += amount` line inside `_tick`.
 const BREAK_LINE: i64 = 11;
+/// The line the turn actually asks for: `func _tick(...)`, the declaration above it.
+///
+/// This is the line a model names, having read the script and picked the function it cares about,
+/// and Godot will verify a breakpoint on it and then never stop there. Measured on a real 4.7.2
+/// editor: twenty seconds with the game running and no stop, against an immediate stop on the line
+/// below. A live debugging turn set a declaration four times, spent six calls on `stop_timeout`,
+/// and finished nothing. So the breakpoint is moved onto the first statement of the body, and this
+/// turn is what proves the move reaches a real editor rather than only a string.
+const ASKED_LINE: i64 = 10;
 const PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://scripts/main_probe.gd\" id=\"1_probe\"]\n\n[node name=\"AiFixture\" type=\"Node2D\"]\nscript = ExtResource(\"1_probe\")\n\n[node name=\"Label\" type=\"Label\" parent=\".\"]\noffset_right = 320.0\noffset_bottom = 40.0\n";
 
 /// The same unclosed parameter list the language-server acceptance uses, because it is a parse
@@ -190,7 +199,7 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             "godot_debug",
             json!({"op": "launch", "params": {
                 "playArgs": ["--headless"],
-                "breakpoints": [{"path": PROBE_PATH, "lines": [BREAK_LINE]}],
+                "breakpoints": [{"path": PROBE_PATH, "lines": [ASKED_LINE]}],
             }}),
         ),
         9 => tool(
@@ -548,6 +557,21 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     // the `_tick` argument read out of the Locals scope.
     assert_eq!(results[8]["breakpoints"][0]["verified"], true);
     assert_eq!(results[8]["breakpoints"][0]["path"], PROBE_PATH);
+    // The declaration the turn asked for became the statement under it, and the answer says so.
+    assert_eq!(
+        results[8]["breakpoints"][0]["line"],
+        BREAK_LINE,
+        "{}",
+        quote("a breakpoint on a declaration must move onto the body")
+    );
+    assert!(
+        results[8]["breakpoints"][0]["message"]
+            .as_str()
+            .is_some_and(|said| said.contains(&ASKED_LINE.to_string())
+                && said.contains(&BREAK_LINE.to_string())),
+        "{}",
+        quote("a moved breakpoint must name both lines")
+    );
     assert_eq!(
         results[9]["stopped"]["reason"],
         "breakpoint",

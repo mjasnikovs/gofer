@@ -443,16 +443,95 @@ fn set_breakpoints(
 ) -> Result<Vec<VerifiedBreakpoint>, DapError> {
     let absolute = resolve(workspace, path)?;
     let relative = relative_path(workspace, &absolute).unwrap_or_else(|| path.to_owned());
+    let text = std::fs::read_to_string(&absolute).unwrap_or_default();
+    let moved: Vec<Moved> = lines.iter().map(|line| Moved::of(&text, *line)).collect();
+    let asked: Vec<i64> = moved.iter().map(|one| one.line).collect();
     Ok(client
-        .set_breakpoints(&absolute, lines)?
+        .set_breakpoints(&absolute, &asked)?
         .into_iter()
-        .map(|breakpoint: Breakpoint| VerifiedBreakpoint {
-            path: relative.clone(),
-            line: breakpoint.line,
-            verified: breakpoint.verified,
-            message: breakpoint.message,
-        })
+        .zip(moved)
+        .map(
+            |(breakpoint, moved): (Breakpoint, Moved)| VerifiedBreakpoint {
+                path: relative.clone(),
+                line: breakpoint.line,
+                verified: breakpoint.verified,
+                message: breakpoint.message.or_else(|| moved.note()),
+            },
+        )
         .collect())
+}
+
+/// A breakpoint line as it was asked for, and as it will actually stop.
+///
+/// Godot answers `verified: true` for a breakpoint on a `func` declaration and then never stops
+/// there — the header is not a statement, and the editor's own gutter will not take a breakpoint on
+/// one. Measured against a real 4.7.2 editor: the same script, breakpoint on the `func` line,
+/// `breakpointLocations` offers it, `setBreakpoints` verifies it, and twenty seconds pass with the
+/// game running; on the line under it the stop arrives at once.
+///
+/// A model reads a script, sees the function it cares about, and names that line. A live debugging
+/// turn did exactly that four times, spent six of its calls on `stop_timeout`, and finished nothing.
+/// So the breakpoint moves onto the first statement of the body, which is what every debugger does
+/// with a line that cannot hold one, and the answer says where it went.
+struct Moved {
+    line: i64,
+    from: Option<i64>,
+}
+
+impl Moved {
+    fn of(text: &str, line: i64) -> Self {
+        match first_statement_of_function(text, line) {
+            Some(body) => Self {
+                line: body,
+                from: Some(line),
+            },
+            None => Self { line, from: None },
+        }
+    }
+
+    fn note(&self) -> Option<String> {
+        let from = self.from?;
+        Some(format!(
+            "Line {from} declares the function and never runs, so a breakpoint on it would be \
+             verified and never hit. This one is on line {}, the first statement of the body.",
+            self.line
+        ))
+    }
+}
+
+/// The first line of a function's body, when `line` is the `func` that declares it.
+///
+/// `None` for everything else, which is every ordinary breakpoint: a line already holding a
+/// statement is left exactly where it was asked for.
+fn first_statement_of_function(text: &str, line: i64) -> Option<i64> {
+    let lines: Vec<&str> = text.lines().collect();
+    let index = usize::try_from(line.checked_sub(1)?).ok()?;
+    let declares = |text: &str| {
+        let trimmed = text.trim_start();
+        trimmed.starts_with("func ") || trimmed.starts_with("static func ")
+    };
+    if !declares(lines.get(index)?) {
+        return None;
+    }
+    // The signature can span lines. It ends on the one closing with `:`, and the search stops at
+    // the next declaration so a one-line `func f(): return 1` — which is a statement and stays put
+    // — cannot borrow the body of the function after it.
+    let mut header = index;
+    while !lines[header].trim_end().ends_with(':') {
+        header += 1;
+        if header >= lines.len() || declares(lines[header]) {
+            return None;
+        }
+    }
+    lines
+        .iter()
+        .enumerate()
+        .skip(header + 1)
+        .find(|(_, text)| {
+            let trimmed = text.trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .and_then(|(found, _)| i64::try_from(found + 1).ok())
 }
 
 /// Returns the adapter for the active session, connecting on first use.
@@ -592,6 +671,60 @@ mod tests {
             .expect("write probe");
         let workspace = Workspace::open(directory.path()).expect("open workspace");
         (directory, workspace)
+    }
+
+    /*
+     * A breakpoint on a `func` line is moved onto the body, because Godot will not stop on one.
+     *
+     * Measured against a real 4.7.2 editor on one script: line 8 is `func _process(...)`, line 9 is
+     * its only statement. `breakpointLocations` offers line 8, `setBreakpoints` answers
+     * `verified: true` for it, and twenty seconds pass with the game running and no stop. On line 9
+     * the stop arrives at once.
+     *
+     * A live debugging turn set line 8 four times — it is the line a model names, having read the
+     * script and picked the function — spent six calls on `stop_timeout`, and finished nothing.
+     */
+    #[test]
+    fn a_breakpoint_on_a_function_header_moves_onto_its_first_statement() {
+        let script = "extends Node2D\n\n@export var speed: float = 24.0\n\nvar travelled := 0.0\n\n\nfunc _process(delta: float) -> void:\n\ttravelled += speed * delta\n";
+
+        assert_eq!(first_statement_of_function(script, 8), Some(9));
+        // A line already holding a statement stays exactly where it was asked for.
+        assert_eq!(first_statement_of_function(script, 9), None);
+        assert_eq!(first_statement_of_function(script, 3), None);
+        assert_eq!(first_statement_of_function(script, 1), None);
+        // And a line the file does not have is not a breakpoint this can improve.
+        assert_eq!(first_statement_of_function(script, 99), None);
+        assert_eq!(first_statement_of_function(script, 0), None);
+
+        let moved = Moved::of(script, 8);
+        assert_eq!(moved.line, 9);
+        let note = moved.note().expect("a moved breakpoint says where it went");
+        assert!(note.contains("line 9"), "{note}");
+        assert!(Moved::of(script, 9).note().is_none());
+
+        // Comments and blank lines under the header are not statements either.
+        let commented = "extends Node\n\nfunc go() -> void:\n\t# what this does\n\n\tprint(1)\n";
+        assert_eq!(first_statement_of_function(commented, 3), Some(6));
+
+        // A signature written over several lines ends on the one closing with `:`.
+        let wrapped = "extends Node\n\nfunc go(\n\tfirst: int,\n\tsecond: int\n) -> void:\n\tprint(first + second)\n";
+        assert_eq!(first_statement_of_function(wrapped, 3), Some(7));
+
+        // A one-line function is a statement of its own and must not borrow the body of the next
+        // one. Nothing between it and the following declaration closes a signature, so it stays.
+        let inline = "extends Node\n\nfunc one(): return 1\n\nfunc two() -> void:\n\tprint(2)\n";
+        assert_eq!(first_statement_of_function(inline, 3), None);
+
+        // A declaration with nothing under it has no body to move to.
+        assert_eq!(
+            first_statement_of_function("func trailing() -> void:\n", 1),
+            None
+        );
+
+        // `static func` declares one too.
+        let statics = "extends Node\n\nstatic func make() -> int:\n\treturn 3\n";
+        assert_eq!(first_statement_of_function(statics, 3), Some(4));
     }
 
     #[test]
