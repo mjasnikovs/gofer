@@ -1637,7 +1637,12 @@ func _readback_error(
         "readback_mismatch",
         (
             "%s: the write asked for %s and Godot holds %s%s"
-            % [what, str(wanted), str(found), _instead_of(String(details.get("property", "")))]
+            % [
+                what,
+                str(wanted),
+                str(found),
+                _instead_of(String(details.get("property", "")), wanted, found)
+            ]
         ),
         described
     )
@@ -1662,8 +1667,37 @@ const NO_SCENE_HOLDS := {
     ),
 }
 
-func _instead_of(property: String) -> String:
-    return String(NO_SCENE_HOLDS.get(property, ""))
+func _instead_of(property: String, wanted: Variant, found: Variant) -> String:
+    if NO_SCENE_HOLDS.has(property):
+        return String(NO_SCENE_HOLDS[property])
+    return _grew_to_its_minimum(property, wanted, found)
+
+## Whether a `size` that came back larger than it was asked for hit the node's own floor.
+##
+## `Control.size` is clamped to `get_combined_minimum_size()`, and a `Label`'s minimum is the text
+## in it. Measured on a real 4.7.2 editor: a `Panel`, a `ColorRect` and a `Panel` inside a
+## `VBoxContainer` all take a size of (64, 64) exactly, and a `Label` asked for (0, 0) comes back
+## (1, 23). So this is not a property that cannot be written — it is one with a floor, and only a
+## write that lands under the floor is refused.
+##
+## Both live turns that met it asked for a smaller size than the node would take: a `Label` at
+## (0, 0) answering (1, 23), and a body at (64, 64) answering (80, 80). Told apart by the values
+## rather than by the name, because a size that came back *smaller* is a different thing entirely
+## and has no such explanation.
+func _grew_to_its_minimum(property: String, wanted: Variant, found: Variant) -> String:
+    if property != "size":
+        return ""
+    if typeof(wanted) != TYPE_VECTOR2 or typeof(found) != TYPE_VECTOR2:
+        return ""
+    var asked: Vector2 = wanted
+    var held: Vector2 = found
+    if held.x < asked.x or held.y < asked.y:
+        return ""
+    return (
+        " A Control's size is held at its own minimum, which for a Label is the text in it, so a"
+        + " smaller one cannot be written. Set custom_minimum_size to lower that floor, or leave"
+        + " the size alone and place the node with its anchors and offsets."
+    )
 
 ## Whether a value read back out of Godot is the value that was written into it.
 ##

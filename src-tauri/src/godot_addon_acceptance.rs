@@ -2343,6 +2343,76 @@ fn undo_answers_for_the_editors_history_across_a_scene_switch() {
 }
 
 /*
+ * A size written under a Control's own floor says which floor, and how to move it.
+ *
+ * `Control.size` is clamped to `get_combined_minimum_size()`, and a `Label`'s minimum is the text
+ * in it. Measured here and in three shapes beside it: a `Panel`, a `ColorRect` and a `Panel` inside
+ * a `VBoxContainer` all take (64, 64) exactly. So this is not a property that cannot be written —
+ * it is one with a floor, and only a write under the floor is refused.
+ *
+ * Two live turns met it, in two different runs: a `Label` asked for (0, 0) and answered (1, 23),
+ * and a body asked for (64, 64) and answered (80, 80).
+ */
+#[test]
+fn a_size_under_a_controls_floor_says_which_floor() {
+    let mut session = Session::start();
+    let scene = "res://sizes.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/sizes", "name": "Words", "type": "Label"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/sizes", "name": "Plain", "type": "Panel"}),
+    );
+
+    let refused = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/sizes/Words",
+            "property": "size",
+            "value": {"type": "vector2", "value": [0.0, 0.0]},
+        }),
+        Some(session.revision()),
+    );
+    assert!(refused.starts_with("readback_mismatch"), "{refused}");
+    assert!(
+        refused.contains("custom_minimum_size"),
+        "the refusal must name the floor to move: {refused}"
+    );
+
+    // A size the node will take is not refused at all, which is most of them.
+    let held = session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/sizes/Plain",
+            "property": "size",
+            "value": {"type": "vector2", "value": [64.0, 64.0]},
+        }),
+    );
+    assert_eq!(held["value"]["value"], json!([64.0, 64.0]));
+
+    // And a property that is not a size keeps the refusal it had.
+    let elsewhere = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/sizes/Plain",
+            "property": "anchors_preset",
+            "value": {"type": "int", "value": 15},
+        }),
+        Some(session.revision()),
+    );
+    assert!(!elsewhere.contains("custom_minimum_size"), "{elsewhere}");
+}
+
+/*
  * A full-screen panel: the refusal names the four properties that do the job.
  *
  * `anchors_preset` is the inspector's own control and no scene stores it. Measured here and in
