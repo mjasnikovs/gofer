@@ -31,6 +31,12 @@ use std::sync::OnceLock;
 /// The layout is the contract with `tauri.conf.json`, which bundles `src-tauri/workers`.
 pub(crate) const RESOURCE_DIRECTORY: &str = "workers";
 
+/// The Godot documentation table, copied beside the bundles by `build-workers.mjs`.
+const DATABASE_DIRECTORY: &str = ".lancedb";
+
+/// The environment variable gofer-rag reads instead of guessing where its own package sits.
+const DATABASE_VARIABLE: &str = "GOFER_RAG_DATABASE_PATH";
+
 /// The subdirectory `build-node-runtime.mjs` fills, bundled the same way.
 const RUNTIME_DIRECTORY: &str = "runtime";
 
@@ -92,6 +98,28 @@ fn node_binary_from(override_path: Option<OsString>, resource_dir: Option<&Path>
         }
     }
     OsString::from("node")
+}
+
+/// What to add to a documentation worker's environment so it reads the table Gofer shipped.
+///
+/// gofer-rag resolves its database one directory above its own module file. Bundling inlined that
+/// file into `workers/`, so the guess became the resource root — which holds no database, and every
+/// warmup failed on `Table 'chunks' was not found` after downloading 1.8 GiB of models first.
+///
+/// Nothing is added when the worker has no table beside it. That is the source-tree build, where
+/// the import is not inlined and the package's own guess is the right one.
+pub(crate) fn database_env(worker: &Path) -> Vec<(OsString, OsString)> {
+    if std::env::var_os(DATABASE_VARIABLE).is_some() {
+        return Vec::new();
+    }
+    let Some(directory) = worker.parent() else {
+        return Vec::new();
+    };
+    let database = directory.join(DATABASE_DIRECTORY);
+    if !database.is_dir() {
+        return Vec::new();
+    }
+    vec![(OsString::from(DATABASE_VARIABLE), database.into_os_string())]
 }
 
 /// Resolves a bundled worker, naming itself in the failure so the message is actionable.
@@ -252,6 +280,25 @@ mod tests {
         // has no reason to know about.
         let mine = OsString::from("/nowhere/node");
         assert_eq!(node_binary_from(Some(mine.clone()), None), mine);
+    }
+
+    /// The documentation table is named outright when it is beside the worker, and not otherwise.
+    #[test]
+    fn the_documentation_table_is_named_only_when_it_ships_beside_the_worker() {
+        let directory = TempDir::new().expect("worker directory");
+        let worker = directory.path().join("rag-warmup.mjs");
+        std::fs::write(&worker, b"worker").expect("write the worker");
+
+        // No table beside it is the source-tree build, where the import is not inlined and
+        // gofer-rag's own guess at its package root is the right one.
+        assert!(database_env(&worker).is_empty());
+
+        let database = directory.path().join(DATABASE_DIRECTORY);
+        std::fs::create_dir_all(&database).expect("create the table");
+        assert_eq!(
+            database_env(&worker),
+            vec![(OsString::from(DATABASE_VARIABLE), database.into_os_string())]
+        );
     }
 
     /// The point of the whole module: a release build has no source directory to fall back to, so

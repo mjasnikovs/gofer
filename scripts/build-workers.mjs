@@ -54,6 +54,20 @@ const REQUIRE_BANNER =
 const NATIVE_PACKAGES = ['onnxruntime-node', '@lancedb/lancedb', 'sharp']
 
 /**
+ * The Godot documentation itself: a LanceDB table `@mjasnikovs/gofer-rag` publishes inside its own
+ * package, and the one thing here that is data rather than code.
+ *
+ * gofer-rag finds it by resolving one directory up from its own module file. Inlining the package
+ * into a bundle moved that file, so "one directory up" became `src-tauri` in a dev build and the
+ * resource root in a shipped one, and neither holds a database — every warmup failed with
+ * `Table 'chunks' was not found` after downloading 1.8 GiB of models first. The copy is beside the
+ * bundles and `rag.rs` names it outright through `GOFER_RAG_DATABASE_PATH`, so nothing depends on
+ * where a third-party package thinks its own root is.
+ */
+const DATABASE_PACKAGE = '@mjasnikovs/gofer-rag'
+const DATABASE_DIRECTORY = '.lancedb'
+
+/**
  * What each bundle has to survive before it is allowed to ship. Every probe runs offline.
  *
  * The interesting one is `check` with a credential. Pi loads each OAuth flow through a *variable*
@@ -253,6 +267,20 @@ async function pruneOnnxRuntime() {
     }
 }
 
+/** Copies the documentation table beside the bundles, and answers with how big it is. */
+async function copyDocumentationDatabase() {
+    const source = join(packageDirectory(DATABASE_PACKAGE, root) ?? '', DATABASE_DIRECTORY)
+    if (!existsSync(source)) {
+        throw new Error(
+            `${DATABASE_PACKAGE} carries no ${DATABASE_DIRECTORY}, so the documentation workers would ship without the manual. Run npm ci.`
+        )
+    }
+    const target = join(outputDirectory, DATABASE_DIRECTORY)
+    await rm(target, {recursive: true, force: true})
+    await cp(source, target, {recursive: true, dereference: true})
+    return target
+}
+
 /** Copies the closure, without the nested `node_modules` npm left inside some of them. */
 async function copyNativePackages() {
     await rm(nativeDirectory, {recursive: true, force: true})
@@ -323,5 +351,6 @@ for (const entry of ENTRIES) {
 
 const copied = await copyNativePackages()
 process.stdout.write(`copied ${copied} native package(s) for ${HOST}\n`)
+process.stdout.write(`copied the documentation table to ${await copyDocumentationDatabase()}\n`)
 probeNativePackages()
 process.stdout.write(`${NATIVE_PACKAGES.join(', ')} load from the workers directory\n`)

@@ -36,6 +36,7 @@ tsconfig.node.tsbuildinfo
 src-tauri/workers/*.mjs
 src-tauri/workers/package.json
 src-tauri/workers/node_modules/
+src-tauri/workers/.lancedb/
 
 # Downloaded per platform by `npm run build:node-runtime`; only the directory's README is tracked.
 src-tauri/runtime/node

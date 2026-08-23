@@ -316,7 +316,12 @@ pub fn run_warmup_with<R: Runtime>(
     let worker = worker_path()?;
     let node = crate::workers::node_binary();
     let mut child = spawner
-        .spawn(node.as_ref(), &[worker.into_os_string()], false)
+        .spawn_with_env(
+            node.as_ref(),
+            &[worker.clone().into_os_string()],
+            false,
+            &crate::workers::database_env(&worker),
+        )
         .map_err(|error| {
             format!(
                 "Could not start Node.js with '{}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY.",
@@ -605,7 +610,12 @@ pub fn retrieve_query_with(
     let worker = retrieve_worker_path()?;
     let node = crate::workers::node_binary();
     let mut child = spawner
-        .spawn(node.as_ref(), &[worker.into_os_string()], true)
+        .spawn_with_env(
+            node.as_ref(),
+            &[worker.clone().into_os_string()],
+            true,
+            &crate::workers::database_env(&worker),
+        )
         .map_err(|error| {
             format!(
                 "Could not start the Gofer RAG retrieve worker with '{}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY.",
@@ -783,7 +793,12 @@ fn probe_reader(spawner: &impl ProcessSpawner) -> Result<(), String> {
     let worker = retrieve_worker_path()?;
     let node = crate::workers::node_binary();
     let mut child = spawner
-        .spawn(node.as_ref(), &[worker.into_os_string()], true)
+        .spawn_with_env(
+            node.as_ref(),
+            &[worker.clone().into_os_string()],
+            true,
+            &crate::workers::database_env(&worker),
+        )
         .map_err(|error| format!("Could not start the Gofer RAG retrieve worker: {error}"))?;
     let mut stdin = child
         .take_stdin()

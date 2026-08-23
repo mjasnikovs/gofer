@@ -15,6 +15,7 @@ Only `README.md` is tracked. The rest is built by `npm run build:workers`:
 | `rag-retrieve-worker.mjs` | `scripts/rag-retrieve-worker.mjs`, the same way                      |
 | `memory-worker.mjs`       | `scripts/memory-worker.mjs`, the same way                            |
 | `node_modules/`           | The three native packages the last three need, and their closure     |
+| `.lancedb/`               | The Godot documentation table, 40 MB, copied out of gofer-rag        |
 | `package.json`            | A `{"type":"module"}` marker, so the bundles load wherever they land |
 
 The directory is tracked because Tauri's build script fails the whole crate when a declared resource
@@ -34,3 +35,12 @@ bundler can follow. Those three are left external and their dependency closure i
 `node_modules/` beside the bundles, where Node finds them by walking up. Only this host's binaries
 are copied: following every optional dependency shipped every other platform too, and onnxruntime's
 CUDA provider alone is 316 MB.
+
+## The documentation table
+
+gofer-rag publishes its LanceDB table inside its own package and finds it by resolving one directory
+up from its own module file. Inlining the package moved that file here, so the guess became the
+resource root, which holds no database — every warmup failed on `Table 'chunks' was not found` after
+downloading 1.8 GB of models first. The table is copied beside the bundles and `rag.rs` names it
+outright through `GOFER_RAG_DATABASE_PATH`, so nothing depends on where a third-party package thinks
+its own root is. A source-tree build has no table here and needs none.
