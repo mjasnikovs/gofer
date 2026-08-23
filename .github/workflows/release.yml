@@ -95,8 +95,14 @@ jobs:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               shell: bash
               run: |
+                  # A `while read` loop rather than `mapfile`: macOS runners ship bash 3.2, which
+                  # has no `mapfile`, and the step died with `command not found` after a clean
+                  # build had already produced the .dmg.
                   bundle=src-tauri/target/release/bundle
-                  mapfile -t assets < <(find "$bundle" -type f \
+                  assets=()
+                  while IFS= read -r asset; do
+                      assets+=("$asset")
+                  done < <(find "$bundle" -type f \
                       \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
                          -o -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \) | sort)
                   if [ "${#assets[@]}" -eq 0 ]; then
