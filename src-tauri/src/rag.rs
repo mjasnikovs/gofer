@@ -314,12 +314,13 @@ pub fn run_warmup_with<R: Runtime>(
     }
 
     let worker = worker_path()?;
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let node = crate::workers::node_binary();
     let mut child = spawner
         .spawn(node.as_ref(), &[worker.into_os_string()], false)
         .map_err(|error| {
             format!(
-                "Could not start Node.js with '{node}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY."
+                "Could not start Node.js with '{}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY.",
+                node.display()
             )
         })?;
     let stdout = child
@@ -367,21 +368,7 @@ pub fn run_warmup_with<R: Runtime>(
 }
 
 fn worker_path() -> Result<PathBuf, String> {
-    let configured = std::env::var_os("GOFER_RAG_WORKER").map(PathBuf::from);
-    let path = configured.unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("scripts")
-            .join("rag-warmup.mjs")
-    });
-
-    if path.is_file() {
-        return Ok(path);
-    }
-    Err(format!(
-        "Gofer RAG worker was not found at {}. Run npm install, or set GOFER_RAG_WORKER.",
-        path.display()
-    ))
+    crate::workers::resolve("The Gofer RAG worker", "GOFER_RAG_WORKER", "rag-warmup.mjs")
 }
 
 const RETRIEVE_RESPONSE_PREFIX: &str = "GOFER_RAG_RESULT:";
@@ -616,12 +603,13 @@ pub fn retrieve_query_with(
     spawner: &impl ProcessSpawner,
 ) -> Result<GodotDocsResponse, String> {
     let worker = retrieve_worker_path()?;
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let node = crate::workers::node_binary();
     let mut child = spawner
         .spawn(node.as_ref(), &[worker.into_os_string()], true)
         .map_err(|error| {
             format!(
-                "Could not start the Gofer RAG retrieve worker with '{node}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY."
+                "Could not start the Gofer RAG retrieve worker with '{}': {error}. Install Node.js 22 or newer, or set GOFER_NODE_BINARY.",
+                node.display()
             )
         })?;
     let mut stdin = child
@@ -793,7 +781,7 @@ pub fn probe_retrieval_with(spawner: &impl ProcessSpawner) -> Result<String, Str
 /// Measured at about 170ms, because the sidecar imports gofer-rag on demand rather than at load.
 fn probe_reader(spawner: &impl ProcessSpawner) -> Result<(), String> {
     let worker = retrieve_worker_path()?;
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let node = crate::workers::node_binary();
     let mut child = spawner
         .spawn(node.as_ref(), &[worker.into_os_string()], true)
         .map_err(|error| format!("Could not start the Gofer RAG retrieve worker: {error}"))?;
@@ -859,23 +847,13 @@ fn probe_models(cache: &Path) -> Result<(), String> {
 }
 
 fn retrieve_worker_path() -> Result<PathBuf, String> {
-    let configured = std::env::var_os("GOFER_RAG_RETRIEVE_WORKER").map(PathBuf::from);
-    let path = configured.unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("scripts")
-            // `rag-retrieve.mjs` holds the injectable request handling; only the worker reads
-            // stdin and loads gofer-rag, so spawning the module itself would produce no output.
-            .join("rag-retrieve-worker.mjs")
-    });
-
-    if path.is_file() {
-        return Ok(path);
-    }
-    Err(format!(
-        "Gofer RAG retrieve worker was not found at {}. Run npm install, or set GOFER_RAG_RETRIEVE_WORKER.",
-        path.display()
-    ))
+    // `rag-retrieve.mjs` holds the injectable request handling; only the worker reads stdin and
+    // loads gofer-rag, so spawning the module itself would produce no output.
+    crate::workers::resolve(
+        "The Gofer RAG retrieve worker",
+        "GOFER_RAG_RETRIEVE_WORKER",
+        "rag-retrieve-worker.mjs",
+    )
 }
 
 #[cfg(test)]

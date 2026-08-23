@@ -110,11 +110,16 @@ fn embed_with(
 // coverage-critical-end: protocol
 
 fn start_worker(spawner: &impl ProcessSpawner) -> Result<MemoryWorker, String> {
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
-    let script = worker_path();
+    let node = crate::workers::node_binary();
+    let script = worker_path()?;
     let mut child = spawner
         .spawn(node.as_ref(), &[script.into_os_string()], true)
-        .map_err(|error| format!("Could not start the memory worker with '{node}': {error}"))?;
+        .map_err(|error| {
+            format!(
+                "Could not start the memory worker with '{}': {error}",
+                node.display()
+            )
+        })?;
     let stdin = child
         .take_stdin()
         .ok_or_else(|| "Could not open memory worker input".to_owned())?;
@@ -128,15 +133,12 @@ fn start_worker(spawner: &impl ProcessSpawner) -> Result<MemoryWorker, String> {
     })
 }
 
-fn worker_path() -> PathBuf {
-    std::env::var_os("GOFER_MEMORY_WORKER")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("scripts")
-                .join("memory-worker.mjs")
-        })
+fn worker_path() -> Result<PathBuf, String> {
+    crate::workers::resolve(
+        "The memory worker",
+        "GOFER_MEMORY_WORKER",
+        "memory-worker.mjs",
+    )
 }
 
 #[cfg(test)]
@@ -338,11 +340,14 @@ mod tests {
 
     #[test]
     fn worker_path_can_be_overridden() {
-        let expected = PathBuf::from("/tmp/fake-memory-worker.mjs");
+        let directory = tempfile::TempDir::new().expect("override directory");
+        let expected = directory.path().join("fake-memory-worker.mjs");
+        std::fs::write(&expected, b"override").expect("write the override worker");
         // SAFETY: this test owns the process-wide override while it executes.
         unsafe { std::env::set_var("GOFER_MEMORY_WORKER", &expected) };
-        assert_eq!(worker_path(), expected);
-        // SAFETY: restore the test process environment after the assertion.
+        let resolved = worker_path();
+        // SAFETY: restore the test process environment before the assertion can unwind.
         unsafe { std::env::remove_var("GOFER_MEMORY_WORKER") };
+        assert_eq!(resolved.expect("the overridden worker"), expected);
     }
 }

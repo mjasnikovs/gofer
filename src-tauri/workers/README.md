@@ -7,11 +7,15 @@ release binary in `target/release` resolves the same way a packaged one does.
 
 Only `README.md` is tracked. The rest is built by `npm run build:workers`:
 
-| File                | What it is                                                           |
-| ------------------- | -------------------------------------------------------------------- |
-| `ai-worker.mjs`     | `scripts/ai-worker.mjs` with its whole import graph inlined          |
-| `ai-codex-auth.mjs` | `scripts/ai-codex-auth.mjs`, the same way                            |
-| `package.json`      | A `{"type":"module"}` marker, so the bundles load wherever they land |
+| File                      | What it is                                                           |
+| ------------------------- | -------------------------------------------------------------------- |
+| `ai-worker.mjs`           | `scripts/ai-worker.mjs` with its whole import graph inlined          |
+| `ai-codex-auth.mjs`       | `scripts/ai-codex-auth.mjs`, the same way                            |
+| `rag-warmup.mjs`          | `scripts/rag-warmup.mjs`, the same way                               |
+| `rag-retrieve-worker.mjs` | `scripts/rag-retrieve-worker.mjs`, the same way                      |
+| `memory-worker.mjs`       | `scripts/memory-worker.mjs`, the same way                            |
+| `node_modules/`           | The three native packages the last three need, and their closure     |
+| `package.json`            | A `{"type":"module"}` marker, so the bundles load wherever they land |
 
 The directory is tracked because Tauri's build script fails the whole crate when a declared resource
 path is missing, so a fresh clone must be able to run `cargo check` before it has run a Node build.
@@ -24,7 +28,9 @@ file fresh on every run. Nothing copied a `.mjs` into the bundle — the AppImag
 on the machine that built it, editing `scripts/ai-worker.mjs` changed what an already-built
 application ran. `workers.rs` explains the resolution order that replaced it.
 
-Two of Gofer's five workers are here. `memory-worker.mjs`, `rag-warmup.mjs` and
-`rag-retrieve-worker.mjs` load `onnxruntime-node` and `@lancedb/lancedb`, which are native `.node`
-binaries no bundler can inline, so those still resolve from the source tree and still carry the old
-behaviour. `REDUCE-SIZE.md` in gofer-rag is the work that would let them join.
+All five are here now. `memory-worker.mjs`, `rag-warmup.mjs` and `rag-retrieve-worker.mjs` load
+`onnxruntime-node`, `@lancedb/lancedb` and `sharp` through a require computed at run time, which no
+bundler can follow. Those three are left external and their dependency closure is copied into
+`node_modules/` beside the bundles, where Node finds them by walking up. Only this host's binaries
+are copied: following every optional dependency shipped every other platform too, and onnxruntime's
+CUDA provider alone is 316 MB.

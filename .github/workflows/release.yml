@@ -1,0 +1,120 @@
+name: Release
+
+# What a tag turns into: one GitHub release carrying an installer for every platform Gofer runs on.
+#
+# The build steps are `packaged-journey.yml`'s, minus the parts a release does not need — no Godot,
+# no display, no journey. What it adds is the two per-platform artifacts that have to be frozen
+# before Tauri copies them: the gdformat sidecar and the Node runtime the workers are spawned with.
+# Neither can be cross-built, which is why this is a matrix rather than one Linux job.
+#
+# The release is drafted first and published last. A tag whose Windows leg fails leaves a draft
+# nobody can download rather than a half-published release people can.
+
+on:
+    push:
+        tags: ['v*']
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: An existing tag to build a release from.
+                type: string
+                required: true
+
+concurrency:
+    group: release-${{ github.ref }}
+    cancel-in-progress: false
+
+permissions:
+    contents: write
+
+env:
+    TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+    draft:
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.tag || github.ref_name }}
+            # `--verify-tag` is what keeps a typo in `workflow_dispatch` from creating a release for
+            # a tag that does not exist.
+            - name: Draft the release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  if gh release view "$TAG" --json id >/dev/null 2>&1; then
+                      echo "$TAG already has a release; the build will upload into it"
+                      exit 0
+                  fi
+                  gh release create "$TAG" --draft --verify-tag --title "$TAG" --generate-notes
+
+    build:
+        needs: draft
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-24.04, windows-2025, macos-15]
+        runs-on: ${{ matrix.os }}
+        # A cold Rust release build, a PyInstaller freeze and three bundlers.
+        timeout-minutes: 90
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.tag || github.ref_name }}
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.19.0
+                  cache: npm
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: 1.97.1
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.13'
+            - name: Install Linux system dependencies
+              if: runner.os == 'Linux'
+              run: >-
+                  sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
+                  libappindicator3-dev librsvg2-dev patchelf
+            - name: Install JavaScript dependencies
+              run: npm ci
+            # Both of these have to happen before the Tauri build, because the Tauri build is what
+            # copies `src-tauri/sidecar` and `src-tauri/runtime` into the bundle. Each one proves
+            # its own artifact by running it.
+            - name: Build the pinned gdformat sidecar
+              run: npm run build:gdformat
+            - name: Download the pinned Node runtime
+              run: npm run build:node-runtime
+            - name: Refuse a tree whose three version fields disagree
+              run: npm run check:version
+            - name: Build the installers
+              run: npm run build:release
+            - name: Upload the installers to the draft release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              shell: bash
+              run: |
+                  bundle=src-tauri/target/release/bundle
+                  mapfile -t assets < <(find "$bundle" -type f \
+                      \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+                         -o -name '*.dmg' -o -name '*.exe' -o -name '*.msi' \) | sort)
+                  if [ "${#assets[@]}" -eq 0 ]; then
+                      echo "::error::No installers were bundled on ${{ matrix.os }}"
+                      find "$bundle" -maxdepth 2 -type d
+                      exit 1
+                  fi
+                  printf 'uploading %s\n' "${assets[@]}"
+                  gh release upload "$TAG" "${assets[@]}" --clobber
+
+    publish:
+        needs: build
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ inputs.tag || github.ref_name }}
+            - name: Publish the release
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: gh release edit "$TAG" --draft=false

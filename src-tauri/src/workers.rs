@@ -17,10 +17,10 @@
 //! whole point of a dev build. A release binary cannot reach the source tree at all, so what it
 //! runs is fixed the moment it is built.
 //!
-//! Only the two AI workers are bundled. `memory-worker.mjs`, `rag-warmup.mjs` and
-//! `rag-retrieve-worker.mjs` load `onnxruntime-node` and `@lancedb/lancedb`, which are native
-//! `.node` binaries no bundler can inline, so those keep resolving from the source tree and still
-//! carry the old behaviour.
+//! All five workers are bundled. `memory-worker.mjs`, `rag-warmup.mjs` and
+//! `rag-retrieve-worker.mjs` load `onnxruntime-node`, `@lancedb/lancedb` and `sharp` through a
+//! require computed at run time, so those three packages are left external and copied into
+//! `workers/node_modules`, which Node finds by walking up from the bundle.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,9 @@ use std::sync::OnceLock;
 ///
 /// The layout is the contract with `tauri.conf.json`, which bundles `src-tauri/workers`.
 pub(crate) const RESOURCE_DIRECTORY: &str = "workers";
+
+/// The subdirectory `build-node-runtime.mjs` fills, bundled the same way.
+const RUNTIME_DIRECTORY: &str = "runtime";
 
 /// The resource directory, remembered once at startup.
 ///
@@ -56,6 +59,39 @@ fn source_directory() -> Option<PathBuf> {
             .join("..")
             .join("scripts"),
     )
+}
+
+/// The Node binary the workers are spawned with.
+///
+/// Every worker here is JavaScript, and the binary that ran them used to be whatever `node` PATH
+/// answered with. That failed outright on a machine with no Node, and failed on macOS even with one
+/// installed: a GUI-launched `.app` inherits `/usr/bin:/bin:/usr/sbin:/sbin` and never reads a
+/// shell profile, so an nvm or Homebrew Node is invisible to it.
+///
+/// `GOFER_NODE_BINARY` still wins — the test suites point it at their own — and PATH is still the
+/// last resort, because a `cargo test` or a `tauri dev` run may have no bundled runtime beside it.
+pub(crate) fn node_binary() -> OsString {
+    node_binary_from(
+        std::env::var_os("GOFER_NODE_BINARY"),
+        RESOURCE_DIR.get().and_then(Option::as_deref),
+    )
+}
+
+/// The lookup itself, with the resource directory passed in so it can be tested without an app.
+fn node_binary_from(override_path: Option<OsString>, resource_dir: Option<&Path>) -> OsString {
+    if let Some(path) = override_path {
+        return path;
+    }
+    if let Some(directory) = resource_dir {
+        let bundled =
+            directory
+                .join(RUNTIME_DIRECTORY)
+                .join(if cfg!(windows) { "node.exe" } else { "node" });
+        if bundled.is_file() {
+            return bundled.into_os_string();
+        }
+    }
+    OsString::from("node")
 }
 
 /// Resolves a bundled worker, naming itself in the failure so the message is actionable.
@@ -188,6 +224,34 @@ mod tests {
         .expect_err("a path that is not a file");
         assert!(failure.contains("/nowhere/ai-worker.mjs"), "{failure}");
         assert!(failure.contains(VARIABLE), "{failure}");
+    }
+
+    /// The bundled runtime is what a shipped Gofer spawns; PATH is what a `tauri dev` run does.
+    #[test]
+    fn the_bundled_node_is_preferred_and_path_is_the_last_resort() {
+        let resources = TempDir::new().expect("resource directory");
+        let directory = resources.path().join(RUNTIME_DIRECTORY);
+        std::fs::create_dir_all(&directory).expect("create the runtime directory");
+        let name = if cfg!(windows) { "node.exe" } else { "node" };
+        let bundled = directory.join(name);
+        std::fs::write(&bundled, b"runtime").expect("write the bundled runtime");
+
+        assert_eq!(
+            node_binary_from(None, Some(resources.path())),
+            bundled.into_os_string()
+        );
+
+        let empty = TempDir::new().expect("empty resource directory");
+        assert_eq!(
+            node_binary_from(None, Some(empty.path())),
+            OsString::from("node")
+        );
+        assert_eq!(node_binary_from(None, None), OsString::from("node"));
+
+        // The override is taken as written, because the suites point it at a binary this lookup
+        // has no reason to know about.
+        let mine = OsString::from("/nowhere/node");
+        assert_eq!(node_binary_from(Some(mine.clone()), None), mine);
     }
 
     /// The point of the whole module: a release build has no source directory to fall back to, so

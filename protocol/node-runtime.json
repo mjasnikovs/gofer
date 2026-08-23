@@ -1,0 +1,30 @@
+{
+    "version": "22.19.0",
+    "artifacts": {
+        "linux-x64": {
+            "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz",
+            "sha256": "c0649af18e6a24f6fe5535a3e86b341dd49a8e71117c8b68bde973ef834f16f2",
+            "binary": "node-v22.19.0-linux-x64/bin/node"
+        },
+        "linux-arm64": {
+            "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-arm64.tar.xz",
+            "sha256": "0b2d9f564b6594222a62c82e1df2efe119dd4a4aff29644f4dd325bf360b6bcc",
+            "binary": "node-v22.19.0-linux-arm64/bin/node"
+        },
+        "darwin-x64": {
+            "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-darwin-x64.tar.xz",
+            "sha256": "41796082f45db51738d1902cae84fa4f699ff6d2550321361424e8bfe6ea1939",
+            "binary": "node-v22.19.0-darwin-x64/bin/node"
+        },
+        "darwin-arm64": {
+            "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-darwin-arm64.tar.xz",
+            "sha256": "1c3a9e78da501bbc1f0c99fbbb69bb7c722bc7a9bf30128b21ea502f3905892a",
+            "binary": "node-v22.19.0-darwin-arm64/bin/node"
+        },
+        "win32-x64": {
+            "url": "https://nodejs.org/dist/v22.19.0/node-v22.19.0-win-x64.zip",
+            "sha256": "ea3fad0e67a991d8477d8c01344b56e69c676ccb733f065b22436994b1253f86",
+            "binary": "node-v22.19.0-win-x64/node.exe"
+        }
+    }
+}

@@ -278,7 +278,13 @@ export function validateBashCommand(command) {
                 whole
             :   `${left}${before}divided-by${after}`
     )
-    if (/(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|\/)/u.test(measured))
+    // A drive letter is the Windows spelling of a leading slash. `cat C:\Users\me\.ssh\id_rsa`
+    // named no `/` and walked straight out.
+    if (
+        /(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|[A-Za-z]:(?:[\\/]|$)|\/)/u.test(
+            measured
+        )
+    )
         throw new Error(
             'Shell commands take paths relative to the workspace, and this one names an absolute '
                 + 'path or one that climbs out. The shell already runs in the workspace root, so '

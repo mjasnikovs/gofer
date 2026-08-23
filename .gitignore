@@ -35,6 +35,11 @@ tsconfig.node.tsbuildinfo
 # declared resource path is missing.
 src-tauri/workers/*.mjs
 src-tauri/workers/package.json
+src-tauri/workers/node_modules/
+
+# Downloaded per platform by `npm run build:node-runtime`; only the directory's README is tracked.
+src-tauri/runtime/node
+src-tauri/runtime/node.exe
 
 # Built per platform by `npm run build:gdformat`; only the directory's README is tracked.
 src-tauri/sidecar/gdformat

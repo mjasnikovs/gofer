@@ -664,7 +664,15 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
                 "format",
                 json!({"source": formatted["formatted"]}),
             );
-            assert_eq!(again["changed"], false, "formatting must be idempotent");
+            // Both strings, escaped, because the bare assertion said only `true != false`. The pin
+            // is idempotent for this input as a file, through stdin, and frozen — measured on this
+            // machine and on a clean ubuntu-24.04 — so a run that fails here is holding two
+            // versions of the same script that differ somewhere invisible.
+            assert_eq!(
+                again["changed"], false,
+                "formatting must be idempotent\n  once:  {:?}\n  twice: {:?}",
+                formatted["formatted"], again["formatted"]
+            );
             assert_eq!(
                 read(&worktree, BROKEN_PATH),
                 FIXED_SCRIPT,

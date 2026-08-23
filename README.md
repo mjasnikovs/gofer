@@ -231,6 +231,11 @@ their own machine before tagging a release, and after any change to the desktop 
 passed, not on `npm run check` alone: `check` stubs the backend, and the backend is where the class
 of bug that this suite exists to catch has always lived.
 
+### Releasing
+
+`RELEASE.md` holds the whole of it: the three gates before a tag, what each platform builds, and
+what the release notes have to tell a user Gofer cannot tell them itself.
+
 Astryx's project guidance lives in `AGENTS.md`. Refresh it after an Astryx upgrade with:
 
 ```bash

@@ -60,14 +60,19 @@ pub(crate) fn worker_path() -> Result<PathBuf, String> {
 /// Sign-in streams and needs its stdin held open; asking for the model catalogue or checking a
 /// stored token does not, so those close the input and read to the end.
 pub(crate) fn run_worker(request: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let node = crate::workers::node_binary();
     let mut child = Command::new(&node)
         .arg(worker_path()?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("Could not start the Pi ChatGPT worker with '{node}': {error}"))?;
+        .map_err(|error| {
+            format!(
+                "Could not start the Pi ChatGPT worker with '{}': {error}",
+                node.display()
+            )
+        })?;
     let mut stdin = child
         .stdin
         .take()
@@ -138,14 +143,19 @@ pub(crate) fn login(
         return Err("A ChatGPT login is already in progress".to_owned());
     }
 
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let node = crate::workers::node_binary();
     let mut child = Command::new(&node)
         .arg(worker_path()?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("Could not start ChatGPT login with '{node}': {error}"))?;
+        .map_err(|error| {
+            format!(
+                "Could not start ChatGPT login with '{}': {error}",
+                node.display()
+            )
+        })?;
     let stdin =
         Arc::new(Mutex::new(child.stdin.take().ok_or_else(|| {
             "Could not write to the ChatGPT login worker".to_owned()

@@ -1302,12 +1302,13 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
         *session_context = Some(describe_session(app));
     }
     let worker = ai_worker_path()?;
-    let node = std::env::var("GOFER_NODE_BINARY").unwrap_or_else(|_| "node".to_owned());
+    let node = crate::workers::node_binary();
     let mut child = spawner
         .spawn(node.as_ref(), &[worker.into_os_string()], true)
         .map_err(|error| {
             format!(
-                "Could not start the Pi AI worker with '{node}': {error}. Install Node.js 22.19 or newer, or set GOFER_NODE_BINARY."
+                "Could not start the Pi AI worker with '{}': {error}. Install Node.js 22.19 or newer, or set GOFER_NODE_BINARY.",
+                node.display()
             )
         })?;
     let stdin = child

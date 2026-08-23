@@ -212,6 +212,8 @@ test('allows workspace shell commands and rejects every explicit escape form', a
         'cat ../secret',
         'cat /etc/passwd',
         'cat ~/secret',
+        'cat C:\\Users\\me\\.ssh\\id_rsa',
+        'type C:/Users/me/secrets.txt',
         'true; cd other'
     ])
         await assert.rejects(tool.execute('2', {command}), /Shell|workspace/iu)
