@@ -93,10 +93,9 @@ use ai_turn::{
 use process::SystemProcessSpawner;
 use settings::{
     AI_HEALTH_TIMEOUT, AI_REQUEST_TIMEOUT, AiModelOption, ApiKeyUpdate, ConnectionTestResult,
-    ConnectionTestStatus, GodotSettings, SettingsRequest, SettingsResponse, apply_api_key_update,
-    apply_brave_key_update, apply_openrouter_key_update, clear_chatgpt_credential,
-    list_ai_models_with, read_settings, restore_api_key, run_connection_test,
-    save_godot_settings as store_godot_settings, settings_response, stored_api_key,
+    ConnectionTestStatus, GodotSettings, SettingsRequest, SettingsResponse, apply_saved_secrets,
+    clear_chatgpt_credential, list_ai_models_with, read_settings, restore_saved_secrets,
+    run_connection_test, save_godot_settings as store_godot_settings, settings_response,
     validate_settings, write_settings,
 };
 use storage::{
@@ -123,23 +122,17 @@ async fn save_settings(
     request: SettingsRequest,
 ) -> Result<SettingsResponse, CommandError> {
     off_thread_coded("save_settings", "settings_unwritable", move || {
-        let settings = validate_settings(request.settings)?;
-        // Written before the AI key's own rollback window, and deliberately outside it: the two are
-        // separate credentials, and a failed settings write must not put back a Brave key the user
-        // had just cleared.
-        apply_brave_key_update(&request.brave_api_key)?;
-        // Outside the rollback window for the same reason, and it needs its own: OpenRouter's key
-        // lives in its own keyring slot, so the AI key's restore below cannot put it back.
-        apply_openrouter_key_update(&request.openrouter_api_key)?;
-        if matches!(&request.api_key, ApiKeyUpdate::Keep) {
-            write_settings(&app, &settings)?;
-            return Ok(announce_settings(&app, settings_response(settings)));
-        }
-
-        let previous_api_key = stored_api_key()?;
-        apply_api_key_update(&request.api_key)?;
+        // Taken rather than moved, because the three key updates beside it are still needed: what
+        // is left behind is a default nobody reads.
+        let mut request = request;
+        let settings = validate_settings(std::mem::take(&mut request.settings))?;
+        // The keyring first, the file second, and every slot the keyring wrote inside one rollback
+        // window: a settings file that will not write must leave the machine as it found it. The
+        // window used to hold the AI key alone, because the restore was the AI key's own and could
+        // not name another slot; `restore_saved_secrets` names the slots that were written.
+        let written = apply_saved_secrets(&request)?;
         if let Err(error) = write_settings(&app, &settings) {
-            restore_api_key(previous_api_key.as_deref())?;
+            restore_saved_secrets(&written)?;
             return Err(error);
         }
 
@@ -263,7 +256,7 @@ fn save_chat(app: AppHandle, chat: StoredChat) -> Result<(), CommandError> {
 #[tauri::command(async)]
 fn create_chat_task(app: AppHandle, bring_changes: bool) -> Result<StoredChat, CommandError> {
     let storage = project_storage(&app)?;
-    refuse_during_turn()?;
+    let _turn = refuse_during_turn()?;
     let release = switch_for(&app);
     let switch = storage.switch(&release);
     if bring_changes {
@@ -291,7 +284,7 @@ fn pending_project_changes(app: AppHandle) -> Result<Vec<git::PendingChange>, Co
 #[tauri::command(async)]
 fn activate_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, CommandError> {
     let storage = project_storage(&app)?;
-    refuse_during_turn()?;
+    let _turn = refuse_during_turn()?;
     let release = switch_for(&app);
     storage
         .tasks()
@@ -322,15 +315,26 @@ fn switch_for(app: &AppHandle) -> impl Fn(&Path) -> Result<(), String> + use<'_>
     move |workspace| leave_task(app, workspace)
 }
 
-fn refuse_during_turn() -> Result<(), CommandError> {
-    match ai_turn::begin_provider_operation() {
-        Ok(_guard) => Ok(()),
-        Err(_) => Err(CommandError::new(
+/// Takes the single provider operation for the whole of a command that moves the checkout, or
+/// refuses because something is already holding it.
+///
+/// The guard is answered rather than checked, and that is the whole of the fix. This used to bind
+/// it as `Ok(_guard) => Ok(())`, where a `_`-prefixed binding is still a binding: it was dropped at
+/// the end of the match arm, so the flag was already back to false by the time the function
+/// returned. Five commands then stopped the editor, committed the loose work, and checked another
+/// branch out holding nothing at all — an RAII guard used as a boolean probe, which is a check that
+/// a turn could win the instant after it passed.
+///
+/// So the caller holds it: `let _turn = refuse_during_turn()?;` keeps the operation for as long as
+/// the switch takes, which is the interval the refusal was written to protect.
+fn refuse_during_turn() -> Result<ai_turn::AiProviderOperation, CommandError> {
+    ai_turn::begin_provider_operation().map_err(|_| {
+        CommandError::new(
             "ai_request_in_progress",
             "Wait for the current answer to finish before opening another task",
         )
-        .retryable()),
-    }
+        .retryable()
+    })
 }
 
 #[tauri::command(async)]
@@ -485,7 +489,7 @@ fn merge_task_branch(
     // session is stopped first, which also takes Gofer's own two lines back out of `project.godot`
     // before anything is committed.
     let storage = project_storage(&app)?;
-    refuse_during_turn()?;
+    let _turn = refuse_during_turn()?;
     // Before any of that: the stop is `get_tree().quit()`, which writes nothing. Work the editor is
     // holding is settled here or the merge does not start. Absent means nobody has been asked yet.
     unsaved_work::settle(unsaved_work.unwrap_or_default())?;
@@ -503,7 +507,7 @@ fn merge_task_branch(
 #[tauri::command(async)]
 fn resolve_task_merge(app: AppHandle, task_id: String) -> Result<ResolveTaskResult, CommandError> {
     let storage = project_storage(&app)?;
-    refuse_during_turn()?;
+    let _turn = refuse_during_turn()?;
     let release = switch_for(&app);
     storage
         .tasks()
@@ -514,7 +518,7 @@ fn resolve_task_merge(app: AppHandle, task_id: String) -> Result<ResolveTaskResu
 #[tauri::command(async)]
 fn abandon_task_merge(app: AppHandle, task_id: String) -> Result<(), CommandError> {
     let storage = project_storage(&app)?;
-    refuse_during_turn()?;
+    let _turn = refuse_during_turn()?;
     storage.tasks().abandon_conflicts(&task_id)
 }
 
@@ -529,10 +533,7 @@ fn run_storage_maintenance(app: AppHandle) -> Result<MaintenanceResult, CommandE
 }
 
 fn run_storage_maintenance_in(app: &AppHandle) -> Result<MaintenanceResult, CommandError> {
-    let storage = project_storage(app)?;
-    let mut result = storage.project().run_maintenance()?;
-    result.memory_embeddings_restored = project_memory::backfill_memory_embeddings(&storage);
-    Ok(result)
+    project_storage(app)?.project().run_maintenance()
 }
 
 /// Searches the stored warning and error history of every recorded run.
@@ -1120,8 +1121,7 @@ async fn ai_health(app: &AppHandle) -> health::AiHealth {
             };
         }
     };
-    let base_url = settings.ai.base_url.clone();
-    let model = settings.ai.model.clone();
+    let (base_url, model) = settings::active_endpoint(&settings.ai);
     let result = run_connection_test(
         SettingsRequest {
             settings,
@@ -1306,6 +1306,39 @@ mod tests {
             .build()
             .expect("build mock webview");
         app
+    }
+
+    /**
+     * A refusal has to outlast the check that produced it.
+     *
+     * `refuse_during_turn` used to answer `Ok(_guard) => Ok(())`, and a `_`-prefixed binding is
+     * still a binding: the guard was dropped at the end of the match arm, so the single provider
+     * operation was already free again by the time the function returned. Five commands then
+     * stopped the editor, committed the loose work and checked another branch out holding nothing
+     * at all — a turn could begin in the middle of the switch that had just refused it.
+     *
+     * Asserted by asking twice, because that is the whole of the difference: a probe answers yes
+     * both times.
+     */
+    #[test]
+    fn refusing_during_a_turn_holds_the_operation_until_the_caller_lets_go() {
+        // The provider operation is process-wide, and every `ai_turn` test that begins a turn takes
+        // this lock — so this waits behind them rather than refusing one of them by holding it.
+        let _gate = crate::approvals::serialize_gate_tests();
+
+        let Ok(switching) = refuse_during_turn() else {
+            panic!("nothing else is running")
+        };
+        let Err(refused) = refuse_during_turn() else {
+            panic!("the checkout is still moving, so nothing else may take the operation")
+        };
+        assert_eq!(refused.code, "ai_request_in_progress");
+
+        drop(switching);
+        assert!(
+            refuse_during_turn().is_ok(),
+            "the switch is over, so the next turn may begin"
+        );
     }
 
     /// The window is granted exactly the commands it registers.

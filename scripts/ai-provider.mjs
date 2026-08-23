@@ -1,6 +1,5 @@
 import {
     Agent,
-    NodeExecutionEnv,
     calculateContextTokens,
     compact,
     convertToLlm,
@@ -13,13 +12,38 @@ import {
     prepareCompaction,
     shouldCompact
 } from '@earendil-works/pi-agent-core/node'
-import {createModels, createProvider, isRetryableAssistantError} from '@earendil-works/pi-ai'
+import {createModels, createProvider} from '@earendil-works/pi-ai'
 import {runVerifyPoints, verifyPointsIn, verifyReport, verifySummary} from './verify-points.mjs'
 import {frozenPathsIn} from './frozen-paths.mjs'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
-import {createGodotTools, withoutPictures, withoutRepeatingARefusal} from './ai-host.mjs'
+import {createGodotTools} from './godot-tools.mjs'
+import {
+    EMPTY_ANSWER,
+    abortableWait,
+    createToolEnv,
+    decorateTools,
+    isWorthRetrying,
+    realTimers,
+    textContent,
+    zeroUsage
+} from './agent-runtime.mjs'
+import {
+    compactionEnd,
+    compactionStart,
+    contextRebuilt,
+    retryScheduled,
+    retryStart,
+    textDelta,
+    thinkingDelta,
+    toolCost,
+    toolEnd,
+    toolStart,
+    toolUpdate,
+    turnDone,
+    usageReport
+} from './ai-events.mjs'
 import {createCredentialStore} from './ai-credentials.mjs'
 import {probeTools} from './ai-reachability.mjs'
 import {createAskUserTool} from './ai-ask.mjs'
@@ -75,33 +99,6 @@ export function retryDelay(attempt, {baseDelayMs, maxDelayMs}) {
     return Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs)
 }
 
-/** A wait that a cancelled turn does not have to sit through. */
-function sleep(ms, signal) {
-    return new Promise((resolve, reject) => {
-        if (signal?.aborted) {
-            reject(new Error('The turn was stopped'))
-            return
-        }
-        const timer = setTimeout(resolve, ms)
-        signal?.addEventListener(
-            'abort',
-            () => {
-                clearTimeout(timer)
-                reject(new Error('The turn was stopped'))
-            },
-            {once: true}
-        )
-    })
-}
-
-/**
- * What a turn that stopped without saying anything is reported as.
- *
- * The wording is the marker: `isTransientFailure` matches this exact string to decide the turn is
- * worth asking again, because Pi's classifier reads provider error text and this failure has none.
- */
-const EMPTY_ANSWER = 'The model ended its turn empty: no answer, no tool call.'
-
 /**
  * Whether a finished turn actually said anything.
  *
@@ -150,23 +147,6 @@ function turnFailure(finalMessage, agent) {
 }
 
 /**
- * Whether waiting and asking again is worth anything.
- *
- * Context overflow is asked first and always answered no: it is deterministic, it fails identically
- * every time, and compaction — not patience — is its repair. Everything else is Pi's classifier,
- * which is a list of provider and transport wording earned from real failures. Copying the list
- * here would have meant maintaining it here.
- */
-function isTransientFailure(failure, model) {
-    if (isContextOverflow(failure, model.contextWindow)) return false
-    // Ours, and asked before Pi's list, because an empty turn carries no provider wording for that
-    // list to recognise. Pi is deliberate about this: its classifier only reads turns that stopped
-    // with an error, and it states that the retry policy belongs to the caller. This is the caller.
-    if (failure.errorMessage === EMPTY_ANSWER) return true
-    return isRetryableAssistantError(failure)
-}
-
-/**
  * Says that the conversation left the model no room to answer.
  *
  * A turn that ran out of room is not an answer, and it does not look like a failure either: the
@@ -185,17 +165,6 @@ function outOfRoom(message, model) {
         + `${wrote === 1 ? '' : 's'}. Start a new task for the rest of this work — a task carries `
         + `its own conversation — or point the connection at a model with a larger context window.`
     )
-}
-
-function zeroUsage() {
-    return {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}
-    }
 }
 
 /**
@@ -271,33 +240,41 @@ async function compactMessages(messages, models, model, settings, thinkingLevel,
     ]
 }
 
-function modelFor(settings, providerId = PROVIDER_ID) {
-    const thinkingLevelMap = piThinkingLevelMap(settings.thinkingLevels)
+/**
+ * One connection and the model on it, as pi-ai describes a model.
+ *
+ * Two halves, and which half a field comes from is the whole of the split: the address, the dialect
+ * and how thinking is turned on belong to the connection, and everything the model carries with it
+ * belongs to the model. A sub-agent is that same pair with the second half replaced.
+ */
+function modelFor(connection, providerId = PROVIDER_ID) {
+    const chosen = connection.model ?? {}
+    const thinkingLevelMap = piThinkingLevelMap(chosen.thinkingLevels)
     // Only a local server holds a KV cache a session header could route back to. See the field.
     const isLocal = providerId === PROVIDER_ID
     return {
-        id: settings.model,
-        name: settings.modelName || settings.model,
+        id: chosen.id,
+        name: chosen.name || chosen.id,
         api: 'openai-completions',
         provider: providerId,
-        baseUrl: settings.baseUrl,
-        reasoning: settings.reasoning ?? false,
-        input: settings.input ?? ['text'],
-        cost: settings.cost ?? {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
-        contextWindow: settings.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        maxTokens: settings.maxTokens ?? settings.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        baseUrl: connection.baseUrl,
+        reasoning: chosen.reasoning ?? false,
+        input: chosen.input ?? ['text'],
+        cost: chosen.cost ?? {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
+        contextWindow: chosen.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        maxTokens: chosen.maxTokens ?? chosen.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         // The efforts this server named, so pi-ai asks at the one that was picked rather than at the
         // nearest one it believes in. See `piThinkingLevelMap`.
         ...(thinkingLevelMap ? {thinkingLevelMap} : {}),
         compat: {
             supportsDeveloperRole: false,
-            supportsReasoningEffort: settings.supportsReasoningEffort ?? false,
+            supportsReasoningEffort: chosen.supportsReasoningEffort ?? false,
             // A llama.cpp host turns thinking on with a chat-template argument and ignores
             // `reasoning_effort` without a word. Sending only the effort field is why the reasoning
             // level did nothing at all for a local model: the server accepted the request, the
             // template never saw the switch, and the model thought or did not think according to
             // whatever the server was started with.
-            ...(settings.chatTemplateThinking ?
+            ...(connection.chatTemplateThinking ?
                 {
                     thinkingFormat: 'chat-template',
                     chatTemplateKwargs: {
@@ -307,7 +284,7 @@ function modelFor(settings, providerId = PROVIDER_ID) {
                         preserve_thinking: true,
                         // Only where the template has efforts to name. Passing one it does not know
                         // puts an unknown key in the kwargs of every single request.
-                        ...(settings.supportsReasoningEffort ?
+                        ...(chosen.supportsReasoningEffort ?
                             {reasoning_effort: {$var: 'thinking.effort', omitWhenOff: true}}
                         :   {})
                     }
@@ -326,32 +303,16 @@ function modelFor(settings, providerId = PROVIDER_ID) {
 }
 
 /**
- * Which stored connection serves a driver, as the flat settings and the saved pair hold it between
- * them.
+ * Which stored connection serves a driver: one lookup in the map the settings hold.
  *
- * The driver the parent is on lives in the flat fields; the other one lives in the pair. Both are
- * read here rather than only the pair, because the flat fields are what the settings page validated
- * and the pair is what it mirrored — reading the mirror for the active driver would be trusting a
- * copy over the original.
+ * It used to be a rule instead of a lookup, because the live connection was written down twice —
+ * flattened onto the settings and mirrored into a slot beside them — so every reader had to know
+ * which copy to trust. The rule was written out in three languages and the three had drifted: Rust
+ * matched the driver exactly, and this file read anything that was not ChatGPT or OpenRouter as the
+ * local one. One question, two answers.
  */
 function connectionProfile(settings, connectionType) {
-    if (parentDriver(settings) === connectionType) return settings
-    if (connectionType === 'openai-codex') return settings.chatgpt
-    if (connectionType === 'openrouter') return settings.openrouter
-    return settings.local
-}
-
-/**
- * Which connection the parent is on.
- *
- * Anything that is not ChatGPT is the local one, rather than only the exact word for it. That is
- * how every other test of the driver in this file already reads, and a settings blob that predates
- * the field has to keep meaning what it has always meant.
- */
-function parentDriver(settings) {
-    if (settings.connectionType === 'openai-codex') return 'openai-codex'
-    if (settings.connectionType === 'openrouter') return 'openrouter'
-    return 'openai-compatible'
+    return settings.connections?.[connectionType]
 }
 
 /**
@@ -364,12 +325,12 @@ function parentDriver(settings) {
  */
 function subagentModelFor(settings, models, parent) {
     const chosen = settings.subagent?.connection
-    if (!chosen) return {model: parent, thinkingLevel: piThinkingLevel(settings.thinkingLevel)}
-    const thinkingLevel = piThinkingLevel(chosen.thinkingLevel)
+    if (!chosen) return {model: parent, thinkingLevel: parentThinkingLevel(settings)}
+    const thinkingLevel = piThinkingLevel(chosen.model?.thinkingLevel)
     if (chosen.connectionType === 'openai-codex') {
-        const model = models.getModel('openai-codex', chosen.model)
+        const model = models.getModel('openai-codex', chosen.model?.id)
         if (!model)
-            throw new Error(`The sub-agent's model '${chosen.model}' is unavailable on ChatGPT`)
+            throw new Error(`The sub-agent's model '${chosen.model?.id}' is unavailable on ChatGPT`)
         return {model, thinkingLevel}
     }
     const openrouter = chosen.connectionType === 'openrouter'
@@ -381,26 +342,27 @@ function subagentModelFor(settings, models, parent) {
             `The sub-agent is set to the ${named} connection, but no ${named} connection is configured`
         )
     }
-    // The address, the dialect and the name are the connection's. Everything the model carries with
-    // it — the id, its window, what it accepts — is the child's own.
+    // The address, the dialect and the name are the connection's; the model half is the child's.
+    // One field, because the two halves are two types — `chatTemplateThinking` stays the
+    // connection's without having to be left out by hand, since it never was the model's.
     return {
         model: modelFor(
-            {
-                ...profile,
-                model: chosen.model,
-                modelName: chosen.modelName,
-                contextWindow: chosen.contextWindow,
-                maxTokens: chosen.maxTokens,
-                reasoning: chosen.reasoning,
-                supportsReasoningEffort: chosen.supportsReasoningEffort,
-                input: chosen.input
-                // `chatTemplateThinking` is deliberately not overridden: it is the connection's,
-                // not the model's, and the connection is the one being spread above.
-            },
+            {...profile, model: chosen.model},
             openrouter ? OPENROUTER_PROVIDER_ID : PROVIDER_ID
         ),
         thinkingLevel
     }
+}
+
+/** The level the parent is asked at, which is the live connection's model's. */
+function parentThinkingLevel(settings) {
+    return piThinkingLevel(
+        connectionProfile(settings, settings.connectionType)?.model?.thinkingLevel
+    )
+}
+
+function imageBlocks(images) {
+    return images.map(image => ({type: 'image', data: image.data, mimeType: image.mimeType}))
 }
 
 /**
@@ -414,11 +376,7 @@ function subagentModelFor(settings, models, parent) {
 function askedAbout(messages) {
     const asking = messages.at(-1)
     if (asking?.sender !== 'user' || !Array.isArray(asking.images)) return []
-    return asking.images.map(image => ({
-        type: 'image',
-        data: image.data,
-        mimeType: image.mimeType
-    }))
+    return imageBlocks(asking.images)
 }
 
 function contextMessage(message, model) {
@@ -426,7 +384,7 @@ function contextMessage(message, model) {
         const images = Array.isArray(message.images) ? message.images : []
         const content = [
             ...(message.text ? [{type: 'text', text: message.text}] : []),
-            ...images.map(image => ({type: 'image', data: image.data, mimeType: image.mimeType}))
+            ...imageBlocks(images)
         ]
         return {
             role: 'user',
@@ -446,21 +404,6 @@ function contextMessage(message, model) {
     }
 }
 
-function textContent(content) {
-    return content
-        .filter(part => part.type === 'text')
-        .map(part => part.text)
-        .join('')
-}
-
-function bindTool(tool, context) {
-    return {
-        ...tool,
-        execute: (id, params, signal, onUpdate) =>
-            tool.execute(id, params, signal, onUpdate, context)
-    }
-}
-
 /**
  * The tools one turn may use: the confined file and shell tools, plus the Godot domain tools the
  * backend offered. The domain tools are forwarded to Rust rather than implemented here, so the
@@ -471,30 +414,21 @@ function bindTool(tool, context) {
  * provider is not made until a turn starts.
  */
 export function createAgentTools(workspacePath, domains, host, extra = [], model, frozen = []) {
-    const env = new NodeExecutionEnv({cwd: workspacePath})
-    const context = {env}
+    const env = createToolEnv(workspacePath)
     const confined = [
         withoutPackedLiterals(createReadTool()),
         createWriteTool(),
         createEditTool(),
         createBashTool()
-    ]
-        .map(tool => confineTool(tool, workspacePath, frozen))
-        .map(tool => bindTool(tool, context))
-    const tools = [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra]
+    ].map(tool => confineTool(tool, workspacePath, frozen))
     return {
         env,
-        tools: tools
-            .map(tool => (canSeePictures(model) ? tool : withoutPictures(tool)))
-            // The counter is per turn because these tools are: the provider is not made until a
-            // turn starts, so a call refused in one turn is not remembered into the next.
-            .map(withoutRepeatingARefusal)
+        tools: decorateTools({
+            env,
+            tools: [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra],
+            model
+        })
     }
-}
-
-/** Whether this model was declared as taking images. Absent means text, which is the safe answer. */
-export function canSeePictures(model) {
-    return Array.isArray(model?.input) && model.input.includes('image')
 }
 
 /** The words of a stored user message, whose content is a string until an image makes it a list. */
@@ -579,7 +513,10 @@ export function createModelContext({
      * answers it. The credential store is keyed by provider id too: it hands the ChatGPT credential
      * to the ChatGPT provider and nothing to the local one, which falls back to the API key below.
      */
-    const drivers = new Set([parentDriver(settings), settings.subagent?.connection?.connectionType])
+    const drivers = new Set([
+        settings.connectionType,
+        settings.subagent?.connection?.connectionType
+    ])
     const models = createModels({
         credentials:
             drivers.has('openai-codex') ?
@@ -635,11 +572,13 @@ export function createModelContext({
             })
         )
     }
+    const parent = connectionProfile(settings, settings.connectionType)
     const model =
-        isChatGpt ? models.getModel('openai-codex', settings.model)
-        : settings.connectionType === 'openrouter' ? modelFor(settings, OPENROUTER_PROVIDER_ID)
-        : modelFor(settings)
-    if (!model) throw new Error(`The selected model '${settings.model}' is unavailable`)
+        isChatGpt ? models.getModel('openai-codex', parent?.model?.id)
+        : !parent ? undefined
+        : settings.connectionType === 'openrouter' ? modelFor(parent, OPENROUTER_PROVIDER_ID)
+        : modelFor(parent)
+    if (!model) throw new Error(`The selected model '${parent?.model?.id}' is unavailable`)
     const subagent = subagentModelFor(settings, models, model)
     // Shared by the caller's own requests and by the sub-agent's, so a child never waits on a
     // different clock or gives up after a different number of tries than the thing that asked for it.
@@ -673,7 +612,15 @@ export async function runAgent({
     host,
     credentialHost,
     emit,
-    signal
+    signal,
+    /**
+     * The clock the retry backoff waits on.
+     *
+     * Injectable for the same reason the delegation's is: a policy of ten waits doubling from five
+     * seconds cannot be proved by sitting through it, and a test that instead shortens the delays is
+     * proving a different policy from the one that ships. Nothing in the application passes this.
+     */
+    timers = realTimers
 }) {
     const {isChatGpt, models, model, subagent, streamOptions} = createModelContext({
         settings,
@@ -779,7 +726,7 @@ export async function runAgent({
         :   rolledBack
     // Said out loud, because a rebuilt context is a conversation the model is seeing for the first
     // time: the tool calls it made are gone, and only what it wrote about them survives.
-    if (isRebuilt) emit({type: 'context-rebuilt', messages: previousMessages.length})
+    if (isRebuilt) emit(contextRebuilt(previousMessages.length))
 
     // Settable so a test can drive ten attempts without waiting seven minutes for them. Nothing in
     // the application sends these; the defaults are the policy.
@@ -802,31 +749,31 @@ export async function runAgent({
         // Summarising is one or two model requests of its own, and the turn has nothing to show
         // while they run. It is announced because a minute spent summarising and a minute spent
         // stuck look exactly the same from the outside.
-        emit({type: 'compaction-start', tokens: contextTokens, contextWindow: model.contextWindow})
+        emit(compactionStart(contextTokens, model.contextWindow))
         contextMessages = await compactMessages(
             previousMessages,
             models,
             model,
             compaction,
-            piThinkingLevel(settings.thinkingLevel),
+            parentThinkingLevel(settings),
             signal
         )
-        emit({type: 'compaction-end'})
+        emit(compactionEnd())
     }
 
     // The summary request announced, run, and withdrawn — shared by the three moments that can
     // need it: before the turn, between two of the turn's own requests, and after an overflow.
     const compactTranscript = async (tokens, transcript) => {
-        emit({type: 'compaction-start', tokens, contextWindow: model.contextWindow})
+        emit(compactionStart(tokens, model.contextWindow))
         const compacted = await compactMessages(
             transcript,
             models,
             model,
             compaction,
-            piThinkingLevel(settings.thinkingLevel),
+            parentThinkingLevel(settings),
             signal
         )
-        emit({type: 'compaction-end'})
+        emit(compactionEnd())
         return compacted
     }
 
@@ -844,7 +791,7 @@ export async function runAgent({
             // appended here, because it is this turn's data rather than the user's instructions.
             systemPrompt: `${systemPrompt}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}${sessionContext ? `\n\n${sessionContext}` : ''}`,
             model,
-            thinkingLevel: piThinkingLevel(settings.thinkingLevel),
+            thinkingLevel: parentThinkingLevel(settings),
             tools,
             messages: contextMessages
         },
@@ -878,24 +825,56 @@ export async function runAgent({
 
     transcript = createTranscript(agent, emit)
 
-    if (signal) signal.addEventListener('abort', () => agent.abort(), {once: true})
-    let finalMessage
+    // Asked before it is listened to, because a listener added to a signal that has already fired
+    // never runs. The compaction above is a full model request and can take a minute; a Stop in that
+    // window aborted the signal before this line existed, so the agent was never told. The loop then
+    // made one complete, uninterrupted request to the model and only noticed at `wasStopped`.
+    if (signal?.aborted) agent.abort()
+    else signal?.addEventListener('abort', () => agent.abort(), {once: true})
+
+    /**
+     * What one pass through the loop below has come to, and the only thing its steps share.
+     *
+     * These were six mutable locals inside the `for(;;)`, and they were the whole of what held its
+     * five separate jobs together — so none of the five could be read, moved or tested on its own.
+     *
+     * Mutated rather than copied, and that is forced rather than chosen: `finalMessage` is written
+     * by the subscriber below, which has no step to return from. A step that answered with a fresh
+     * record would be answering with a stale message the moment the next request settled.
+     */
+    const state = {
+        /** The last assistant message this turn produced, whatever it stopped for. */
+        finalMessage: undefined,
+        /** How many transient failures have been waited out. */
+        attempt: 0,
+        /** How many times the model has been handed its own red verify report. Once, at most. */
+        verifyAttempt: 0,
+        verifyResults: undefined,
+        recoveredOverflow: false,
+        // A retry that carries on says nothing new: the prompt is already the last thing the model
+        // was asked, and `prompt` would put it in a second time.
+        resume:
+            entry.continues && !isRebuilt ?
+                () => agent.continue()
+            :   () => agent.prompt(contextMessage(promptMessage, model))
+    }
+
     const unsubscribe = agent.subscribe(event => {
         if (event.type === 'message_update') {
             const update = event.assistantMessageEvent
-            if (update.type === 'text_delta') emit({type: 'text-delta', delta: update.delta})
-            if (update.type === 'thinking_delta')
-                emit({type: 'thinking-delta', delta: update.delta})
+            if (update.type === 'text_delta') emit(textDelta(update.delta))
+            if (update.type === 'thinking_delta') emit(thinkingDelta(update.delta))
             return
         }
         if (event.type === 'tool_execution_start') {
-            emit({
-                type: 'tool-start',
-                id: event.toolCallId,
-                name: event.toolName,
-                target: toolTarget(event.toolName, event.args),
-                startedAt: Date.now()
-            })
+            emit(
+                toolStart({
+                    id: event.toolCallId,
+                    name: event.toolName,
+                    target: toolTarget(event.toolName, event.args),
+                    startedAt: Date.now()
+                })
+            )
             return
         }
         if (event.type === 'tool_execution_update') {
@@ -904,27 +883,29 @@ export async function runAgent({
             // is opened. The row is closed by default, which is how a sub-agent's live report spent
             // its whole life invisible.
             const step = event.partialResult?.details?.step
-            emit({
-                type: 'tool-update',
-                id: event.toolCallId,
-                output: textContent(event.partialResult.content ?? []),
-                ...(typeof step === 'string' && step !== '' && {step})
-            })
+            emit(
+                toolUpdate({
+                    id: event.toolCallId,
+                    output: textContent(event.partialResult.content ?? []),
+                    step: typeof step === 'string' && step !== '' ? step : undefined
+                })
+            )
             return
         }
         if (event.type === 'tool_execution_end') {
-            emit({
-                type: 'tool-end',
-                id: event.toolCallId,
-                output: textContent(event.result.content ?? []),
-                isError: event.isError,
-                endedAt: Date.now()
-            })
+            emit(
+                toolEnd({
+                    id: event.toolCallId,
+                    output: textContent(event.result.content ?? []),
+                    isError: event.isError,
+                    endedAt: Date.now()
+                })
+            )
             return
         }
         if (event.type === 'turn_end' && event.message.role === 'assistant') {
-            finalMessage = event.message
-            emit({type: 'usage', usage: event.message.usage, model: event.message.model})
+            state.finalMessage = event.message
+            emit(usageReport(event.message.usage, event.message.model))
             // What this one ask cost, addressed to the calls it issued.
             //
             // `input + output` and not `totalTokens`: `cacheRead` is the same story re-sent to the
@@ -936,12 +917,7 @@ export async function runAgent({
             {
                 const ids = (event.toolResults ?? []).map(result => result.toolCallId)
                 const usage = event.message.usage
-                if (ids.length > 0)
-                    emit({
-                        type: 'tool-cost',
-                        ids,
-                        tokens: (usage?.input ?? 0) + (usage?.output ?? 0)
-                    })
+                if (ids.length > 0) emit(toolCost(ids, (usage?.input ?? 0) + (usage?.output ?? 0)))
             }
             // The transcript is checkpointed at every step, not only at the end.
             //
@@ -954,116 +930,152 @@ export async function runAgent({
         }
     })
 
-    try {
-        // A retry that carries on says nothing new: the prompt is already the last thing the model
-        // was asked, and `prompt` would put it in a second time.
-        let resume =
-            entry.continues && !isRebuilt ?
-                () => agent.continue()
-            :   () => agent.prompt(contextMessage(promptMessage, model))
-        let recoveredOverflow = false
-        let attempt = 0
-        let verifyAttempt = 0
-        let verifyResults
-        // Read once, before the model runs: the specification is already on the transcript when the
-        // turn starts, and a model that writes a VERIFY block into its own answer is describing
-        // what it did rather than agreeing to be held to it.
-        const verifyPoints = verifyPointsIn(messages)
-        for (;;) {
-            await resume()
-            // A context overflow is recovered from once, not surfaced: the error is taken back off
-            // the transcript, the transcript is compacted, and the turn carries on. Surfacing it
-            // hands the user a Retry button, and a retry of a task's only prompt rolls back
-            // everything. A second overflow after compacting is surfaced, because compacting is the
-            // one repair on offer.
-            if (
-                finalMessage
-                && finalMessage.stopReason === 'error'
-                && compaction.enabled
-                && !recoveredOverflow
-                && isContextOverflow(finalMessage, model.contextWindow)
-            ) {
-                const withoutError = withoutTrailingAnswer(transcript.messages())
-                // The error message reports no usage, so the size of what remains is estimated.
-                transcript.replaceWith(
-                    await compactTranscript(
-                        estimateContextTokens(withoutError).tokens,
-                        withoutError
-                    )
-                )
-                recoveredOverflow = true
-                finalMessage = undefined
-                await agent.continue()
-            }
-            if (
-                finalMessage
-                && finalMessage.stopReason !== 'error'
-                && !answeredNothing(finalMessage)
-            ) {
-                // The turn is over as far as the model is concerned, and this is the last moment
-                // before `done` says so out loud. Running the points here rather than after the
-                // loop is what makes them a gate: the executor is already rooted in the worktree,
-                // the composer has not been released, and the model is still there to be asked
-                // again. After `done` it is none of those things.
-                if (!verifyPoints) break
-                verifyResults = await runVerifyPoints({points: verifyPoints, env, emit, signal})
-                const report = verifyReport(verifyResults)
-                if (report === undefined) break
-                // Told once, then let go. A model that cannot make its own checks pass on a second
-                // attempt is spending turns to write the same answer, and the red points are on the
-                // transcript either way — which is the thing that was missing.
-                if (verifyAttempt >= 1) break
-                verifyAttempt += 1
-                resume = () => agent.prompt(contextMessage({sender: 'user', text: report}, model))
-                finalMessage = undefined
-                continue
-            }
-            // A stopped turn is the user's decision, not a failure, and it is read from the signal
-            // rather than from the message. Pi reports the two cancellations differently: a stop
-            // during the request comes back as `aborted`, and a stop while a tool call is in flight
-            // comes back as an ordinary error carrying the runtime's own wording. Only the signal
-            // knows both are the same event, so it is asked before anything is classified, retried,
-            // or thrown — a turn the user stopped must never wait five seconds and ask again.
-            if (signal?.aborted) {
-                // Every field the `done` event is built from is defaulted, because a turn can be
-                // stopped before the model produced a message at all. `isAiStreamEvent` rejects a
-                // completion whose usage or model is missing, and a rejected completion is dropped
-                // in silence — the stopped turn would then never be recorded as having ended.
-                finalMessage = {
-                    content: [],
-                    usage: zeroUsage(),
-                    model: model.id,
-                    ...finalMessage,
-                    stopReason: 'aborted'
-                }
-                break
-            }
-            const failure = turnFailure(finalMessage, agent)
-            if (attempt >= retry.attempts || !isTransientFailure(failure, model)) {
-                throw new Error(failure.errorMessage)
-            }
-            attempt += 1
-            const delayMs = retryDelay(attempt, retry)
-            // Two events, not one, because the wait is the part the user is watching: the first
-            // says how long and why, the second says the wait is over and the model is being asked
-            // again. A single event would leave the countdown reading "in 60s" while the retry ran.
-            emit({
-                type: 'retry-scheduled',
-                attempt,
+    // Read once, before the model runs: the specification is already on the transcript when the
+    // turn starts, and a model that writes a VERIFY block into its own answer is describing
+    // what it did rather than agreeing to be held to it.
+    const verifyPoints = verifyPointsIn(messages)
+
+    /**
+     * A context overflow is recovered from once, not surfaced: the error is taken back off the
+     * transcript, the transcript is compacted, and the turn carries on. Surfacing it hands the user
+     * a Retry button, and a retry of a task's only prompt rolls back everything. A second overflow
+     * after compacting is surfaced, because compacting is the one repair on offer.
+     */
+    const recoverOverflow = async attemptState => {
+        if (
+            !attemptState.finalMessage
+            || attemptState.finalMessage.stopReason !== 'error'
+            || !compaction.enabled
+            || attemptState.recoveredOverflow
+            || !isContextOverflow(attemptState.finalMessage, model.contextWindow)
+        )
+            return attemptState
+        const withoutError = withoutTrailingAnswer(transcript.messages())
+        // The error message reports no usage, so the size of what remains is estimated.
+        transcript.replaceWith(
+            await compactTranscript(estimateContextTokens(withoutError).tokens, withoutError)
+        )
+        attemptState.recoveredOverflow = true
+        attemptState.finalMessage = undefined
+        await agent.continue()
+        return attemptState
+    }
+
+    /**
+     * What the turn's own checks make of the answer it just produced.
+     *
+     * Run here rather than after the loop, and that is what makes the points a gate: the executor is
+     * already rooted in the worktree, the composer has not been released, and the model is still
+     * there to be asked again. After `done` it is none of those things.
+     *
+     * Three answers, because the loop can do three things with one:
+     *
+     *   answered  the turn is finished — no points to run, or none of them went red.
+     *   again     the model has been handed its own red report and is being asked once more.
+     *   nothing   there was no answer to gate, so the endings below it get their turn.
+     */
+    const gateOnVerifyPoints = async attemptState => {
+        if (
+            !attemptState.finalMessage
+            || attemptState.finalMessage.stopReason === 'error'
+            || answeredNothing(attemptState.finalMessage)
+        )
+            return 'nothing'
+        if (!verifyPoints) return 'answered'
+        attemptState.verifyResults = await runVerifyPoints({
+            points: verifyPoints,
+            env,
+            emit,
+            signal
+        })
+        const report = verifyReport(attemptState.verifyResults)
+        if (report === undefined) return 'answered'
+        // Told once, then let go. A model that cannot make its own checks pass on a second attempt
+        // is spending turns to write the same answer, and the red points are on the transcript
+        // either way — which is the thing that was missing.
+        if (attemptState.verifyAttempt >= 1) return 'answered'
+        attemptState.verifyAttempt += 1
+        attemptState.resume = () =>
+            agent.prompt(contextMessage({sender: 'user', text: report}, model))
+        attemptState.finalMessage = undefined
+        return 'again'
+    }
+
+    /**
+     * Whether the user stopped this turn, and the ending that says so if they did.
+     *
+     * A stopped turn is the user's decision, not a failure, and it is read from the signal rather
+     * than from the message. Pi reports the two cancellations differently: a stop during the request
+     * comes back as `aborted`, and a stop while a tool call is in flight comes back as an ordinary
+     * error carrying the runtime's own wording. Only the signal knows both are the same event, so it
+     * is asked before anything is classified, retried, or thrown — a turn the user stopped must
+     * never wait five seconds and ask again.
+     */
+    const wasStopped = attemptState => {
+        if (!signal?.aborted) return false
+        // Every field the `done` event is built from is defaulted, because a turn can be stopped
+        // before the model produced a message at all. `isAiStreamEvent` rejects a completion whose
+        // usage or model is missing, and a rejected completion is dropped in silence — the stopped
+        // turn would then never be recorded as having ended.
+        attemptState.finalMessage = {
+            content: [],
+            usage: zeroUsage(),
+            model: model.id,
+            ...attemptState.finalMessage,
+            stopReason: 'aborted'
+        }
+        return true
+    }
+
+    /**
+     * The failure this attempt ended on, and what to do about it.
+     *
+     * Throws when there is nothing left to try — the budget is spent, or the failure is not one that
+     * fixes itself — which is how the turn reaches the user. Otherwise it waits out the backoff and
+     * leaves the record pointing at the next attempt.
+     */
+    const classifyAndBackoff = async attemptState => {
+        const failure = turnFailure(attemptState.finalMessage, agent)
+        if (attemptState.attempt >= retry.attempts || !isWorthRetrying(failure, model))
+            throw new Error(failure.errorMessage)
+        attemptState.attempt += 1
+        const delayMs = retryDelay(attemptState.attempt, retry)
+        // Two events, not one, because the wait is the part the user is watching: the first says how
+        // long and why, the second says the wait is over and the model is being asked again. A
+        // single event would leave the countdown reading "in 60s" while the retry ran.
+        emit(
+            retryScheduled({
+                attempt: attemptState.attempt,
                 maxAttempts: retry.attempts,
                 delayMs,
                 errorMessage: failure.errorMessage
             })
-            await sleep(delayMs, signal)
-            emit({type: 'retry-start', attempt, maxAttempts: retry.attempts})
-            // The failed answer is taken back off first. Left on, it teaches the model that its own
-            // last word was the provider's error text, and the next answer is written to match it.
-            transcript.dropTrailingAnswer()
-            finalMessage = undefined
-            // `continue`, not `prompt`: the prompt is already on the transcript, and asking it
-            // again would put the same question in twice.
-            resume = () => agent.continue()
+        )
+        await abortableWait(delayMs, signal, timers)
+        emit(retryStart(attemptState.attempt, retry.attempts))
+        // The failed answer is taken back off first. Left on, it teaches the model that its own last
+        // word was the provider's error text, and the next answer is written to match it.
+        transcript.dropTrailingAnswer()
+        attemptState.finalMessage = undefined
+        // `continue`, not `prompt`: the prompt is already on the transcript, and asking it again
+        // would put the same question in twice.
+        attemptState.resume = () => agent.continue()
+        return attemptState
+    }
+
+    try {
+        // The order the five jobs happen in, and nothing else. Each step reads the record, decides
+        // its own part, and hands it back; what the loop owns is which one goes next.
+        for (;;) {
+            await state.resume()
+            await recoverOverflow(state)
+            const verdict = await gateOnVerifyPoints(state)
+            if (verdict === 'answered') break
+            if (verdict === 'again') continue
+            if (wasStopped(state)) break
+            await classifyAndBackoff(state)
         }
+        const {finalMessage, verifyResults} = state
         if (finalMessage.stopReason === 'length') throw new Error(outOfRoom(finalMessage, model))
         // The answer carries its own verdict. A turn whose points went red used to end with
         // `stopReason: 'stop'` and whatever the model chose to say — measured live, that was "The
@@ -1071,8 +1083,7 @@ export async function runAgent({
         // and the bubble held the opposite.
         const verifyFailure = verifySummary(verifyResults)
         const answered = textContent(finalMessage.content)
-        const completion = {
-            type: 'done',
+        const completion = turnDone({
             text: verifyFailure === undefined ? answered : `${answered}\n\n${verifyFailure}`,
             verify:
                 verifyResults === undefined ? undefined : (
@@ -1092,7 +1103,7 @@ export async function runAgent({
             usage: finalMessage.usage,
             model: finalMessage.model,
             agentMessages: transcript.messages()
-        }
+        })
         emit(completion)
         return completion
     } catch (error) {

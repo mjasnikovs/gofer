@@ -19,7 +19,7 @@
 //! Gated behind the `godot-acceptance` feature so the fast gate needs no engine.
 
 use crate::ai_tools;
-use crate::ai_turn::{AiWorkerMessage, AiWorkerRequest, ChatSender};
+use crate::ai_turn::{AiWorkerMessage, ChatSender, Job, JobContext};
 use crate::godot_editor_harness::{self, PNG_BASE64_PREFIX, Transports, free_port};
 use crate::process::SystemProcessSpawner;
 use crate::settings::AiSettings;
@@ -448,42 +448,34 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     // and puts every one of the turn's process-wide values back when this function returns.
     let turn = crate::ai_turn::AiTurn::begin(1, stream).expect("no other AI turn is running");
 
+    // The context the application builds, from the same function. What the suite chooses for
+    // itself is where the model is, that none of this machine's credentials are sent, and which
+    // checkout its editor is bound to; the catalogue, the agent prompt Gofer ships and the session
+    // line are composed the way a turn in the application composes them. Built by hand here, this
+    // suite was the only caller that ever left the prompt unset — so the one path it exercised was
+    // a path nothing in the application took.
+    let context = JobContext::for_suite(
+        app.handle(),
+        AiSettings::served_by(base_url, "gofer-acceptance".to_owned()),
+        session.worktree.display().to_string(),
+    )
+    .expect("build the job context");
     let completion = crate::ai_turn::run_ai_worker_with(
         app.handle(),
         &turn,
-        AiWorkerRequest {
-            settings: AiSettings {
-                base_url,
-                model: "gofer-acceptance".to_owned(),
-                max_retries: 0,
-                ..AiSettings::default()
-            },
-            api_key: None,
-            openrouter_api_key: None,
-            brave_api_key: None,
-            oauth_credential: None,
-            session_id: Some("godot-ai-acceptance".to_owned()),
-            workspace_path: session.worktree.display().to_string(),
-            tools: ai_tools::CATALOG,
-            // No system prompt of its own, so the suite drives the agent Gofer ships.
-            job: crate::ai_turn::WorkerJob::Turn {
-                messages: vec![AiWorkerMessage {
-                    sender: ChatSender::User,
-                    text:
-                        "Add a marker, fix the broken script, debug the probe, and show me the game."
-                            .to_owned(),
-                    timestamp: 1,
-                    images: Vec::new(),
-                }],
-                agent_messages: None,
-                is_retry: false,
-                memory_context: None,
-                // Filled by `run_ai_worker_with`, like the prompt beside it, from the editor this
-                // suite has bound.
-                session_context: None,
-                system_prompt: None,
-            },
-        },
+        context.request(Job::Turn {
+            task_id: Some("godot-ai-acceptance".to_owned()),
+            messages: vec![AiWorkerMessage {
+                sender: ChatSender::User,
+                text: "Add a marker, fix the broken script, debug the probe, and show me the game."
+                    .to_owned(),
+                timestamp: 1,
+                images: Vec::new(),
+            }],
+            agent_messages: None,
+            is_retry: false,
+            memory_context: None,
+        }),
         &SystemProcessSpawner,
     )
     .unwrap_or_else(|error| {

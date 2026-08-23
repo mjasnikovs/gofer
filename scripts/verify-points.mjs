@@ -14,6 +14,7 @@
  * Rust job, the schema and the event vocabulary.
  */
 
+import {verifyPoint} from './ai-events.mjs'
 import {parseVerifyPoints} from './brief/phases.mjs'
 import {validateBashCommand} from './workspace-confinement.mjs'
 
@@ -83,14 +84,15 @@ function refusedPoint(error) {
 export async function runVerifyPoints({points, env, emit, signal}) {
     const results = []
     for (const [index, point] of points.entries()) {
-        emit({
-            type: 'verify-point',
-            status: 'running',
-            name: point.name,
-            command: point.command,
-            index,
-            of: points.length
-        })
+        emit(
+            verifyPoint({
+                status: 'running',
+                name: point.name,
+                command: point.command,
+                index,
+                of: points.length
+            })
+        )
         // The same rules the bash tool obeys. Measured live: the specification told the model to
         // put its check outside the project, `validateBashCommand` then refused that path, and the
         // model copied the file into the workspace to get around it — while this ran the original
@@ -111,15 +113,16 @@ export async function runVerifyPoints({points, env, emit, signal}) {
                 tail(`${outcome.value.stdout ?? ''}\n${outcome.value.stderr ?? ''}`)
             :   tail(String(outcome.error?.message ?? outcome.error ?? 'the command did not run'))
         results.push({name: point.name, command: point.command, passed, output})
-        emit({
-            type: 'verify-point',
-            status: passed ? 'complete' : 'error',
-            name: point.name,
-            command: point.command,
-            index,
-            of: points.length,
-            output: passed ? '' : output
-        })
+        emit(
+            verifyPoint({
+                status: passed ? 'complete' : 'error',
+                name: point.name,
+                command: point.command,
+                index,
+                of: points.length,
+                output: passed ? '' : output
+            })
+        )
     }
     return results
 }

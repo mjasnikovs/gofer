@@ -4,6 +4,7 @@
 //! coalesced warmup that downloads them. Tauri commands stay in `lib.rs` and call in here.
 
 use crate::process::{ProcessSpawner, SystemProcessSpawner};
+use crate::settings::{Secret, Secrets};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -396,6 +397,22 @@ pub struct GodotDocsQuery {
     pub max_text_chars: usize,
 }
 
+/// The fields [`GodotDocsQuery`] deserializes, as serde spells them on the wire, and whether a call
+/// may leave one out.
+///
+/// Declared beside the type rather than recovered from it. `tool_drift` holds the catalogue's
+/// parameter table to what the handler behind it really reads, and what a query takes is a fact
+/// about the query — so changing the struct and changing the list is one edit in one place.
+///
+/// Optional means what serde means: the type is an `Option`, or the field carries
+/// `#[serde(default)]`.
+#[cfg(test)]
+pub const DOCS_QUERY_FIELDS: &[(&str, bool)] = &[
+    ("question", false),
+    ("maxPassages", true),
+    ("maxTextChars", true),
+];
+
 /// How many passages a query gets when the caller names no number.
 ///
 /// It used to be ten, which never bound anything: gofer-rag keeps five and pins up to three more,
@@ -580,8 +597,10 @@ struct RetrieveWorkerResponse {
 /// question its expansion and nothing else, so neither is reported as a failure.
 pub fn expansion_connection<R: Runtime>(app: &AppHandle<R>) -> Option<RetrieveConnection> {
     let settings = crate::settings::read_settings(app).ok()?;
-    let key = crate::settings::ai_worker_api_key().ok().flatten();
-    let openrouter_key = crate::settings::stored_openrouter_api_key().ok().flatten();
+    // Through the one store, by slot. Which of the three is spent is the connection's to decide.
+    let secrets = crate::settings::SystemSecrets;
+    let key = secrets.read(Secret::AiDefault).ok().flatten();
+    let openrouter_key = secrets.read(Secret::OpenRouter).ok().flatten();
     let credential = crate::settings::stored_chatgpt_credential().ok().flatten();
     crate::settings::docs_expansion_connection(&settings.ai, key, openrouter_key, credential)
 }

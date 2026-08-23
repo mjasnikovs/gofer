@@ -6,41 +6,43 @@ import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../te
 import {flush} from '../../test/flush'
 import {immediateScheduler, setScheduler, timerScheduler} from '../../services/clock'
 import type {SettingsRequest, SettingsResponse} from '../../models/settings'
-import {installBackend} from '../../test/backend'
-import type {BackendAnswers} from '../../test/backend'
+import {SETTINGS, installBackend} from '../../test/backend'
+import type {Backend, BackendAnswers} from '../../test/backend'
 import type {DesktopCommand} from '../../services/desktop'
 
 const tauri = createDesktopFake()
 
-const settingsResponse = {
+const settingsResponse: SettingsResponse = {
+    ...SETTINGS,
     settings: {
-        version: 1,
+        ...SETTINGS.settings,
         ai: {
-            connectionType: 'openai-compatible',
-            name: 'Local AI',
-            baseUrl: 'http://127.0.0.1:8080/v1',
-            model: 'local-model',
-            api: 'openai-completions',
-            // Sent with every settings response, because what a ChatGPT connection is belongs to
-            // the backend. Without it this page has no second driver to offer.
-            chatgpt: {
-                name: 'ChatGPT subscription',
-                baseUrl: 'https://chatgpt.com/backend-api',
-                model: 'gpt-5.6-terra',
-                api: 'openai-codex-responses',
-                modelName: 'GPT-5.6 Terra',
-                contextWindow: 272_000,
-                maxTokens: 128_000,
-                reasoning: true,
-                supportsReasoningEffort: true,
-                thinkingLevels: [],
-                input: ['text', 'image'],
-                thinkingLevel: 'high'
+            ...SETTINGS.settings.ai,
+            connections: {
+                ...SETTINGS.settings.ai.connections,
+                // Sent with every settings response, because what a ChatGPT connection is belongs
+                // to the backend. Without it this page has no second driver to offer.
+                'openai-codex': {
+                    name: 'ChatGPT subscription',
+                    baseUrl: 'https://chatgpt.com/backend-api',
+                    api: 'openai-codex-responses',
+                    chatTemplateThinking: false,
+                    model: {
+                        id: 'gpt-5.6-terra',
+                        name: 'GPT-5.6 Terra',
+                        contextWindow: 272_000,
+                        maxTokens: 128_000,
+                        reasoning: true,
+                        supportsReasoningEffort: true,
+                        thinkingLevels: [],
+                        input: ['text', 'image'],
+                        thinkingLevel: 'high'
+                    }
+                }
             }
         }
-    },
-    hasApiKey: false
-} as const
+    }
+}
 
 const shippedPrompt = 'You are Gofer, a capable local coding agent.'
 
@@ -62,13 +64,18 @@ const serverModels = [
 ]
 
 /**
- * The shared backend, holding this page's settings, with per-command values on top.
+ * The shared backend, holding this page's settings, with per-command answers on top.
  *
- * The overrides are values rather than handlers because that is all this suite ever needs: what one
- * command answers, or the failure it raises. Keying them by `DesktopCommand` is what makes a
- * renamed command fail typecheck here rather than quietly stop being overridden.
+ * Most overrides are values, because that is all a page test usually needs: what one command
+ * answers, or the failure it raises. `handlers` is for the two that need the command held open
+ * while the window is read. Keying either by `DesktopCommand` is what makes a renamed command fail
+ * typecheck here rather than quietly stop being overridden.
  */
-function answer(overrides: Partial<Record<DesktopCommand, unknown>> = {}) {
+let server: Backend
+function answer(
+    overrides: Partial<Record<DesktopCommand, unknown>> = {},
+    handlers: BackendAnswers = {}
+) {
     const answers: BackendAnswers = {}
     for (const command of Object.keys(overrides) as DesktopCommand[]) {
         const value = overrides[command]
@@ -77,12 +84,14 @@ function answer(overrides: Partial<Record<DesktopCommand, unknown>> = {}) {
             return value
         }
     }
-    return installBackend(tauri, {
-        settings: settingsResponse as unknown as SettingsResponse,
+    Object.assign(answers, handlers)
+    server = installBackend(tauri, {
+        settings: settingsResponse,
         agentPrompt: {prompt: shippedPrompt, defaultPrompt: shippedPrompt},
         cache: installedCache,
         answers
     })
+    return server
 }
 
 /**
@@ -145,7 +154,7 @@ describe('the AI connection form', () => {
         await flush()
         expect(savedRequest()?.settings.ai).toMatchObject({
             connectionType: 'openai-codex',
-            model: 'qwen3-coder'
+            connections: {'openai-codex': {model: {id: 'qwen3-coder'}}}
         })
 
         await user.click(screen.getByRole('combobox', {name: 'AI driver'}))
@@ -177,12 +186,16 @@ describe('the AI connection form', () => {
         await user.click(screen.getByRole('button', {name: 'Save AI settings'}))
         await flush()
 
-        expect(savedRequest()?.settings.ai).toMatchObject({
-            name: 'Studio box',
-            baseUrl: 'https://ai.example.com/v1',
-            model: 'big-model',
-            contextWindow: 32_768,
-            maxTokens: 4096,
+        // Read back out of the backend rather than out of the call that went to it: what a save
+        // means is that the next read answers with what was sent.
+        expect(server.state.settings.settings.ai).toMatchObject({
+            connections: {
+                'openai-compatible': {
+                    name: 'Studio box',
+                    baseUrl: 'https://ai.example.com/v1',
+                    model: {id: 'big-model', contextWindow: 32_768, maxTokens: 4096}
+                }
+            },
             timeoutMs: 90_000,
             maxRetries: 5
         })
@@ -268,11 +281,12 @@ describe('the AI connection form', () => {
 
         expect(savedRequest()?.settings.ai.subagent.connection).toMatchObject({
             connectionType: 'openai-compatible',
-            model: 'qwen3-coder',
-            contextWindow: 262_144
+            model: {id: 'qwen3-coder', contextWindow: 262_144}
         })
         // The main agent is where it was. That separation is the whole feature.
-        expect(savedRequest()?.settings.ai.model).toBe('local-model')
+        expect(savedRequest()?.settings.ai.connections['openai-compatible']?.model.id).toBe(
+            'local-model'
+        )
     })
 
     it('reports a connection test that never reached the server', async () => {
@@ -450,7 +464,6 @@ describe('the documentation model cache', () => {
     // The download subscribes before it starts and unsubscribes whatever happens, because the
     // progress events are the only sign of life during a 1.68 GiB fetch.
     it('subscribes to the download progress, installs the models, and unsubscribes', async () => {
-        answer({get_rag_cache_status: missingCache})
         const unlisten = vi.fn()
         let report: ((payload: unknown) => void) | undefined
         tauri.listen.mockImplementation(async (event, handler) => {
@@ -461,15 +474,17 @@ describe('the documentation model cache', () => {
             }
             return unlisten
         })
-        const invoke = tauri.invoke.getMockImplementation()
-        tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
-            if (command === 'initialize_rag') {
-                // As the backend does it: the progress arrives while the command is still running.
-                report?.({model: 'bge-m3', status: 'progress', loaded: 1024, total: 2048})
-                return undefined
+        answer(
+            {get_rag_cache_status: missingCache},
+            {
+                initialize_rag: () => {
+                    // As the backend does it: the progress arrives while the command is still
+                    // running.
+                    report?.({model: 'bge-m3', status: 'progress', loaded: 1024, total: 2048})
+                    return undefined
+                }
             }
-            return invoke?.(command, args)
-        })
+        )
         await open()
         await openTab('Documentation models')
 
@@ -498,17 +513,17 @@ describe('the documentation model cache', () => {
             return () => undefined
         })
         let finishDownload: (() => void) | undefined
-        const invoke = tauri.invoke.getMockImplementation()
-        tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
-            if (command === 'initialize_rag') {
-                return new Promise<undefined>(resolve => {
-                    finishDownload = () => {
-                        resolve(undefined)
-                    }
-                })
+        answer(
+            {get_rag_cache_status: missingCache},
+            {
+                initialize_rag: () =>
+                    new Promise<undefined>(resolve => {
+                        finishDownload = () => {
+                            resolve(undefined)
+                        }
+                    })
             }
-            return invoke?.(command, args)
-        })
+        )
         await open()
         await openTab('Documentation models')
 
@@ -615,6 +630,9 @@ describe('project storage', () => {
                 attachmentsRemoved: 3,
                 blobsRemoved: 4,
                 godotRunsRemoved: 5,
+                sketchesRemoved: 6,
+                docsAnswersRemoved: 7,
+                memoryVectorsRemoved: 8,
                 backupsRemoved: 1,
                 memoryEmbeddingsRestored: 2
             }
@@ -628,7 +646,7 @@ describe('project storage', () => {
         expect(screen.getByText('Storage maintenance complete')).toBeInTheDocument()
         expect(
             screen.getByText(
-                '3 attachments, 4 blobs, 5 old Godot runs, and 1 old backups removed. 2 memory embeddings restored.'
+                '3 attachments, 4 blobs, 5 old Godot runs, 6 sketches, 7 stale manual answers, 8 orphaned memory vectors, and 1 old backups removed. 2 memory embeddings restored.'
             )
         ).toBeInTheDocument()
     })

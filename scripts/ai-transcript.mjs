@@ -1,3 +1,5 @@
+import {turnState} from './ai-events.mjs'
+
 /**
  * What the model is given as its memory, and the only thing allowed to change it.
  *
@@ -48,7 +50,7 @@ export function createTranscript(agent, emit) {
          * forget.
          */
         checkpoint: () => {
-            emit({type: 'turn-state', agentMessages: agent.state.messages})
+            emit(turnState(agent.state.messages))
         },
 
         /**

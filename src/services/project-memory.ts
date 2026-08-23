@@ -11,6 +11,28 @@ import type {
     ProjectMemory
 } from '../models/memory'
 import {isMemoryJudgeEvent, isMemorySweepEvent} from '../models/memory'
+import {setTurnRunning} from './turn-activity'
+
+/**
+ * Runs one memory job as what the backend runs it as: a turn.
+ *
+ * Both calls below begin an `AiTurn` in Rust, which takes the single provider operation everything
+ * else is refused against. Neither said so on this side, so for the whole of a sweep — a minute a
+ * row, over an hour for eighty of them — `isTurnRunning()` answered false: the sidebar offered New
+ * task, the user pressed it, and the backend refused it by name.
+ *
+ * One wrapper rather than a call at each of the two, and not a `TurnKind` per call site either:
+ * what makes a run a turn is that it holds that operation, and both of these do. A third memory
+ * command that begins a turn goes through here and nothing else changes.
+ */
+async function asTurn<T>(run: () => Promise<T>): Promise<T> {
+    setTurnRunning('memory', true)
+    try {
+        return await run()
+    } finally {
+        setTurnRunning('memory', false)
+    }
+}
 
 /**
  * The project's memory, as the window reads and corrects it.
@@ -45,7 +67,9 @@ export function deleteProjectMemory(id: string): Promise<void> {
 export function judgeProjectMemory(
     request: Readonly<{requestId: number; memoryId: string}>
 ): Promise<ProjectMemory> {
-    return invoke('judge_project_memory', {request, stream: new Channel<AiStreamPayload>()})
+    return asTurn(() =>
+        invoke('judge_project_memory', {request, stream: new Channel<AiStreamPayload>()})
+    )
 }
 
 /**
@@ -70,7 +94,9 @@ export function watchMemoryJudge(handler: (event: MemoryJudgeEvent) => void): Pr
 export function sweepProjectMemory(
     request: Readonly<{requestId: number; memoryIds: readonly string[]}>
 ): Promise<readonly ProjectMemory[]> {
-    return invoke('sweep_project_memory', {request, stream: new Channel<AiStreamPayload>()})
+    return asTurn(() =>
+        invoke('sweep_project_memory', {request, stream: new Channel<AiStreamPayload>()})
+    )
 }
 
 /** Watches the running sweep's own count. Per-row progress is still `watchMemoryJudge`. */

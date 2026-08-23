@@ -40,6 +40,7 @@ import {
 } from '../../services/chatgpt-auth'
 import {commandErrorMessage} from '../../utils/command-error'
 import {
+    activeConnection,
     thinkingLevelsFor,
     SEARCH_PROVIDERS,
     SEARCH_PROVIDERS_NEEDING_KEY,
@@ -62,10 +63,13 @@ import {
     stepsLabel
 } from '../../models/settings'
 import type {
+    AiConnectionProfile,
     AiModelOption,
     AiSettings,
     GodotSettings,
+    ModelChoice,
     SearchProvider,
+    SecretName,
     SubagentSettings
 } from '../../models/settings'
 import {
@@ -77,7 +81,7 @@ import {
     runSettingsTask,
     settingsRequest
 } from '../../models/settings-draft'
-import type {SettingsAction, SettingsTab, SettingsTask} from '../../models/settings-draft'
+import type {KeyDraft, SettingsAction, SettingsTab, SettingsTask} from '../../models/settings-draft'
 
 /** Every settings group breaks to one column at the same width. */
 const SETTINGS_GRID_COLUMNS = {minWidth: 320} as const
@@ -90,6 +94,111 @@ const SETTINGS_GRID_COLUMNS = {minWidth: 320} as const
  * every Gofer before this did and still the right answer for one model on one machine.
  */
 const SUBAGENT_INHERITS = 'inherit'
+
+/** The three secrets a person types. ChatGPT is the fourth, and it is a sign-in rather than a box. */
+type TypedSecret = Exclude<SecretName, 'chat-gpt'>
+
+/**
+ * What one key box says, which is the whole of what ever differed between the three.
+ *
+ * Everything else — "Stored securely", "Leave blank to keep…", the removal button and when it is
+ * shown — was written out once per secret and had to be kept in step by hand.
+ */
+type StoredKeyCopy = Readonly<{
+    label: string
+    /**
+     * The box's own hint, shown only while nothing is stored. A format example or a statement about
+     * the field, never its name: a placeholder that names the field disappears when it is typed in.
+     */
+    placeholder: string
+    /** What to say when there is no stored key to leave alone. */
+    description: string
+    removeLabel: string
+    keepLabel: string
+    /** Which of the two hints the label carries, and neither is the third answer: no hint at all. */
+    isRequired: boolean
+    isOptional: boolean
+}>
+
+const STORED_KEY_COPY: Readonly<Record<TypedSecret, StoredKeyCopy>> = {
+    'ai-default': {
+        label: 'API key',
+        placeholder: 'Not required by local servers',
+        description: 'Enter a key only if this server requires authentication.',
+        removeLabel: 'Remove stored API key',
+        keepLabel: 'Keep stored API key',
+        isRequired: false,
+        isOptional: true
+    },
+    openrouter: {
+        label: 'API key',
+        placeholder: 'sk-or-v1-…',
+        description: 'Create one at openrouter.ai under Keys.',
+        removeLabel: 'Remove stored API key',
+        keepLabel: 'Keep stored API key',
+        isRequired: true,
+        isOptional: false
+    },
+    brave: {
+        label: 'Brave Search API key',
+        placeholder: 'From api.search.brave.com',
+        description: 'Stored in the operating system credential store, never in the settings file.',
+        removeLabel: 'Remove stored Brave key',
+        keepLabel: 'Keep stored Brave key',
+        isRequired: false,
+        isOptional: false
+    }
+}
+
+type StoredKeyFieldProps = Readonly<{
+    secret: TypedSecret
+    draft: KeyDraft
+    dispatch: (action: SettingsAction) => void
+}>
+
+/**
+ * One secret's box, and the button that takes the stored one off the machine.
+ *
+ * The two belong together: the box cannot mean "remove it" — the page never reads a stored secret
+ * back, so an emptied box is "leave it alone" — and the button is the only thing that can. This was
+ * written out three times, differing in a noun, and the removal button sat a screenful away from
+ * the field it was about.
+ */
+function StoredKeyField({secret, draft, dispatch}: StoredKeyFieldProps) {
+    const copy = STORED_KEY_COPY[secret]
+    const isRemoving = draft.intent === 'clear'
+    return (
+        <>
+            <TextInput
+                label={copy.label}
+                type='password'
+                value={draft.typed}
+                isRequired={copy.isRequired}
+                isOptional={copy.isOptional}
+                startIcon={KeyIcon}
+                placeholder={draft.isStored ? 'Stored securely' : copy.placeholder}
+                description={
+                    isRemoving ? 'The stored key will be removed when you save.'
+                    : draft.isStored ?
+                        'Leave blank to keep the key stored in the operating system credential store.'
+                    :   copy.description
+                }
+                onChange={value => {
+                    dispatch({type: 'key-typed', secret, value})
+                }}
+            />
+            {(draft.isStored || isRemoving) && (
+                <Button
+                    label={isRemoving ? copy.keepLabel : copy.removeLabel}
+                    variant='ghost'
+                    clickAction={() => {
+                        dispatch({type: 'key-removal-toggled', secret})
+                    }}
+                />
+            )}
+        </>
+    )
+}
 
 type SettingsPageProps = Readonly<{
     isOpen: boolean
@@ -116,21 +225,10 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     /** Runs one task, and owns its began / failed / ended. See `runSettingsTask`. */
     const run = (task: SettingsTask, title: string, work: () => Promise<void>) =>
         runSettingsTask(dispatchAny, task, title, work)
-    const {
-        apiKey,
-        apiKeyIntent,
-        availableModels,
-        braveKey,
-        braveKeyIntent,
-        openrouterKey,
-        openrouterKeyIntent,
-        busy,
-        cache,
-        notices,
-        progress,
-        tab
-    } = state
+    const {availableModels, busy, cache, keys, notices, progress, tab} = state
     const draft = state.settings
+    /** The connection the live driver runs on, which is what the AI tab's fields are about. */
+    const connection = draft && activeConnection(draft.ai)
     // The key field appears only for the engine that needs one, so a keyless setup is never shown a
     // credential box it has no use for.
     const needsSearchKey = SEARCH_PROVIDERS_NEEDING_KEY.includes(
@@ -157,7 +255,9 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         void invoke('list_ai_models', {request})
             .then(models => {
                 dispatch({type: 'models-listed', models})
-                const configured = models.find(model => model.id === draft.ai.model)
+                const configured = models.find(
+                    model => model.id === activeConnection(draft.ai)?.model.id
+                )
                 // A model the server serves has its facts re-read, so the reasoning menu offers what
                 // this model can actually be asked. A model it does not serve is replaced only on
                 // ChatGPT, whose catalogue is the whole truth; a local Model ID is typed by hand and
@@ -199,7 +299,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
             .then(models => {
                 dispatch({type: 'subagent-models-listed', models})
                 // The same re-read the parent gets: what the chosen model can actually be asked.
-                const chosen = models.find(model => model.id === subagentConnection.model)
+                const chosen = models.find(model => model.id === subagentConnection.model.id)
                 if (chosen) dispatch({type: 'subagent-model-reconciled', model: chosen})
             })
             .catch((error: unknown) => {
@@ -262,6 +362,14 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
 
     const updateAi = (update: Partial<AiSettings>) => {
         dispatch({type: 'ai-changed', update})
+    }
+
+    const updateConnection = (update: Partial<AiConnectionProfile>) => {
+        dispatch({type: 'connection-changed', update})
+    }
+
+    const updateModel = (update: Partial<ModelChoice>) => {
+        dispatch({type: 'model-changed', update})
     }
 
     const updateSubagent = (update: Partial<SubagentSettings>) => {
@@ -393,7 +501,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                 notice: {
                     status: 'success',
                     title: 'Storage maintenance complete',
-                    description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, and ${String(result.backupsRemoved)} old backups removed. ${String(result.memoryEmbeddingsRestored)} memory embeddings restored.`
+                    description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, ${String(result.sketchesRemoved)} sketches, ${String(result.docsAnswersRemoved)} stale manual answers, ${String(result.memoryVectorsRemoved)} orphaned memory vectors, and ${String(result.backupsRemoved)} old backups removed. ${String(result.memoryEmbeddingsRestored)} memory embeddings restored.`
                 }
             })
         })
@@ -529,7 +637,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                     </Text>
                 </VStack>
 
-                {draft ?
+                {draft && connection ?
                     <VStack gap={5}>
                         <FormLayout>
                             <Selector
@@ -550,34 +658,34 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 <>
                                     <TextInput
                                         label='Connection name'
-                                        value={draft.ai.name}
+                                        value={connection.name}
                                         isRequired
                                         onChange={name => {
-                                            updateAi({name})
+                                            updateConnection({name})
                                         }}
                                     />
                                     <TextInput
                                         label='Base URL'
-                                        value={draft.ai.baseUrl}
+                                        value={connection.baseUrl}
                                         isRequired
                                         description='Absolute HTTP or HTTPS URL including the API prefix.'
                                         onChange={baseUrl => {
-                                            updateAi({baseUrl})
+                                            updateConnection({baseUrl})
                                         }}
                                     />
                                     <TextInput
                                         label='Model ID'
-                                        value={draft.ai.model}
+                                        value={connection.model.id}
                                         isRequired
                                         description='Must exactly match an ID returned by the server models endpoint.'
-                                        onChange={model => {
-                                            updateAi({model})
+                                        onChange={id => {
+                                            updateModel({id})
                                         }}
                                     />
                                     {availableModels.length > 0 && (
                                         <Selector
                                             label='Available server models'
-                                            value={draft.ai.model}
+                                            value={connection.model.id}
                                             options={availableModels.map(model => ({
                                                 value: model.id,
                                                 label: model.name
@@ -592,52 +700,32 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     )}
                                     <TextInput
                                         label='Context window'
-                                        value={String(draft.ai.contextWindow)}
+                                        value={String(connection.model.contextWindow)}
                                         isRequired
                                         description='Maximum context tokens advertised by the selected model.'
                                         onChange={contextWindow => {
-                                            updateAi({contextWindow: Number(contextWindow)})
+                                            updateModel({contextWindow: Number(contextWindow)})
                                         }}
                                     />
                                     <TextInput
                                         label='Maximum output tokens'
-                                        value={String(draft.ai.maxTokens)}
+                                        value={String(connection.model.maxTokens)}
                                         isRequired
                                         onChange={maxTokens => {
-                                            updateAi({maxTokens: Number(maxTokens)})
+                                            updateModel({maxTokens: Number(maxTokens)})
                                         }}
                                     />
                                 </>
                             : draft.ai.connectionType === 'openrouter' ?
                                 <>
-                                    <TextInput
-                                        label='API key'
-                                        type='password'
-                                        value={openrouterKey}
-                                        isRequired
-                                        startIcon={KeyIcon}
-                                        placeholder={
-                                            state.hasOpenrouterApiKey ? 'Stored securely' : (
-                                                'sk-or-v1-…'
-                                            )
-                                        }
-                                        description={
-                                            openrouterKeyIntent === 'clear' ?
-                                                'The stored key will be removed when you save.'
-                                            : state.hasOpenrouterApiKey ?
-                                                'Leave blank to keep the key stored in the operating system credential store.'
-                                            :   'Create one at openrouter.ai under Keys.'
-                                        }
-                                        onChange={enteredKey => {
-                                            dispatch({
-                                                type: 'openrouter-key-typed',
-                                                value: enteredKey
-                                            })
-                                        }}
+                                    <StoredKeyField
+                                        secret='openrouter'
+                                        draft={keys.openrouter}
+                                        dispatch={dispatch}
                                     />
                                     <Selector
                                         label='Model'
-                                        value={draft.ai.model}
+                                        value={connection.model.id}
                                         hasSearch
                                         searchPlaceholder='Filter by name or id'
                                         isDisabled={availableModels.length === 0}
@@ -656,21 +744,21 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     />
                                     <TextInput
                                         label='Context window'
-                                        value={draft.ai.contextWindow.toLocaleString()}
+                                        value={connection.model.contextWindow.toLocaleString()}
                                         isDisabled
                                         disabledMessage="OpenRouter's catalogue answers this, so there is nothing to type."
                                         onChange={() => undefined}
                                     />
                                     <TextInput
                                         label='Maximum output tokens'
-                                        value={draft.ai.maxTokens.toLocaleString()}
+                                        value={connection.model.maxTokens.toLocaleString()}
                                         isDisabled
                                         disabledMessage="OpenRouter's catalogue answers this, so there is nothing to type."
                                         onChange={() => undefined}
                                     />
                                     <TextInput
                                         label='Accepts'
-                                        value={draft.ai.input.join(', ')}
+                                        value={connection.model.input.join(', ')}
                                         isDisabled
                                         disabledMessage='What this model takes as input, as OpenRouter describes it.'
                                         onChange={() => undefined}
@@ -683,22 +771,22 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     >
                                         <StatusDot
                                             variant={
-                                                state.hasChatGptCredential ? 'success' : 'neutral'
+                                                keys['chat-gpt'].isStored ? 'success' : 'neutral'
                                             }
                                             label={
-                                                state.hasChatGptCredential ? 'Signed in' : (
-                                                    'Signed out'
-                                                )
+                                                keys['chat-gpt'].isStored ?
+                                                    'Signed in'
+                                                :   'Signed out'
                                             }
                                         />
                                         <Text>
-                                            {state.hasChatGptCredential ?
+                                            {keys['chat-gpt'].isStored ?
                                                 'Signed in with ChatGPT'
                                             :   'Not signed in'}
                                         </Text>
                                     </HStack>
                                     <HStack gap={2}>
-                                        {state.hasChatGptCredential ?
+                                        {keys['chat-gpt'].isStored ?
                                             <Button
                                                 label='Sign out of ChatGPT'
                                                 variant='secondary'
@@ -748,7 +836,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     )}
                                     <Selector
                                         label='ChatGPT model'
-                                        value={draft.ai.model}
+                                        value={connection.model.id}
                                         isDisabled={availableModels.length === 0}
                                         disabledMessage='The Pi model catalogue is still loading.'
                                         options={availableModels.map(model => ({
@@ -776,7 +864,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     {value: 75, label: '75%'},
                                     {value: 100, label: 'Off'}
                                 ]}
-                                formatValue={compactionLabel(draft.ai.contextWindow)}
+                                formatValue={compactionLabel(connection.model.contextWindow)}
                                 description='Older messages are summarised once a conversation fills this much of the window. 100 keeps every message and lets long conversations run out of room.'
                                 onChange={(compactionPercent: number) => {
                                     updateAi({compactionPercent})
@@ -802,13 +890,13 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                             />
                             <DropdownMenu
                                 button={{
-                                    label: `Reasoning: ${draft.ai.thinkingLevel}`,
+                                    label: `Reasoning: ${connection.model.thinkingLevel}`,
                                     variant: 'secondary'
                                 }}
-                                items={thinkingLevelsFor(draft.ai).map(level => ({
+                                items={thinkingLevelsFor(connection.model).map(level => ({
                                     label: level,
                                     onClick: () => {
-                                        updateAi({thinkingLevel: level})
+                                        updateModel({thinkingLevel: level})
                                     }
                                 }))}
                             />
@@ -821,62 +909,13 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 />
                             )}
                             {draft.ai.connectionType === 'openai-compatible' && (
-                                <TextInput
-                                    label='API key'
-                                    type='password'
-                                    value={apiKey}
-                                    isOptional
-                                    startIcon={KeyIcon}
-                                    placeholder={
-                                        state.hasApiKey ? 'Stored securely' : (
-                                            'Not required by local servers'
-                                        )
-                                    }
-                                    description={
-                                        apiKeyIntent === 'clear' ?
-                                            'The stored key will be removed when you save.'
-                                        : state.hasApiKey ?
-                                            'Leave blank to keep the key stored in the operating system credential store.'
-                                        :   'Enter a key only if this server requires authentication.'
-
-                                    }
-                                    onChange={enteredApiKey => {
-                                        dispatch({
-                                            type: 'api-key-typed',
-                                            value: enteredApiKey
-                                        })
-                                    }}
+                                <StoredKeyField
+                                    secret='ai-default'
+                                    draft={keys['ai-default']}
+                                    dispatch={dispatch}
                                 />
                             )}
                         </FormLayout>
-                        {draft.ai.connectionType === 'openrouter'
-                            && (state.hasOpenrouterApiKey || openrouterKeyIntent === 'clear') && (
-                                <Button
-                                    label={
-                                        openrouterKeyIntent === 'clear' ? 'Keep stored API key' : (
-                                            'Remove stored API key'
-                                        )
-                                    }
-                                    variant='ghost'
-                                    clickAction={() => {
-                                        dispatch({type: 'openrouter-key-removal-toggled'})
-                                    }}
-                                />
-                            )}
-                        {draft.ai.connectionType === 'openai-compatible'
-                            && (state.hasApiKey || apiKeyIntent === 'clear') && (
-                                <Button
-                                    label={
-                                        apiKeyIntent === 'clear' ? 'Keep stored API key' : (
-                                            'Remove stored API key'
-                                        )
-                                    }
-                                    variant='ghost'
-                                    clickAction={() => {
-                                        dispatch({type: 'api-key-removal-toggled'})
-                                    }}
-                                />
-                            )}
                     </VStack>
                 :   <Text color='secondary'>
                         {state.isLoading ? 'Loading Gofer settings…' : 'Settings are unavailable.'}
@@ -945,7 +984,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 <>
                                     <Selector
                                         label='Model the sub-agent answers with'
-                                        value={subagentConnection.model}
+                                        value={subagentConnection.model.id}
                                         isDisabled={state.subagentModels.length === 0}
                                         disabledMessage='That connection has not answered with a model list yet.'
                                         options={state.subagentModels.map(model => ({
@@ -962,10 +1001,10 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     />
                                     <DropdownMenu
                                         button={{
-                                            label: `Sub-agent reasoning: ${subagentConnection.thinkingLevel}`,
+                                            label: `Sub-agent reasoning: ${subagentConnection.model.thinkingLevel}`,
                                             variant: 'secondary'
                                         }}
-                                        items={thinkingLevelsFor(subagentConnection).map(
+                                        items={thinkingLevelsFor(subagentConnection.model).map(
                                             thinkingLevel => ({
                                                 label: thinkingLevel,
                                                 onClick: () => {
@@ -1150,43 +1189,13 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 }}
                             />
                             {needsSearchKey && (
-                                <TextInput
-                                    label='Brave Search API key'
-                                    type='password'
-                                    value={braveKey}
-                                    startIcon={KeyIcon}
-                                    placeholder={
-                                        state.hasBraveApiKey ? 'Stored securely' : (
-                                            'From api.search.brave.com'
-                                        )
-                                    }
-                                    description={
-                                        braveKeyIntent === 'clear' ?
-                                            'The stored key will be removed when you save.'
-                                        : state.hasBraveApiKey ?
-                                            'Leave blank to keep the key stored in the operating system credential store.'
-                                        :   'Stored in the operating system credential store, never in the settings file.'
-
-                                    }
-                                    onChange={enteredKey => {
-                                        dispatch({type: 'brave-key-typed', value: enteredKey})
-                                    }}
+                                <StoredKeyField
+                                    secret='brave'
+                                    draft={keys.brave}
+                                    dispatch={dispatch}
                                 />
                             )}
                         </FormLayout>
-                        {needsSearchKey && (state.hasBraveApiKey || braveKeyIntent === 'clear') && (
-                            <Button
-                                label={
-                                    braveKeyIntent === 'clear' ? 'Keep stored Brave key' : (
-                                        'Remove stored Brave key'
-                                    )
-                                }
-                                variant='ghost'
-                                clickAction={() => {
-                                    dispatch({type: 'brave-key-removal-toggled'})
-                                }}
-                            />
-                        )}
                     </VStack>
                 </Grid>
             )}

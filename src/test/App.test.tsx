@@ -59,10 +59,15 @@ const settingsResponse = {
         version: 1,
         ai: {
             connectionType: 'openai-compatible',
-            name: 'Local AI',
-            baseUrl: 'http://127.0.0.1:8080/v1',
-            model: 'local-model',
-            api: 'openai-completions'
+            connections: {
+                'openai-compatible': {
+                    name: 'Local AI',
+                    baseUrl: 'http://127.0.0.1:8080/v1',
+                    api: 'openai-completions',
+                    chatTemplateThinking: false,
+                    model: {id: 'local-model', name: 'local-model', input: ['text']}
+                }
+            }
         }
     },
     hasApiKey: true
@@ -285,7 +290,19 @@ describe('Workspace', () => {
                 ...settingsResponse,
                 settings: {
                     ...settingsResponse.settings,
-                    ai: {...settingsResponse.settings.ai, input: ['text', 'image']}
+                    ai: {
+                        ...settingsResponse.settings.ai,
+                        connections: {
+                            'openai-compatible': {
+                                ...settingsResponse.settings.ai.connections['openai-compatible'],
+                                model: {
+                                    id: 'local-model',
+                                    name: 'local-model',
+                                    input: ['text', 'image']
+                                }
+                            }
+                        }
+                    }
                 }
             }),
             list_ai_models: () => [

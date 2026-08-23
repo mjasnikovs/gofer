@@ -97,6 +97,18 @@ pub struct FormatRequest {
     pub source: String,
 }
 
+/// The fields [`FormatRequest`] deserializes, as serde spells them on the wire, and whether a call
+/// may leave one out.
+///
+/// Declared beside the type rather than recovered from it. `tool_drift` holds the catalogue's
+/// parameter table to what the handler behind it really reads, and what a request takes is a fact
+/// about the request — so changing the struct and changing the list is one edit in one place.
+///
+/// Optional means what serde means: the type is an `Option`, or the field carries
+/// `#[serde(default)]`.
+#[cfg(test)]
+pub const FORMAT_REQUEST_FIELDS: &[(&str, bool)] = &[("source", false)];
+
 /// The formatted buffer. `changed` lets the caller skip the diff/apply flow entirely when the
 /// formatter found nothing to do.
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -26,6 +26,16 @@ describe('whether the agent is occupied', () => {
         expect(isTurnRunning()).toBe(true)
     })
 
+    /*
+     * The third kind, and the same failure a third time: `run_judge` and `run_sweep` begin the same
+     * `AiTurn` a chat message does, and a sweep of eighty rows holds it for over an hour. Nothing
+     * on this side said so, so for that hour the window believed the agent was idle.
+     */
+    it('counts a memory run, which no conversation is watching', () => {
+        setTurnRunning('memory', true)
+        expect(isTurnRunning()).toBe(true)
+    })
+
     // Two runs cannot really overlap — the backend allows one — but the readers must not care, and
     // one ending must not clear the other's fact.
     it('stays occupied until every run has ended', () => {

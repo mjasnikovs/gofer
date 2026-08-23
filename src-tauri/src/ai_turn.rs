@@ -10,7 +10,7 @@
 
 use crate::command_error::CommandError;
 use crate::process::{ProcessSpawner, SystemProcessSpawner};
-use crate::settings::AiSettings;
+use crate::settings::{AiSettings, Secret, Secrets, SystemSecrets};
 use crate::storage::{ProjectStorage, StoredAttachment};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,39 @@ const AI_EVENT_PREFIX: &str = "GOFER_AI_EVENT:";
 /// their own, and anything unprefixed on stdout stays diagnostic output rather than protocol.
 const AI_TOOL_PREFIX: &str = "GOFER_AI_TOOL:";
 const AI_CREDENTIAL_PREFIX: &str = "GOFER_AI_CREDENTIAL:";
+
+/// The one line this side sends that is not an answer to something the worker asked for.
+///
+/// Stopping a turn was a kill and nothing else, so every abort branch in `scripts/ai-provider.mjs`
+/// — the listener that calls `agent.abort()`, the `aborted` completion, the interruptible retry
+/// wait — was reachable from its tests and from nothing in a running Gofer: the worker never built
+/// an `AbortController` to pass them. The kill is still here and still ends a worker that will not
+/// answer, but it is the second ask. This line is the first, and answering it is what lets the turn
+/// checkpoint the assistant message that was in flight instead of losing it with the process.
+///
+/// Spelled once, and `scripts/ai-host.mjs` spells it once as `CANCEL_TYPE`; the two are held
+/// together by `scripts/check-command-surface.mjs`.
+const AI_CANCEL_LINE: &str = r#"{"type":"cancel"}"#;
+
+/// How each job mode says it has finished, one name per mode.
+///
+/// It was one name for all three. `done` came off a chat turn carrying `{text, usage, model,
+/// agentMessages}`, off a brief carrying `{spec}`, and off a judgement carrying `{verdict}` — and
+/// this loop read every one of them as "the turn completed" and took `event["text"]`, which two of
+/// the three have never had. A brief and a judgement are spelled out now, so a completion is routed
+/// by what it is rather than by not looking like a `brief-` or a `judge-`.
+///
+/// The turn's own is still `done`: it is the completion that was always this event, and the other
+/// two were the impostors sharing its name. `scripts/ai-events.mjs` owns the list and
+/// `scripts/check-command-surface.mjs` holds this copy to it.
+const AI_COMPLETION_EVENTS: [&str; 3] = ["done", "brief-done", "judge-done"];
+
+/// What a `done` event's `stopReason` says when the worker's turn was stopped rather than finished.
+///
+/// The word is minted in `scripts/ai-provider.mjs` and read in `src/models/chat-timeline.ts`, which
+/// is why it is read here too: the renderer decides `aborted` against `complete` from this field, so
+/// deciding whether to file the answer from anything else is two sides disagreeing about one turn.
+const AI_STOPPED_REASON: &str = "aborted";
 
 const MAX_CHAT_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_CHAT_ATTACHMENT_BASE64_BYTES: usize = MAX_CHAT_ATTACHMENT_BYTES.div_ceil(3) * 4;
@@ -43,6 +76,13 @@ static AI_REQUEST_CANCELLED: AtomicBool = AtomicBool::new(false);
 static ACTIVE_AI_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 type SharedChildProcess = Arc<Mutex<Box<dyn crate::process::ChildProcess>>>;
 static AI_CHILD: Mutex<Option<SharedChildProcess>> = Mutex::new(None);
+/// The running worker's stdin, the same handle the tool answers are written on.
+///
+/// Held beside the child because a cancellation needs both: the line that asks the worker to stop
+/// itself, and the process to kill if it does not. `take_stdin` moves the handle out of the child,
+/// so the child alone is not enough to reach it.
+type SharedWorkerInput = Arc<Mutex<crate::process::ProcessWriter>>;
+static AI_WORKER_INPUT: Mutex<Option<SharedWorkerInput>> = Mutex::new(None);
 /// The stream the running turn writes to. Held here so that `cancel_ai_request` — a command of its
 /// own, with no channel of its own — can report the abort down the same ordered stream the deltas
 /// rode, rather than out of band where it could arrive before the text it ends.
@@ -172,18 +212,18 @@ pub(crate) enum WorkerJob {
         memory_context: Option<String>,
         /// The whole system prompt, sent as it stands.
         ///
-        /// `None` means the shipped one, which [`run_ai_worker_with`] fills in — so an acceptance
-        /// suite or a test that builds a request without a prompt still runs the agent Gofer
-        /// ships. It is an `Option` rather than an empty string because "I have none" and "this
-        /// one, which happens to be empty" are different things to say, and only one of them is
-        /// ever meant.
+        /// Filled by [`JobContext::request`], from the one resolve its context did when it was
+        /// read — so a turn the acceptance suite runs is composed the way a turn in the
+        /// application is. It is an `Option` rather than an empty string because "I have none" and
+        /// "this one, which happens to be empty" are different things to say, and only one of them
+        /// is ever meant.
         system_prompt: Option<String>,
         /// What the editor session is, in the sentence the prompt tells the model to read.
         ///
         /// The prompt used to say "call godot_session status first, every time", and the model
         /// did: 58 of 72 recorded turns opened with that call, and in 54 it was the only call of
         /// the ask that issued it. One round trip per turn — 4.2s median of waiting — for a state
-        /// this process already holds and can simply say. Filled by [`run_ai_worker_with`], for
+        /// this process already holds and can simply say. Filled by [`JobContext::request`], for
         /// the same reason the prompt is.
         session_context: Option<String>,
     },
@@ -236,6 +276,320 @@ impl WorkerJob {
     }
 }
 
+/// What one caller wants a worker started for, and nothing besides.
+///
+/// Distinct from [`WorkerJob`], which is the shape that crosses the pipe. Everything a job of a
+/// kind always carries — the tool catalogue, the system prompt, the session line, which
+/// credentials it is given, which cache key it uses — belongs to [`JobContext`] instead, so four
+/// assemblers cannot differ from one another by each naming those fields for itself. They did:
+/// nine fields spelled out at five construction sites, three of them carrying a comment to justify
+/// a `None`, and `tools` written out at every one of them for the single value it has ever had.
+pub(crate) enum Job {
+    /// A chat turn, answering into a conversation.
+    Turn {
+        /// The task this conversation belongs to, which is also its prompt cache key.
+        task_id: Option<String>,
+        messages: Vec<AiWorkerMessage>,
+        agent_messages: Option<serde_json::Value>,
+        is_retry: bool,
+        memory_context: Option<String>,
+    },
+    /// The four phases that turn one ask into a specification.
+    Brief {
+        /// The task the specification is being written for, and its cache key.
+        task_id: String,
+        prompt: String,
+        images: Vec<AiWorkerImage>,
+        inventory: Option<String>,
+    },
+    /// One stored memory, put to a read-only child that says whether it is still true.
+    Judge {
+        memory_id: String,
+        memory: JudgedMemory,
+    },
+}
+
+/// The four secrets a worker may be sent, read in one place.
+///
+/// One value rather than four calls in each of four assemblers, because they are read together or
+/// not at all — and because where a secret is kept is one decision, not four. The default is
+/// nothing stored, which is what a suite driving its own model server sends.
+#[derive(Clone, Debug, Default)]
+struct Credentials {
+    api_key: Option<String>,
+    openrouter_api_key: Option<String>,
+    brave_api_key: Option<String>,
+    oauth_credential: Option<serde_json::Value>,
+}
+
+impl Credentials {
+    /// Everything this machine has stored. Three of the four are the same read under a different
+    /// slot, so they are the same call with a different [`Secret`]. The ChatGPT one stays a helper
+    /// because it parses what it read rather than handing back the string.
+    fn read() -> Result<Self, String> {
+        let secrets = SystemSecrets;
+        Ok(Self {
+            api_key: secrets.read(Secret::AiDefault)?,
+            openrouter_api_key: secrets.read(Secret::OpenRouter)?,
+            brave_api_key: secrets.read(Secret::Brave)?,
+            oauth_credential: crate::settings::stored_chatgpt_credential()?,
+        })
+    }
+}
+
+/// The prompt this project sends: its own text where it stored one, the shipped one where it did
+/// not. Resolved once, when a context is read, and never again.
+fn resolve_prompt(storage: &ProjectStorage, strict_typing: bool) -> Result<String, String> {
+    Ok(crate::agent_prompt::resolve(
+        storage
+            .project()
+            .read_agent_prompt()
+            .map_err(|failure| failure.message)?
+            .as_deref(),
+        crate::ai_tools::CATALOG,
+        strict_typing,
+    ))
+}
+
+/// Everything a job needs that is the same for every job, and the one place that reads it.
+///
+/// It sits between the four job assemblers and [`run_ai_worker_with`], which is where the seam was
+/// missing. `run_ai_worker_with` takes an injected spawner and is tested; everything above it read
+/// four credentials off the machine, so none of it could be driven at all. Three of the four
+/// assemblers opened with the same seven lines — settings, four credentials, storage, workspace
+/// path — and the fourth was a `JudgeContext` that existed to hoist exactly those for the two jobs
+/// that share a turn.
+///
+/// The system prompt is resolved here, once. It used to be resolved twice: `run_turn` composed it
+/// from the project's stored text, and `run_ai_worker_with` composed it again from what it was
+/// handed. The second call always took the "it already has one" branch, so its `strict_typing`
+/// argument — read from a second settings function with a second error policy — decided nothing,
+/// and the branch it was written for was reached only by the two acceptance harnesses. The suite
+/// composed a turn the application never composed, which is the one thing an acceptance suite may
+/// not do.
+pub(crate) struct JobContext {
+    ai: AiSettings,
+    credentials: Credentials,
+    storage: ProjectStorage,
+    workspace_path: String,
+    /// The whole system prompt, as this project sends it. See the note above.
+    system_prompt: String,
+    /// What the editor session is, in the sentence the prompt tells the model to read.
+    session_context: String,
+}
+
+impl JobContext {
+    /// Reads everything a job needs off this machine.
+    pub(crate) fn read<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
+        let settings = crate::settings::read_settings(app)?;
+        let storage = crate::workspace::project_storage(app)?;
+        let workspace_path = storage
+            .tasks()
+            .agent_workspace()
+            .map_err(|failure| failure.message)?
+            .display()
+            .to_string();
+        // The one read of the typing rule a job makes, from the settings it already has, rather
+        // than a second read further down with an error policy of its own.
+        let system_prompt = resolve_prompt(&storage, settings.godot.strict_typing)?;
+        Ok(Self {
+            ai: settings.ai,
+            credentials: Credentials::read()?,
+            storage,
+            workspace_path,
+            system_prompt,
+            session_context: describe_session(app),
+        })
+    }
+
+    /// The same context, for a suite that drives its own model against its own checkout.
+    ///
+    /// The suites used to build the request by hand, and were the only callers that ever left the
+    /// system prompt unset — so the branch they took was one nothing in the application took. They
+    /// compose a turn here the way the application composes one; what a suite still chooses for
+    /// itself is where the model is, that none of this machine's credentials are sent, and which
+    /// checkout the editor it started is bound to.
+    // Gated exactly where its callers are: the two acceptance harnesses are `cfg(all(test,
+    // feature = "godot-acceptance"))` modules, and a build without the engine has no suite to
+    // build a context for.
+    #[cfg(all(test, feature = "godot-acceptance"))]
+    pub(crate) fn for_suite<R: Runtime>(
+        app: &AppHandle<R>,
+        ai: AiSettings,
+        workspace_path: String,
+    ) -> Result<Self, String> {
+        let storage = crate::workspace::project_storage(app)?;
+        let system_prompt = resolve_prompt(
+            &storage,
+            crate::settings::read_godot_settings(app)
+                .unwrap_or_default()
+                .strict_typing,
+        )?;
+        Ok(Self {
+            ai,
+            credentials: Credentials::default(),
+            storage,
+            workspace_path,
+            system_prompt,
+            session_context: describe_session(app),
+        })
+    }
+
+    /// The project database this job reads and writes through.
+    fn storage(&self) -> &ProjectStorage {
+        &self.storage
+    }
+
+    /// The checkout the worker runs in.
+    fn workspace_path(&self) -> &str {
+        &self.workspace_path
+    }
+
+    /// The request one job is sent as.
+    ///
+    /// Every field the worker reads is filled in here and nowhere else. `tools` is the router's own
+    /// catalogue, which is the only value it has ever had; the prompt and the session line are this
+    /// context's, already resolved; and which credentials a job is given, and which cache key it
+    /// uses, are properties of the job rather than of the place it was assembled.
+    pub(crate) fn request(&self, job: Job) -> AiWorkerRequest {
+        let (session_id, job) = match job {
+            Job::Turn {
+                task_id,
+                messages,
+                agent_messages,
+                is_retry,
+                memory_context,
+            } => (
+                task_id,
+                WorkerJob::Turn {
+                    messages,
+                    agent_messages,
+                    is_retry,
+                    memory_context,
+                    system_prompt: Some(self.system_prompt.clone()),
+                    session_context: Some(self.session_context.clone()),
+                },
+            ),
+            Job::Brief {
+                task_id,
+                prompt,
+                images,
+                inventory,
+            } => (
+                Some(task_id),
+                WorkerJob::Brief {
+                    prompt,
+                    images,
+                    inventory,
+                },
+            ),
+            // No cache key. A judgement is one question about one row, so there is no prefix a
+            // later ask would reuse, and keying it per memory would fragment the cache the
+            // conversation depends on.
+            Job::Judge { memory_id, memory } => (None, WorkerJob::Judge { memory_id, memory }),
+        };
+        // A judging child holds `read` and `bash`. Neither reaches the web, so a search key it
+        // cannot use is a key with no reason to be in the request.
+        let brave_api_key = if matches!(job, WorkerJob::Judge { .. }) {
+            None
+        } else {
+            self.credentials.brave_api_key.clone()
+        };
+        AiWorkerRequest {
+            settings: self.ai.clone(),
+            api_key: self.credentials.api_key.clone(),
+            openrouter_api_key: self.credentials.openrouter_api_key.clone(),
+            brave_api_key,
+            oauth_credential: self.credentials.oauth_credential.clone(),
+            session_id,
+            workspace_path: self.workspace_path.clone(),
+            tools: crate::ai_tools::CATALOG,
+            job,
+        }
+    }
+}
+
+/// How one job ended: the three words for it, and the one place that decides which.
+///
+/// The contract was written four times over — a brief that read its row back and matched four
+/// arms, a judgement that decided its own in two, a sweep choosing between two strings, and a
+/// fourth in the renderer's `finally`. All four exist for one reason: a worker that is killed
+/// narrates nothing, so the side holding the knife is the only side that can say what happened. A
+/// cancellation asks before it kills now — see [`AI_CANCEL_LINE`] — and a worker that answers does
+/// narrate its own stop; the ask is best-effort and the kill is what remains for the one that does
+/// not, so this stays the side that decides. Three of them live here now; the renderer's is its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending<'a> {
+    /// It produced what it was started for: a specification with words in it, a filed verdict, a
+    /// list judged to the end.
+    Finished,
+    /// Stop was pressed. The user's doing, and not a failure to report as one.
+    Stopped,
+    /// It did not produce it, and this is why.
+    Failed(&'a str),
+}
+
+impl<'a> Ending<'a> {
+    /// The ending a worker's exit means.
+    ///
+    /// The `Ok` side says what the job has to show for it: `None` where what it was paid for is
+    /// there, and the sentence to report it by where it is not. A worker exiting without an error
+    /// is NOT by itself a finished job — a run cancelled mid-phase is killed, which the process
+    /// reports as an ordinary end, so keying on the exit alone recorded a stopped run and a run
+    /// that never reached compose as `done`: a row claiming a brief that finished, with no spec in
+    /// it.
+    ///
+    /// Stop wins over a failure, which is the one point the four contracts disagreed on. A killed
+    /// worker's broken pipe is an error, and the brief reported it as a failed plan while the
+    /// judgement — whose worker is killed exactly the same way — called it stopped.
+    fn settle(outcome: Result<Option<&'a str>, &'a str>, cancelled: bool) -> Self {
+        match outcome {
+            Err(_) | Ok(Some(_)) if cancelled => Self::Stopped,
+            Err(reason) | Ok(Some(reason)) => Self::Failed(reason),
+            Ok(None) => Self::Finished,
+        }
+    }
+
+    /// The word this ending is spelled with on the wire.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Finished => "finished",
+            Self::Stopped => "stopped",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    /// Why it failed, where that is something somebody is owed.
+    fn reason(self) -> Option<&'a str> {
+        match self {
+            Self::Failed(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// The event this ending is said with on `job`'s own window event, or nothing where the job's
+    /// own answer has already said it.
+    ///
+    /// `about` is what that job's panel needs beside the ending to find the row it belongs to.
+    fn event(self, job: &str, about: &[(&str, &str)]) -> Option<serde_json::Value> {
+        if matches!(self, Self::Finished) {
+            return None;
+        }
+        let mut event = serde_json::Map::new();
+        event.insert(
+            "type".to_owned(),
+            serde_json::Value::from(format!("{job}-{}", self.word())),
+        );
+        for (key, value) in about {
+            event.insert((*key).to_owned(), serde_json::Value::from(*value));
+        }
+        if let Some(reason) = self.reason() {
+            event.insert("reason".to_owned(), serde_json::Value::from(reason));
+        }
+        Some(serde_json::Value::Object(event))
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiStreamPayload {
@@ -261,6 +615,12 @@ pub(crate) struct AiStreamPayload {
 ///
 /// It is one value now, and ending is one `Drop`. This is what `end_session` already is for the
 /// editor: an order, held in one place, rather than a habit several functions have.
+///
+/// What it holds is what a *turn* lasts: the request id, the cancellation flag, the stream, and the
+/// one provider operation. The gate pair and the worker process are [`WorkerRun`]'s, because those
+/// last one *worker* — and a sweep is one turn holding eighty of them. Opening them here is what
+/// made `run_sweep` copy the two `open()` calls into its own loop to get the second memory's child
+/// a gate, which is the hand-written lifecycle this type exists to end.
 ///
 /// `cancel::CANCELLED_TURN` is deliberately not reset when a turn *ends*. That module identifies
 /// turns rather than flagging them, precisely so no reset has to race the tool threads still
@@ -310,14 +670,6 @@ impl AiTurn {
         // A turn that inherited a stopped turn's id had every tool call refused as cancelled — the
         // reachability pass named all eleven and stopped the turn before the model was asked.
         crate::cancel::clear_if_cancelled(request_id);
-        // Approvals belong to a turn: the gate opens with it and closes with it, so a gated tool
-        // call always has an agent waiting for its answer, and a prompt that arrives after the end
-        // is refused rather than left waiting.
-        crate::approvals::open();
-        // And so do questions, for the same reason and on the same schedule. Two gates rather than
-        // one because they are two registries — an approval and a question are different answers —
-        // but there is no run in which one of them should be open and the other shut.
-        crate::ask::open_user_prompts();
         *AI_STREAM
             .lock()
             .map_err(|_| CommandError::new("lock_poisoned", "The AI stream lock is poisoned"))? =
@@ -334,26 +686,8 @@ impl AiTurn {
         AI_STREAM.lock().ok()?.clone()
     }
 
-    /// Records the worker process, so a cancellation can reach it.
-    fn register_child(&self, child: SharedChildProcess) -> Result<(), String> {
-        *AI_CHILD
-            .lock()
-            .map_err(|_| "The AI process lock is poisoned".to_owned())? = Some(child);
-        Ok(())
-    }
-
     fn is_cancelled(&self) -> bool {
         AI_REQUEST_CANCELLED.load(Ordering::Acquire)
-    }
-
-    /// Closes the gate before the tool threads are joined.
-    ///
-    /// The join is what keeps a tool that outlived the worker from writing into the next turn's
-    /// channel, and closing the gate first is what makes it finite. `Drop` closes it too — this is
-    /// the one place the *order* matters rather than the fact.
-    fn close_gate_before_draining(&self) {
-        crate::approvals::cancel_all();
-        crate::ask::cancel_user_prompts();
     }
 
     /// Marks this turn cancelled, for the tests that drive the worker's cancelled exit directly.
@@ -365,20 +699,86 @@ impl AiTurn {
 
 impl Drop for AiTurn {
     fn drop(&mut self) {
-        // First, because it is the one that was being missed: no gated call may outlive the agent
-        // that asked for it, whichever way the turn ended.
-        crate::approvals::cancel_all();
-        crate::ask::cancel_user_prompts();
         ACTIVE_AI_REQUEST_ID.store(0, Ordering::Release);
         AI_REQUEST_CANCELLED.store(false, Ordering::Release);
-        if let Ok(mut active) = AI_CHILD.lock() {
-            *active = None;
-        }
         if let Ok(mut stream) = AI_STREAM.lock() {
             *stream = None;
         }
         // The flag that admits the next turn is `_provider_operation`, and a field is dropped after
         // the body that owns it: it is released once everything it would collide with is back.
+    }
+}
+
+/// One spawned worker inside a turn: the gate pair its tool calls may ask through, and the child
+/// process a cancellation has to reach.
+///
+/// Split out of [`AiTurn`] because this is the lifetime those two things actually have. A turn is
+/// one command; a worker is one process, and a sweep is one turn holding eighty of them, each
+/// spawned and reaped in its own iteration. Held at turn scope, the gate a finished worker closed
+/// on its way out stayed shut for every worker after it — so `run_sweep` re-opened both gates at
+/// the top of its loop, by hand, with a comment explaining why. That is a lifecycle re-enacted at a
+/// call site, which is the exact failure `AiTurn` was written to end; `register_worker` was the same
+/// shape, a turn-scoped field overwritten once per memory.
+///
+/// Approvals belong to a worker: the gate opens with it and closes with it, so a gated tool call
+/// always has an agent waiting for its answer, and a prompt that arrives after the end is refused
+/// rather than left waiting. And so do questions, for the same reason and on the same schedule.
+/// They are two registries — an approval and a question are different answers — but there is no run
+/// in which one of them should be open and the other shut, so one call opens both and one closes
+/// both: see [`crate::ask::open_user_prompts`].
+pub(crate) struct WorkerRun;
+
+impl WorkerRun {
+    /// Opens the gate pair for one worker.
+    ///
+    /// It takes the turn rather than reading one, because a worker only ever runs inside a turn and
+    /// a signature says so where a comment is only read afterwards. Nothing is taken out of it:
+    /// what a run owns is process-wide, exactly as what a turn owns is.
+    pub(crate) fn enter(_turn: &AiTurn) -> Self {
+        crate::ask::open_user_prompts();
+        Self
+    }
+
+    /// Records the worker process and the channel into it, so a cancellation can reach both.
+    ///
+    /// Both, and in one call, because a stop is two asks and it needs one of them for each: the
+    /// line that lets the worker end its own turn, and the process to kill if it does not answer.
+    /// Registered together so no window exists in which a cancellation can ask but not enforce.
+    fn register_worker(
+        &self,
+        child: SharedChildProcess,
+        input: SharedWorkerInput,
+    ) -> Result<(), String> {
+        *AI_WORKER_INPUT
+            .lock()
+            .map_err(|_| "The AI worker input lock is poisoned".to_owned())? = Some(input);
+        *AI_CHILD
+            .lock()
+            .map_err(|_| "The AI process lock is poisoned".to_owned())? = Some(child);
+        Ok(())
+    }
+
+    /// Closes the gate before the tool threads are joined.
+    ///
+    /// The join is what keeps a tool that outlived the worker from writing into the next turn's
+    /// channel, and closing the gate first is what makes it finite. `Drop` closes it too — this is
+    /// the one place the *order* matters rather than the fact.
+    fn close_gate_before_draining(&self) {
+        crate::ask::cancel_user_prompts();
+    }
+}
+
+impl Drop for WorkerRun {
+    fn drop(&mut self) {
+        // First, because it is the one that was being missed: no gated call may outlive the agent
+        // that asked for it, whichever way the worker ended.
+        crate::ask::cancel_user_prompts();
+        if let Ok(mut active) = AI_CHILD.lock() {
+            *active = None;
+        }
+        if let Ok(mut input) = AI_WORKER_INPUT.lock() {
+            *input = None;
+        }
     }
 }
 
@@ -401,54 +801,27 @@ pub(crate) async fn run_turn(
             .last()
             .map(|message| message.text.clone())
             .unwrap_or_default();
-        let settings = crate::settings::read_settings(&app)?;
-        let api_key = crate::settings::ai_worker_api_key()?;
-        let openrouter_api_key = crate::settings::stored_openrouter_api_key()?;
-        let oauth_credential = crate::settings::stored_chatgpt_credential()?;
-        let brave_api_key = crate::settings::stored_brave_api_key()?;
-        let storage = crate::workspace::project_storage(&app)?;
-        let workspace_path = storage
-            .tasks()
-            .agent_workspace()
-            .map_err(|failure| failure.message)?
-            .display()
-            .to_string();
+        let context = JobContext::read(&app)?;
         let task_id = request.task_id;
-        let memory_context =
-            crate::project_memory::retrieve_memory_context(&storage, &prompt, task_id.as_deref())
-                .ok();
+        let memory_context = crate::project_memory::retrieve_memory_context(
+            context.storage(),
+            &prompt,
+            task_id.as_deref(),
+        )
+        .ok();
         let completion = run_ai_worker(
             &app,
             &turn,
-            AiWorkerRequest {
-                settings: settings.ai,
-                api_key,
-                openrouter_api_key,
-                brave_api_key,
-                oauth_credential,
-                session_id: task_id.clone(),
-                workspace_path,
-                tools: crate::ai_tools::CATALOG,
-                job: WorkerJob::Turn {
-                    messages,
-                    agent_messages: request.agent_messages,
-                    is_retry: request.is_retry,
-                    memory_context,
-                    system_prompt: Some(crate::agent_prompt::resolve(
-                        storage
-                            .project()
-                            .read_agent_prompt()
-                            .map_err(|failure| failure.message)?
-                            .as_deref(),
-                        crate::ai_tools::CATALOG,
-                        settings.godot.strict_typing,
-                    )),
-                    session_context: None,
-                },
-            },
+            context.request(Job::Turn {
+                task_id: task_id.clone(),
+                messages,
+                agent_messages: request.agent_messages,
+                is_retry: request.is_retry,
+                memory_context,
+            }),
         )?;
         let _ = crate::project_memory::remember_completed_turn(
-            &storage,
+            context.storage(),
             task_id.as_deref(),
             &prompt,
             &completion,
@@ -501,38 +874,15 @@ pub(crate) struct SweepRequest {
 /// credentials and the worktree scan are the same for every row, and the scan in particular is a
 /// full directory walk that would otherwise be repeated once a minute for an hour.
 struct JudgeContext {
-    settings: crate::settings::GoferSettings,
-    api_key: Option<String>,
-    openrouter_api_key: Option<String>,
-    oauth_credential: Option<serde_json::Value>,
-    storage: crate::storage::ProjectStorage,
-    workspace_path: String,
+    job: JobContext,
     snapshot: crate::files::Snapshot,
 }
 
 impl JudgeContext {
     fn read(app: &AppHandle) -> Result<Self, String> {
-        let settings = crate::settings::read_settings(app)?;
-        let api_key = crate::settings::ai_worker_api_key()?;
-        let openrouter_api_key = crate::settings::stored_openrouter_api_key()?;
-        let oauth_credential = crate::settings::stored_chatgpt_credential()?;
-        let storage = crate::workspace::project_storage(app)?;
-        let workspace_path = storage
-            .tasks()
-            .agent_workspace()
-            .map_err(|failure| failure.message)?
-            .display()
-            .to_string();
-        let snapshot = crate::files::scan(std::path::Path::new(&workspace_path));
-        Ok(Self {
-            settings,
-            api_key,
-            openrouter_api_key,
-            oauth_credential,
-            storage,
-            workspace_path,
-            snapshot,
-        })
+        let job = JobContext::read(app)?;
+        let snapshot = crate::files::scan(std::path::Path::new(job.workspace_path()));
+        Ok(Self { job, snapshot })
     }
 }
 
@@ -545,26 +895,6 @@ impl JudgeContext {
 /// and any duplicate from here.
 ///
 /// The verdict itself is not returned. It crosses on `judge-verdict` and is filed by
-/// The ending event one judgement earned, or none where it produced a verdict.
-///
-/// A judgement has exactly one ending, and a verdict is one of them. Stop and a finished worker can
-/// land in the same instant, and the row was then sent `judge-stopped` *and* pushed into the
-/// sweep's answer: the panel drew it as stopped while the list it was handed carried its verdict.
-/// What the model was paid for is what is reported, and only a judgement with no verdict has an
-/// ending of its own to send.
-fn judgement_ending(
-    memory_id: &str,
-    failure: Option<&str>,
-    cancelled: bool,
-) -> Option<serde_json::Value> {
-    let reason = failure?;
-    Some(if cancelled {
-        serde_json::json!({"type": "judge-stopped", "memoryId": memory_id})
-    } else {
-        serde_json::json!({"type": "judge-failed", "memoryId": memory_id, "reason": reason})
-    })
-}
-
 /// [`handle_judge_event`], which is the only side that survives the worker being killed, so what
 /// comes back is the row read afterwards: what was stored, not what was reported.
 fn judge_one(
@@ -576,7 +906,8 @@ fn judge_one(
     // Read here rather than in the worker, which holds no database. It is also what refuses a
     // memory deleted between the click and the spawn, before a model is paid for.
     let record = context
-        .storage
+        .job
+        .storage()
         .memory()
         .get(memory_id)
         .map_err(|failure| failure.message)?
@@ -588,42 +919,34 @@ fn judge_one(
     let outcome = run_ai_worker(
         app,
         turn,
-        AiWorkerRequest {
-            settings: context.settings.ai.clone(),
-            api_key: context.api_key.clone(),
-            openrouter_api_key: context.openrouter_api_key.clone(),
-            // The child holds `read` and `bash`. Neither reaches the web, so a search key it
-            // cannot use is a key with no reason to be in the request.
-            brave_api_key: None,
-            oauth_credential: context.oauth_credential.clone(),
-            // No cache key. A judgement is one question about one row, so there is no prefix a
-            // later ask would reuse, and keying it per memory would fragment the cache the
-            // conversation depends on.
-            session_id: None,
-            workspace_path: context.workspace_path.clone(),
-            tools: crate::ai_tools::CATALOG,
-            job: WorkerJob::Judge {
-                memory_id: memory_id.to_owned(),
-                memory: JudgedMemory {
-                    id: checked.memory.id.clone(),
-                    content: checked.memory.content.clone(),
-                    anchors: checked.anchors,
-                },
+        context.job.request(Job::Judge {
+            memory_id: memory_id.to_owned(),
+            memory: JudgedMemory {
+                id: checked.memory.id.clone(),
+                content: checked.memory.content.clone(),
+                anchors: checked.anchors,
             },
-        },
+        }),
     );
 
-    if let Some(ending) = judgement_ending(
-        memory_id,
-        outcome.as_ref().err().map(String::as_str),
+    // A judgement has exactly one ending, and a verdict is one of them. Stop and a finished worker
+    // can land in the same instant, and the row was then sent `judge-stopped` *and* pushed into
+    // the sweep's answer: the panel drew it as stopped while the list it was handed carried its
+    // verdict. What the model was paid for is what is reported, and only a judgement with no
+    // verdict has an ending of its own to send — a worker that returned is a worker whose verdict
+    // crossed `judge-verdict` and was filed on this side of the pipe.
+    let ending = Ending::settle(
+        outcome.as_ref().map(|_| None).map_err(String::as_str),
         turn.is_cancelled(),
-    ) {
-        let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, ending);
+    );
+    if let Some(event) = ending.event("judge", &[("memoryId", memory_id)]) {
+        let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, event);
     }
     outcome?;
 
     let record = context
-        .storage
+        .job
+        .storage()
         .memory()
         .get(memory_id)
         .map_err(|failure| failure.message)?
@@ -638,7 +961,7 @@ fn judge_one(
 /// Puts one stored memory to a read-only child and files what it says.
 ///
 /// It begins an `AiTurn` for the same two reasons a brief does, and neither is a convenience. The
-/// turn is what Stop can reach, because cancelling kills whatever `register_child` registered; and
+/// turn is what Stop can reach, because cancelling reaches whatever `register_worker` registered; and
 /// it is what holds the single provider operation, so a judgement cannot run beside a chat turn on
 /// the one connection or have the shared checkout switched out from under the child reading it.
 pub(crate) async fn run_judge(
@@ -699,12 +1022,6 @@ pub(crate) async fn run_sweep(
                 stopped = true;
                 break;
             }
-            // The previous worker's exit closed both gates on its way out, and `AiTurn` only opens
-            // them when a turn begins. A sweep is one turn holding many workers, so the gates are
-            // raised again here — without this the second memory's child would have every approval
-            // and every question refused the moment it asked.
-            crate::approvals::open();
-            crate::ask::open_user_prompts();
             let _ = app.emit_to(
                 crate::ask::MAIN_WINDOW,
                 SWEEP_EVENT,
@@ -726,16 +1043,19 @@ pub(crate) async fn run_sweep(
             }
         }
 
+        // A sweep has no worker of its own to settle: every row already said its own ending. What
+        // is left is which of the two this run had — and a sweep says it even where it finished,
+        // because the panel is drawing "31 of 84" and has to be told to stop.
         let ending = if stopped || turn.is_cancelled() {
-            "sweep-stopped"
+            Ending::Stopped
         } else {
-            "sweep-finished"
+            Ending::Finished
         };
         let _ = app.emit_to(
             crate::ask::MAIN_WINDOW,
             SWEEP_EVENT,
             serde_json::json!({
-                "type": ending,
+                "type": format!("sweep-{}", ending.word()),
                 "done": judged.len(),
                 "total": total,
             }),
@@ -750,7 +1070,7 @@ pub(crate) async fn run_sweep(
 /// Runs the four phases that produce a task's brief.
 ///
 /// It begins an `AiTurn` like an ordinary turn does, and that is the load-bearing part rather than a
-/// convenience. The turn is what Stop can reach — cancellation kills whatever `register_child`
+/// convenience. The turn is what Stop can reach — cancellation reaches whatever `register_worker`
 /// registered — and it is what holds the single provider operation, which is what stops the user
 /// switching tasks and moving the one shared checkout out from under four research workers that are
 /// reading it.
@@ -776,24 +1096,14 @@ pub(crate) async fn run_brief(
     let turn = AiTurn::begin(request.request_id, stream)?;
     tauri::async_runtime::spawn_blocking(move || {
         let turn = turn;
-        let settings = crate::settings::read_settings(&app)?;
-        let api_key = crate::settings::ai_worker_api_key()?;
-        let openrouter_api_key = crate::settings::stored_openrouter_api_key()?;
-        let oauth_credential = crate::settings::stored_chatgpt_credential()?;
-        let brave_api_key = crate::settings::stored_brave_api_key()?;
-        let storage = crate::workspace::project_storage(&app)?;
-        let workspace_path = storage
-            .tasks()
-            .agent_workspace()
-            .map_err(|failure| failure.message)?
-            .display()
-            .to_string();
-        let inventory_root = workspace_path.clone();
+        let context = JobContext::read(&app)?;
+        let inventory_root = context.workspace_path().to_owned();
         let images = hydrate_chat_attachments(&app, &request.attachments)?;
 
         // Opened before the worker starts, so a run killed at its first phase still leaves a row
         // saying what was asked and how far it got.
-        storage
+        context
+            .storage()
             .tasks()
             .start_brief(&request.task_id, &prompt)
             .map_err(|failure| failure.message)?;
@@ -805,22 +1115,14 @@ pub(crate) async fn run_brief(
             // agent, so a brief carries no system prompt at all — nor a transcript, nor project
             // memory. It used to fill all five with empty values and be sent the shipped agent
             // prompt anyway, which would have put a Godot editor's tool guidance in front of a
-            // worker listing file paths if the host loop had ever read it.
-            AiWorkerRequest {
-                settings: settings.ai,
-                api_key,
-                openrouter_api_key,
-                brave_api_key,
-                oauth_credential,
-                session_id: Some(request.task_id.clone()),
-                workspace_path,
-                tools: crate::ai_tools::CATALOG,
-                job: WorkerJob::Brief {
-                    prompt,
-                    images,
-                    inventory: crate::git::tracked_files(std::path::Path::new(&inventory_root)),
-                },
-            },
+            // worker listing file paths if the host loop had ever read it. Which fields a job
+            // carries is the context's to know now, so no assembler can answer that differently.
+            context.request(Job::Brief {
+                task_id: request.task_id.clone(),
+                prompt,
+                images,
+                inventory: crate::git::tracked_files(std::path::Path::new(&inventory_root)),
+            }),
         );
 
         // A run that reported its own ending has already recorded it, and `finish_brief` only moves
@@ -830,41 +1132,42 @@ pub(crate) async fn run_brief(
         // is NOT the same fact: a run cancelled mid-phase is killed, which the process reports as an
         // ordinary end, so keying on the exit alone recorded a stopped run and a run that never
         // reached compose as `done` — a row claiming a brief that finished, with no spec in it.
-        let finished = storage
+        let finished = context
+            .storage()
             .tasks()
             .read_brief(&request.task_id)
             .and_then(|brief| brief.spec)
             .is_some_and(|spec| !spec.trim().is_empty());
-        let tasks = storage.tasks();
+        let tasks = context.storage().tasks();
         let phase = tasks
             .read_brief(&request.task_id)
             .map_or_else(|| "compose".to_owned(), |brief| brief.phase);
         const WORDLESS: &str = "the plan ended before it wrote a specification";
-        let (status, reason) = match &outcome {
-            Err(reason) => ("failed", Some(reason.as_str())),
-            Ok(_) if finished => ("done", None),
-            // The worker ended without a specification and without saying why. A cancellation is the
-            // ordinary way that happens and is the user's doing; anything else is not.
-            Ok(_) if turn.is_cancelled() => ("stopped", None),
-            Ok(_) => ("failed", Some(WORDLESS)),
+        // The specification is what a plan was paid for, and a worker that ended without one and
+        // without saying why has `WORDLESS` said for it. A cancellation is the ordinary way that
+        // happens and is the user's doing; anything else is not.
+        let ending = Ending::settle(
+            outcome
+                .as_ref()
+                .map(|_| (!finished).then_some(WORDLESS))
+                .map_err(String::as_str),
+            turn.is_cancelled(),
+        );
+        // `done` rather than `finished`: that is the word the row has always been closed with, and
+        // the one the panel reads back.
+        let status = if matches!(ending, Ending::Finished) {
+            "done"
+        } else {
+            ending.word()
         };
-        tasks.finish_brief(&request.task_id, status, reason);
+        tasks.finish_brief(&request.task_id, status, ending.reason());
 
         // The window is told how it ended, and not only when the worker said so. A killed worker,
         // or one that broke before its own handler ran, emits nothing — and a panel with no ending
         // sits on a spinner and then unmounts, taking the way out of a failed plan with it. The
         // renderer keeps the first ending it hears, so saying it twice costs nothing.
-        if status != "done" {
-            let ending = if status == "stopped" {
-                serde_json::json!({"type": "brief-stopped", "phase": phase})
-            } else {
-                serde_json::json!({
-                    "type": "brief-failed",
-                    "phase": phase,
-                    "reason": reason.unwrap_or(WORDLESS),
-                })
-            };
-            let _ = app.emit_to(crate::ask::MAIN_WINDOW, BRIEF_EVENT, ending);
+        if let Some(event) = ending.event("brief", &[("phase", &phase)]) {
+            let _ = app.emit_to(crate::ask::MAIN_WINDOW, BRIEF_EVENT, event);
         }
         outcome.map(|_| ())
     })
@@ -919,6 +1222,29 @@ pub(crate) fn read_chat_attachment_in(
     ))
 }
 
+/// How long a worker is given to answer the cancel line before it is killed anyway.
+///
+/// Nobody waits this out from a command: the line is written, the watch is handed to a thread, and
+/// `cancel_ai_request` returns. What it costs when a worker ignores the line is the seconds before
+/// the provider operation is free again, which is why it is short — a worker that is going to
+/// answer answers in the time it takes to read one line.
+const WORKER_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// Asks the running worker to stop itself, and says whether the ask went out.
+///
+/// `false` is not a failure, it is the case where there is nothing to ask: no worker registered, a
+/// channel already closed, a poisoned lock. The caller kills instead, which is what stopping a turn
+/// has always been.
+fn ask_worker_to_stop() -> bool {
+    let Ok(input) = AI_WORKER_INPUT.lock() else {
+        return false;
+    };
+    let Some(input) = input.clone() else {
+        return false;
+    };
+    write_worker_line(&input, AI_CANCEL_LINE.as_bytes()).is_ok()
+}
+
 // coverage-critical-start: cancellation
 pub(crate) fn cancel_ai_request_with(request_id: u64) -> Result<bool, String> {
     if ACTIVE_AI_REQUEST_ID.load(Ordering::Acquire) != request_id {
@@ -927,9 +1253,8 @@ pub(crate) fn cancel_ai_request_with(request_id: u64) -> Result<bool, String> {
     AI_REQUEST_CANCELLED.store(true, Ordering::Release);
     // A tool call waiting for the user belongs to the turn being cancelled: left waiting, it would
     // hold a tool worker open long after the agent that asked for it is gone.
-    crate::approvals::cancel_all();
     crate::ask::cancel_user_prompts();
-    // So does one waiting on the editor. Killing the worker below ends the conversation, but the
+    // So does one waiting on the editor. Ending the worker below ends the conversation, but the
     // calls already dispatched into Rust wait on their own timeouts — minutes, for an addon request
     // that names one — and the turn is not over until they return.
     crate::cancel::cancel_turn(request_id);
@@ -938,11 +1263,22 @@ pub(crate) fn cancel_ai_request_with(request_id: u64) -> Result<bool, String> {
         .map_err(|_| "The AI process lock is poisoned".to_owned())?
         .clone();
     if let Some(child) = active {
-        child
-            .lock()
-            .map_err(|_| "The AI child process lock is poisoned".to_owned())?
-            .kill()
-            .map_err(|error| format!("Could not stop the AI agent: {error}"))?;
+        // Asked before it is killed, and killed only if the ask could not be made or was ignored.
+        // A killed worker narrates nothing: the assistant message it was part-way through never
+        // reaches a `turn-state` checkpoint, so the model's memory of the stopped turn ends at the
+        // last step that finished while the screen shows everything after it. A worker that answers
+        // the line aborts its own agent, emits that checkpoint and its own completion, and exits.
+        if ask_worker_to_stop() {
+            std::thread::spawn(move || {
+                let _ = stop_worker_within(&child, WORKER_CANCEL_GRACE);
+            });
+        } else {
+            child
+                .lock()
+                .map_err(|_| "The AI child process lock is poisoned".to_owned())?
+                .kill()
+                .map_err(|error| format!("Could not stop the AI agent: {error}"))?;
+        }
     }
     // No stream means no turn is streaming — a cancellation with nobody left to tell is not a
     // failure, it is the idle case the test suite exercises.
@@ -1148,10 +1484,11 @@ const BRIEF_EVENT: &str = "ai-brief";
 
 /// Records one brief event and passes it to the window.
 ///
-/// Recording happens here, on the Rust side of the pipe, because it is the only side that survives
-/// the ending. A run is cancelled by killing the worker, so anything the worker was still holding —
-/// the refined ask, three of four research sections — goes with it. A phase that has crossed this
-/// line is a phase a stopped run can still show.
+/// Recording happens here, on the Rust side of the pipe, because it is the only side that always
+/// survives the ending. A cancellation asks the worker to stop and kills the one that does not
+/// answer, so anything a killed worker was still holding — the refined ask, three of four research
+/// sections — goes with it. A phase that has crossed this line is a phase a stopped run can still
+/// show.
 ///
 /// Best-effort throughout: a storage write that failed is not worth ending a run over, and a window
 /// that is not listening is not a failure either.
@@ -1187,9 +1524,9 @@ const JUDGE_EVENT: &str = "ai-memory-judge";
 
 /// Files one judgement and passes every update to the window.
 ///
-/// The filing happens on this side of the pipe for the reason the brief's does: a run is cancelled
-/// by killing the worker, so a verdict still held in Node goes with it. A verdict that has crossed
-/// this line is one a stopped run still leaves behind.
+/// The filing happens on this side of the pipe for the reason the brief's does: a cancellation ends
+/// with a kill for a worker that will not stop itself, and a verdict still held in Node goes with
+/// it. A verdict that has crossed this line is one a stopped run still leaves behind.
 ///
 /// Best-effort: a storage write that failed is not worth ending a judgement over, and a window that
 /// is not listening is not a failure either.
@@ -1219,11 +1556,6 @@ fn handle_judge_event<R: Runtime>(
     let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, event);
 }
 
-/// Runs one worker for a turn that has already begun.
-///
-/// It takes the turn rather than a request id and a channel because both belong to it, and because
-/// what used to be missing here is not a value but a lifetime: the gate this opens is closed by the
-/// turn's own `Drop`, so no path out of this function can leave it open.
 /// The editor session, in the sentence the prompt sends the model to read.
 ///
 /// Every field here is one the model would otherwise have spent a call to learn, and the sentence
@@ -1273,34 +1605,30 @@ pub(crate) fn describe_session<R: Runtime>(app: &AppHandle<R>) -> String {
     )
 }
 
+/// Runs one worker for a turn that has already begun.
+///
+/// It takes the turn rather than a request id and a channel because both belong to it, and because
+/// what used to be missing here is not a value but a lifetime: the gate this opens is closed by the
+/// run's own `Drop`, so no path out of this function can leave it open.
+///
+/// It takes the request as it stands. It used to compose half of one — the system prompt and the
+/// session line — for every turn that passed through, which is a second composition of something
+/// [`JobContext`] had already done, and the only callers that reached the branch it was written
+/// for were the two acceptance harnesses.
 pub(crate) fn run_ai_worker_with<R: Runtime>(
     app: &AppHandle<R>,
     turn: &AiTurn,
-    mut request: AiWorkerRequest,
+    request: AiWorkerRequest,
     spawner: &impl ProcessSpawner,
 ) -> Result<String, String> {
+    // The gate pair and the child process are this worker's, not the turn's. Entered here, so no
+    // caller can spawn a worker without them — which is what `run_sweep` was doing by copying the
+    // two `open()` calls into its loop, once per memory, to get the next child a gate.
+    let run = WorkerRun::enter(turn);
     let request_id = turn.request_id();
     let stream = turn
         .stream()
         .ok_or_else(|| "The AI stream lock is poisoned".to_owned())?;
-    // The one place every turn passes through, so a request built without a prompt — an acceptance
-    // suite, a test — still runs the agent Gofer ships rather than one with nothing said to it. A
-    // brief is not filled in: its phases carry their own instructions and read no system prompt.
-    if let WorkerJob::Turn {
-        system_prompt,
-        session_context,
-        ..
-    } = &mut request.job
-    {
-        *system_prompt = Some(crate::agent_prompt::resolve(
-            system_prompt.as_deref(),
-            request.tools,
-            crate::settings::read_godot_settings(app)
-                .unwrap_or_default()
-                .strict_typing,
-        ));
-        *session_context = Some(describe_session(app));
-    }
     let worker = ai_worker_path()?;
     let node = crate::workers::node_binary();
     let mut child = spawner
@@ -1330,7 +1658,7 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
         .take_stderr()
         .ok_or_else(|| "Could not read Pi AI worker errors".to_owned())?;
     let child = Arc::new(Mutex::new(child));
-    turn.register_child(Arc::clone(&child))?;
+    run.register_worker(Arc::clone(&child), Arc::clone(&stdin))?;
     let stderr_reader = std::thread::spawn(move || {
         let mut output = String::new();
         let _ = BufReader::new(stderr).read_to_string(&mut output);
@@ -1338,6 +1666,9 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     });
     let mut completed = false;
     let mut completion_text = String::new();
+    // The reason the worker gave for stopping. `None` for a completion that has no such field — a
+    // brief and a judgement are their own events — and then the turn's own flag answers instead.
+    let mut completion_reason: Option<String> = None;
     let mut tool_workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     // Which task's brief this worker is filling in, or `None` for an ordinary turn. The task is the
     // session id: a brief belongs to exactly one task and that is already what the field means.
@@ -1367,28 +1698,31 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
             };
             let event: serde_json::Value = serde_json::from_str(payload)
                 .map_err(|error| format!("Pi AI returned an invalid event: {error}"))?;
+            let kind = event
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            // Read by name, and read first: `brief-done` and `judge-done` are prefixed like the
+            // progress below them and are not progress. See [`AI_COMPLETION_EVENTS`].
+            let is_done = AI_COMPLETION_EVENTS.contains(&kind);
             // A brief's progress is not part of an assistant message, so it does not ride the
             // turn's stream — the renderer's timeline drops every event it does not recognise, by
             // design, and a phase is not one of the things it draws. It goes out as a window event
             // instead, and anything worth surviving a stop is written to the database on the way.
-            if brief_task.is_some()
-                && let Some(kind) = event.get("type").and_then(serde_json::Value::as_str)
-                && kind.starts_with("brief-")
-            {
+            if !is_done && brief_task.is_some() && kind.starts_with("brief-") {
                 handle_brief_event(app, brief_task.as_deref(), kind, &event);
                 continue;
             }
             // A judgement's progress is not part of an assistant message either, and the panel
             // reading it is not the chat. Same rule, same reason: the timeline drops what it does
             // not draw, so this goes out as a window event and its verdict is filed on the way.
-            if let Some(memory_id) = judged_memory.as_deref()
-                && let Some(kind) = event.get("type").and_then(serde_json::Value::as_str)
+            if !is_done
+                && let Some(memory_id) = judged_memory.as_deref()
                 && kind.starts_with("judge-")
             {
                 handle_judge_event(app, memory_id, kind, &event);
                 continue;
             }
-            let is_done = event.get("type").and_then(serde_json::Value::as_str) == Some("done");
             if is_done {
                 completed = true;
                 completion_text = event
@@ -1396,6 +1730,10 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
+                completion_reason = event
+                    .get("stopReason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
             }
             stream
                 .send(AiStreamPayload { request_id, event })
@@ -1417,7 +1755,7 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     // writing into the next turn's channel. Closing the approval gate first is what makes that join
     // finite: a tool call still waiting for the user has lost the agent that asked, and a prompt
     // registered after this point is refused rather than left waiting for the whole timeout.
-    turn.close_gate_before_draining();
+    run.close_gate_before_draining();
     drain_tool_workers(tool_workers);
     streamed?;
 
@@ -1427,6 +1765,12 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     // seconds of a composer that says Gofer is working after Gofer has answered.
     if completed {
         reap_worker(Arc::clone(&child), stderr_reader);
+        // A stopped turn is not a completed one, whatever the worker managed to write on its way
+        // out. The half-answer has already been streamed and the transcript already checkpointed —
+        // what is refused here is the caller filing it as what the task achieved.
+        if the_worker_says_it_was_stopped(completion_reason.as_deref(), turn) {
+            return Ok(String::new());
+        }
         return Ok(completion_text);
     }
 
@@ -1434,10 +1778,31 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
     let stderr = stderr_reader
         .join()
         .map_err(|_| "Could not collect Pi AI worker errors".to_owned())?;
-    if !status.success {
-        if turn.is_cancelled() {
-            return Ok(String::new());
+    // Read before the exit status, because a stop now has two ways out and they report differently:
+    // a worker that answered the cancel line ends its own turn and exits cleanly, and one that had
+    // to be killed does not. Both are the user pressing Stop, and neither is a failure to show the
+    // user — a killed process names its signal on stderr and that is not a fault they can act on.
+    //
+    // The stderr is not thrown away with it, though. A worker can also die of something else in the
+    // seconds after Stop — an out-of-memory kill, a Node fault — and that arrives here looking
+    // exactly the same. Filed silently, the one diagnostic of it was gone; logged, it is still
+    // somewhere to look when a stop is followed by a session that will not start.
+    if turn.is_cancelled() {
+        if !status.success {
+            let detail = stderr.trim();
+            eprintln!(
+                "The stopped AI worker exited with {}{}",
+                status.description,
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                }
+            );
         }
+        return Ok(String::new());
+    }
+    if !status.success {
         let detail = stderr.trim();
         if detail.is_empty() {
             return Err(format!("Pi AI worker exited with {}", status.description));
@@ -1448,6 +1813,21 @@ pub(crate) fn run_ai_worker_with<R: Runtime>(
         return Err("Pi AI worker exited without completing the response".to_owned());
     }
     Ok(completion_text)
+}
+
+/// Whether a completed turn is one the user stopped, asking the worker before the flag.
+///
+/// The worker's own `stopReason` decides, because it is what the renderer decides from. The two used
+/// to answer different questions: the screen read the reason on the completion, and this read a flag
+/// set the moment Stop was pressed. Since a worker answers the cancel line and finishes its turn
+/// rather than being killed, the window between them is reachable — a `done` carrying `stop`, and a
+/// Stop that arrived microseconds before it. The turn then returned nothing, `remember_completed_turn`
+/// filed nothing, and the screen showed the same message complete.
+///
+/// The flag is still the answer for a completion with no reason to give: `brief-done` and
+/// `judge-done` carry a spec and a verdict, not a stop reason.
+fn the_worker_says_it_was_stopped(reason: Option<&str>, turn: &AiTurn) -> bool {
+    reason.map_or_else(|| turn.is_cancelled(), |reason| reason == AI_STOPPED_REASON)
 }
 
 /// How long a worker that has finished is given to exit on its own before it is stopped.
@@ -1476,7 +1856,19 @@ fn reap_worker(child: SharedChildProcess, stderr: std::thread::JoinHandle<String
 /// worker holding a cached connection open sits there for five minutes, and every one of those
 /// minutes was a turn the renderer still drew as running.
 fn stop_worker(child: &SharedChildProcess) -> Result<crate::process::ProcessStatus, String> {
-    let deadline = std::time::Instant::now() + WORKER_EXIT_GRACE;
+    stop_worker_within(child, WORKER_EXIT_GRACE)
+}
+
+/// The same ending, with the moment named by the caller.
+///
+/// Two callers want different moments for the same reason from opposite ends. A finished worker is
+/// closing the connection it cached and is worth waiting out; a cancelled one has been asked to
+/// stop and is holding the provider operation while it does not answer.
+fn stop_worker_within(
+    child: &SharedChildProcess,
+    grace: Duration,
+) -> Result<crate::process::ProcessStatus, String> {
+    let deadline = std::time::Instant::now() + grace;
     loop {
         {
             let mut child = child
@@ -1660,6 +2052,7 @@ mod tests {
     use super::*;
     use crate::process::{FakeChildProcess, FakeProcessSpawner, ProcessStatus};
     use crate::{ai_tools, cancel};
+    use std::ffi::{OsStr, OsString};
     use std::fs;
 
     use std::sync::atomic::Ordering as AtomicOrdering;
@@ -1675,14 +2068,18 @@ mod tests {
     /// The panel drew it as stopped while the list it was handed carried its verdict.
     #[test]
     fn a_judgement_that_produced_a_verdict_reports_no_ending() {
-        assert_eq!(super::judgement_ending("m1", None, false), None);
+        let ending = |failure: Option<&'static str>, cancelled: bool| {
+            Ending::settle(failure.map_or(Ok(None), Err), cancelled)
+                .event("judge", &[("memoryId", "m1")])
+        };
+        assert_eq!(ending(None, false), None);
         assert_eq!(
-            super::judgement_ending("m1", None, true),
+            ending(None, true),
             None,
             "cancelled the instant it finished is still finished"
         );
         assert_eq!(
-            super::judgement_ending("m1", Some("it used all of its steps"), false),
+            ending(Some("it used all of its steps"), false),
             Some(serde_json::json!({
                 "type": "judge-failed",
                 "memoryId": "m1",
@@ -1690,9 +2087,54 @@ mod tests {
             }))
         );
         assert_eq!(
-            super::judgement_ending("m1", Some("the turn was stopped"), true),
+            ending(Some("the turn was stopped"), true),
             Some(serde_json::json!({"type": "judge-stopped", "memoryId": "m1"}))
         );
+    }
+
+    /// The ending contract, in the one place it is now decided for all three jobs.
+    ///
+    /// It was written three times in this file and read three different ways. A worker exiting
+    /// without an error is not a finished job — cancelling kills it, and a killed process reports
+    /// an ordinary end — so what a run has to show for itself is the fact that decides, and Stop
+    /// beats a failure because a broken pipe is what killing a worker looks like from here.
+    #[test]
+    fn one_settlement_decides_every_job_ending() {
+        const WORDLESS: &str = "the plan ended before it wrote a specification";
+        assert_eq!(Ending::settle(Ok(None), false), Ending::Finished);
+        assert_eq!(
+            Ending::settle(Ok(None), true),
+            Ending::Finished,
+            "what it was paid for is there, whenever Stop arrived"
+        );
+        assert_eq!(Ending::settle(Ok(Some(WORDLESS)), true), Ending::Stopped);
+        assert_eq!(
+            Ending::settle(Ok(Some(WORDLESS)), false),
+            Ending::Failed(WORDLESS),
+            "it produced nothing and said nothing about why"
+        );
+        assert_eq!(
+            Ending::settle(Err("the provider refused"), false),
+            Ending::Failed("the provider refused")
+        );
+        assert_eq!(
+            Ending::settle(Err("Could not read Pi AI output"), true),
+            Ending::Stopped,
+            "the pipe broke because the user killed the worker"
+        );
+
+        // The two words a brief closes its row with, which are not the two the wire uses.
+        assert_eq!(Ending::Failed(WORDLESS).reason(), Some(WORDLESS));
+        assert_eq!(Ending::Stopped.reason(), None);
+        assert_eq!(
+            Ending::Stopped.event("brief", &[("phase", "research")]),
+            Some(serde_json::json!({"type": "brief-stopped", "phase": "research"}))
+        );
+        assert_eq!(
+            format!("sweep-{}", Ending::Finished.word()),
+            "sweep-finished"
+        );
+        assert_eq!(format!("sweep-{}", Ending::Stopped.word()), "sweep-stopped");
     }
 
     fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
@@ -2107,6 +2549,205 @@ mod tests {
         }
     }
 
+    /// A job context from parts: injected settings, injected storage, and no keyring anywhere.
+    ///
+    /// This is the seam the four assemblers were missing. `run_ai_worker_with` has taken an
+    /// injected spawner for as long as it has been tested; everything above it read four
+    /// credentials off the machine, so not one of the four could be driven at all — and the two
+    /// tests that looked like coverage built the request by hand and asserted its JSON, which is
+    /// the serde attributes rather than the code that fills it in.
+    ///
+    /// The prompt is injected verbatim rather than resolved, so that a second composition anywhere
+    /// downstream is visible in what the worker is sent.
+    fn a_context<R: Runtime>(
+        app: &AppHandle<R>,
+        directory: &TempDir,
+        credentials: Credentials,
+        system_prompt: &str,
+    ) -> JobContext {
+        let workspace = directory.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let storage =
+            crate::storage::ProjectStorage::open(&directory.path().join("data"), &workspace)
+                .expect("open project storage");
+        JobContext {
+            ai: AiSettings::default(),
+            credentials,
+            storage,
+            workspace_path: workspace.display().to_string(),
+            system_prompt: system_prompt.to_owned(),
+            session_context: describe_session(app),
+        }
+    }
+
+    /// Everything this machine could have stored, so a job that must not carry one is visible.
+    fn every_credential() -> Credentials {
+        Credentials {
+            api_key: Some("ai-default-key".to_owned()),
+            openrouter_api_key: Some("openrouter-key".to_owned()),
+            brave_api_key: Some("brave-key".to_owned()),
+            oauth_credential: Some(serde_json::json!({"type": "oauth", "access": "token"})),
+        }
+    }
+
+    /// A brief is not a chat turn, and the context is what makes that true.
+    ///
+    /// The phases carry their own instructions, in full, and none of them is the chat agent — so a
+    /// brief carries no system prompt, no transcript and no project memory. That was a property of
+    /// four hand-built requests until now, and the assembler that got it wrong would have put a
+    /// Godot editor's tool guidance in front of a worker listing file paths with nothing failing.
+    #[test]
+    fn a_brief_carries_no_system_prompt_and_no_memory() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = mock_app();
+        let context = a_context(
+            app.handle(),
+            &directory,
+            every_credential(),
+            "the project's own prompt",
+        );
+
+        let encoded = serde_json::to_value(context.request(Job::Brief {
+            task_id: "task-9".to_owned(),
+            prompt: "add a pause menu".to_owned(),
+            images: Vec::new(),
+            inventory: None,
+        }))
+        .expect("serialize the request");
+
+        assert_eq!(encoded["mode"], "brief");
+        assert!(encoded.get("systemPrompt").is_none(), "{encoded}");
+        assert!(encoded.get("sessionContext").is_none(), "{encoded}");
+        assert!(encoded.get("memoryContext").is_none(), "{encoded}");
+        assert!(encoded.get("agentMessages").is_none(), "{encoded}");
+        assert!(encoded.get("messages").is_none(), "{encoded}");
+        // The task is the cache key: what is re-sent belongs to the task, not to the phase.
+        assert_eq!(encoded["sessionId"], "task-9");
+        // The catalogue is the router's own, at every construction site, because it only ever had
+        // one legal value and no caller was left to name it.
+        assert_eq!(
+            encoded["tools"].as_array().expect("the catalogue").len(),
+            ai_tools::CATALOG.len()
+        );
+    }
+
+    /// A judging child holds `read` and `bash`, and asks one question about one row.
+    ///
+    /// So it is sent no search key — nothing it holds reaches the web — and no cache key: there is
+    /// no prefix a later ask would reuse, and keying it per memory would fragment the cache the
+    /// conversation depends on. Both were comments beside a hand-written `None`, at one of the
+    /// five sites that spelled every field out.
+    #[test]
+    fn a_judgement_carries_no_search_key_and_no_cache_key() {
+        let directory = TempDir::new().expect("temporary directory");
+        let app = mock_app();
+        let context = a_context(
+            app.handle(),
+            &directory,
+            every_credential(),
+            "the project's own prompt",
+        );
+
+        let judgement = serde_json::to_value(context.request(Job::Judge {
+            memory_id: "01a0".to_owned(),
+            memory: JudgedMemory {
+                id: "01a0".to_owned(),
+                content: "Deleted GRAYZONE.md.".to_owned(),
+                anchors: Vec::new(),
+            },
+        }))
+        .expect("serialize the request");
+
+        assert_eq!(judgement["mode"], "judge");
+        assert_eq!(judgement["braveApiKey"], serde_json::Value::Null);
+        assert_eq!(judgement["sessionId"], serde_json::Value::Null);
+        // The keys it can use still travel: the child is read-only, not credential-less.
+        assert_eq!(judgement["apiKey"], "ai-default-key");
+        assert_eq!(judgement["openrouterApiKey"], "openrouter-key");
+
+        // And the same context sends both to a chat turn, so what is withheld is the job's doing
+        // rather than an empty keyring's.
+        let turn = serde_json::to_value(context.request(Job::Turn {
+            task_id: Some("task-1".to_owned()),
+            messages: Vec::new(),
+            agent_messages: None,
+            is_retry: false,
+            memory_context: None,
+        }))
+        .expect("serialize the request");
+        assert_eq!(turn["braveApiKey"], "brave-key");
+        assert_eq!(turn["sessionId"], "task-1");
+    }
+
+    /// The prompt is composed once, and what the context composed is what the worker is sent.
+    ///
+    /// It used to be composed twice: `run_turn` resolved the project's stored text, and
+    /// `run_ai_worker_with` resolved it again from what it was handed. The second call took the
+    /// "it already has one" branch every time, so its `strict_typing` argument — read from a
+    /// second settings function with a second error policy — decided nothing, and the branch it
+    /// was written for was reached only by the two acceptance harnesses.
+    ///
+    /// The stale engine line is what makes a second composition visible: resolving refreshes it to
+    /// the version this build pins, so a prompt that arrives at the worker unrefreshed is a prompt
+    /// nothing composed on the way out.
+    #[test]
+    fn a_chat_turn_sends_the_prompt_its_context_composed_and_no_other() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        // A turn closes the process-wide approval gate when it ends, so this waits its turn
+        // behind the `approvals` tests rather than settling a prompt one of them is waiting on.
+        let _gate = crate::approvals::serialize_gate_tests();
+        let directory = TempDir::new().expect("temporary directory");
+        let app = mock_app();
+        let composed = concat!(
+            "You are Gofer, and this is my project.\n",
+            "- Version 4.6.0 stable, released 2025-01-01 — newer than your training data\n",
+        );
+        let context = a_context(app.handle(), &directory, Credentials::default(), composed);
+        let spawner = FakeProcessSpawner::new(
+            "GOFER_AI_EVENT:{\"type\":\"done\",\"text\":\"Hi\",\"agentMessages\":[],\"usage\":{},\"model\":\"fake\"}\n",
+            "",
+            true,
+        );
+        let (stream, _streamed) = recording_stream();
+
+        run_ai_worker_with(
+            app.handle(),
+            &a_turn(51, &stream),
+            context.request(Job::Turn {
+                task_id: Some("task-1".to_owned()),
+                messages: Vec::new(),
+                agent_messages: None,
+                is_retry: false,
+                memory_context: None,
+            }),
+            &spawner,
+        )
+        .expect("fake AI completion");
+
+        assert_eq!(
+            spawner.sent()[0]["systemPrompt"],
+            composed,
+            "the turn sent a prompt somebody composed a second time"
+        );
+
+        // And the one composition the context does is the project's own text with that line put
+        // right — the read `run_turn` used to make inline, on its way to the same string.
+        context
+            .storage()
+            .project()
+            .write_agent_prompt(Some(composed))
+            .expect("store the project's own prompt");
+        let resolved = resolve_prompt(context.storage(), true).expect("resolve the prompt");
+        assert!(
+            resolved.starts_with("You are Gofer, and this is my project."),
+            "the project's own text is what it sends: {resolved}"
+        );
+        assert!(
+            resolved.contains(crate::godot_session::REQUIRED_ENGINE_VERSION),
+            "the pinned engine has to reach the model: {resolved}"
+        );
+    }
+
     /// Stands in for the renderer's channel, keeping what the turn streamed so a test can read it
     /// back in the order it was sent.
     fn recording_stream() -> (
@@ -2248,6 +2889,57 @@ mod tests {
         );
     }
 
+    /// A completion decides whether it was stopped, and the screen reads the same field it does.
+    ///
+    /// Since a worker answers the cancel line and ends its own turn rather than being killed, Stop
+    /// and a finished turn can land microseconds apart. The flag said stopped, the worker's own
+    /// `done` said `stop` — and the two sides then disagreed about one message: nothing was filed as
+    /// what the task achieved, while `chat-timeline.ts` drew it complete from the very same event.
+    #[test]
+    fn a_turn_that_finished_a_hair_before_stop_is_still_filed_as_finished() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let _gate = crate::approvals::serialize_gate_tests();
+        let app = mock_app();
+        let (stream, _streamed) = recording_stream();
+
+        let finished = FakeProcessSpawner::new(
+            concat!(
+                r#"GOFER_AI_EVENT:{"type":"done","text":"Hello","stopReason":"stop","#,
+                r#""agentMessages":[],"usage":{},"model":"fake"}"#,
+                "\n"
+            ),
+            "",
+            true,
+        );
+        let turn = a_turn(20, &stream);
+        turn.mark_cancelled(true);
+        assert_eq!(
+            run_ai_worker_with(app.handle(), &turn, worker_request(), &finished)
+                .expect("a completed turn"),
+            "Hello",
+            "the worker finished this turn, whenever the flag was set"
+        );
+        drop(turn);
+
+        // And a worker that really was cut off says so in the same field, and keeps nothing.
+        let stopped = FakeProcessSpawner::new(
+            concat!(
+                r#"GOFER_AI_EVENT:{"type":"done","text":"Half an ans","stopReason":"aborted","#,
+                r#""agentMessages":[],"usage":{},"model":"fake"}"#,
+                "\n"
+            ),
+            "",
+            true,
+        );
+        let turn = a_turn(21, &stream);
+        assert_eq!(
+            run_ai_worker_with(app.handle(), &turn, worker_request(), &stopped)
+                .expect("a stopped turn"),
+            "",
+            "a half-answer is not what the task achieved"
+        );
+    }
+
     /// A worker that has said everything and then holds its pipe open.
     ///
     /// This is what a remote turn really leaves behind: the answer is written, the agent is done,
@@ -2368,7 +3060,49 @@ mod tests {
         assert_eq!(sent[0]["event"]["type"], "done");
     }
 
-    /// No turn, no gate — on every way out of one, not only the clean one.
+    /// Both gates are open, or neither is. Whichever half a caller remembers is not the question.
+    ///
+    /// The pair was opened by hand at seven sites and the harness that copied it got it wrong: it
+    /// took the approval half and left the question half shut, so every `ask_user` inside a journey
+    /// was refused by a gate nothing had opened. `WorkerRun` is what makes that unspellable — there
+    /// is one call in, one call out, and a test that watches both registries rather than the one it
+    /// happened to be about.
+    #[test]
+    fn a_worker_run_opens_both_gates_and_its_drop_closes_both() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let _gate = crate::approvals::serialize_gate_tests();
+        let (stream, _streamed) = recording_stream();
+        let turn = a_turn(33, &stream);
+
+        assert!(
+            !crate::approvals::is_open() && !crate::ask::questions_open(),
+            "a turn is not a worker: nothing is waiting on a user until one is running"
+        );
+
+        {
+            let _run = WorkerRun::enter(&turn);
+            assert!(
+                crate::approvals::is_open() && crate::ask::questions_open(),
+                "entering a run is what opens both gates"
+            );
+        }
+
+        assert!(
+            !crate::approvals::is_open() && !crate::ask::questions_open(),
+            "the worker ended, so nothing may still be waiting on the user"
+        );
+
+        // And the next worker of the same turn gets them back, which is the sweep: one turn, one
+        // provider operation, eighty children, each spawned after the last one's exit shut the
+        // gates behind it. `run_sweep` used to raise them again by hand at the top of its loop.
+        let _second = WorkerRun::enter(&turn);
+        assert!(
+            crate::approvals::is_open() && crate::ask::questions_open(),
+            "a second worker in the same turn has its own gates"
+        );
+    }
+
+    /// No worker, no gate — on every way out of one, not only the clean one.
     ///
     /// The gate used to be opened inside the worker and closed a hundred lines later, just before
     /// the tool threads were joined. Six things between those two lines return `Err`: taking the
@@ -2378,9 +3112,9 @@ mod tests {
     /// and is answered by nobody.
     ///
     /// A spawn that fails is the earliest of those paths and the easiest to provoke; the assertion
-    /// is about the turn ending, not about which failure ended it.
+    /// is about the run ending, not about which failure ended it.
     #[test]
-    fn a_turn_that_fails_before_its_worker_starts_still_closes_the_approval_gate() {
+    fn a_turn_that_fails_before_its_worker_starts_still_closes_both_gates() {
         let _test = AI_TEST_LOCK.lock().expect("AI test lock");
         // A turn closes the process-wide approval gate when it ends, so this waits its turn
         // behind the `approvals` tests rather than settling a prompt one of them is waiting on.
@@ -2396,22 +3130,98 @@ mod tests {
         {
             let turn = a_turn(31, &stream);
             assert!(
-                crate::approvals::is_open(),
-                "beginning a turn is what opens the gate"
-            );
-            assert!(
                 run_ai_worker_with(app.handle(), &turn, worker_request(), &missing).is_err(),
                 "the worker cannot start"
             );
             assert!(
-                crate::approvals::is_open(),
-                "the turn has not ended yet, so a tool call may still ask"
+                !crate::approvals::is_open() && !crate::ask::questions_open(),
+                "the worker never started, so nothing may be left waiting on the user"
             );
         }
 
         assert!(
-            !crate::approvals::is_open(),
+            !crate::approvals::is_open() && !crate::ask::questions_open(),
             "the turn ended, so nothing may still be waiting on the user"
+        );
+    }
+
+    /// What the gates were when a worker was spawned, so a run can be watched from where it
+    /// starts rather than from outside it.
+    ///
+    /// Recorded at the spawn because that is the edge that matters: everything the worker does
+    /// afterwards — asking, answering, exiting — happens on threads of its own, and a fake worker
+    /// whose whole output is already buffered can finish before its own tool thread reaches the
+    /// gate. Watching the tool call's answer would time that race rather than the fact.
+    struct WatchedSpawner {
+        inner: FakeProcessSpawner,
+        gates: Arc<Mutex<Vec<(bool, bool)>>>,
+    }
+
+    impl ProcessSpawner for WatchedSpawner {
+        fn output(
+            &self,
+            program: &OsStr,
+            arguments: &[OsString],
+        ) -> std::io::Result<crate::process::ProcessOutput> {
+            self.inner.output(program, arguments)
+        }
+
+        fn spawn(
+            &self,
+            program: &OsStr,
+            arguments: &[OsString],
+            piped_stdin: bool,
+        ) -> std::io::Result<Box<dyn crate::process::ChildProcess>> {
+            self.gates
+                .lock()
+                .expect("recorded gates")
+                .push((crate::approvals::is_open(), crate::ask::questions_open()));
+            self.inner.spawn(program, arguments, piped_stdin)
+        }
+    }
+
+    /**
+     * A sweep is one turn holding many workers, and every one of them is spawned into open gates.
+     *
+     * This is the failure the two hand-copied `open()` calls at the top of `run_sweep`'s loop were
+     * papering over: the first memory's worker closed both gates on its way out, `AiTurn` only
+     * opened them once, and the seventy-nine children after it would have had every approval and
+     * every question refused the moment they asked. Take the two calls out without moving the
+     * lifetime and this is what is left — which is why it is asserted per worker rather than once.
+     */
+    #[test]
+    fn every_worker_in_one_turn_is_spawned_into_open_gates() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let _gate = crate::approvals::serialize_gate_tests();
+        let app = mock_app();
+        let (stream, _streamed) = recording_stream();
+        let turn = a_turn(34, &stream);
+        let gates = Arc::new(Mutex::new(Vec::new()));
+
+        for _ in 0..2 {
+            let spawner = WatchedSpawner {
+                inner: FakeProcessSpawner::new(
+                    "GOFER_AI_EVENT:{\"type\":\"done\",\"text\":\"Judged\",\"agentMessages\":[],\"usage\":{},\"model\":\"fake\"}\n",
+                    "",
+                    true,
+                ),
+                gates: Arc::clone(&gates),
+            };
+            assert_eq!(
+                run_ai_worker_with(app.handle(), &turn, worker_request(), &spawner)
+                    .expect("fake AI completion"),
+                "Judged"
+            );
+        }
+
+        assert_eq!(
+            gates.lock().expect("recorded gates").as_slice(),
+            [(true, true), (true, true)],
+            "every worker of a turn is spawned with both gates open"
+        );
+        assert!(
+            !crate::approvals::is_open() && !crate::ask::questions_open(),
+            "and the last one closed them behind it"
         );
     }
 
@@ -2424,7 +3234,17 @@ mod tests {
         // `get_tree` is answered by the real session door, so the refusal it must produce is only
         // this test's to assert while nothing else has an editor bound.
         let _no_editor = crate::godot_session::no_editor_bound();
+        let directory = TempDir::new().expect("temporary directory");
         let app = mock_app();
+        // Composed the way the application composes one, rather than assembled here: the session
+        // line and the catalogue asserted below are the context's, and this is the only test that
+        // watches them cross the pipe.
+        let context = a_context(
+            app.handle(),
+            &directory,
+            Credentials::default(),
+            "the project's own prompt",
+        );
         // Two calls: one the router rejects outright, one that reaches a handler with no session.
         // Both must come back as structured failures on the same channel the events ride.
         let output = [
@@ -2441,7 +3261,13 @@ mod tests {
             run_ai_worker_with(
                 app.handle(),
                 &a_turn(21, &stream),
-                worker_request(),
+                context.request(Job::Turn {
+                    task_id: Some("task-1".to_owned()),
+                    messages: Vec::new(),
+                    agent_messages: None,
+                    is_retry: false,
+                    memory_context: None,
+                }),
                 &spawner
             )
             .expect("fake AI completion"),
@@ -2537,6 +3363,232 @@ mod tests {
             .contains("invalid tool request")
         );
         *AI_CHILD.lock().expect("AI child lock") = None;
+    }
+
+    /// A stdin the test can read back, because what is being proved is what was written on it.
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("recording stdin lock poisoned"))?
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A child that will not go until it is made to.
+    ///
+    /// The fakes beside the trait answer `try_wait` with a status the first time they are asked,
+    /// which is the one thing the backstop cannot be proved against: a worker that has already
+    /// exited is never killed, so a kill that never happens looks exactly like one that was not
+    /// needed.
+    struct StubbornChild(Arc<AtomicBool>);
+
+    impl StubbornChild {
+        fn status(&self) -> ProcessStatus {
+            ProcessStatus {
+                success: false,
+                code: None,
+                description: "killed".to_owned(),
+            }
+        }
+    }
+
+    impl crate::process::ChildProcess for StubbornChild {
+        fn take_stdin(&mut self) -> Option<crate::process::ProcessWriter> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<crate::process::ProcessReader> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<crate::process::ProcessReader> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<ProcessStatus>> {
+            Ok(self.0.load(AtomicOrdering::Acquire).then(|| self.status()))
+        }
+
+        fn wait(&mut self) -> std::io::Result<ProcessStatus> {
+            Ok(self.status())
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.store(true, AtomicOrdering::Release);
+            Ok(())
+        }
+    }
+
+    /// Hands out one child that was built before the run started.
+    ///
+    /// `FakeProcessSpawner` scripts stdout from a string, which is a worker that has already said
+    /// everything it will ever say. A cancellation has to reach a worker that is still running, so
+    /// this one's stdout is a pipe the test writes into while the loop reads it.
+    struct PreparedSpawner(Mutex<Option<FakeChildProcess>>);
+
+    impl crate::process::ProcessSpawner for PreparedSpawner {
+        fn output(
+            &self,
+            _: &OsStr,
+            _: &[OsString],
+        ) -> std::io::Result<crate::process::ProcessOutput> {
+            unreachable!("a prepared worker is never asked for command output")
+        }
+
+        fn spawn(
+            &self,
+            _: &OsStr,
+            _: &[OsString],
+            _: bool,
+        ) -> std::io::Result<Box<dyn crate::process::ChildProcess>> {
+            self.0
+                .lock()
+                .expect("prepared child lock")
+                .take()
+                .map(|child| Box::new(child) as Box<dyn crate::process::ChildProcess>)
+                .ok_or_else(|| std::io::Error::other("the prepared worker was already spawned"))
+        }
+    }
+
+    /// A stream that a test can block on rather than poll.
+    ///
+    /// The recorder above answers "what has arrived", which cannot be asked before something has.
+    /// Waiting for the first event is how this test knows the run has registered its worker without
+    /// guessing at a moment.
+    fn signalling_stream() -> (
+        tauri::ipc::Channel<AiStreamPayload>,
+        std::sync::mpsc::Receiver<serde_json::Value>,
+    ) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let channel = tauri::ipc::Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(json) = body
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&json)
+            {
+                let _ = sender.send(value);
+            }
+            Ok(())
+        });
+        (channel, receiver)
+    }
+
+    /// Stopping a turn is two asks, and this is the first one.
+    ///
+    /// It was one: `kill()`, and nothing else. So every abort branch in the worker — the listener
+    /// that calls `agent.abort()`, the `aborted` completion it builds, the interruptible retry wait
+    /// — was threaded through fifteen functions and reached by no running Gofer, because nothing
+    /// ever built the `AbortController` they read. What a killed worker loses is the assistant
+    /// message that was in flight: no `turn-state` checkpoint is emitted for it, so the model's
+    /// memory of a stopped turn ends at the last step that finished while the screen shows
+    /// everything after it.
+    ///
+    /// Driven against a worker that is still running, because that is the only state a cancellation
+    /// happens in and a scripted stdout is a worker that has already finished.
+    #[test]
+    fn cancelling_a_running_turn_asks_the_worker_to_stop_on_its_own_channel() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        // A turn closes the process-wide approval gate when it ends, so this waits its turn
+        // behind the `approvals` tests rather than settling a prompt one of them is waiting on.
+        let _gate = crate::approvals::serialize_gate_tests();
+        let app = mock_app();
+        let (stream, events) = signalling_stream();
+
+        let (worker_stdout, mut say) = std::io::pipe().expect("worker stdout pipe");
+        let (worker_stderr, quiet) = std::io::pipe().expect("worker stderr pipe");
+        drop(quiet);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let killed = Arc::new(AtomicBool::new(false));
+        let spawner = PreparedSpawner(Mutex::new(Some(FakeChildProcess {
+            stdin: Some(Box::new(RecordingWriter(Arc::clone(&written)))),
+            stdout: Some(Box::new(worker_stdout)),
+            stderr: Some(Box::new(worker_stderr)),
+            status: ProcessStatus {
+                success: true,
+                code: Some(0),
+                description: "exit status: 0".to_owned(),
+            },
+            killed: Arc::clone(&killed),
+        })));
+
+        let turn = a_turn(91, &stream);
+        let handle = app.handle().clone();
+        let answer = std::thread::scope(|scope| {
+            let running =
+                scope.spawn(|| run_ai_worker_with(&handle, &turn, worker_request(), &spawner));
+            // The worker has started to answer, which is what says the run is past the point where
+            // it registered its channel. Waited for rather than assumed: nothing else in this test
+            // knows when the reading loop began.
+            say.write_all(b"GOFER_AI_EVENT:{\"type\":\"text-delta\",\"delta\":\"Half an \"}\n")
+                .expect("stream a delta");
+            let first = events.recv().expect("the turn streams its first delta");
+            assert_eq!(first["event"]["type"], "text-delta");
+
+            assert!(cancel_ai_request_with(91).expect("cancel the running turn"));
+
+            // The worker answers the way a worker does: its own last events, then its own exit.
+            say.write_all(
+                b"GOFER_AI_EVENT:{\"type\":\"turn-state\",\"agentMessages\":[{\"role\":\"assistant\"}]}\n",
+            )
+            .expect("stream the checkpoint");
+            say.write_all(
+                b"GOFER_AI_EVENT:{\"type\":\"done\",\"text\":\"Half an \",\"thinking\":\"\",\"stopReason\":\"aborted\",\"agentMessages\":[],\"usage\":{},\"model\":\"fake\"}\n",
+            )
+            .expect("stream the completion");
+            drop(say);
+            running.join().expect("the worker run ends")
+        });
+
+        // The whole finding, in one assertion: the stop reached the worker as a line on the channel
+        // it was already reading, ahead of the kill that used to be all there was.
+        let sent = String::from_utf8(written.lock().expect("recorded stdin").clone())
+            .expect("the worker channel is UTF-8");
+        let lines: Vec<&str> = sent.lines().collect();
+        assert_eq!(
+            lines.get(1).copied(),
+            Some(AI_CANCEL_LINE),
+            "the cancel line follows the startup context on the worker's own channel"
+        );
+        assert!(
+            !killed.load(AtomicOrdering::Acquire),
+            "a worker that was asked to stop is given the chance to answer before it is killed"
+        );
+        // What it managed to say still reached the renderer, in the order it was said: the abort
+        // the cancellation minted, then the worker's own checkpoint and completion behind it. That
+        // checkpoint is what a bare kill loses.
+        let rest: Vec<String> = events
+            .try_iter()
+            .map(|value| {
+                value["event"]["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(rest, ["aborted", "turn-state", "done"]);
+        // And the turn reports nothing to remember: a half answer is not what the task achieved.
+        assert_eq!(answer.expect("a stopped turn is not a failed one"), "");
+
+        crate::cancel::clear_if_cancelled(91);
+    }
+
+    /// The backstop, which the ask does not replace: a worker that will not answer still dies.
+    #[test]
+    fn a_worker_that_does_not_answer_the_cancel_line_is_still_killed() {
+        let killed = Arc::new(AtomicBool::new(false));
+        let child: SharedChildProcess =
+            Arc::new(Mutex::new(Box::new(StubbornChild(Arc::clone(&killed)))));
+        // No grace at all, so the deadline is already past on the first poll and the kill is the
+        // first thing that happens rather than something this test sits through.
+        let status = stop_worker_within(&child, Duration::ZERO).expect("stop a stubborn worker");
+        assert!(killed.load(AtomicOrdering::Acquire));
+        assert!(!status.success);
     }
 
     #[test]

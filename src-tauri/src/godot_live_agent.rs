@@ -34,7 +34,7 @@
 //! an editor. The prompt A/B that measured the strict-typing line ran on those two files.
 
 use crate::ai_tools;
-use crate::ai_turn::{AiWorkerMessage, AiWorkerRequest, ChatSender};
+use crate::ai_turn::{AiWorkerMessage, ChatSender, Job, JobContext};
 use crate::godot_editor_harness::{self, Transports, free_port};
 use crate::process::SystemProcessSpawner;
 use crate::settings::AiSettings;
@@ -265,40 +265,32 @@ fn live_agent_acceptance() {
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
     answer_the_prompts_nobody_is_watching(Arc::clone(&finished));
 
+    // The context the application builds, from the same function — so what this run measures is
+    // the turn Gofer composes, not one this file assembled to look like it. The run still chooses
+    // where the model is, that none of this machine's credentials are sent, and which checkout the
+    // editor it started is bound to.
+    let context = JobContext::for_suite(
+        app.handle(),
+        AiSettings::served_by(base_url, model),
+        session.worktree.display().to_string(),
+    )
+    .expect("build the job context");
     let started = std::time::Instant::now();
     let completion = crate::ai_turn::run_ai_worker_with(
         app.handle(),
         &turn,
-        AiWorkerRequest {
-            settings: AiSettings {
-                base_url,
-                model,
-                max_retries: 0,
-                ..AiSettings::default()
-            },
-            api_key: None,
-            openrouter_api_key: None,
-            brave_api_key: None,
-            oauth_credential: None,
-            session_id: Some("godot-live-agent".to_owned()),
-            workspace_path: session.worktree.display().to_string(),
-            tools: ai_tools::CATALOG,
-            job: crate::ai_turn::WorkerJob::Turn {
-                messages: vec![AiWorkerMessage {
-                    sender: ChatSender::User,
-                    text: task.clone(),
-                    timestamp: 1,
-                    images: Vec::new(),
-                }],
-                agent_messages: None,
-                is_retry: false,
-                memory_context: None,
-                // Filled by `run_ai_worker_with`, like the prompt beside it, from the editor this
-                // suite has bound.
-                session_context: None,
-                system_prompt: None,
-            },
-        },
+        context.request(Job::Turn {
+            task_id: Some("godot-live-agent".to_owned()),
+            messages: vec![AiWorkerMessage {
+                sender: ChatSender::User,
+                text: task.clone(),
+                timestamp: 1,
+                images: Vec::new(),
+            }],
+            agent_messages: None,
+            is_retry: false,
+            memory_context: None,
+        }),
         &SystemProcessSpawner,
     );
     let seconds = started.elapsed().as_secs_f64();

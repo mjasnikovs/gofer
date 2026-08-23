@@ -9,7 +9,18 @@
 //! file — so reading the router meant reading a thousand lines of source-text parser first, and the
 //! parsers themselves had no tests: every one of them can go blind on a rename or a reformat, and a
 //! blind parser makes its check pass on an empty set rather than fail. `fixtures` below is what
-//! stops that, and every check that reads a surface asserts it found something before comparing.
+//! stops that, and every check that still reads a surface asserts it found something before
+//! comparing.
+//!
+//! Only one of the four surfaces is still *read*. The Rust half was recovered by parsing this
+//! crate's own source — find `struct X {`, read to the first `\n}`, split each line on its first
+//! `:`, and for the router's own arms find `"list" =>` and stop at the next line beginning with
+//! exactly eight spaces and a quote. That made a test a constraint on how the router could be
+//! written, and it went blind in every way a parser can: a field whose type wrapped onto a second
+//! line was dropped in silence, and an arm that moved a column parsed to nothing at all. Each Rust
+//! request now declares its own fields beside itself, so this file compares two tables. What is
+//! still parsed is GDScript, which really is another language across a socket, and the English of
+//! the summaries, which is prose and has no other form.
 
 #![cfg(test)]
 
@@ -18,8 +29,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// The parsers, against snippets written here rather than against the app.
 ///
-/// Every check below reads one surface with a hand-rolled parser of GDScript, Rust or English, and
-/// a parser that stops recognising its surface does not fail — it answers with nothing, and a
+/// The checks below that still read a surface read GDScript or English with a hand-rolled parser,
+/// and a parser that stops recognising its surface does not fail — it answers with nothing, and a
 /// comparison against nothing passes. These are the tests that say what each parser is supposed to
 /// find, so a rename or a reformat breaks something loud.
 mod fixtures {
@@ -71,35 +82,6 @@ mod fixtures {
         );
     }
 
-    /*
-     * The one that was silently vacuous.
-     *
-     * It matched `params\n                .get("` literally — sixteen spaces of indent — so a
-     * reformat that moved `.get` to another column left it finding nothing, and the check that
-     * compares its answer to the catalogue passed on an empty set.
-     */
-    #[test]
-    fn a_routers_reads_are_found_however_rustfmt_wrapped_them() {
-        let wrapped = "let a = params\n                .get(\"hashes\")\n                .and_then(Value::as_bool);\nlet b = params.get(\"path\");\n";
-        assert_eq!(
-            params_read_in(wrapped),
-            ["hashes", "path"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>()
-        );
-
-        let differently_wrapped = "let a =\n    params\n        .get(\"hashes\");\n";
-        assert_eq!(
-            params_read_in(differently_wrapped),
-            ["hashes"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>(),
-            "the column it lands in must not decide what the parser can see"
-        );
-    }
-
     /// The English one: the first `{…}` shape a summary writes out, read as a list of names.
     #[test]
     fn a_summary_is_read_as_the_parameter_names_it_writes_out() {
@@ -117,28 +99,6 @@ mod fixtures {
         assert_eq!(
             documented_parameters("Takes {playArgs?, breakpoints?: [{path, lines}]}."),
             vec!["playArgs".to_owned(), "breakpoints".to_owned()]
-        );
-    }
-
-    #[test]
-    fn a_rust_request_is_read_as_the_fields_it_deserializes() {
-        let body = "pub struct SaveRequest {\n    pub path: String,\n    #[serde(default)]\n    pub expected_hash: Option<String>,\n}";
-        assert_eq!(
-            deserialized_fields(body),
-            ["expectedHash", "path"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<BTreeSet<_>>(),
-            "read in the camel case serde puts on the wire"
-        );
-        assert_eq!(
-            optional_by_field(body),
-            [
-                ("expectedHash".to_owned(), true),
-                ("path".to_owned(), false)
-            ]
-            .into_iter()
-            .collect::<BTreeMap<_, _>>()
         );
     }
 }
@@ -617,106 +577,10 @@ fn every_parameter_the_addon_reads_is_the_one_the_catalog_documents() {
     );
 }
 
-/// The request types the domains answered in Rust deserialize into.
-const RUST_HANDLERS: [(&str, &str); 7] = [
-    ("script", include_str!("script.rs")),
-    ("debug", include_str!("debug.rs")),
-    ("session", include_str!("godot_session.rs")),
-    ("rag", include_str!("rag.rs")),
-    ("gdformat", include_str!("gdformat.rs")),
-    ("files", include_str!("files.rs")),
-    // This file: six operations are answered by an arm of its own router rather than by
-    // deserializing anything, and their parameters are read straight out of the JSON.
-    ("router", include_str!("ai_tools.rs")),
-];
-
 /// `threadId` is on six debug operations and documented on none. GDScript runs one thread, the
 /// adapter defaults to it, and a model told to pass a thread identifier would have to go and
 /// find one before it could step.
 const NOT_WORTH_THE_MODEL_S_ATTENTION: [&str; 1] = ["threadId"];
-
-/// The body of one `struct X {` or `enum X {`, up to the brace that closes it at column zero.
-fn rust_item_body<'a>(source: &'a str, keyword: &str, name: &str) -> Option<&'a str> {
-    let opened = source.find(&format!("{keyword} {name} {{"))?;
-    let rest = &source[opened..];
-    let closed = rest.find("\n}")?;
-    Some(&rest[..closed])
-}
-
-/// The body of one variant inside an enum body. A variant that carries nothing has no body and
-/// no fields, which is the answer for every operation that takes no parameters.
-fn rust_variant_body<'a>(enum_body: &'a str, variant: &str) -> &'a str {
-    let Some(opened) = enum_body.find(&format!("\n    {variant} {{")) else {
-        return "";
-    };
-    let rest = &enum_body[opened..];
-    rest.find("\n    },").map_or(rest, |closed| &rest[..closed])
-}
-
-/// The field names one Rust item deserializes, as serde spells them on the wire. The request
-/// enums carry `rename_all_fields = "camelCase"` and the request structs `rename_all`, so a
-/// wire name is the field name camel-cased.
-fn deserialized_fields(body: &str) -> BTreeSet<String> {
-    optional_by_field(body).into_keys().collect()
-}
-
-/// Every field serde reads, and whether a request may leave it out.
-///
-/// Optional means one of two things in the source: the type is an `Option`, or the field
-/// carries `#[serde(default)]`. Both are read here because the table has to say the same thing
-/// — a parameter this file calls required while serde would have filled in a default is a
-/// refusal the handler would never have made, and one it calls optional while serde demands it
-/// is a call refused later and worse.
-fn optional_by_field(body: &str) -> std::collections::BTreeMap<String, bool> {
-    let mut fields = std::collections::BTreeMap::new();
-    let mut defaulted = false;
-    for line in body.lines().map(str::trim) {
-        if line.starts_with("//") {
-            continue;
-        }
-        if line.starts_with('#') {
-            defaulted |= line.contains("serde(default");
-            continue;
-        }
-        let Some(declaration) = line.strip_suffix(',') else {
-            continue;
-        };
-        let Some((name, kind)) = declaration.split_once(':') else {
-            continue;
-        };
-        let name = to_camel_case(name.trim().trim_start_matches("pub "));
-        if name.chars().all(char::is_alphanumeric) && !name.is_empty() {
-            fields.insert(name, defaulted || kind.trim().starts_with("Option<"));
-        }
-        defaulted = false;
-    }
-    fields
-}
-
-/// Which fields the request behind one operation lets a caller leave out.
-///
-/// Empty for the operations answered by a router arm that reads the JSON itself: there is no
-/// type there to ask, and those six are covered by the addon check or by their own tests.
-fn optional_of(tool: &str, op: &str) -> std::collections::BTreeMap<String, bool> {
-    let Some((source, item, is_variant)) = rust_request_behind(tool, op) else {
-        return std::collections::BTreeMap::new();
-    };
-    let keyword = if is_variant { "enum" } else { "struct" };
-    let Some(body) = rust_item_body(source, keyword, item) else {
-        return std::collections::BTreeMap::new();
-    };
-    if is_variant {
-        let variant = to_camel_case(op);
-        let mut characters = variant.chars();
-        let pascal = characters
-            .next()
-            .map(|first| first.to_uppercase().to_string() + characters.as_str())
-            .unwrap_or_default();
-        optional_by_field(rust_variant_body(body, &pascal))
-    } else {
-        optional_by_field(body)
-    }
-}
 
 /// Both operations that take a key read it with the same vocabulary, and it is not empty.
 ///
@@ -754,177 +618,98 @@ fn both_operations_that_take_a_key_speak_the_same_vocabulary() {
     }
 }
 
-/// The parameters one arm of this file's own router reads out of the JSON, for the operations
-/// that deserialize nothing. `function` is the router function, `arm` its match arm.
-fn params_a_router_arm_reads(function: &str, arm: &str) -> BTreeSet<String> {
-    let source = rust_source("router");
-    let Some(body) = source
-        .split_once(&format!("fn {function}"))
-        .and_then(|(_, rest)| rest.split_once("\n}"))
-        .map(|(body, _)| body)
-    else {
-        panic!("{function} is a router function this test can read");
-    };
-    // Arms are `"list" => {` … up to the next arm at the same level.
-    let opened = body
-        .find(&format!("\"{arm}\" =>"))
-        .unwrap_or_else(|| panic!("{function} has a {arm} arm"));
-    let rest = &body[opened..];
-    let end = rest[1..]
-        .find("\n        \"")
-        .map_or(rest.len(), |index| index + 1);
-    params_read_in(&rest[..end])
-}
-
-/// Every `params.get("…")` key in a body, however rustfmt happened to wrap it.
+/// The fields the request behind one Rust-answered operation deserializes, and whether a call may
+/// leave each one out.
 ///
-/// Read with the whitespace taken out, and that is the point. The two spellings used to be matched
-/// literally, one of them carrying sixteen spaces of indent — so a reformat that moved `.get` to
-/// another column left the parse finding nothing, and the check that compares its answer to the
-/// catalogue passed on an empty set. A parser that can go blind silently is worse than none.
-fn params_read_in(body: &str) -> BTreeSet<String> {
-    let squeezed: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    quoted_after(&squeezed, "params.get(\"")
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
-}
-
-/// The same, with a floor: an arm the parser could not read answers with nothing, and nothing
-/// compared to a catalogue entry passes.
-fn params_a_router_arm_must_read(function: &str, arm: &str) -> BTreeSet<String> {
-    let read = params_a_router_arm_reads(function, arm);
-    assert!(
-        !read.is_empty(),
-        "{function}'s {arm} arm parsed to no parameters at all, so nothing here is being checked"
-    );
-    read
-}
-
-fn rust_source(module: &str) -> &'static str {
-    RUST_HANDLERS
-        .iter()
-        .find(|(name, _)| *name == module)
-        .map(|(_, source)| *source)
-        .expect("the module is one this test reads")
-}
-
-/// The request type one Rust-answered operation deserializes into: which file, which item, and
-/// whether the operation names a variant inside it.
-fn rust_request_behind(domain: &str, op: &str) -> Option<(&'static str, &'static str, bool)> {
-    let source = rust_source;
+/// Still a hand-written `(domain, op)` table, and deliberately so. ADR 0002 draws the line at
+/// names: the catalogue generates which operations exist, and what shape each one carries is
+/// written by hand next to the thing it describes. Which Rust type answers an operation is a
+/// shape — it names a payload — so generating it out of `params.json` would be the fourth schema
+/// that ADR refuses, and `params.json` cannot describe a Rust type any more than it can describe
+/// a GDScript dictionary.
+///
+/// What changed is where the answer comes from. This used to hand back a *file* and an item name,
+/// and the fields were recovered by parsing that file's source text. Each request now declares its
+/// own fields beside itself — [`crate::script`], [`crate::debug`], [`crate::files`],
+/// [`crate::gdformat`], [`crate::godot_session`] and [`crate::rag`] each next to their types — so
+/// this is a lookup into a table rather than a parse of a file.
+fn rust_request_behind(domain: &str, op: &str) -> Option<&'static [(&'static str, bool)]> {
     match (domain, op) {
-        ("godot_resource", "move") => Some((source("files"), "MovePathRequest", false)),
-        ("godot_resource", "delete") => Some((source("files"), "DeletePathRequest", false)),
+        // The three the desktop answers out of the supervisor rather than out of a request: they
+        // take nothing, so the empty table is the whole of what they take.
+        ("godot_session", "status" | "start" | "stop") => Some(&[]),
+        ("godot_resource", "list") => Some(crate::files::LIST_PATHS_FIELDS),
+        ("godot_resource", "move") => Some(crate::files::MOVE_PATH_FIELDS),
+        ("godot_resource", "delete") => Some(crate::files::DELETE_PATH_FIELDS),
         // The operations the script domain answers itself, before the language server.
-        ("godot_script", "open" | "close") => Some((source("script"), "OpenScriptRequest", false)),
-        ("godot_script", "update") => Some((source("script"), "UpdateScriptRequest", false)),
-        ("godot_script", "save") => Some((source("script"), "SaveScriptRequest", false)),
-        ("godot_script", "edit") => Some((source("script"), "EditScriptRequest", false)),
-        ("godot_script", "apply_rename") => Some((source("script"), "ApplyRenameRequest", false)),
-        ("godot_script", "format") => Some((source("gdformat"), "FormatRequest", false)),
-        ("godot_script", _) => Some((source("script"), "ScriptRequest", true)),
-        ("godot_debug", _) => Some((source("debug"), "DebugRequest", true)),
-        ("godot_logs", "read") => Some((source("session"), "LogQuery", false)),
-        ("godot_docs_search", "search" | "ask") => Some((source("rag"), "GodotDocsQuery", false)),
+        ("godot_script", "list") => Some(crate::script::LIST_SCRIPTS_FIELDS),
+        ("godot_script", "open" | "close") => Some(crate::script::OPEN_SCRIPT_FIELDS),
+        ("godot_script", "update") => Some(crate::script::UPDATE_SCRIPT_FIELDS),
+        ("godot_script", "save") => Some(crate::script::SAVE_SCRIPT_FIELDS),
+        ("godot_script", "edit") => Some(crate::script::EDIT_SCRIPT_FIELDS),
+        ("godot_script", "apply_rename") => Some(crate::script::APPLY_RENAME_FIELDS),
+        ("godot_script", "format") => Some(crate::gdformat::FORMAT_REQUEST_FIELDS),
+        ("godot_script", op) => crate::script::language_request_fields(op),
+        ("godot_debug", op) => crate::debug::request_fields(op),
+        ("godot_logs", "read") => Some(crate::godot_session::LOG_QUERY_FIELDS),
+        ("godot_docs_search", "search" | "ask") => Some(crate::rag::DOCS_QUERY_FIELDS),
         _ => None,
     }
 }
 
-/// The same promise as the addon check, for the four domains that never reach the editor.
+/// The same promise as the addon check, for the domains that never reach the editor.
 ///
-/// `godot_script`, `godot_debug`, `godot_logs` and `godot_docs_search` are answered in Rust, so
-/// their parameters are the fields of a request type rather than keys read out of a dictionary.
-/// A summary that names a field serde will not accept is refused with `invalid_params` before
-/// anything runs, and one that leaves a field out is a capability the model cannot reach —
-/// `runtime.inspect_node` was the second kind, and it answered with an empty object for as long
-/// as nobody read the handler.
+/// `godot_session`, `godot_resource`, `godot_script`, `godot_debug`, `godot_logs` and
+/// `godot_docs_search` are answered in Rust, so their parameters are the fields of a request type
+/// rather than keys read out of a dictionary. A summary that names a field serde will not accept
+/// is refused with `invalid_params` before anything runs, and one that leaves a field out is a
+/// capability the model cannot reach — `runtime.inspect_node` was the second kind, and it answered
+/// with an empty object for as long as nobody read the handler.
+///
+/// There is no floor under this one any more. A floor was what stood in for the parser that could
+/// stop recognising its surface and compare nothing to nothing; every Rust-answered operation now
+/// has to name a row here or the test panics on it, which is the same promise made exactly rather
+/// than by counting.
 #[test]
 fn every_field_the_rust_handlers_deserialize_is_the_one_the_catalog_documents() {
-    let mut checked = 0;
     let mut disagreements = Vec::new();
     for domain in CATALOG {
         for operation in domain.operations {
-            // The seven that deserialize nothing: their router arm reads the JSON itself.
-            let (item, fields) = match (domain.name, operation.op) {
-                ("godot_script", "list") => (
-                    "the script_domain list arm".to_owned(),
-                    params_a_router_arm_must_read("script_domain", "list"),
-                ),
-                ("godot_resource", "list") => (
-                    "the resource_domain list arm".to_owned(),
-                    params_a_router_arm_must_read("resource_domain", "list"),
-                ),
-                // Not held to the floor below: these three genuinely take nothing, so an empty
-                // answer here is the right one rather than a parser that stopped reading.
-                ("godot_session", op @ ("status" | "start" | "stop")) => (
-                    format!("the session_domain {op} arm"),
-                    params_a_router_arm_reads("session_domain", op),
-                ),
-                _ => {
-                    let Some((source, item, is_variant)) =
-                        rust_request_behind(domain.name, operation.op)
-                    else {
-                        continue;
-                    };
-                    let keyword = if is_variant { "enum" } else { "struct" };
-                    let body = rust_item_body(source, keyword, item)
-                        .unwrap_or_else(|| panic!("{item} is a {keyword} this test can read"));
-                    let fields = if is_variant {
-                        let variant = to_camel_case(operation.op);
-                        let mut characters = variant.chars();
-                        let pascal = characters
-                            .next()
-                            .map(|first| first.to_uppercase().to_string() + characters.as_str())
-                            .unwrap_or_default();
-                        deserialized_fields(rust_variant_body(body, &pascal))
-                    } else {
-                        deserialized_fields(body)
-                    };
-                    (item.to_owned(), fields)
-                }
-            };
-            checked += 1;
+            if operation.route() != crate::tool_params::Answers::Rust {
+                continue;
+            }
+            // Never a skip: an operation answered in Rust that nothing here describes is the one
+            // failure a table comparison could otherwise make in silence.
+            let fields = rust_request_behind(domain.name, operation.op).unwrap_or_else(|| {
+                panic!(
+                    "{} {} is answered in Rust and nothing declares what it deserializes",
+                    domain.name, operation.op
+                )
+            });
             // The declared table, which is what the router enforces. It replaced the prose the
             // first version of this test read: a sentence can be right about a field and still
             // not be the thing that refuses a call carrying the wrong one.
-            let documented: Vec<String> = crate::tool_params::params_of(domain.name, operation.op)
-                .unwrap_or_else(|| {
+            let params =
+                crate::tool_params::params_of(domain.name, operation.op).unwrap_or_else(|| {
                     panic!("{} {} declares its parameters", domain.name, operation.op)
-                })
-                .iter()
-                .map(|param| param.name.to_owned())
-                .collect();
-            for field in &fields {
-                if !NOT_WORTH_THE_MODEL_S_ATTENTION.contains(&field.as_str())
-                    && !documented.iter().any(|named| named == field)
-                {
+                });
+            let documented: Vec<&str> = params.iter().map(|param| param.name).collect();
+            for (field, may_omit) in fields {
+                if !NOT_WORTH_THE_MODEL_S_ATTENTION.contains(field) && !documented.contains(field) {
                     disagreements.push(format!(
                         "{} {} takes `{field}` and its summary never names it",
                         domain.name, operation.op
                     ));
                 }
-            }
-            for named in &documented {
-                if !fields.contains(named) {
-                    disagreements.push(format!(
-                        "{} {} documents `{named}` and {item} has no such field",
-                        domain.name, operation.op
-                    ));
-                }
-            }
-            // Names alone let a hole through: `resource.rescan` was declared as requiring the
-            // path it treats as optional, and the whole-project walk stopped working. Serde
-            // knows which of its fields may be left out, so the table is held to that too.
-            for (field, may_omit) in optional_of(domain.name, operation.op) {
-                let Some(declared) = crate::tool_params::params_of(domain.name, operation.op)
-                    .and_then(|params| params.iter().find(|param| param.name == field))
-                else {
+                // Names alone let a hole through: `resource.rescan` was declared as requiring the
+                // path it treats as optional, and the whole-project walk stopped working. Serde
+                // knows which of its fields may be left out, so the table is held to that too.
+                let Some(declared) = params.iter().find(|param| param.name == *field) else {
                     continue;
                 };
-                if declared.required == may_omit {
+                if declared.required == *may_omit {
                     disagreements.push(format!(
-                        "{} {} calls `{field}` {} and {item} treats it as {}",
+                        "{} {} calls `{field}` {} and the request behind it treats it as {}",
                         domain.name,
                         operation.op,
                         if declared.required {
@@ -932,16 +717,20 @@ fn every_field_the_rust_handlers_deserialize_is_the_one_the_catalog_documents() 
                         } else {
                             "optional"
                         },
-                        if may_omit { "optional" } else { "required" }
+                        if *may_omit { "optional" } else { "required" }
+                    ));
+                }
+            }
+            for named in &documented {
+                if !fields.iter().any(|(field, _)| field == named) {
+                    disagreements.push(format!(
+                        "{} {} documents `{named}` and the request behind it has no such field",
+                        domain.name, operation.op
                     ));
                 }
             }
         }
     }
-    assert!(
-        checked > 44,
-        "only {checked} operations were read, so this test proves little"
-    );
     assert!(
         disagreements.is_empty(),
         "the catalog and the request types disagree:\n{}",
@@ -979,27 +768,13 @@ fn gd_match_labels(functions: &HashMap<&str, String>, name: &str) -> BTreeSet<St
         .collect()
 }
 
-/// The variants of one Rust enum, as serde spells them on the wire.
-fn rust_enum_values(source: &str, name: &str) -> BTreeSet<String> {
-    let Some(body) = rust_item_body(source, "enum", name) else {
-        panic!("{name} is an enum this test can read");
-    };
-    body.lines()
-        .map(str::trim)
-        .filter(|line| !line.starts_with("//") && !line.starts_with('#'))
-        .filter_map(|line| line.strip_suffix(','))
-        .filter(|line| {
-            line.starts_with(|character: char| character.is_ascii_uppercase())
-                && line.chars().all(char::is_alphanumeric)
-        })
-        .map(|variant| {
-            let mut characters = variant.chars();
-            characters
-                .next()
-                .map(|first| first.to_lowercase().to_string() + characters.as_str())
-                .unwrap_or_default()
-        })
-        .collect()
+/// A vocabulary that is written down rather than read out of a file.
+///
+/// The Rust-answered ones are declared beside their own type — see
+/// [`crate::godot_session::LOG_SEVERITY_NAMES`] — so all this does is put them in the same shape as
+/// the six the addon's source still has to be parsed for.
+fn declared_names(names: &[&str]) -> BTreeSet<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
 }
 
 /// Every name a summary offers as a vocabulary has to be a name its handler accepts.
@@ -1018,7 +793,6 @@ fn every_name_a_vocabulary_holds_is_offered_by_the_summary_that_advertises_it() 
     let editor = editor_functions();
     let runtime = gd_functions(RUNTIME_ADDON);
     let protocol = gd_functions(include_str!("../addon/protocol.gd"));
-    let session = rust_source("session");
     let vocabularies: [(&str, &str, &str, BTreeSet<String>); 8] = [
         (
             "godot_node",
@@ -1060,13 +834,13 @@ fn every_name_a_vocabulary_holds_is_offered_by_the_summary_that_advertises_it() 
             "godot_logs",
             "read",
             "the log severities",
-            rust_enum_values(session, "LogSeverity"),
+            declared_names(crate::godot_session::LOG_SEVERITY_NAMES),
         ),
         (
             "godot_logs",
             "read",
             "the log sources",
-            rust_enum_values(session, "LogSource"),
+            declared_names(crate::godot_session::LOG_SOURCE_NAMES),
         ),
     ];
     let mut unoffered = Vec::new();
@@ -1185,6 +959,23 @@ fn the_input_event_shape_the_catalog_documents_is_the_one_the_addon_reads() {
         !summary.contains("keycode"),
         "the addon has no `keycode` field on an input event: {summary}"
     );
+
+    // And the other direction, which the two named fields above cannot cover: a field the catalog
+    // declares and the addon never reads is a promise nothing keeps. `pressed` was one — a model
+    // told it could bind a release event silently got a pressed one, because `decode_input_events`
+    // reads `kind`, `key` and `button` and builds the event from those alone.
+    let events = crate::tool_params::params_of("godot_project", "set_input_action")
+        .expect("set_input_action declares its parameters")
+        .iter()
+        .find(|param| param.name == "events")
+        .expect("set_input_action takes an events list");
+    for field in events.entry {
+        assert!(
+            ADDON.contains(&format!("entry.get(\"{}\"", field.name)),
+            "set_input_action declares an event field `{}` the addon never reads",
+            field.name
+        );
+    }
 }
 
 /// Every mutation the addon guards with a revision has to say so where the model reads it.

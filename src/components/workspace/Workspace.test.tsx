@@ -553,11 +553,19 @@ describe('Workspace game screenshots', () => {
                 version: 1,
                 ai: {
                     connectionType: 'openai-compatible',
-                    name: 'Local AI',
-                    baseUrl: 'http://127.0.0.1:8080/v1',
-                    model: 'local-model',
-                    api: 'openai-completions',
-                    input: ['text', 'image']
+                    connections: {
+                        'openai-compatible': {
+                            name: 'Local AI',
+                            baseUrl: 'http://127.0.0.1:8080/v1',
+                            api: 'openai-completions',
+                            chatTemplateThinking: false,
+                            model: {
+                                id: 'local-model',
+                                name: 'local-model',
+                                input: ['text', 'image']
+                            }
+                        }
+                    }
                 }
             },
             hasApiKey: true
@@ -665,11 +673,19 @@ describe('Workspace planning with a picture attached', () => {
                 version: 1,
                 ai: {
                     connectionType: 'openai-compatible',
-                    name: 'Local AI',
-                    baseUrl: 'http://127.0.0.1:8080/v1',
-                    model: 'local-model',
-                    api: 'openai-completions',
-                    input: ['text', 'image']
+                    connections: {
+                        'openai-compatible': {
+                            name: 'Local AI',
+                            baseUrl: 'http://127.0.0.1:8080/v1',
+                            api: 'openai-completions',
+                            chatTemplateThinking: false,
+                            model: {
+                                id: 'local-model',
+                                name: 'local-model',
+                                input: ['text', 'image']
+                            }
+                        }
+                    }
                 }
             },
             hasApiKey: true

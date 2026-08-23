@@ -10,12 +10,18 @@ import {
     settingsRequest
 } from './settings-draft'
 import type {SettingsAction, SettingsDraft, SettingsTaskAction} from './settings-draft'
-import {DEFAULT_GODOT_SETTINGS, DEFAULT_SUBAGENT_SETTINGS, DEFAULT_WEB_SETTINGS} from './settings'
+import {
+    DEFAULT_GODOT_SETTINGS,
+    DEFAULT_SUBAGENT_SETTINGS,
+    DEFAULT_WEB_SETTINGS,
+    activeConnection
+} from './settings'
 import type {
     AgentPrompt,
     AiModelOption,
     CacheStatus,
     GoferSettings,
+    ModelChoice,
     SettingsResponse
 } from './settings'
 
@@ -23,19 +29,25 @@ const SETTINGS: GoferSettings = {
     version: 1,
     ai: {
         connectionType: 'openai-compatible',
-        name: 'Local',
-        baseUrl: 'http://127.0.0.1:8080/v1',
-        model: 'qwen',
-        api: 'openai-completions',
-        modelName: 'qwen',
-        contextWindow: 32_768,
-        maxTokens: 4096,
-        reasoning: true,
-        chatTemplateThinking: false,
-        supportsReasoningEffort: true,
-        thinkingLevels: [],
-        input: ['text'],
-        thinkingLevel: 'high',
+        connections: {
+            'openai-compatible': {
+                name: 'Local',
+                baseUrl: 'http://127.0.0.1:8080/v1',
+                api: 'openai-completions',
+                chatTemplateThinking: false,
+                model: {
+                    id: 'qwen',
+                    name: 'qwen',
+                    contextWindow: 32_768,
+                    maxTokens: 4096,
+                    reasoning: true,
+                    supportsReasoningEffort: true,
+                    thinkingLevels: [],
+                    input: ['text'],
+                    thinkingLevel: 'high'
+                }
+            }
+        },
         maxRetries: 2,
         timeoutMs: 120_000,
         compactionPercent: 86,
@@ -43,6 +55,11 @@ const SETTINGS: GoferSettings = {
         web: DEFAULT_WEB_SETTINGS
     },
     godot: DEFAULT_GODOT_SETTINGS
+}
+
+/** The live connection's model, which is what the AI tab's fields are about. */
+function chosen(state: {settings?: GoferSettings | undefined}): ModelChoice | undefined {
+    return state.settings && activeConnection(state.settings.ai)?.model
 }
 
 const CACHE: CacheStatus = {path: '/cache', sizeBytes: 1024, state: 'installed'}
@@ -77,7 +94,7 @@ describe('loading', () => {
             cache: CACHE
         })
         expect(state.settings?.ai.compactionPercent).toBe(86)
-        expect(state.settings?.ai.thinkingLevel).toBe('off')
+        expect(state.settings?.ai.subagent).toEqual(DEFAULT_SUBAGENT_SETTINGS)
         expect(state.isLoading).toBe(false)
     })
 
@@ -127,66 +144,102 @@ describe('the request the page would send', () => {
     })
 
     it('sets the key the user typed', () => {
-        const state = reduce(loaded, {type: 'api-key-typed', value: 'sk-1'})
+        const state = reduce(loaded, {type: 'key-typed', secret: 'ai-default', value: 'sk-1'})
         expect(settingsRequest(state)?.apiKey).toEqual({action: 'set', value: 'sk-1'})
     })
 
     it('keeps rather than clears when the typed key is erased again', () => {
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'api-key-typed', value: 'sk-1'},
-            {type: 'api-key-typed', value: '   '}
+            {type: 'key-typed', secret: 'ai-default', value: 'sk-1'},
+            {type: 'key-typed', secret: 'ai-default', value: '   '}
         )
         expect(settingsRequest(state)?.apiKey).toEqual({action: 'keep'})
     })
 
     it('clears only when the removal button was pressed, and un-clears on a second press', () => {
-        const cleared = reduce(loaded, {type: 'api-key-removal-toggled'})
+        const cleared = reduce(loaded, {type: 'key-removal-toggled', secret: 'ai-default'})
         expect(settingsRequest(cleared)?.apiKey).toEqual({action: 'clear'})
-        const kept = reduce(cleared, {type: 'api-key-removal-toggled'})
+        const kept = reduce(cleared, {type: 'key-removal-toggled', secret: 'ai-default'})
         expect(settingsRequest(kept)?.apiKey).toEqual({action: 'keep'})
     })
 
-    it('holds the Brave key by the same three rules as the AI key', () => {
+    it('holds every secret by the same three rules, in its own field of the request', () => {
         // Every one of these matters because the page never reads a stored secret back. An empty
-        // field is "leave it alone"; only the removal button is "take it off the machine".
-        expect(settingsRequest(loaded)?.braveApiKey).toEqual({action: 'keep'})
+        // field is "leave it alone"; only the removal button is "take it off the machine". One rule
+        // now, so this asserts it holds for each secret rather than that three copies agree.
+        const fields = [
+            {secret: 'brave', field: 'braveApiKey'},
+            {secret: 'openrouter', field: 'openrouterApiKey'}
+        ] as const
+        for (const {secret, field} of fields) {
+            expect(settingsRequest(loaded)?.[field]).toEqual({action: 'keep'})
 
-        const typed = reduce(loaded, {type: 'brave-key-typed', value: 'brave-1'})
-        expect(settingsRequest(typed)?.braveApiKey).toEqual({action: 'set', value: 'brave-1'})
+            const typed = reduce(loaded, {type: 'key-typed', secret, value: `${secret}-1`})
+            expect(settingsRequest(typed)?.[field]).toEqual({
+                action: 'set',
+                value: `${secret}-1`
+            })
 
-        const erased = reduce(typed, {type: 'brave-key-typed', value: '   '})
-        expect(settingsRequest(erased)?.braveApiKey).toEqual({action: 'keep'})
+            const erased = reduce(typed, {type: 'key-typed', secret, value: '   '})
+            expect(settingsRequest(erased)?.[field]).toEqual({action: 'keep'})
 
-        const cleared = reduce(loaded, {type: 'brave-key-removal-toggled'})
-        expect(settingsRequest(cleared)?.braveApiKey).toEqual({action: 'clear'})
-        expect(
-            settingsRequest(reduce(cleared, {type: 'brave-key-removal-toggled'}))?.braveApiKey
-        ).toEqual({action: 'keep'})
+            const cleared = reduce(loaded, {type: 'key-removal-toggled', secret})
+            expect(settingsRequest(cleared)?.[field]).toEqual({action: 'clear'})
+            expect(
+                settingsRequest(reduce(cleared, {type: 'key-removal-toggled', secret}))?.[field]
+            ).toEqual({action: 'keep'})
+        }
     })
 
     it('changes one key without disturbing the other', () => {
-        // Two separate credentials sharing one save. Typing a Brave key must not send the AI key,
-        // and clearing one must not clear the other.
+        // Three separate credentials sharing one save. Typing a Brave key must not send the AI key,
+        // and clearing one must not clear the others.
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'brave-key-typed', value: 'brave-1'}
+            {type: 'key-typed', secret: 'brave', value: 'brave-1'}
         )
         expect(settingsRequest(state)?.apiKey).toEqual({action: 'keep'})
+        expect(settingsRequest(state)?.openrouterApiKey).toEqual({action: 'keep'})
         expect(settingsRequest(state)?.braveApiKey).toEqual({action: 'set', value: 'brave-1'})
 
-        const removed = reduce(state, {type: 'api-key-removal-toggled'})
+        const removed = reduce(state, {type: 'key-removal-toggled', secret: 'ai-default'})
         expect(settingsRequest(removed)?.apiKey).toEqual({action: 'clear'})
+        expect(settingsRequest(removed)?.openrouterApiKey).toEqual({action: 'keep'})
         expect(settingsRequest(removed)?.braveApiKey).toEqual({action: 'set', value: 'brave-1'})
     })
 
     it('discards a typed key when removal is chosen', () => {
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'api-key-typed', value: 'sk-1'},
-            {type: 'api-key-removal-toggled'}
+            {type: 'key-typed', secret: 'ai-default', value: 'sk-1'},
+            {type: 'key-removal-toggled', secret: 'ai-default'}
         )
-        expect(state.apiKey).toBe('')
+        expect(state.keys['ai-default'].typed).toBe('')
+    })
+
+    it('reports every stored secret the backend named, including the one with no field', () => {
+        const state = reduce(INITIAL_SETTINGS_DRAFT, {
+            type: 'loaded',
+            response: {
+                settings: SETTINGS,
+                hasApiKey: true,
+                hasBraveApiKey: true,
+                hasOpenrouterApiKey: false,
+                hasChatGptCredential: true
+            },
+            cache: CACHE,
+            prompt: PROMPT
+        })
+        expect(state.keys['ai-default'].isStored).toBe(true)
+        expect(state.keys.brave.isStored).toBe(true)
+        expect(state.keys.openrouter.isStored).toBe(false)
+        expect(state.keys['chat-gpt'].isStored).toBe(true)
+
+        // Signing out is the only thing that removes the one secret with no box.
+        const out = reduce(state, {type: 'chatgpt-auth-changed', isAuthenticated: false})
+        expect(out.keys['chat-gpt'].isStored).toBe(false)
+        expect(out.keys['ai-default'].isStored).toBe(true)
     })
 })
 
@@ -194,7 +247,9 @@ describe('editing the connection', () => {
     it('changes one field and leaves the rest alone', () => {
         const state = reduce(loaded, {type: 'ai-changed', update: {maxRetries: 9}})
         expect(state.settings?.ai.maxRetries).toBe(9)
-        expect(state.settings?.ai.baseUrl).toBe(SETTINGS.ai.baseUrl)
+        expect(state.settings && activeConnection(state.settings.ai)?.baseUrl).toBe(
+            'http://127.0.0.1:8080/v1'
+        )
     })
 
     it('ignores edits arriving before anything has loaded', () => {
@@ -215,9 +270,9 @@ describe('editing the connection', () => {
             input: ['text', 'image']
         }
         const state = reduce(loaded, {type: 'model-chosen', model})
-        expect(state.settings?.ai).toMatchObject({
-            model: 'llama',
-            modelName: 'Llama',
+        expect(chosen(state)).toMatchObject({
+            id: 'llama',
+            name: 'Llama',
             contextWindow: 8192,
             maxTokens: 2048,
             input: ['text', 'image']
@@ -235,9 +290,7 @@ describe('editing the connection', () => {
             thinkingLevels: [],
             input: ['text']
         }
-        expect(reduce(loaded, {type: 'model-chosen', model}).settings?.ai.thinkingLevel).toBe(
-            'high'
-        )
+        expect(chosen(reduce(loaded, {type: 'model-chosen', model}))?.thinkingLevel).toBe('high')
     })
 
     it('drops the thinking level on a model that cannot reason', () => {
@@ -251,7 +304,7 @@ describe('editing the connection', () => {
             thinkingLevels: [],
             input: ['text']
         }
-        expect(reduce(loaded, {type: 'model-chosen', model}).settings?.ai.thinkingLevel).toBe('off')
+        expect(chosen(reduce(loaded, {type: 'model-chosen', model}))?.thinkingLevel).toBe('off')
     })
 
     /*
@@ -275,7 +328,7 @@ describe('editing the connection', () => {
         const stale = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {
-                type: 'ai-changed',
+                type: 'model-changed',
                 update: {
                     reasoning: false,
                     supportsReasoningEffort: false,
@@ -286,9 +339,9 @@ describe('editing the connection', () => {
         )
         const state = reduce(stale, {type: 'model-reconciled', model})
 
-        expect(state.settings?.ai.reasoning).toBe(true)
-        expect(state.settings?.ai.supportsReasoningEffort).toBe(true)
-        expect(state.settings?.ai.contextWindow).toBe(999_999)
+        expect(chosen(state)?.reasoning).toBe(true)
+        expect(chosen(state)?.supportsReasoningEffort).toBe(true)
+        expect(chosen(state)?.contextWindow).toBe(999_999)
     })
 
     it('leaves the draft alone when the catalogue agrees with it', () => {
@@ -297,9 +350,9 @@ describe('editing the connection', () => {
             name: 'Local model',
             contextWindow: 4_096,
             maxTokens: 1_024,
-            reasoning: loaded.settings?.ai.reasoning ?? false,
+            reasoning: chosen(loaded)?.reasoning ?? false,
             thinkingLevels: [],
-            supportsReasoningEffort: loaded.settings?.ai.supportsReasoningEffort ?? false,
+            supportsReasoningEffort: chosen(loaded)?.supportsReasoningEffort ?? false,
             input: ['text']
         }
 
@@ -332,11 +385,10 @@ describe('choosing the model the sub-agent answers with', () => {
 
         expect(state.settings?.ai.subagent.connection).toMatchObject({
             connectionType: 'openai-compatible',
-            model: 'qwen',
-            contextWindow: 32_768
+            model: {id: 'qwen', contextWindow: 32_768}
         })
         // And the parent is untouched, which is the whole point of the child having its own.
-        expect(state.settings?.ai.model).toBe('qwen')
+        expect(chosen(state)?.id).toBe('qwen')
     })
 
     it('gives the child a model and a level of its own', () => {
@@ -347,12 +399,14 @@ describe('choosing the model the sub-agent answers with', () => {
         )
 
         expect(state.settings?.ai.subagent.connection).toMatchObject({
-            model: 'small',
-            contextWindow: 8192,
-            // A model that cannot reason has no level to keep.
-            thinkingLevel: 'off'
+            model: {
+                id: 'small',
+                contextWindow: 8192,
+                // A model that cannot reason has no level to keep.
+                thinkingLevel: 'off'
+            }
         })
-        expect(state.settings?.ai.thinkingLevel).toBe('high')
+        expect(chosen(state)?.thinkingLevel).toBe('high')
     })
 
     it('empties the model list when the driver changes, so nothing stale can be picked', () => {
@@ -391,7 +445,7 @@ describe('choosing the model the sub-agent answers with', () => {
             {type: 'subagent-thinking-chosen', thinkingLevel: 'low'}
         )
 
-        expect(state.settings?.ai.subagent.connection?.thinkingLevel).toBe('low')
+        expect(state.settings?.ai.subagent.connection?.model.thinkingLevel).toBe('low')
     })
 })
 
@@ -442,16 +496,23 @@ describe('work in flight', () => {
 })
 
 describe('saving', () => {
-    it('adopts what the backend stored and forgets the typed key', () => {
+    it('adopts what the backend stored and forgets every typed key', () => {
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'api-key-typed', value: 'sk-1'},
+            {type: 'key-typed', secret: 'ai-default', value: 'sk-1'},
+            {type: 'key-typed', secret: 'brave', value: 'brave-1'},
+            {type: 'key-removal-toggled', secret: 'openrouter'},
             {type: 'began', task: 'saving'},
-            {type: 'saved', response: {settings: SETTINGS, hasApiKey: true}}
+            {type: 'saved', response: {settings: SETTINGS, hasApiKey: true, hasBraveApiKey: true}}
         )
-        expect(state.hasApiKey).toBe(true)
-        expect(state.apiKey).toBe('')
-        expect(state.apiKeyIntent).toBe('keep')
+        expect(state.keys['ai-default'].isStored).toBe(true)
+        expect(state.keys.brave.isStored).toBe(true)
+        // The save wrote all three, so all three boxes are empty and back to "leave it alone".
+        // Text left in one would be sent a second time by the next save.
+        for (const key of Object.values(state.keys)) {
+            expect(key.typed).toBe('')
+            expect(key.intent).toBe('keep')
+        }
         expect(state.busy.saving).toBe(false)
         expect(state.notices.ai?.status).toBe('success')
     })

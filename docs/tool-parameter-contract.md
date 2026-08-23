@@ -1,7 +1,8 @@
 # The tool parameter contract
 
-One source of truth for what every tool operation accepts, the check that refuses a bad call in
-Rust, the signature the model reads, and the addon's own backstop.
+One source of truth for everything a tool operation is — what it accepts, what the model is told it
+does, what answers it, where it may sit in an `ops` list, and whether the user is asked first — the
+check that refuses a bad call in Rust, the signature the model reads, and the addon's own backstop.
 
 ## Why it exists
 
@@ -30,15 +31,32 @@ path, and no test held it to anything.
 ```
 protocol/schemas/v2/params.json      the source. Hand-written.
   │  npm run generate
-  ├─► src-tauri/src/tool_params.rs   the table the router refuses a call against
+  ├─► src-tauri/src/tool_params.rs   the OPERATIONS table the router works off
   └─► src-tauri/addon/plugin.gd      COMMAND_PARAMS, the addon-side backstop
 ```
 
 `npm run check` runs `--check`, so a hand-edited region fails the gate.
 
-The signature the model reads is generated from the same table at serialization time — the worker
-receives `{op, summary, signature, params}` per operation, and `ai-host.mjs` renders the signature
-in front of the summary.
+One row of the source is one `Operation`, and it carries everything about that operation:
+
+| Field     | Source key               | What reads it                                                                 |
+| --------- | ------------------------ | ----------------------------------------------------------------------------- |
+| `tool`    | `tool`                   | the refusal, so it can name the call the way the model wrote it               |
+| `op`      | `op`                     | the router's lookup, keyed on the `(tool, op)` pair                           |
+| `summary` | `summary`                | the model — this is the half of the tool description a person writes          |
+| `params`  | `params`                 | `check`, and the signature printed in front of the summary                    |
+| `answers` | `command` / `answeredBy` | `route()`: the addon under that command name, or a Rust handler of its own    |
+| `alone`   | `alone`                  | `sharing()`: how much of an `ops` list it may share, and the sentence why     |
+| `gated`   | `gated`                  | `gate()`: the sentence the user is shown first, or `None` for auto-allowed    |
+| `writes`  | `writes`                 | `godot_policy::enforcement_refusal`, which reads the tag rather than the pair |
+
+It was five tables keyed on the same pair of strings, and one dispatch looked the same operation up
+five times over. They are one row of the source, so they are one row in Rust.
+
+The signature the model reads is generated from the row's own parameters at serialization time
+rather than stored beside them — the worker receives `{op, summary, signature, params, alone}` per
+operation, and `signatureOf` in `scripts/tool-schema.mjs` renders the signature in front of the
+summary as `godot-tools.mjs` builds each domain's description.
 
 ## What is checked where
 

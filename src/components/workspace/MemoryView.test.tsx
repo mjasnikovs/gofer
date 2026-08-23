@@ -4,13 +4,8 @@ import userEvent from '@testing-library/user-event'
 import {MemoryView} from './MemoryView'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush, flushUntil} from '../../test/flush'
-import type {
-    MemoryEdit,
-    MemoryJudgeEvent,
-    MemoryState,
-    MemorySweepEvent,
-    ProjectMemory
-} from '../../models/memory'
+import {CommandFailure, installBackend} from '../../test/backend'
+import type {MemoryJudgeEvent, MemorySweepEvent, ProjectMemory} from '../../models/memory'
 
 const tauri = createDesktopFake()
 
@@ -36,85 +31,62 @@ const STALE = memory({
     anchors: [{named: 'GRAYZONE.md'}]
 })
 
-/** Everything the panel asked the backend to do, and what it was handed back. */
+/** One judgement the panel asked for: which memory, and the turn it runs as. */
+type JudgeRequest = Readonly<{memoryId: string; requestId: number}>
+/** One sweep the panel asked for: the rows it named, and the turn it runs as. */
+type SweepRequest = Readonly<{memoryIds: readonly string[]; requestId: number}>
+
+/**
+ * The shared backend holding these rows, with the two model runs held open.
+ *
+ * Listing, saving, forgetting and triage are the fake's own, so every assertion below is about
+ * what the panel did to the project rather than about which command it called. Judging and
+ * sweeping are overridden because they are a minute of model time the test has to end itself.
+ */
 function backend(rows: readonly ProjectMemory[] = [memory({}), STALE]) {
-    const saved: MemoryEdit[] = []
-    const forgotten: string[] = []
-    const judged: {memoryId: string; requestId: number}[] = []
+    const judged: JudgeRequest[] = []
     const stopped: number[] = []
-    const swept: {memoryIds: readonly string[]; requestId: number}[] = []
-    const held: {ids: string[]; state: MemoryState}[] = []
+    const swept: SweepRequest[] = []
     /** Resolves the running judgement, the way the backend answers once its verdict is filed. */
     let settle: ((memory: ProjectMemory) => void) | undefined
     /** Ends the running sweep, which is how the backend answers whether it finished or was stopped. */
-    let endSweep: (() => void) | undefined
-    let listed = [...rows]
-    tauri.invoke.mockImplementation((command, arguments_) => {
-        if (command === 'judge_project_memory') {
-            const {request} = arguments_ as {request: {memoryId: string; requestId: number}}
-            judged.push(request)
-            return new Promise<ProjectMemory>(resolve => {
-                settle = judgedMemory => {
-                    listed = listed.map(row => (row.id === judgedMemory.id ? judgedMemory : row))
-                    resolve(judgedMemory)
-                }
-            })
-        }
-        if (command === 'cancel_ai_request') {
-            stopped.push((arguments_ as {requestId: number}).requestId)
-            return Promise.resolve(true)
-        }
-        if (command === 'list_project_memory') return Promise.resolve(listed)
-        if (command === 'save_project_memory') {
-            const {edit} = arguments_ as {edit: MemoryEdit}
-            saved.push(edit)
-            const before = listed.find(row => row.id === edit.id)
-            const stored = memory({
-                ...before,
-                kind: edit.kind,
-                state: edit.state,
-                content: edit.content
-            })
-            listed = listed.map(row => (row.id === stored.id ? stored : row))
-            return Promise.resolve(stored)
-        }
-        if (command === 'delete_project_memory') {
-            const {id} = arguments_ as {id: string}
-            forgotten.push(id)
-            listed = listed.filter(row => row.id !== id)
-            return Promise.resolve()
-        }
-        if (command === 'sweep_project_memory') {
-            const {request} = arguments_ as {
-                request: {memoryIds: readonly string[]; requestId: number}
+    let endSweep: ((rows: readonly ProjectMemory[]) => void) | undefined
+    const server = installBackend(tauri, {
+        memories: rows,
+        answers: {
+            judge_project_memory: ({request}) => {
+                judged.push(request)
+                return new Promise<ProjectMemory>(resolve => {
+                    settle = resolve
+                })
+            },
+            cancel_ai_request: ({requestId}) => {
+                stopped.push(requestId)
+                return true
+            },
+            sweep_project_memory: ({request}) => {
+                swept.push(request)
+                return new Promise<readonly ProjectMemory[]>(resolve => {
+                    endSweep = resolve
+                })
             }
-            swept.push(request)
-            return new Promise<readonly ProjectMemory[]>(resolve => {
-                endSweep = () => {
-                    resolve(listed)
-                }
-            })
         }
-        if (command === 'set_memory_states') {
-            const {ids, state} = arguments_ as {ids: readonly string[]; state: MemoryState}
-            held.push({ids: [...ids], state})
-            const moved = listed.filter(row => ids.includes(row.id)).map(row => ({...row, state}))
-            listed = listed.map(row => moved.find(one => one.id === row.id) ?? row)
-            return Promise.resolve(moved)
-        }
-        throw new Error(`No fake for ${command}`)
     })
     return {
-        saved,
-        forgotten,
+        state: server.state,
         judged,
         stopped,
         swept,
-        held,
-        settle: (row: ProjectMemory) => settle?.(row),
-        endSweep: () => endSweep?.(),
+        /** Files the verdict the way Rust does — in the row — before the command answers. */
+        settle: (row: ProjectMemory) => {
+            server.state.memories = server.state.memories.map(one =>
+                one.id === row.id ? row : one
+            )
+            settle?.(row)
+        },
+        endSweep: () => endSweep?.(server.state.memories),
         /** What the panel would read now, so a test can assert against the same rows it does. */
-        listed: () => listed
+        listed: () => server.state.memories
     }
 }
 
@@ -217,14 +189,11 @@ describe('the memory panel', () => {
         await user.click(screen.getByRole('button', {name: 'Save'}))
         await flush()
 
-        expect(log.saved).toEqual([
-            {
-                id: 'two',
-                kind: 'summary',
-                state: 'candidate',
-                content: 'User request: delete GRAYZONE.md\nOutcome: deleted it.'
-            }
-        ])
+        expect(log.listed().find(row => row.id === 'two')).toMatchObject({
+            kind: 'summary',
+            state: 'candidate',
+            content: 'User request: delete GRAYZONE.md\nOutcome: deleted it.'
+        })
         expect(screen.getByText('1 of these reach the model. A turn is given six.')).toBeVisible()
     })
 
@@ -239,16 +208,21 @@ describe('the memory panel', () => {
         await user.click(screen.getByRole('button', {name: 'Forget'}))
         await flush()
 
-        expect(log.forgotten).toEqual(['two'])
+        expect(log.listed().map(row => row.id)).toEqual(['one'])
         expect(screen.queryByText('delete GRAYZONE.md → deleted it.')).toBeNull()
     })
 
     /** A failed read is a state of the panel, not a blank list that looks like an empty project. */
     it('reports a read it could not do', async () => {
-        tauri.invoke.mockRejectedValue({
-            code: 'memory_unavailable',
-            message: 'The project database is not open',
-            retryable: true
+        installBackend(tauri, {
+            answers: {
+                list_project_memory: () => {
+                    throw new CommandFailure(
+                        'memory_unavailable',
+                        'The project database is not open'
+                    )
+                }
+            }
         })
         render(<MemoryView />)
         await flushUntil(
@@ -623,8 +597,10 @@ describe('acting on what the model found', () => {
         await user.click(screen.getByRole('button', {name: 'Hold back all 1'}))
         await flush()
 
-        expect(log.held).toEqual([{ids: ['four'], state: 'candidate'}])
-        expect(log.forgotten).toEqual([])
-        expect(log.listed().find(row => row.id === 'four')?.content).toBe(BROKEN.content)
+        expect(log.listed().find(row => row.id === 'four')).toMatchObject({
+            state: 'candidate',
+            content: BROKEN.content
+        })
+        expect(log.listed().map(row => row.id)).toEqual(['one', 'four'])
     })
 })

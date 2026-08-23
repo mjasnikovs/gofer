@@ -225,11 +225,22 @@ struct Journey {
     workspace: PathBuf,
     directory: TempDir,
     _environment: Vec<EnvGuard>,
+    /// The worker this journey stands in for, and the turn it runs inside.
+    ///
+    /// Declared in this order because fields drop in declaration order: the gate pair closes
+    /// before the turn that admitted it releases the provider operation, which is the order
+    /// [`crate::ai_turn`] runs a real worker in.
+    _run: crate::ai_turn::WorkerRun,
+    _turn: crate::ai_turn::AiTurn,
 }
 
 impl Drop for Journey {
     fn drop(&mut self) {
-        approvals::cancel_all();
+        // Ahead of stopping the session, for the reason `run_ai_worker_with` closes it ahead of
+        // joining its tool threads: a gated call still waiting on a user it will never get holds
+        // the thread that is about to be asked to shut the editor down. `_run`'s own `Drop` closes
+        // it again once this body has finished — this is the one place the order matters.
+        crate::ask::cancel_user_prompts();
         let _ = ai_tools::dispatch(
             self.app.handle(),
             ToolRequest {
@@ -279,8 +290,16 @@ impl Journey {
             .build()
             .expect("build mock webview");
         app.manage(crate::storage::StorageSlot::new(Ok(storage.clone())));
-        // A turn is running: gated tool calls only ever wait for a user inside one.
-        approvals::open();
+        // A turn is running: gated tool calls only ever wait for a user inside one. The real
+        // guard, rather than the approval half of it copied out by hand — which left every
+        // `ask_user` a journey made refused by a gate nothing here had opened.
+        //
+        // Nothing reads the stream. A journey drives `ai_tools::dispatch` directly rather than
+        // spawning a worker, so there are no agent events to carry; the turn is what owns the
+        // channel, so one has to exist.
+        let turn = crate::ai_turn::AiTurn::begin(1, tauri::ipc::Channel::new(|_| Ok(())))
+            .expect("no other AI turn is running");
+        let run = crate::ai_turn::WorkerRun::enter(&turn);
 
         Self {
             app,
@@ -288,6 +307,8 @@ impl Journey {
             workspace,
             directory,
             _environment: environment,
+            _run: run,
+            _turn: turn,
         }
     }
 

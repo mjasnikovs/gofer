@@ -21,18 +21,25 @@ describe('renderer desktop journey', () => {
                 version: 1,
                 ai: {
                     connectionType: 'openai-compatible',
-                    name: 'Local AI',
-                    baseUrl: 'http://127.0.0.1:8080/v1',
-                    model: 'fixture',
-                    api: 'openai-completions',
-                    modelName: 'Fixture',
-                    contextWindow: 8_192,
-                    maxTokens: 1_024,
-                    reasoning: false,
-                    supportsReasoningEffort: false,
-                    thinkingLevels: [],
-                    input: ['text'],
-                    thinkingLevel: 'off',
+                    connections: {
+                        'openai-compatible': {
+                            name: 'Local AI',
+                            baseUrl: 'http://127.0.0.1:8080/v1',
+                            api: 'openai-completions',
+                            chatTemplateThinking: false,
+                            model: {
+                                id: 'fixture',
+                                name: 'Fixture',
+                                contextWindow: 8_192,
+                                maxTokens: 1_024,
+                                reasoning: false,
+                                supportsReasoningEffort: false,
+                                thinkingLevels: [],
+                                input: ['text'],
+                                thinkingLevel: 'off'
+                            }
+                        }
+                    },
                     maxRetries: 0,
                     timeoutMs: 5_000
                 }

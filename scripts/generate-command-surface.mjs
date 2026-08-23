@@ -90,6 +90,14 @@ async function parameterCatalogue() {
             throw new Error(
                 `${path}: ${entry.tool} ${entry.op} names neither an addon command nor answeredBy: "rust"`
             )
+        // The prose the model reads. An operation without one is a tool the model is told the name
+        // of and nothing else, which is the one thing a catalogue may not be.
+        if (typeof entry.summary !== 'string' || entry.summary.trim() === '')
+            throw new Error(`${path}: ${entry.tool} ${entry.op} has no summary`)
+        if ('writes' in entry && !WRITES.includes(entry.writes))
+            throw new Error(
+                `${path}: ${entry.tool} ${entry.op} writes ${JSON.stringify(entry.writes)}, not one of ${WRITES.join(', ')}`
+            )
         // A blank sentence would refuse the call and say nothing about why, which is the failure the
         // whole file exists to make impossible. Absence is the default and means "may be repeated".
         if ('alone' in entry) {
@@ -132,6 +140,16 @@ async function parameterCatalogue() {
  * rather than an operation that quietly stops being narrowed.
  */
 const ALONE_SCOPES = ['repeat', 'exclusive']
+
+/**
+ * What an operation may declare that it writes.
+ *
+ * The tag one of the user's enforced Godot rules is keyed on — the two settings surfaces and a call
+ * carrying GDScript source. Held to a list here so a typo is a build failure rather than an
+ * operation that quietly stops being enforced, which is the whole reason the rule reads a tag
+ * instead of matching on the tool and the operation.
+ */
+const WRITES = ['projectSetting', 'editorSetting', 'scriptText']
 
 const KINDS = [
     'text',
@@ -337,23 +355,73 @@ function rustParam(param) {
     return param.note ? `noted(${call}, ${rustString(param.note)})` : call
 }
 
-function rustParams(operations) {
-    const entries = operations
-        .map(entry => {
-            const declared = (entry.params ?? []).map(rustParam)
-            // Accepted by the router and left out of the signature, so a desktop client that has
-            // always passed `scene` keeps working without the model being told to.
-            const accepted = (entry.accepts ?? []).map(name => `hidden("${name}", Text)`)
-            const params = [...declared, ...accepted].join(', ')
-            // What answers the operation, from the same row that declares its parameters. The
-            // router used to rebuild the addon command with `format!("{prefix}.{op}")` and keep a
-            // hand-written exception list per domain; this is the mapping those lists approximated.
-            const answers =
-                entry.command ? `Answers::Addon(${rustString(entry.command)})` : 'Answers::Rust'
-            return `op(${rustString(entry.tool)}, ${rustString(entry.op)}, ${answers}, &[${params}]),\n`
+/**
+ * One operation as the Rust row declares it, wrapper by wrapper.
+ *
+ * Everything the router knows about an operation comes off this row: the prose the model reads,
+ * the parameters that refuse a call, what answers it, where it may sit in an `ops` list, whether
+ * the user is asked first, and what it writes that a rule may refuse. Each of those was a table of
+ * its own, keyed on the same `(tool, op)` pair, and a single dispatch looked the same operation up
+ * five times over — while a gate or a narrowing naming an operation that had been renamed meant an
+ * operation quietly running unapproved or unnarrowed, catchable only by a test that ran afterwards.
+ * They are one row of the source, so they are one row here.
+ */
+function rustOperation(entry) {
+    const declared = (entry.params ?? []).map(rustParam)
+    // Accepted by the router and left out of the signature, so a desktop client that has
+    // always passed `scene` keeps working without the model being told to.
+    const accepted = (entry.accepts ?? []).map(name => `hidden("${name}", Text)`)
+    const params = [...declared, ...accepted].join(', ')
+    // What answers the operation, from the same row that declares its parameters. The router used
+    // to rebuild the addon command with `format!("{prefix}.{op}")` and keep a hand-written
+    // exception list per domain; this is the mapping those lists approximated.
+    const answers = entry.command ? `Answers::Addon(${rustString(entry.command)})` : 'Answers::Rust'
+    let call = `op(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustString(entry.summary)}, ${answers}, &[${params}])`
+    if (entry.alone)
+        call = `alone(${call}, ${rustScope(entry.alone.scope)}, ${rustString(entry.alone.why)})`
+    if (entry.gated) call = `gated(${call}, ${rustString(entry.gated)})`
+    if (entry.writes) call = `writes(${call}, ${rustWrites(entry.writes)})`
+    return call
+}
+
+/** The Rust const one domain's operations are emitted under, which is what `CATALOG` names. */
+function operationsConst(tool) {
+    return `${tool.toUpperCase()}_OPERATIONS`
+}
+
+/** The `Writes` variant for a declared tag. */
+function rustWrites(what) {
+    return `Writes::${what[0].toUpperCase()}${what.slice(1)}`
+}
+
+/**
+ * Every operation, as one list per domain and one list of those.
+ *
+ * Emitted long — one call per line, no width judgement — and handed to rustfmt, because guessing
+ * where rustfmt would break a line is a game the generator cannot win and `npm run check` would
+ * lose loudly.
+ *
+ * Per domain rather than one flat table, because `CATALOG` hands its domain's list to the worker
+ * whole: the tool the model is given is a name, a description, and these rows. Nothing else names
+ * them, which is what makes a list nobody hands to a domain a dead const the compiler reports.
+ */
+function rustOperations(operations) {
+    const byTool = new Map()
+    for (const entry of operations) {
+        if (!byTool.has(entry.tool)) byTool.set(entry.tool, [])
+        byTool.get(entry.tool).push(entry)
+    }
+    return [...byTool]
+        .map(([tool, entries]) => {
+            const rows = entries.map(entry => `    ${rustOperation(entry)},\n`).join('')
+            return `pub const ${operationsConst(tool)}: &[Operation] = &[\n${rows}];\n`
         })
-        .join('')
-    return `pub const TABLE: &[OpParams] = &[\n${entries}];\n`
+        .join('\n')
+}
+
+/** The `Sharing` variant for a declared scope. */
+function rustScope(scope) {
+    return `Sharing::${scope[0].toUpperCase()}${scope.slice(1)}`
 }
 
 /**
@@ -363,52 +431,6 @@ function rustParams(operations) {
  * handler that demanded them among its parameters would refuse every well-formed call. The same
  * spec therefore means two different things at the two layers, and only the generator knows both.
  */
-/**
- * The safety model, keyed by the same (tool, op) as the parameters and the route.
- *
- * It was a table of its own in `approvals.rs`, which made it a fifth surface on the same key and a
- * fifth thing to hold to the catalogue afterwards — `gated_operations_name_real_catalog_operations`
- * existed only to catch a gate naming an operation that no longer exists. Generated from the row
- * that declares the operation, that cannot happen.
- */
-function rustGated(operations) {
-    const rows = operations
-        .filter(entry => entry.gated)
-        .map(
-            entry =>
-                `    gate(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustString(entry.gated)}),\n`
-        )
-        .join('')
-    return `pub const GATED: &[GatedOperation] = &[\n${rows}];\n`
-}
-
-/**
- * Where an operation may sit in an `ops` list, keyed by the same (tool, op) as everything else.
- *
- * Every tool call is a list now, so the model that wanted three inspections writes one call rather
- * than three. Two narrowings, and the sentence is the refusal, so it says which one it is.
- * `Repeat` is an operation a list may hold beside others but not twice: it takes no parameters to
- * vary, or it drives something the session owns exactly one of — the open scene, the running game,
- * the undo stack, the dialog — and the router runs a list in order, so a second entry would only
- * redo or undo the first. `Exclusive` is the debugger, where each answer decides what the next
- * operation means, so nothing may share its call.
- */
-function rustAlone(operations) {
-    const rows = operations
-        .filter(entry => entry.alone)
-        .map(
-            entry =>
-                `    only(${rustString(entry.tool)}, ${rustString(entry.op)}, ${rustScope(entry.alone.scope)}, ${rustString(entry.alone.why)}),\n`
-        )
-        .join('')
-    return `pub const ALONE: &[LoneOperation] = &[\n${rows}];\n`
-}
-
-/** The `Sharing` variant for a declared scope. */
-function rustScope(scope) {
-    return `Sharing::${scope[0].toUpperCase()}${scope.slice(1)}`
-}
-
 function gdCommandParams(operations) {
     const rows = operations
         .filter(entry => entry.command)
@@ -497,15 +519,8 @@ export async function generateSurfaces() {
             rustfmt: true,
             regions: [
                 {name: 'vocabularies', body: rustVocabularies(vocabularies)},
-                {name: 'op-params', body: rustParams(parameters)},
-                {name: 'alone-operations', body: rustAlone(parameters)}
+                {name: 'operations', body: rustOperations(parameters)}
             ]
-        },
-        {
-            path: 'src-tauri/src/approvals.rs',
-            comment: '//',
-            rustfmt: true,
-            regions: [{name: 'gated-operations', body: rustGated(parameters)}]
         },
         {
             path: 'src/models/godot-commands.ts',

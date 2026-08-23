@@ -132,6 +132,9 @@ function reason(error) {
  */
 async function withDeadline(run, signal, timeoutMs) {
     let timer
+    // Taken off in the same `finally` as the timer, and for the same reason: the signal outlives the
+    // probe by the whole turn, and every probe adds one of these to it.
+    let stopped
     try {
         return await Promise.race([
             run(),
@@ -148,13 +151,13 @@ async function withDeadline(run, signal, timeoutMs) {
                         ),
                     timeoutMs
                 )
-                signal?.addEventListener('abort', () => reject(new Error('the turn was stopped')), {
-                    once: true
-                })
+                stopped = () => reject(new Error('the turn was stopped'))
+                signal?.addEventListener('abort', stopped, {once: true})
             })
         ])
     } finally {
         clearTimeout(timer)
+        if (stopped) signal?.removeEventListener('abort', stopped)
     }
 }
 

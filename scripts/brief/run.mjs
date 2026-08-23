@@ -8,16 +8,33 @@
  *
  * Two facts about the process it runs in shape everything below.
  *
- * A stop is a kill. The backend cancels a run by killing this process, so nothing held here survives
- * it. Anything a resumed run would want back has to have crossed into Rust already, which is why each
- * phase announces its output the moment it has one rather than at the end.
+ * A stop can be a kill. The backend asks this process to stop on the channel it already has open —
+ * `scripts/ai-host.mjs` reads the line and aborts the signal every phase carries — and kills it if
+ * it does not answer. Nothing held here survives that second ask, so anything a resumed run would
+ * want back has to have crossed into Rust already, which is why each phase announces its output the
+ * moment it has one rather than at the end.
  *
  * Nothing here writes to a database. Node has no handle on one. The `brief-phase` event is the whole
  * of the persistence story from this side; the backend is what makes it durable.
  */
 
+import {
+    briefCost,
+    briefDone,
+    briefFailed,
+    briefLog,
+    briefPhase,
+    briefPhaseStart,
+    briefQuestionSettled,
+    briefStarted,
+    briefStopped,
+    briefWorker,
+    briefWorkerDone,
+    briefWorkerStep
+} from '../ai-events.mjs'
 import {createModelContext} from '../ai-provider.mjs'
-import {createChildTools, eventProgress, readsImages, runSubagentOutcome} from '../ai-subagent.mjs'
+import {createChildTools, eventProgress, runSubagentOutcome} from '../ai-subagent.mjs'
+import {modelReadsImages} from '../agent-runtime.mjs'
 import {probeTools} from '../ai-reachability.mjs'
 import {BRIEF_PHASES} from './catalogue.mjs'
 import {PhaseFailed, PhaseStopped, compose, grill, refine, research} from './phases.mjs'
@@ -108,16 +125,6 @@ export function searchConfigured(settings, braveApiKey) {
     return provider !== 'brave' || Boolean(braveApiKey)
 }
 
-/**
- * Can this model be shown a picture?
- *
- * Re-exported rather than written again. It was written twice, identically, and two copies of one
- * capability check is one of them being right after somebody widens it — a provider that advertises
- * its eyes under another word would be understood by one caller and not the other, for the same
- * model.
- */
-export {readsImages}
-
 /** The backend's `{data, mimeType}` pairs, as the content blocks a prompt carries. */
 export function asImageContent(images) {
     return images.map(image => ({type: 'image', data: image.data, mimeType: image.mimeType}))
@@ -197,7 +204,7 @@ export async function runBrief({
     // Said before anything slow happens, and the probe below is slow. Until this arrives the window
     // has a task with an empty chat and nothing saying why, which is the same thing a broken run
     // looks like. It is also the only event that arrives before the first phase can fail.
-    emit({type: 'brief-started'})
+    emit(briefStarted())
     /*
      * The pictures the ask came with, if the model answering the phases can read one.
      *
@@ -207,14 +214,14 @@ export async function runBrief({
      * loud when they are dropped, because a plan written without the screenshot it was asked about
      * is wrong in a way only the user can see.
      */
-    const pictures = readsImages(subagent.model) ? asImageContent(images) : []
+    const pictures = modelReadsImages(subagent.model) ? asImageContent(images) : []
     if (images.length > 0 && pictures.length === 0) {
-        emit({
-            type: 'brief-log',
-            message:
+        emit(
+            briefLog(
                 `the plan's model cannot read images, so the ${String(images.length)} attached `
-                + 'to the ask were left out of it'
-        })
+                    + 'to the ask were left out of it'
+            )
+        )
     }
     const canSearch = searchConfigured(settings, braveApiKey)
     const childDeps = {domains, host, braveApiKey, searchProvider: settings?.web?.searchProvider}
@@ -231,13 +238,13 @@ export async function runBrief({
      * the accounting are decided once instead of per phase.
      */
     const runWorker = async ({label, prompt: text, toolNames, images: pictures = []}) => {
-        emit({type: 'brief-worker', label})
+        emit(briefWorker(label))
         const outcome = await world.runSubagentOutcome({
             // The panel's live line, produced by the delegation rather than by this loop. Nothing
             // here formats it: `eventProgress` is the sub-agent's own sink for a caller that has an
             // event pipe instead of a tool row, and the only thing this file supplies is the name
             // the catalogue owns and which worker it is about.
-            progress: eventProgress(emit, 'brief-worker-step', {label}),
+            progress: eventProgress(emit, briefWorkerStep, {label}),
             prompt: appendNoThink(text),
             images: pictures,
             toolNames,
@@ -270,10 +277,9 @@ export async function runBrief({
         // runs up to eight workers between two of them and compose two whole drafts, so a boundary
         // alone lets a runaway spend most of a run past its ceiling.
         guard: phase => guardDeadline(phase, now() - startedAt - waitedOnTheUser, deadlineMs),
-        log: message => emit({type: 'brief-log', message}),
-        onWorker: (section, kind) => emit({type: 'brief-worker-done', section, kind}),
-        onQuestion: (question, outcome) =>
-            emit({type: 'brief-question-settled', question: question.question, outcome}),
+        log: message => emit(briefLog(message)),
+        onWorker: (section, kind) => emit(briefWorkerDone(section, kind)),
+        onQuestion: (question, outcome) => emit(briefQuestionSettled(question.question, outcome)),
         // The question goes out as an ordinary tool call, down the channel the backend already gives
         // its own thread. That is what lets it block for as long as a person takes to answer without
         // stalling the events drawing the question on screen.
@@ -298,9 +304,9 @@ export async function runBrief({
 
     const started = phase => {
         atPhase = phase
-        emit({type: 'brief-phase-start', phase})
+        emit(briefPhaseStart(phase))
     }
-    const finished = (phase, field, value) => emit({type: 'brief-phase', phase, field, value})
+    const finished = (phase, field, value) => emit(briefPhase(phase, field, value))
 
     try {
         // Before any phase runs, and worded so a refusal names the tool rather than the brief: a
@@ -327,8 +333,8 @@ export async function runBrief({
             finished(name, field, stored(done[field]))
         }
 
-        emit({type: 'brief-cost', ...spend})
-        emit({type: 'done', spec: done.spec})
+        emit(briefCost(spend))
+        emit(briefDone(done.spec))
         return done.spec
     } catch (error) {
         // Every way out of a run says so, on one of two events, and this is the only place that
@@ -338,7 +344,7 @@ export async function runBrief({
         // showing the run kept a spinner and then vanished, taking the way out of a failed plan
         // with it.
         if (error instanceof PhaseStopped) {
-            emit({type: 'brief-stopped', phase: error.phase})
+            emit(briefStopped(error.phase))
             return null
         }
         const phase = error?.phase ?? atPhase
@@ -346,7 +352,7 @@ export async function runBrief({
             error instanceof PhaseFailed ? error.reason
             : error instanceof Error ? error.message
             : String(error)
-        emit({type: 'brief-failed', phase, reason})
+        emit(briefFailed(phase, reason))
         // Rethrown for anything this file did not expect, so the exit code still says the worker
         // broke. The two typed endings are outcomes of a run that worked; this is not one.
         if (error instanceof PhaseFailed || error instanceof BriefExpired) return null

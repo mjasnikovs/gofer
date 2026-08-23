@@ -2,9 +2,9 @@ import {describe, expect, it} from 'vitest'
 import {
     adoptModelReasoning,
     thinkingLevelsFor,
-    adoptSubagentReasoning,
+    activeConnection,
     apiKeyUpdate,
-    applySubagentModel,
+    applyModelSelection,
     cacheStateLabel,
     cacheStateVariant,
     compactionLabel,
@@ -19,84 +19,93 @@ import {
     startSubagentConnection
 } from './settings'
 import {DEFAULT_SUBAGENT_SETTINGS, DEFAULT_WEB_SETTINGS} from './settings'
-import type {GoferSettings} from './settings'
+import type {AiConnectionProfile, AiModelOption, GoferSettings} from './settings'
 
 /** What a ChatGPT connection is, as the backend sends it. Never invented in the renderer. */
-const chatgptProfile = {
+const chatgptConnection: AiConnectionProfile = {
     name: 'ChatGPT subscription',
     baseUrl: 'https://chatgpt.com/backend-api',
-    model: 'gpt-5.6-terra',
     api: 'openai-codex-responses',
-    modelName: 'GPT-5.6 Terra',
-    contextWindow: 272_000,
-    maxTokens: 128_000,
-    reasoning: true,
-    supportsReasoningEffort: true,
-    thinkingLevels: [],
-    input: ['text', 'image'],
-    thinkingLevel: 'high'
-} as const
+    chatTemplateThinking: false,
+    model: {
+        id: 'gpt-5.6-terra',
+        name: 'GPT-5.6 Terra',
+        contextWindow: 272_000,
+        maxTokens: 128_000,
+        reasoning: true,
+        supportsReasoningEffort: true,
+        thinkingLevels: [],
+        input: ['text', 'image'],
+        thinkingLevel: 'high'
+    }
+}
 
-/** A settings file written before the connection fields existed: version and the four originals. */
+const localConnection: AiConnectionProfile = {
+    name: 'Local AI',
+    baseUrl: 'http://127.0.0.1:8080/v1',
+    api: 'openai-completions',
+    chatTemplateThinking: false,
+    model: {
+        id: 'local-model',
+        name: 'local-model',
+        contextWindow: 120_064,
+        maxTokens: 120_064,
+        reasoning: false,
+        supportsReasoningEffort: false,
+        thinkingLevels: [],
+        input: ['text'],
+        thinkingLevel: 'off'
+    }
+}
+
+/** A settings file written before the sections below it existed: the connections, and nothing else. */
 const stored = {
     version: 1,
     ai: {
         connectionType: 'openai-compatible',
-        name: 'Local AI',
-        baseUrl: 'http://127.0.0.1:8080/v1',
-        model: 'local-model',
-        api: 'openai-completions',
-        chatgpt: chatgptProfile
+        connections: {'openai-compatible': localConnection, 'openai-codex': chatgptConnection},
+        maxRetries: 2,
+        timeoutMs: 120_000,
+        compactionPercent: 86
     }
 } as unknown as GoferSettings
 
+/** One catalogue entry, with whichever facts a test is about. */
+function option(facts: Partial<AiModelOption> = {}): AiModelOption {
+    return {
+        id: 'local-model',
+        name: 'Local model',
+        contextWindow: 8_192,
+        maxTokens: 4_096,
+        reasoning: false,
+        supportsReasoningEffort: false,
+        thinkingLevels: [],
+        input: ['text'],
+        ...facts
+    }
+}
+
 describe('normalizeSettings', () => {
-    it('fills in the fields an older settings file never stored', () => {
-        expect(normalizeSettings(stored).ai).toEqual({
-            connectionType: 'openai-compatible',
-            name: 'Local AI',
-            baseUrl: 'http://127.0.0.1:8080/v1',
-            model: 'local-model',
-            api: 'openai-completions',
-            modelName: 'local-model',
-            contextWindow: 120_064,
-            maxTokens: 120_064,
-            reasoning: false,
-            supportsReasoningEffort: false,
-            chatTemplateThinking: false,
-            thinkingLevels: [],
-            input: ['text'],
-            thinkingLevel: 'off',
-            maxRetries: 2,
-            timeoutMs: 120_000,
-            compactionPercent: 86,
-            subagent: DEFAULT_SUBAGENT_SETTINGS,
-            web: DEFAULT_WEB_SETTINGS,
-            local: {
-                name: 'Local AI',
-                baseUrl: 'http://127.0.0.1:8080/v1',
-                model: 'local-model',
-                api: 'openai-completions',
-                modelName: 'local-model',
-                contextWindow: 120_064,
-                maxTokens: 120_064,
-                reasoning: false,
-                supportsReasoningEffort: false,
-                chatTemplateThinking: false,
-                thinkingLevels: [],
-                input: ['text'],
-                thinkingLevel: 'off'
-            },
-            chatgpt: chatgptProfile
+    it('fills in the sections an older settings file never stored', () => {
+        const normalized = normalizeSettings(stored).ai
+
+        expect(normalized.subagent).toEqual(DEFAULT_SUBAGENT_SETTINGS)
+        expect(normalized.web).toEqual(DEFAULT_WEB_SETTINGS)
+        // And it invents no connection: what one is belongs to the backend, which sends it.
+        expect(normalized.connections).toEqual({
+            'openai-compatible': localConnection,
+            'openai-codex': chatgptConnection
         })
     })
 
-    it('offers no ChatGPT driver when the backend sent no profile for one', () => {
-        const {chatgpt: _sent, ...ai} = stored.ai
-        const normalized = normalizeSettings({...stored, ai})
+    it('offers no ChatGPT driver when the backend sent no connection for one', () => {
+        const normalized = normalizeSettings({
+            ...stored,
+            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+        }).ai
 
-        expect(normalized.ai.chatgpt).toBeUndefined()
-        expect(normalized.ai.local?.baseUrl).toBe('http://127.0.0.1:8080/v1')
+        expect(normalized.connections['openai-codex']).toBeUndefined()
+        expect(activeConnection(normalized)?.baseUrl).toBe('http://127.0.0.1:8080/v1')
     })
 
     it('fills in one missing sub-agent bound without losing the ones beside it', () => {
@@ -118,12 +127,11 @@ describe('normalizeSettings', () => {
     it('leaves a stored value alone rather than replacing it with the default', () => {
         const normalized = normalizeSettings({
             ...stored,
-            ai: {...stored.ai, thinkingLevel: 'high', compactionPercent: 100, contextWindow: 8192}
+            ai: {...stored.ai, compactionPercent: 100}
         })
 
-        expect(normalized.ai.thinkingLevel).toBe('high')
         expect(normalized.ai.compactionPercent).toBe(100)
-        expect(normalized.ai.contextWindow).toBe(8192)
+        expect(activeConnection(normalized.ai)?.model.contextWindow).toBe(120_064)
     })
 })
 
@@ -137,21 +145,15 @@ describe('the sub-agent connection', () => {
 
         expect(startSubagentConnection(ai, 'openai-codex')).toEqual({
             connectionType: 'openai-codex',
-            model: 'gpt-5.6-terra',
-            modelName: 'GPT-5.6 Terra',
-            contextWindow: 272_000,
-            maxTokens: 128_000,
-            reasoning: true,
-            supportsReasoningEffort: true,
-            thinkingLevels: [],
-            input: ['text', 'image'],
-            thinkingLevel: 'high'
+            model: chatgptConnection.model
         })
     })
 
     it('offers no driver the settings file has never held a connection for', () => {
-        const {chatgpt: _sent, ...ai} = stored.ai
-        const withoutChatgpt = normalizeSettings({...stored, ai}).ai
+        const withoutChatgpt = normalizeSettings({
+            ...stored,
+            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+        }).ai
 
         expect(startSubagentConnection(withoutChatgpt, 'openai-codex')).toBeUndefined()
         expect(startSubagentConnection(withoutChatgpt, 'openai-compatible')).toBeDefined()
@@ -162,22 +164,16 @@ describe('the sub-agent connection', () => {
         const connection = startSubagentConnection(ai, 'openai-codex')
         if (!connection) throw new Error('the ChatGPT connection')
 
-        const smaller = applySubagentModel(connection, {
-            id: 'gpt-5.4-mini',
-            name: 'GPT-5.4 mini',
-            contextWindow: 272_000,
-            maxTokens: 128_000,
-            reasoning: false,
-            supportsReasoningEffort: false,
-            thinkingLevels: [],
-            input: ['text']
-        })
+        const smaller = applyModelSelection(
+            connection.model,
+            option({id: 'gpt-5.4-mini', name: 'GPT-5.4 mini', maxTokens: 128_000})
+        )
 
-        expect(smaller.model).toBe('gpt-5.4-mini')
+        expect(smaller.id).toBe('gpt-5.4-mini')
         expect(smaller.maxTokens).toBe(128_000)
         expect(smaller.thinkingLevel).toBe('off')
         // And the connection it is served by is the child's own, untouched by the model.
-        expect(smaller.connectionType).toBe('openai-codex')
+        expect(connection.connectionType).toBe('openai-codex')
     })
 })
 
@@ -234,50 +230,34 @@ describe('adoptModelReasoning', () => {
      * not the id Pi's catalogue names the same model by, so `reasoning: false` was written to the
      * settings file and the reasoning menu offered `off` and nothing else — forever, because
      * nothing ever re-read the model's facts once it was the chosen one.
+     *
+     * One function now, for the parent's model and the sub-agent's alike: both are a `ModelChoice`,
+     * and the second copy of this rule is what let the sub-agent go on saying `false` after the
+     * parent's had been corrected.
      */
     it('turns a level on for a model that turns out to reason', () => {
-        const ai = normalizeSettings(stored).ai
-        expect(ai.reasoning).toBe(false)
+        const chosen = localConnection.model
+        expect(chosen.reasoning).toBe(false)
 
-        const adopted = adoptModelReasoning(ai, {
-            id: 'local-model',
-            name: 'Local model',
-            contextWindow: 8_192,
-            maxTokens: 4_096,
-            reasoning: true,
-            supportsReasoningEffort: true,
-            thinkingLevels: [],
-            input: ['text']
-        })
+        const adopted = adoptModelReasoning(
+            chosen,
+            option({reasoning: true, supportsReasoningEffort: true})
+        )
 
         expect(adopted.reasoning).toBe(true)
         expect(adopted.supportsReasoningEffort).toBe(true)
-        expect(adopted.local?.reasoning).toBe(true)
         // What the user typed is theirs. Only what the model decides is re-read.
-        expect(adopted.contextWindow).toBe(ai.contextWindow)
-        expect(adopted.model).toBe('local-model')
+        expect(adopted.contextWindow).toBe(chosen.contextWindow)
+        expect(adopted.id).toBe('local-model')
     })
 
     it('takes the level away from a model that turns out not to', () => {
-        const ai = {
-            ...normalizeSettings(stored).ai,
-            reasoning: true,
-            thinkingLevel: 'high'
-        } as const
-        const adopted = adoptModelReasoning(ai, {
-            id: 'local-model',
-            name: 'Local model',
-            contextWindow: 8_192,
-            maxTokens: 4_096,
-            reasoning: false,
-            supportsReasoningEffort: false,
-            thinkingLevels: [],
-            input: ['text']
-        })
+        const chosen = {...localConnection.model, reasoning: true, thinkingLevel: 'high'} as const
+
+        const adopted = adoptModelReasoning(chosen, option())
 
         expect(adopted.reasoning).toBe(false)
         expect(adopted.thinkingLevel).toBe('off')
-        expect(adopted.local?.thinkingLevel).toBe('off')
     })
 
     /*
@@ -286,118 +266,45 @@ describe('adoptModelReasoning', () => {
      * because the model reasons left `Reasoning: medium` on screen for a model that has no medium.
      */
     it('keeps on for a model that thinks but cannot be told how hard', () => {
-        const ai = {
-            ...normalizeSettings(stored).ai,
+        const chosen = {
+            ...localConnection.model,
             reasoning: true,
             supportsReasoningEffort: true,
             thinkingLevel: 'high'
         } as const
-        const model = {
-            id: 'local-model',
-            name: 'Local model',
-            contextWindow: 8_192,
-            maxTokens: 4_096,
-            reasoning: true,
-            supportsReasoningEffort: false,
-            thinkingLevels: [],
-            input: ['text']
-        } as const
+        const model = option({reasoning: true, supportsReasoningEffort: false})
 
         // `high` is not one of the two it offers, so it goes.
-        const dropped = adoptModelReasoning(ai, model)
+        const dropped = adoptModelReasoning(chosen, model)
         expect(dropped.reasoning).toBe(true)
         expect(dropped.supportsReasoningEffort).toBe(false)
         expect(dropped.thinkingLevel).toBe('off')
-        expect(dropped.local?.thinkingLevel).toBe('off')
 
         // `on` is, so it stays. Thinking is not taken away from a model that thinks.
-        const kept = adoptModelReasoning({...ai, thinkingLevel: 'on'}, model)
+        const kept = adoptModelReasoning({...chosen, thinkingLevel: 'on'}, model)
         expect(kept.thinkingLevel).toBe('on')
-        expect(kept.local?.thinkingLevel).toBe('on')
     })
 
     it('is the same object when the catalogue says what the settings already said', () => {
-        const ai = normalizeSettings(stored).ai
+        const chosen = localConnection.model
 
-        expect(
-            adoptModelReasoning(ai, {
-                id: 'local-model',
-                name: 'Local model',
-                contextWindow: 8_192,
-                maxTokens: 4_096,
-                reasoning: false,
-                supportsReasoningEffort: false,
-                thinkingLevels: [],
-                input: ['text']
-            })
-        ).toBe(ai)
-    })
-})
-
-describe('adoptSubagentReasoning', () => {
-    /** The third copy, and the one that outlived the other two. Same rule, same reason. */
-    it('turns a level on for a sub-agent model that turns out to reason', () => {
-        const ai = normalizeSettings(stored).ai
-        const connection = startSubagentConnection(ai, 'openai-compatible')
-        if (!connection) throw new Error('the local connection')
-        expect(connection.reasoning).toBe(false)
-
-        const adopted = adoptSubagentReasoning(connection, {
-            id: 'local-model',
-            name: 'Local model',
-            contextWindow: 8_192,
-            maxTokens: 4_096,
-            reasoning: true,
-            supportsReasoningEffort: true,
-            thinkingLevels: [],
-            input: ['text']
-        })
-
-        expect(adopted.reasoning).toBe(true)
-        expect(adopted.supportsReasoningEffort).toBe(true)
-        // The connection it is served by is still the child's own, and its limits are untouched.
-        expect(adopted.connectionType).toBe('openai-compatible')
-        expect(adopted.contextWindow).toBe(connection.contextWindow)
+        expect(adoptModelReasoning(chosen, option())).toBe(chosen)
     })
 
-    it('takes the level away from a sub-agent model that turns out not to', () => {
-        const ai = normalizeSettings(stored).ai
-        const connection = startSubagentConnection(ai, 'openai-codex')
+    /** The sub-agent's model, held to the same rule by the same function. */
+    it("corrects the sub-agent's model with no second copy of the rule", () => {
+        const connection = startSubagentConnection(normalizeSettings(stored).ai, 'openai-codex')
         if (!connection) throw new Error('the ChatGPT connection')
-        expect(connection.thinkingLevel).toBe('high')
+        expect(connection.model.thinkingLevel).toBe('high')
 
-        const adopted = adoptSubagentReasoning(connection, {
-            id: 'gpt-5.4-mini',
-            name: 'GPT-5.4 mini',
-            contextWindow: 272_000,
-            maxTokens: 128_000,
-            reasoning: false,
-            supportsReasoningEffort: false,
-            thinkingLevels: [],
-            input: ['text']
-        })
+        const adopted = adoptModelReasoning(
+            connection.model,
+            option({id: 'gpt-5.4-mini', name: 'GPT-5.4 mini'})
+        )
 
         expect(adopted.reasoning).toBe(false)
         expect(adopted.thinkingLevel).toBe('off')
-    })
-
-    it('is the same object when the catalogue says what the connection already said', () => {
-        const ai = normalizeSettings(stored).ai
-        const connection = startSubagentConnection(ai, 'openai-codex')
-        if (!connection) throw new Error('the ChatGPT connection')
-
-        expect(
-            adoptSubagentReasoning(connection, {
-                id: 'gpt-5.6-terra',
-                name: 'GPT-5.6 Terra',
-                contextWindow: 272_000,
-                maxTokens: 128_000,
-                reasoning: true,
-                supportsReasoningEffort: true,
-                thinkingLevels: [],
-                input: ['text', 'image']
-            })
-        ).toBe(connection)
+        expect(adopted.contextWindow).toBe(connection.model.contextWindow)
     })
 })
 
@@ -405,49 +312,70 @@ describe('selectAiDriver', () => {
     it('preserves each driver model while switching between them', () => {
         const local = normalizeSettings(stored).ai
         const chatgpt = selectAiDriver(local, 'openai-codex')
-        const selectedChatgpt = {...chatgpt, model: 'gpt-5.5', modelName: 'GPT-5.5'}
-        const backToLocal = selectAiDriver(selectedChatgpt, 'openai-compatible')
+        const backToLocal = selectAiDriver(chatgpt, 'openai-compatible')
         const backToChatgpt = selectAiDriver(backToLocal, 'openai-codex')
 
-        expect(backToLocal.model).toBe('local-model')
-        expect(backToChatgpt.model).toBe('gpt-5.5')
-        expect(backToChatgpt.modelName).toBe('GPT-5.5')
+        expect(activeConnection(backToLocal)?.model.id).toBe('local-model')
+        expect(activeConnection(backToChatgpt)?.model.id).toBe('gpt-5.6-terra')
+        expect(activeConnection(backToChatgpt)?.model.name).toBe('GPT-5.6 Terra')
+    })
+
+    it('does not switch to a driver that has nowhere to run', () => {
+        const localOnly = normalizeSettings({
+            ...stored,
+            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+        }).ai
+
+        expect(selectAiDriver(localOnly, 'openai-codex')).toBe(localOnly)
     })
 })
 
 describe('selectAiDriver across three drivers', () => {
     it('keeps every driver its own model while moving between all of them', () => {
-        const openrouterProfile = {
-            ...chatgptProfile,
-            chatTemplateThinking: false,
+        const openrouterConnection: AiConnectionProfile = {
+            ...chatgptConnection,
             name: 'OpenRouter',
             baseUrl: OPENROUTER_BASE_URL,
-            model: 'nvidia/nemotron-3.5-lightning:free',
-            modelName: 'Nemotron 3.5 Lightning',
-            api: 'openai-completions'
-        } as const
-        const start = {...normalizeSettings(stored).ai, openrouter: openrouterProfile}
+            api: 'openai-completions',
+            model: {
+                ...chatgptConnection.model,
+                id: 'nvidia/nemotron-3.5-lightning:free',
+                name: 'Nemotron 3.5 Lightning'
+            }
+        }
+        const start = {
+            ...normalizeSettings(stored).ai,
+            connections: {
+                ...normalizeSettings(stored).ai.connections,
+                openrouter: openrouterConnection
+            }
+        }
 
         const onOpenrouter = selectAiDriver(start, 'openrouter')
         const onChatgpt = selectAiDriver(onOpenrouter, 'openai-codex')
         const backToLocal = selectAiDriver(onChatgpt, 'openai-compatible')
         const backToOpenrouter = selectAiDriver(backToLocal, 'openrouter')
 
-        expect(onOpenrouter.model).toBe('nvidia/nemotron-3.5-lightning:free')
-        expect(onOpenrouter.baseUrl).toBe(OPENROUTER_BASE_URL)
-        expect(backToLocal.model).toBe('local-model')
-        expect(backToOpenrouter.model).toBe('nvidia/nemotron-3.5-lightning:free')
+        expect(activeConnection(onOpenrouter)?.model.id).toBe('nvidia/nemotron-3.5-lightning:free')
+        expect(activeConnection(onOpenrouter)?.baseUrl).toBe(OPENROUTER_BASE_URL)
+        expect(activeConnection(backToLocal)?.model.id).toBe('local-model')
+        expect(activeConnection(backToOpenrouter)?.model.id).toBe(
+            'nvidia/nemotron-3.5-lightning:free'
+        )
         // The two it passed through on the way are still there to go back to.
-        expect(backToOpenrouter.local?.model).toBe('local-model')
-        expect(backToOpenrouter.chatgpt?.model).toBe(chatgptProfile.model)
+        expect(backToOpenrouter.connections['openai-compatible']).toEqual(localConnection)
+        expect(backToOpenrouter.connections['openai-codex']).toEqual(chatgptConnection)
     })
 
     it('offers a configured OpenRouter connection in the picker', () => {
-        const ai = {
-            ...normalizeSettings(stored).ai,
-            openrouter: {...chatgptProfile, chatTemplateThinking: false}
-        }
-        expect(driverOptions(ai).map(option => option.value)).toEqual([
+        const ai = normalizeSettings({
+            ...stored,
+            ai: {
+                ...stored.ai,
+                connections: {...stored.ai.connections, openrouter: chatgptConnection}
+            }
+        }).ai
+        expect(driverOptions(ai).map(offered => offered.value)).toEqual([
             'openai-compatible',
             'openai-codex',
             'openrouter'
@@ -465,7 +393,10 @@ describe('driverOptions', () => {
     })
 
     it('leaves out a driver nobody has configured', () => {
-        const localOnly = {...normalizeSettings(stored).ai, chatgpt: undefined}
+        const localOnly = normalizeSettings({
+            ...stored,
+            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+        }).ai
         expect(driverOptions(localOnly)).toEqual([
             {value: 'openai-compatible', label: 'Local model'}
         ])

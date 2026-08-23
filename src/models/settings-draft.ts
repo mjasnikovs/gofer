@@ -1,17 +1,18 @@
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import {commandErrorMessage} from '../utils/command-error'
 import {
+    activeConnection,
     adoptModelReasoning,
-    adoptSubagentReasoning,
     apiKeyUpdate,
     applyModelSelection,
-    applySubagentModel,
     normalizeSettings,
     selectAiDriver,
-    startSubagentConnection
+    startSubagentConnection,
+    withActiveConnection
 } from './settings'
 import type {
     AgentPrompt,
+    AiConnectionProfile,
     AiConnectionType,
     AiModelOption,
     AiSettings,
@@ -19,7 +20,9 @@ import type {
     CacheStatus,
     GodotSettings,
     GoferSettings,
+    ModelChoice,
     Notice,
+    SecretName,
     SettingsRequest,
     SettingsResponse,
     SubagentConnection,
@@ -69,6 +72,24 @@ export const TASK_TABS: Readonly<Record<SettingsTask, SettingsTab>> = {
 export type SettingsNotices = Readonly<Partial<Record<SettingsTab, Notice>>>
 
 /**
+ * One secret, as the settings page holds it.
+ *
+ * The page never reads a stored secret back, which is what makes all three fields necessary: an
+ * empty box cannot mean "remove it", so what is stored, what was typed, and what the save should do
+ * are three separate answers.
+ */
+export type KeyDraft = Readonly<{
+    /** Whether the credential store already holds it, as the backend last reported. */
+    isStored: boolean
+    /** What the user has typed this session. Never the stored key. */
+    typed: string
+    intent: ApiKeyIntent
+}>
+
+/** Nothing typed and nothing stored, which is every slot before the backend has answered. */
+const NO_KEY: KeyDraft = {isStored: false, typed: '', intent: 'keep'}
+
+/**
  * Everything the settings dialog holds, as one value.
  *
  * Kept whole and kept out of React on purpose: the page's behaviour is then a pure function of
@@ -78,22 +99,13 @@ export type SettingsNotices = Readonly<Partial<Record<SettingsTab, Notice>>>
 export type SettingsDraft = Readonly<{
     /** Absent until the backend answers, and while it never does. */
     settings?: GoferSettings | undefined
-    /** Whether the credential store already holds a key, as the backend last reported it. */
-    hasApiKey: boolean
-    hasChatGptCredential: boolean
-    /** Whether a Brave key is already in the keyring. Its value is never sent back to the page. */
-    hasBraveApiKey: boolean
-    /** What the user has typed into the key field this session. Never the stored key. */
-    apiKey: string
-    apiKeyIntent: ApiKeyIntent
-    /** The Brave Search key, held exactly like the AI key: never read back, only written. */
-    braveKey: string
-    braveKeyIntent: ApiKeyIntent
-    /** Whether an OpenRouter key is already in the keyring. Its own slot, so its own flag. */
-    hasOpenrouterApiKey: boolean
-    /** OpenRouter's key, held the same way again. */
-    openrouterKey: string
-    openrouterKeyIntent: ApiKeyIntent
+    /**
+     * Every secret, held the one way. Three of them used to be nine fields differing in a noun.
+     *
+     * ChatGPT is in here too even though nothing is ever typed into it: it is a secret the backend
+     * reports a flag for, and the flag is what the sign-in state is drawn from.
+     */
+    keys: Readonly<Record<SecretName, KeyDraft>>
     /** Which tab is on screen. Here rather than in React so the page stays one value. */
     tab: SettingsTab
     cache?: CacheStatus | undefined
@@ -142,7 +154,12 @@ export type SettingsAction =
     /** Loading finished without settings: no desktop backend, or the call threw. */
     | Readonly<{type: 'unavailable'; notice: Notice}>
     | Readonly<{type: 'tab-chosen'; tab: SettingsTab}>
+    /** The tuning that belongs to the whole file: the clock, the retries, the compaction line. */
     | Readonly<{type: 'ai-changed'; update: Partial<AiSettings>}>
+    /** The live connection's address half — where it is, and what it is called. */
+    | Readonly<{type: 'connection-changed'; update: Partial<AiConnectionProfile>}>
+    /** Its model half, typed by hand rather than picked out of a catalogue. */
+    | Readonly<{type: 'model-changed'; update: Partial<ModelChoice>}>
     | Readonly<{type: 'ai-driver-chosen'; connectionType: AiSettings['connectionType']}>
     | Readonly<{type: 'model-chosen'; model: AiModelOption}>
     | Readonly<{type: 'model-reconciled'; model: AiModelOption}>
@@ -153,12 +170,9 @@ export type SettingsAction =
     | Readonly<{type: 'subagent-model-reconciled'; model: AiModelOption}>
     | Readonly<{type: 'subagent-thinking-chosen'; thinkingLevel: ThinkingLevel}>
     | Readonly<{type: 'subagent-models-listed'; models: readonly AiModelOption[]}>
-    | Readonly<{type: 'api-key-typed'; value: string}>
-    | Readonly<{type: 'api-key-removal-toggled'}>
-    | Readonly<{type: 'brave-key-typed'; value: string}>
-    | Readonly<{type: 'brave-key-removal-toggled'}>
-    | Readonly<{type: 'openrouter-key-typed'; value: string}>
-    | Readonly<{type: 'openrouter-key-removal-toggled'}>
+    /** A key box was typed into. Which secret travels with the action rather than with its name. */
+    | Readonly<{type: 'key-typed'; secret: SecretName; value: string}>
+    | Readonly<{type: 'key-removal-toggled'; secret: SecretName}>
     | Readonly<{type: 'chatgpt-auth-changed'; isAuthenticated: boolean}>
     | Readonly<{type: 'saved'; response: SettingsResponse}>
     | Readonly<{type: 'prompt-typed'; value: string}>
@@ -189,16 +203,12 @@ const NOTHING_RUNNING: SettingsBusy = {
 }
 
 export const INITIAL_SETTINGS_DRAFT: SettingsDraft = {
-    hasApiKey: false,
-    hasChatGptCredential: false,
-    hasBraveApiKey: false,
-    apiKey: '',
-    apiKeyIntent: 'keep',
-    braveKey: '',
-    braveKeyIntent: 'keep',
-    hasOpenrouterApiKey: false,
-    openrouterKey: '',
-    openrouterKeyIntent: 'keep',
+    keys: {
+        'ai-default': NO_KEY,
+        brave: NO_KEY,
+        openrouter: NO_KEY,
+        'chat-gpt': NO_KEY
+    },
     tab: 'ai',
     notices: {},
     isLoading: true,
@@ -231,6 +241,59 @@ function withSubagent(
     }
 }
 
+/**
+ * Rewrites the live connection, leaving every other driver's alone.
+ *
+ * Every edit on the AI tab is one of these: the address half, the model half, or a model picked out
+ * of a catalogue. Written once here because the reducer would otherwise spell out the same two
+ * levels of spread at each of them.
+ */
+function withLiveConnection(
+    settings: GoferSettings,
+    change: (connection: AiConnectionProfile) => AiConnectionProfile
+): GoferSettings {
+    return {...settings, ai: withActiveConnection(settings.ai, change)}
+}
+
+/** Rewrites one secret's draft, leaving the other three alone. */
+function withKey(state: SettingsDraft, secret: SecretName, key: Partial<KeyDraft>): SettingsDraft {
+    return {...state, keys: {...state.keys, [secret]: {...state.keys[secret], ...key}}}
+}
+
+/**
+ * What the backend just said each slot holds, adopted whole.
+ *
+ * The typed text and the intent are left alone here, because a load has nothing to say about
+ * either: they are what the user is in the middle of doing.
+ */
+function withStoredKeys(state: SettingsDraft, response: SettingsResponse): SettingsDraft {
+    return {
+        ...state,
+        keys: {
+            'ai-default': {...state.keys['ai-default'], isStored: response.hasApiKey},
+            brave: {...state.keys.brave, isStored: response.hasBraveApiKey ?? false},
+            openrouter: {
+                ...state.keys.openrouter,
+                isStored: response.hasOpenrouterApiKey ?? false
+            },
+            'chat-gpt': {
+                ...state.keys['chat-gpt'],
+                isStored: response.hasChatGptCredential ?? false
+            }
+        }
+    }
+}
+
+/** Every box emptied and every intent back to "leave it alone", which is what a save leaves. */
+function forgottenKeys(keys: SettingsDraft['keys']): SettingsDraft['keys'] {
+    return {
+        'ai-default': {...keys['ai-default'], typed: '', intent: 'keep'},
+        brave: {...keys.brave, typed: '', intent: 'keep'},
+        openrouter: {...keys.openrouter, typed: '', intent: 'keep'},
+        'chat-gpt': {...keys['chat-gpt'], typed: '', intent: 'keep'}
+    }
+}
+
 /** Puts one tab's banner in place, or takes it away, leaving the other three tabs alone. */
 function noticedOn(notices: SettingsNotices, tab: SettingsTab, notice?: Notice): SettingsNotices {
     return {...notices, [tab]: notice}
@@ -239,11 +302,12 @@ function noticedOn(notices: SettingsNotices, tab: SettingsTab, notice?: Notice):
 /** What the page sends to the backend, or `undefined` while there is nothing loaded to send. */
 export function settingsRequest(state: SettingsDraft): SettingsRequest | undefined {
     if (!state.settings) return undefined
+    const {'ai-default': ai, brave, openrouter} = state.keys
     return {
         settings: state.settings,
-        apiKey: apiKeyUpdate(state.apiKeyIntent, state.apiKey),
-        braveApiKey: apiKeyUpdate(state.braveKeyIntent, state.braveKey),
-        openrouterApiKey: apiKeyUpdate(state.openrouterKeyIntent, state.openrouterKey)
+        apiKey: apiKeyUpdate(ai.intent, ai.typed),
+        braveApiKey: apiKeyUpdate(brave.intent, brave.typed),
+        openrouterApiKey: apiKeyUpdate(openrouter.intent, openrouter.typed)
     }
 }
 
@@ -292,12 +356,8 @@ export function reduce(
     switch (action.type) {
         case 'loaded':
             return {
-                ...state,
+                ...withStoredKeys(state, action.response),
                 settings: normalizeSettings(action.response.settings),
-                hasApiKey: action.response.hasApiKey,
-                hasChatGptCredential: action.response.hasChatGptCredential ?? false,
-                hasBraveApiKey: action.response.hasBraveApiKey ?? false,
-                hasOpenrouterApiKey: action.response.hasOpenrouterApiKey ?? false,
                 cache: action.cache,
                 agentPrompt: action.prompt.prompt,
                 savedAgentPrompt: action.prompt.prompt,
@@ -365,14 +425,34 @@ export function reduce(
                 }
             }
 
+        case 'connection-changed':
+            if (!state.settings) return state
+            return {
+                ...state,
+                settings: withLiveConnection(state.settings, connection => ({
+                    ...connection,
+                    ...action.update
+                }))
+            }
+
+        case 'model-changed':
+            if (!state.settings) return state
+            return {
+                ...state,
+                settings: withLiveConnection(state.settings, connection => ({
+                    ...connection,
+                    model: {...connection.model, ...action.update}
+                }))
+            }
+
         case 'model-chosen': {
             if (!state.settings) return state
             return {
                 ...state,
-                settings: {
-                    ...state.settings,
-                    ai: applyModelSelection(state.settings.ai, action.model)
-                }
+                settings: withLiveConnection(state.settings, connection => ({
+                    ...connection,
+                    model: applyModelSelection(connection.model, action.model)
+                }))
             }
         }
 
@@ -383,10 +463,14 @@ export function reduce(
          * they are, because a context window the user typed is an answer, not a stale copy.
          */
         case 'model-reconciled': {
-            if (!state.settings) return state
-            const ai = adoptModelReasoning(state.settings.ai, action.model)
-            if (ai === state.settings.ai) return state
-            return {...state, settings: {...state.settings, ai}}
+            const connection = state.settings && activeConnection(state.settings.ai)
+            if (!state.settings || !connection) return state
+            const model = adoptModelReasoning(connection.model, action.model)
+            if (model === connection.model) return state
+            return {
+                ...state,
+                settings: withLiveConnection(state.settings, chosen => ({...chosen, model}))
+            }
         }
 
         case 'models-listed':
@@ -414,7 +498,10 @@ export function reduce(
             if (!state.settings || !chosen) return state
             return {
                 ...state,
-                settings: withSubagent(state.settings, applySubagentModel(chosen, action.model))
+                settings: withSubagent(state.settings, {
+                    ...chosen,
+                    model: applyModelSelection(chosen.model, action.model)
+                })
             }
         }
 
@@ -425,7 +512,7 @@ export function reduce(
                 ...state,
                 settings: withSubagent(state.settings, {
                     ...chosen,
-                    thinkingLevel: action.thinkingLevel
+                    model: {...chosen.model, thinkingLevel: action.thinkingLevel}
                 })
             }
         }
@@ -434,78 +521,48 @@ export function reduce(
         case 'subagent-model-reconciled': {
             const chosen = state.settings?.ai.subagent.connection
             if (!state.settings || !chosen) return state
-            const adopted = adoptSubagentReasoning(chosen, action.model)
-            if (adopted === chosen) return state
-            return {...state, settings: withSubagent(state.settings, adopted)}
+            const adopted = adoptModelReasoning(chosen.model, action.model)
+            if (adopted === chosen.model) return state
+            return {
+                ...state,
+                settings: withSubagent(state.settings, {...chosen, model: adopted})
+            }
         }
 
         case 'subagent-models-listed':
             return {...state, subagentModels: action.models}
 
         // Emptying the field means "leave the stored key alone", not "remove it": removing is the
-        // separate button, and it is the only thing that reaches 'clear'.
-        case 'api-key-typed':
-            return {
-                ...state,
-                apiKey: action.value,
-                apiKeyIntent: action.value.trim() ? 'set' : 'keep'
-            }
+        // separate button, and it is the only thing that reaches 'clear'. One rule for all three
+        // boxes, because the page never reads a stored secret back for any of them.
+        case 'key-typed':
+            return withKey(state, action.secret, {
+                typed: action.value,
+                intent: action.value.trim() ? 'set' : 'keep'
+            })
 
-        case 'api-key-removal-toggled':
-            return {
-                ...state,
-                apiKey: '',
-                apiKeyIntent: state.apiKeyIntent === 'clear' ? 'keep' : 'clear'
-            }
+        // A typed key is discarded when removal is chosen: the two are opposite answers, and a box
+        // still holding text under a "will be removed" line says the save will do both.
+        case 'key-removal-toggled':
+            return withKey(state, action.secret, {
+                typed: '',
+                intent: state.keys[action.secret].intent === 'clear' ? 'keep' : 'clear'
+            })
 
-        // The same two rules as the AI key above, and for the same reason: the page never reads a
-        // stored secret back, so an empty field cannot mean "remove it".
-        case 'brave-key-typed':
-            return {
-                ...state,
-                braveKey: action.value,
-                braveKeyIntent: action.value.trim() ? 'set' : 'keep'
-            }
-
-        case 'brave-key-removal-toggled':
-            return {
-                ...state,
-                braveKey: '',
-                braveKeyIntent: state.braveKeyIntent === 'clear' ? 'keep' : 'clear'
-            }
-
-        // And again for OpenRouter, whose key lives in a third keyring slot of its own.
-        case 'openrouter-key-typed':
-            return {
-                ...state,
-                openrouterKey: action.value,
-                openrouterKeyIntent: action.value.trim() ? 'set' : 'keep'
-            }
-
-        case 'openrouter-key-removal-toggled':
-            return {
-                ...state,
-                openrouterKey: '',
-                openrouterKeyIntent: state.openrouterKeyIntent === 'clear' ? 'keep' : 'clear'
-            }
-
+        // ChatGPT is the one secret with no box: signing in and out is what stores and removes it.
         case 'chatgpt-auth-changed':
-            return {...state, hasChatGptCredential: action.isAuthenticated}
+            return withKey(state, 'chat-gpt', {isStored: action.isAuthenticated})
 
+        // Every box is emptied, not only the AI key's: the save has written all three, and text
+        // left in one would be sent a second time by the next save.
         case 'saved':
             return {
-                ...state,
+                ...withStoredKeys({...state, keys: forgottenKeys(state.keys)}, action.response),
                 // Normalised like the load above, and for the same reason: what comes back is a
                 // settings object, not necessarily one carrying every field this build knows about.
                 // Stored raw, a response missing a field left the draft holding `undefined` for it,
                 // and the next screen to read it crashed rather than falling back.
                 settings: normalizeSettings(action.response.settings),
-                hasApiKey: action.response.hasApiKey,
-                hasChatGptCredential: action.response.hasChatGptCredential ?? false,
-                hasBraveApiKey: action.response.hasBraveApiKey ?? false,
-                hasOpenrouterApiKey: action.response.hasOpenrouterApiKey ?? false,
-                apiKey: '',
-                apiKeyIntent: 'keep',
                 busy: busyWith(state.busy, 'saving', false),
                 notices: noticedOn(state.notices, 'ai', savedNotice(action.response))
             }

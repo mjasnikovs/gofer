@@ -27,7 +27,9 @@ export function piThinkingLevel(level) {
  * Every effort Gofer has a word for, which is every one a settings file can hold.
  *
  * `off` is not among them: it is the absence of an effort, not one of them. The same list, in the
- * same order, is `KNOWN_EFFORTS` in `model_server.rs`, which is what reads them out of a template.
+ * same order, is `KNOWN_EFFORTS` in `model_server.rs`, which is what reads them out of a template,
+ * and `NAMED_EFFORTS` in `settings.rs`. `check-command-surface.mjs` holds all of them to each
+ * other, membership and order both, rather than leaving this sentence to be believed.
  */
 const KNOWN_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 

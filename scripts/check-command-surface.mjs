@@ -7,6 +7,7 @@
 import {readdir, readFile} from 'node:fs/promises'
 import {fileURLToPath} from 'node:url'
 import {checkSurfacesAreGenerated} from './generate-command-surface.mjs'
+import * as aiEvents from './ai-events.mjs'
 import * as briefCatalogue from './brief/catalogue.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -238,15 +239,27 @@ async function rustBriefFields() {
     }
 }
 
-/** The statuses the backend closes a run with. */
+/**
+ * The statuses the backend closes a run with.
+ *
+ * Read from two anchors rather than one, because that is what the backend now is. The four endings
+ * a brief, a judgement and a sweep each decided for themselves are one `Ending` type, so the words
+ * are spelled once — and the brief's own substitution, which stores a finished plan as `done`, is
+ * all that is left where the match used to be.
+ */
 async function rustBriefStatuses() {
     const path = 'src-tauri/src/ai_turn.rs'
-    const body = slice(await read(path), path, 'let (status, reason) = match &outcome {', '};')
-    // Read from the arm's answer alone. Prose in between holds apostrophes, and a quote-counting
-    // parser reading those swallowed a whole arm — the one way a checker is worse than nothing.
-    const arms = [...body.matchAll(/=> \("(\w+)",/gu)].map(match => match[1])
+    const text = await read(path)
+    const words = quoted(slice(text, path, "fn word(self) -> &'static str {", '\n    }'))
+    const [finished] = quoted(
+        slice(text, path, 'let status = if matches!(ending, Ending::Finished) {', '} else {')
+    )
+    if (!finished) throw new Error(`${path} no longer says what a finished brief is stored as`)
     // `running` is never written here: a row starts running and this only ends it.
-    return {path: `${path} run_brief`, names: ['running', ...new Set(arms)]}
+    return {
+        path: `${path} run_brief`,
+        names: ['running', ...new Set(words.map(word => (word === 'finished' ? finished : word)))]
+    }
 }
 
 /** One list the renderer declares, read by its own anchor. */
@@ -289,12 +302,268 @@ async function nodeResearchSections() {
 /** One list from the owner, named the way a failure should name it. */
 const briefWord = (name, names) => ({path: `scripts/brief/catalogue.mjs ${name}`, names})
 
+// --- Surface 7: the reasoning vocabulary, written out five times.
+
+/*
+ * `settings.rs` says it in a doc comment — "The same list, in the same order, is `KNOWN_EFFORTS` in
+ * `model_server.rs` and in `thinking-level.mjs`" — and nothing checked it. Five copies: the two
+ * that name the efforts, the two menus that are those efforts with `off` in front, and the
+ * validation set, which is the menu plus `on`. What a copy getting this wrong costs is not
+ * cosmetic: an effort a template does not know is an HTTP 500 on every request of the turn, and a
+ * level clamped to nothing goes out as thinking disabled.
+ *
+ * Order matters here as much as membership, because these are menus, so they are checked for both.
+ */
+
+/** One `const NAME: &[&str] = ...;` slice, read by its own anchor. */
+async function rustList(file, name) {
+    const path = `src-tauri/src/${file}`
+    const open = `const ${name}: &[&str] =`
+    return {path: `${path} ${name}`, names: quoted(slice(await read(path), path, open, '];'))}
+}
+
+/** One `export const NAME: readonly ThinkingLevel[] = [ ... ]` list from the renderer. */
+async function typescriptList(file, name) {
+    const path = `src/models/${file}`
+    const open = `export const ${name}: readonly ThinkingLevel[] = [`
+    return {path: `${path} ${name}`, names: quoted(slice(await read(path), path, open, ']'))}
+}
+
+async function nodeKnownEfforts() {
+    const path = 'scripts/thinking-level.mjs'
+    return {
+        path: `${path} KNOWN_EFFORTS`,
+        names: quoted(slice(await read(path), path, 'const KNOWN_EFFORTS = [', ']'))
+    }
+}
+
+/** A menu with its leading `off` taken off, which is what the two effort lists hold. */
+const withoutOff = surface => ({
+    path: surface.path,
+    names: surface.names.filter(level => level !== 'off' && level !== 'on')
+})
+
+// --- Surface 8: what the sub-agent's ceilings may be set to.
+
+/**
+ * The bounds, as `name→low–high`, from the two places that each enforce them for one caller.
+ *
+ * The slider was the only thing enforcing them for years: `validate_settings` never looked at
+ * `SubagentSettings` at all, so a hand-edited `settings.json` saying `maxTurns: 100000` loaded and
+ * was obeyed. Rust bounds them now, which makes this the second copy of the numbers.
+ */
+async function rustSubagentBounds() {
+    const path = 'src-tauri/src/settings.rs'
+    const body = slice(
+        await read(path),
+        path,
+        'const SUBAGENT_BOUNDS: [SubagentBound; 7] = [',
+        '\n];'
+    )
+    const rows = [...body.matchAll(/"(\w+)",\s*\|s\| s\.\w+,\s*([\d_]+),\s*([\d_]+),?\s*\)/gu)]
+    return {
+        path: `${path} SUBAGENT_BOUNDS`,
+        names: rows.map(
+            row => `${row[1]}→${row[2].replaceAll('_', '')}–${row[3].replaceAll('_', '')}`
+        )
+    }
+}
+
+async function typescriptSubagentRanges() {
+    const path = 'src/models/settings.ts'
+    const body = slice(await read(path), path, 'export const SUBAGENT_RANGES = {', '\n} as const')
+    const rows = [...body.matchAll(/^ {4}(\w+): \{min: ([\d_]+), max: ([\d_]+),/gmu)]
+    return {
+        path: `${path} SUBAGENT_RANGES`,
+        names: rows.map(
+            row => `${row[1]}→${row[2].replaceAll('_', '')}–${row[3].replaceAll('_', '')}`
+        )
+    }
+}
+
+// --- Surface 9: the vocabulary the AI worker’s stream is written in.
+
+/*
+ * About forty `emit({type: ...})` sites across five files, and until now no list of them anywhere.
+ * Rust routed them by string prefix and the renderer re-declared the whole set twice — as a union
+ * and as a hand-written guard — while `src/services/turn.ts` drops whatever the guard rejects in
+ * silence, by design. A name on one surface and not another is therefore an event that is emitted
+ * and never drawn, with nothing anywhere saying so.
+ *
+ * `scripts/ai-events.mjs` is the owner and is imported rather than parsed, the same split the brief
+ * catalogue makes. The renderer's two surfaces are hand-written next to what reads them, so they
+ * are read by their own anchors.
+ *
+ * The names are checked, and so are the sites that write them. An object literal on the wire is a
+ * shape nothing declared: it can carry a field the constructor does not, miss one the constructor
+ * fills in, and stay on every list either way, because a list only ever knew the name.
+ */
+
+/** One list from the event vocabulary, named the way a failure should name it. */
+const aiEvent = (name, names) => ({path: `scripts/ai-events.mjs ${name}`, names})
+
+/** The arms of the union the renderer folds a stream event through. */
+async function typescriptStreamEvents() {
+    const path = 'src/models/chat.ts'
+    const body = slice(
+        await read(path),
+        path,
+        'export type AiStreamEvent =',
+        '\nexport type AiStreamPayload'
+    )
+    return {
+        path: `${path} AiStreamEvent`,
+        names: [...body.matchAll(/type: '([a-z-]+)'/gu)].map(match => match[1])
+    }
+}
+
+/**
+ * The cases the guard admits.
+ *
+ * Checked apart from the union because the two fail differently and only one of them fails loudly.
+ * A union arm with no case is an event the guard rejects and the turn drops without a word; a case
+ * with no arm is dead code the compiler cannot see, because the guard reads `value['type']` off an
+ * `unknown`.
+ */
+async function typescriptStreamEventGuard() {
+    const path = 'src/models/chat-timeline.ts'
+    const body = slice(await read(path), path, 'export function isAiStreamEvent(', '\n}')
+    return {
+        path: `${path} isAiStreamEvent`,
+        names: [...body.matchAll(/^ {8}case '([a-z-]+)':$/gmu)].map(match => match[1])
+    }
+}
+
+/**
+ * Every event on the worker's stream is built by its constructor rather than written out.
+ *
+ * The names above are the vocabulary; this is the grammar. An `emit` handed an object literal with
+ * the event's name typed into it is a shape assembled at the call site, and the defect that hides
+ * is the one written down in
+ * `scripts/ai-provider.mjs`: a completion that had lost a field was rejected by the renderer's
+ * guard and dropped in silence, so the stopped turn it belonged to was never recorded as ended. A
+ * constructor cannot lose a field, because the field list is the constructor.
+ *
+ * Only an `emit(` handed an object literal whose first key is `type` — every one of the sites this
+ * replaced looked exactly like that. `scripts/rag-progress.mjs` emits a different vocabulary
+ * entirely, keyed on `status`, and is left alone by the shape of the match rather than by an
+ * exceptions list. Tests are skipped: a test that writes a wire shape out by hand is asserting
+ * about that shape, which is the point of it.
+ */
+async function everyEmitSiteBuildsItsEvent() {
+    const declared = new Set([
+        ...aiEvents.TURN_EVENTS,
+        ...aiEvents.BRIEF_EVENTS,
+        ...aiEvents.JUDGE_EVENTS,
+        ...aiEvents.COMPLETION_EVENTS
+    ])
+    for (const path of await workerScripts()) {
+        const text = await read(path)
+        for (const [, name] of text.matchAll(/\bemit\(\s*\{\s*type:\s*'([a-z-]+)'/gu)) {
+            fail(
+                declared.has(name) ?
+                    `${path} writes ${name} out as an object literal; build it with its `
+                        + 'constructor in scripts/ai-events.mjs'
+                :   `${path} emits ${name}, which scripts/ai-events.mjs never declared`
+            )
+        }
+    }
+}
+
+/** Every script the AI worker is built out of, tests aside. Walked, so a new file is covered. */
+async function workerScripts() {
+    const found = []
+    const walk = async directory => {
+        for (const entry of await readdir(new URL(directory, `file://${root}`), {
+            withFileTypes: true
+        })) {
+            if (entry.isDirectory()) await walk(`${directory}/${entry.name}`)
+            else if (entry.name.endsWith('.mjs') && !entry.name.endsWith('.test.mjs'))
+                found.push(`${directory}/${entry.name}`)
+        }
+    }
+    await walk('scripts')
+    if (found.length === 0) throw new Error('scripts holds no worker sources')
+    return found
+}
+
+/** The events one memory judgement reports itself on, as the panel reading them declares it. */
+async function typescriptJudgeEvents() {
+    const path = 'src/models/memory.ts'
+    return {
+        path: `${path} JUDGE_EVENTS`,
+        names: quoted(
+            slice(
+                await read(path),
+                path,
+                "const JUDGE_EVENTS: readonly MemoryJudgeEvent['type'][] = [",
+                ']'
+            )
+        )
+    }
+}
+
+/** The completions the worker loop ends a job on. */
+async function rustCompletionEvents() {
+    const path = 'src-tauri/src/ai_turn.rs'
+    const text = await read(path)
+    const declared = text.match(/const AI_COMPLETION_EVENTS: \[&str; (\d+)\] = \[/u)
+    if (!declared) throw new Error(`${path} no longer declares AI_COMPLETION_EVENTS`)
+    const names = quoted(slice(text, path, declared[0], '];'))
+    if (names.length !== Number(declared[1]))
+        throw new Error(
+            `${path} declares AI_COMPLETION_EVENTS as ${declared[1]} entries but lists ${String(names.length)}`
+        )
+    return {path: `${path} AI_COMPLETION_EVENTS`, names}
+}
+
+/**
+ * The one line Rust writes that is not an answer, and the word the worker recognises it by.
+ *
+ * Two spellings of one thing, and the failure is silent in the direction that matters: a worker
+ * that does not recognise the line runs on until it is killed, which is exactly what stopping a
+ * turn used to be, so nothing about the symptom would point here.
+ */
+async function cancelLineAgreement() {
+    const rustPath = 'src-tauri/src/ai_turn.rs'
+    const line = /const AI_CANCEL_LINE: &str = r#"([^"#]*(?:"[^#][^"#]*)*)"#;/u.exec(
+        await read(rustPath)
+    )
+    if (!line) throw new Error(`${rustPath} no longer declares AI_CANCEL_LINE`)
+    const hostPath = 'scripts/ai-host.mjs'
+    const word = /export const CANCEL_TYPE = '([a-z-]+)'/u.exec(await read(hostPath))
+    if (!word) throw new Error(`${hostPath} no longer declares CANCEL_TYPE`)
+    let sent
+    try {
+        sent = JSON.parse(line[1])
+    } catch (error) {
+        throw new Error(`${rustPath} AI_CANCEL_LINE is not JSON: ${String(error)}`)
+    }
+    if (sent?.type !== word[1])
+        fail(
+            `${rustPath} stops a worker with ${JSON.stringify(sent)} but ${hostPath} `
+                + `recognises ${JSON.stringify(word[1])}`
+        )
+}
+
 // --- The comparisons.
 
 const failures = []
 
 function fail(message) {
     failures.push(message)
+}
+
+/** Fails when two surfaces hold the same names in a different order. A menu's order is its own. */
+function checkOrder(what, surfaces) {
+    const [first, ...rest] = surfaces
+    for (const surface of rest) {
+        if (surface.names.join(' ') === first.names.join(' ')) continue
+        fail(
+            `${what} is ordered ${first.names.join(', ')} in ${first.path} `
+                + `but ${surface.names.join(', ')} in ${surface.path}`
+        )
+    }
 }
 
 function checkForDuplicates(surface) {
@@ -422,6 +691,95 @@ checkAgreement('brief event', [
     briefWord('BRIEF_EVENTS', BRIEF_EVENTS),
     await typescriptBriefList('BRIEF_EVENT_TYPES')
 ])
+
+// The stream vocabulary, reconciled against the two surfaces the renderer re-declares it on and
+// against the one Rust routes by.
+checkAgreement('AI stream event', [
+    aiEvent('TURN_EVENTS', aiEvents.TURN_EVENTS),
+    await typescriptStreamEvents(),
+    await typescriptStreamEventGuard()
+])
+checkAgreement('AI brief event', [
+    aiEvent('BRIEF_EVENTS', aiEvents.BRIEF_EVENTS),
+    briefWord('BRIEF_EVENTS', BRIEF_EVENTS)
+])
+checkAgreement('AI judge event', [
+    aiEvent('JUDGE_EVENTS', aiEvents.JUDGE_EVENTS),
+    await typescriptJudgeEvents()
+])
+checkAgreement('AI completion event', [
+    aiEvent('COMPLETION_EVENTS', aiEvents.COMPLETION_EVENTS),
+    await rustCompletionEvents()
+])
+await everyEmitSiteBuildsItsEvent()
+await cancelLineAgreement()
+
+// The reasoning vocabulary. Membership first, so a missing word is reported as a missing word
+// rather than as an ordering difference, and then the order, because these are menus.
+const efforts = [
+    await rustList('settings.rs', 'NAMED_EFFORTS'),
+    await rustList('model_server.rs', 'KNOWN_EFFORTS'),
+    await nodeKnownEfforts(),
+    withoutOff(await rustList('settings.rs', 'EFFORT_LEVELS')),
+    withoutOff(await typescriptList('settings.ts', 'EFFORT_LEVELS')),
+    withoutOff(await rustList('settings.rs', 'EVERY_LEVEL'))
+]
+for (const surface of efforts) checkForDuplicates(surface)
+checkAgreement('reasoning effort', efforts)
+checkOrder('the reasoning vocabulary', efforts)
+
+// The two menus a settings file may name a level from, which are the efforts with `off` in front.
+// Checked whole rather than through `withoutOff`, so a copy that lost its `off` is caught too.
+checkOrder('the reasoning menu', [
+    await rustList('settings.rs', 'EFFORT_LEVELS'),
+    await typescriptList('settings.ts', 'EFFORT_LEVELS')
+])
+
+// The sub-agent's ceilings: the slider that offers them, and the validation that now enforces them.
+const subagentBounds = [await rustSubagentBounds(), await typescriptSubagentRanges()]
+for (const surface of subagentBounds) checkForDuplicates(surface)
+checkAgreement('sub-agent bound', subagentBounds)
+
+/**
+ * A parameter name that means different shapes in different operations of one domain widens to
+ * accept either, deliberately — `jsonSchemaOfEntry` says why, and the refusal it moves to
+ * `tool_params::check` is the one that can explain itself.
+ *
+ * What must not happen is widening against *nothing*. A list of objects that declares no `entry` is
+ * checked by neither layer: ajv gets a bare `{type: "array"}` branch that swallows the sibling's
+ * strict one, and `check_inside` returns early on an empty entry. Serde is then the first thing to
+ * look, and `missing field oldText` is exactly the refusal `check_inside` was written to replace.
+ *
+ * Measured: `godot_script apply_rename` was that case. Its entries are `PlannedFile`, and
+ * `{"nope": 1}` was accepted by the schema and by `check` alike.
+ */
+async function everyMergedNameDeclaresItsShape() {
+    const {operations} = JSON.parse(await read('protocol/schemas/v2/params.json'))
+    const byName = new Map()
+    for (const row of operations)
+        for (const param of row.params ?? []) {
+            const key = `${row.tool}.${param.name}`
+            if (!byName.has(key)) byName.set(key, [])
+            byName.get(key).push({op: row.op, param})
+        }
+    for (const [key, uses] of [...byName].sort()) {
+        if (uses.length < 2) continue
+        const shaped = uses.filter(use => use.param.entry?.length > 0)
+        if (shaped.length === 0) continue
+        const bare = uses.filter(
+            use =>
+                !use.param.entry?.length
+                && (use.param.kind === 'list' || use.param.kind === 'object')
+        )
+        for (const one of bare)
+            fail(
+                `${key} declares an entry shape in ${shaped.map(u => u.op).join(', ')} but not in `
+                    + `${one.op}, so the schema widens to a bare ${one.param.kind} that swallows the `
+                    + 'strict branch and check_inside skips it. Give it an entry.'
+            )
+    }
+}
+await everyMergedNameDeclaresItsShape()
 
 if (failures.length > 0) throw new Error(`command surfaces disagree:\n${failures.join('\n')}`)
 

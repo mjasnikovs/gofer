@@ -69,7 +69,7 @@ async function variants() {
     )
     return {
         before: (await import(baseline)).createGodotTools,
-        after: (await import(join(ROOT, 'scripts/ai-host.mjs'))).createGodotTools
+        after: (await import(join(ROOT, 'scripts/godot-tools.mjs'))).createGodotTools
     }
 }
 

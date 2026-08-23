@@ -1,34 +1,9 @@
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 
 export type AiSettings = Readonly<{
+    /** Which of the connections below is live. The only thing that decides. */
     connectionType: AiConnectionType
-    name: string
-    baseUrl: string
-    model: string
-    api: AiApiDialect
-    modelName: string
-    contextWindow: number
-    maxTokens: number
-    reasoning: boolean
-    supportsReasoningEffort: boolean
-    /**
-     * Whether thinking is turned on by a chat-template argument rather than by an effort field.
-     *
-     * True for a llama.cpp host, which takes `chat_template_kwargs.enable_thinking` and ignores
-     * `reasoning_effort` without a word. Derived from the server, never typed.
-     */
-    chatTemplateThinking: boolean
-    /**
-     * The efforts this model's server said it will accept, or empty when nothing has said.
-     *
-     * The menu, in other words. Empty is not "none" — it is "unasked", and the two reasoning flags
-     * answer instead. A list rather than a flag because a chat template refuses the efforts it does
-     * not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the other
-     * two with HTTP 500 on every request of the turn.
-     */
-    thinkingLevels: readonly ThinkingLevel[]
-    input: readonly string[]
-    thinkingLevel: ThinkingLevel
+    connections: AiConnections
     maxRetries: number
     timeoutMs: number
     /**
@@ -38,11 +13,20 @@ export type AiSettings = Readonly<{
     compactionPercent: number
     subagent: SubagentSettings
     web: WebSettings
-    /** Saved independently so changing drivers never destroys another driver's selection. */
-    local?: AiConnectionProfile | undefined
-    chatgpt?: AiConnectionProfile | undefined
-    openrouter?: AiConnectionProfile | undefined
 }>
+
+/**
+ * Every connection the settings file holds, by the driver that runs it.
+ *
+ * One entry per driver and no second copy of any of them, so "which one is live" is a lookup rather
+ * than a rule. The live connection used to be stored twice — flattened onto `AiSettings` and
+ * mirrored into a slot — and the paragraph explaining which copy to trust was written out in Rust,
+ * here, and in the worker. The three had already drifted.
+ *
+ * A driver with no entry has never been configured, which a ChatGPT-only install's local driver
+ * never is, and a driver with no entry is not offered in the picker.
+ */
+export type AiConnections = Readonly<Partial<Record<AiConnectionType, AiConnectionProfile>>>
 
 /**
  * Which engine `web_search` asks, and nothing else.
@@ -81,19 +65,6 @@ export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openroute
 export type AiApiDialect = 'openai-completions' | 'openai-codex-responses'
 
 /**
- * Which field of `AiSettings` holds each driver's saved connection.
- *
- * One map rather than a branch at every reader. Every one of the five places that used to ask
- * "local or ChatGPT?" was a two-armed ternary, and a third driver would have meant finding all five
- * and getting all five right.
- */
-const PROFILE_SLOTS: Readonly<Record<AiConnectionType, 'local' | 'chatgpt' | 'openrouter'>> = {
-    'openai-compatible': 'local',
-    'openai-codex': 'chatgpt',
-    openrouter: 'openrouter'
-}
-
-/**
  * OpenRouter's address, which the user never types.
  *
  * The whole point of the driver: a fixed host whose catalogue answers every question the local
@@ -101,30 +72,36 @@ const PROFILE_SLOTS: Readonly<Record<AiConnectionType, 'local' | 'chatgpt' | 'op
  */
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 
+/**
+ * One connection and the model chosen on it: an address half, and a `ModelChoice`.
+ *
+ * The split is the point. The address is the connection's — where it is, which dialect it speaks,
+ * how thinking is turned on there — and the model half is what a catalogue can answer for and the
+ * sub-agent can override. The child borrows the first and replaces the second, which is one field
+ * rather than nine.
+ */
 export type AiConnectionProfile = Readonly<{
     name: string
     baseUrl: string
-    model: string
     api: AiApiDialect
-    modelName: string
-    contextWindow: number
-    maxTokens: number
-    reasoning: boolean
-    supportsReasoningEffort: boolean
-    /** See `AiSettings`. A property of the connection, not of the model on it. */
-    chatTemplateThinking: boolean
     /**
-     * The efforts this model's server said it will accept, or empty when nothing has said.
+     * Whether thinking is turned on by a chat-template argument rather than by an effort field.
      *
-     * The menu, in other words. Empty is not "none" — it is "unasked", and the two reasoning flags
-     * answer instead. A list rather than a flag because a chat template refuses the efforts it does
-     * not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the other
-     * two with HTTP 500 on every request of the turn.
+     * True for a llama.cpp host, which takes `chat_template_kwargs.enable_thinking` and ignores
+     * `reasoning_effort` without a word. A property of the connection, not of the model on it, and
+     * derived from the server rather than typed.
      */
-    thinkingLevels: readonly ThinkingLevel[]
-    input: readonly string[]
-    thinkingLevel: ThinkingLevel
+    chatTemplateThinking: boolean
+    model: ModelChoice
 }>
+
+/**
+ * A model, as the user chose it: which one, what it can do, and the level it is asked at.
+ *
+ * Everything but the level is what the catalogue says — which is exactly `AiModelOption`, so this
+ * is that type plus the one field the user owns rather than a second list of the same nine facts.
+ */
+export type ModelChoice = AiModelOption & Readonly<{thinkingLevel: ThinkingLevel}>
 
 /**
  * What bounds the sub-agent, the second agent the main one delegates reading to.
@@ -168,23 +145,8 @@ export type SubagentSettings = Readonly<{
  */
 export type SubagentConnection = Readonly<{
     connectionType: AiConnectionType
-    model: string
-    modelName: string
-    contextWindow: number
-    maxTokens: number
-    reasoning: boolean
-    supportsReasoningEffort: boolean
-    /**
-     * The efforts this model's server said it will accept, or empty when nothing has said.
-     *
-     * The menu, in other words. Empty is not "none" — it is "unasked", and the two reasoning flags
-     * answer instead. A list rather than a flag because a chat template refuses the efforts it does
-     * not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the other
-     * two with HTTP 500 on every request of the turn.
-     */
-    thinkingLevels: readonly ThinkingLevel[]
-    input: readonly string[]
-    thinkingLevel: ThinkingLevel
+    /** The model half of that connection, replaced. The address half is borrowed as it stands. */
+    model: ModelChoice
 }>
 
 /**
@@ -296,15 +258,33 @@ export type Notice = Readonly<{
 
 export type ApiKeyIntent = 'keep' | 'set' | 'clear'
 
+/**
+ * Which secret a key field is about. The same four names as `Secret` in `settings.rs`.
+ *
+ * Four secrets used to be four sets of draft fields, four actions and three copies of one field on
+ * screen, all differing in a noun. Naming them is what lets one field, one action and one draft
+ * entry serve all of them.
+ */
+export type SecretName = 'ai-default' | 'brave' | 'openrouter' | 'chat-gpt'
+
 export type StorageMaintenanceResult = Readonly<{
     attachmentsRemoved: number
     blobsRemoved: number
     godotRunsRemoved: number
+    sketchesRemoved: number
+    docsAnswersRemoved: number
+    memoryVectorsRemoved: number
     backupsRemoved: number
     memoryEmbeddingsRestored: number
 }>
 
-export const ALL_THINKING_LEVELS: readonly ThinkingLevel[] = [
+/**
+ * The levels a model with named efforts can be asked at, which is the menu rather than the
+ * validation set. `on` is not one of them: it belongs to a template with no efforts to name, and a
+ * model that has efforts has no use for it. `EFFORT_LEVELS` in `settings.rs` is the same list, and
+ * the levels a settings file may legally hold are `EVERY_LEVEL` there.
+ */
+export const EFFORT_LEVELS: readonly ThinkingLevel[] = [
     'off',
     'minimal',
     'low',
@@ -331,7 +311,7 @@ export function thinkingLevelsFor(model: ThinkingCapable): readonly ThinkingLeve
     // What the server named wins outright. Its template raises on an effort it does not know, and
     // llama.cpp turns that into an HTTP 500 on every request of the turn.
     if (model.thinkingLevels.length > 0) return ['off', ...model.thinkingLevels]
-    return model.supportsReasoningEffort ? ALL_THINKING_LEVELS : ON_OFF_THINKING_LEVELS
+    return model.supportsReasoningEffort ? EFFORT_LEVELS : ON_OFF_THINKING_LEVELS
 }
 
 /** The three fields that decide what a reasoning menu offers. See `thinkingLevelsFor`. */
@@ -420,49 +400,17 @@ export const DEFAULT_GODOT_SETTINGS: GodotSettings = {
     embedGameWindow: true
 }
 
-function profileOf(ai: AiSettings): AiConnectionProfile {
-    return {
-        name: ai.name,
-        baseUrl: ai.baseUrl,
-        model: ai.model,
-        api: ai.api,
-        modelName: ai.modelName,
-        contextWindow: ai.contextWindow,
-        maxTokens: ai.maxTokens,
-        reasoning: ai.reasoning,
-        supportsReasoningEffort: ai.supportsReasoningEffort,
-        chatTemplateThinking: ai.chatTemplateThinking,
-        thinkingLevels: ai.thinkingLevels,
-        input: ai.input,
-        thinkingLevel: ai.thinkingLevel
-    }
-}
-
+/**
+ * Fills in what a settings response left out, so no screen has to guess at an absent field.
+ *
+ * The three numbers and the three sections a file written before them arrives without. The
+ * connections themselves are
+ * never invented here: what a ChatGPT connection is belongs to the backend, which sends it with
+ * every settings response, and a driver with no connection is one Gofer cannot offer — the settings
+ * page draws it that way rather than guessing an address.
+ */
 export function normalizeSettings(settings: GoferSettings): GoferSettings {
-    const normalizedAi = Object.assign(
-        {
-            modelName: settings.ai.model,
-            contextWindow: 120_064,
-            maxTokens: 120_064,
-            reasoning: false,
-            supportsReasoningEffort: false,
-            chatTemplateThinking: false,
-            thinkingLevels: [],
-            input: ['text'],
-            thinkingLevel: 'off',
-            maxRetries: 2,
-            timeoutMs: 120_000,
-            compactionPercent: 86
-        },
-        settings.ai,
-        {
-            subagent: {...DEFAULT_SUBAGENT_SETTINGS, ...settings.ai.subagent},
-            // Filled the same way, for the same reason: a file written before the web tools existed
-            // arrives without this, and an undefined engine reaches the worker as no engine at all.
-            web: {...DEFAULT_WEB_SETTINGS, ...settings.ai.web}
-        }
-    ) as AiSettings
-    const active = profileOf(normalizedAi)
+    const tuning = {maxRetries: 2, timeoutMs: 120_000, compactionPercent: 86}
     return {
         ...settings,
         // Filled in the same way the sub-agent bounds are, and for the same reason: a stored file
@@ -470,52 +418,50 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
         // `false` would silently stop enforcing what the user never turned off.
         godot: {...DEFAULT_GODOT_SETTINGS, ...settings.godot},
         ai: {
-            ...normalizedAi,
-            // Never invented here. What a ChatGPT connection is belongs to the backend, which sends
-            // it with every settings response; a driver with no profile is a driver Gofer cannot
-            // offer, and the settings page draws it that way rather than guessing an address. Only
-            // the active driver's slot is filled, and only when the file did not already carry it.
-            [PROFILE_SLOTS[normalizedAi.connectionType]]:
-                normalizedAi[PROFILE_SLOTS[normalizedAi.connectionType]] ?? active
+            ...tuning,
+            ...settings.ai,
+            // Spread rather than taken whole, so a response that carried no connections at all
+            // arrives as a map with none in it rather than as an absent field every reader would
+            // then have to guard against.
+            connections: {...settings.ai.connections},
+            subagent: {...DEFAULT_SUBAGENT_SETTINGS, ...settings.ai.subagent},
+            // Filled the same way, for the same reason: a file written before the web tools existed
+            // arrives without this, and an undefined engine reaches the worker as no engine at all.
+            web: {...DEFAULT_WEB_SETTINGS, ...settings.ai.web}
         }
     }
 }
 
+/**
+ * Switches the live driver, which is one field, because there is nothing to move.
+ *
+ * It used to write the driver being left back into its own slot first: its flat fields were the
+ * only copy the user had been editing, and without that write they were overwritten by the driver
+ * being switched to and never reached the pair. There are no flat fields now — every driver's
+ * connection has only ever been in one place — so switching is naming a different key.
+ *
+ * A driver with no connection is not switched to: there would be no address and no dialect to run
+ * it on, and the picker does not offer it for exactly that reason.
+ */
 export function selectAiDriver(ai: AiSettings, connectionType: AiConnectionType): AiSettings {
     if (ai.connectionType === connectionType) return ai
-    // The driver being left is written back to its own slot first. Without that, its flat fields —
-    // which are the only copy the user has been editing — are overwritten by the driver being
-    // switched to and never reach the pair.
-    const saved = withProfile(ai)
-    const selected = connectionProfile(saved, connectionType)
-    if (!selected) return ai
-    return {...saved, ...selected, connectionType}
+    if (!connectionProfile(ai, connectionType)) return ai
+    return {...ai, connectionType}
 }
 
 /**
- * Applies a chosen server model to the AI settings.
+ * Applies a chosen model, wherever a model is chosen.
  *
  * Picking a model carries the model's own limits with it. Reasoning is the one that cannot simply
  * be copied: a model that cannot reason has no thinking level to keep, so the previously chosen
  * level is dropped rather than left pointing at nothing.
  *
- * The rule lives here because two places choose a model — the settings page's draft reducer and the
- * connection hook that saves the choice straight away — and a field copied into one of them only is
- * a model whose limits depend on which screen picked it.
+ * One function rather than two. The parent's selection and the sub-agent's used to be written out
+ * separately because what they updated was a different shape — the parent's had a profile pair to
+ * mirror into, and the child had none — and both shapes are a `ModelChoice` now.
  */
-export function applyModelSelection(ai: AiSettings, model: AiModelOption): AiSettings {
-    return withProfile({
-        ...ai,
-        model: model.id,
-        modelName: model.name,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-        reasoning: model.reasoning,
-        supportsReasoningEffort: model.supportsReasoningEffort,
-        thinkingLevels: model.thinkingLevels,
-        input: model.input,
-        thinkingLevel: keepThinkingLevel(model, ai.thinkingLevel)
-    })
+export function applyModelSelection(choice: ModelChoice, model: AiModelOption): ModelChoice {
+    return {...model, thinkingLevel: keepThinkingLevel(model, choice.thinkingLevel)}
 }
 
 /**
@@ -527,42 +473,71 @@ export function applyModelSelection(ai: AiSettings, model: AiModelOption): AiSet
  * own fact, and a file that says no because the catalogue had never been read is a file whose
  * reasoning menu offers `off` and nothing else, for as long as that model stays selected.
  *
- * Returns the settings unchanged when the catalogue says what they already said, so a connection
- * that agrees costs no write.
+ * Returns the choice unchanged when the catalogue says what it already said, so a connection that
+ * agrees costs no write.
  */
-export function adoptModelReasoning(ai: AiSettings, model: AiModelOption): AiSettings {
+export function adoptModelReasoning(choice: ModelChoice, model: AiModelOption): ModelChoice {
     if (
-        ai.reasoning === model.reasoning
-        && ai.supportsReasoningEffort === model.supportsReasoningEffort
+        choice.reasoning === model.reasoning
+        && choice.supportsReasoningEffort === model.supportsReasoningEffort
     ) {
-        return ai
+        return choice
     }
-    return withProfile({
-        ...ai,
+    return {
+        ...choice,
         reasoning: model.reasoning,
         supportsReasoningEffort: model.supportsReasoningEffort,
         thinkingLevels: model.thinkingLevels,
-        thinkingLevel: keepThinkingLevel(model, ai.thinkingLevel)
-    })
+        thinkingLevel: keepThinkingLevel(model, choice.thinkingLevel)
+    }
 }
 
-/** Mirrors the flat fields back into the active driver's slot. See `normalizeSettings`. */
-function withProfile(ai: AiSettings): AiSettings {
-    return {...ai, [PROFILE_SLOTS[ai.connectionType]]: profileOf(ai)}
-}
-
-/**
- * Which stored connection serves a driver, or nothing when that driver has never been configured.
- *
- * Read off the saved pair rather than the flat fields, because the pair is the only place both
- * drivers exist at once — the flat fields hold whichever one is active. `normalizeSettings` fills
- * the active driver's half of the pair from them, so the two can never disagree.
- */
+/** Which stored connection serves a driver, or nothing when that driver has never been configured. */
 export function connectionProfile(
     ai: AiSettings,
     connectionType: AiConnectionType
 ): AiConnectionProfile | undefined {
-    return ai[PROFILE_SLOTS[connectionType]]
+    return ai.connections[connectionType]
+}
+
+/** The connection the live driver runs on, which is the same lookup against `connectionType`. */
+export function activeConnection(ai: AiSettings): AiConnectionProfile | undefined {
+    return connectionProfile(ai, ai.connectionType)
+}
+
+/**
+ * The model the live driver is on, or nothing while nothing has been loaded.
+ *
+ * Takes the whole settings rather than the `ai` half, because every screen that asks holds them
+ * optionally: a window that has not heard from the backend yet has no model to name, and that is an
+ * ordinary state rather than a fault.
+ */
+export function activeModel(settings?: GoferSettings): ModelChoice | undefined {
+    return settings && activeConnection(settings.ai)?.model
+}
+
+/** One driver's connection, replaced, leaving the others alone. */
+function withConnection(
+    ai: AiSettings,
+    connectionType: AiConnectionType,
+    connection: AiConnectionProfile
+): AiSettings {
+    return {...ai, connections: {...ai.connections, [connectionType]: connection}}
+}
+
+/**
+ * The live connection, rewritten. Every edit to what the live driver runs on is one of these.
+ *
+ * A driver with no connection is left alone rather than given one: what a connection is belongs to
+ * the backend, and inventing an address here is how a screen writes a server nobody named.
+ */
+export function withActiveConnection(
+    ai: AiSettings,
+    change: (connection: AiConnectionProfile) => AiConnectionProfile
+): AiSettings {
+    const connection = activeConnection(ai)
+    if (!connection) return ai
+    return withConnection(ai, ai.connectionType, change(connection))
 }
 
 /**
@@ -608,71 +583,7 @@ export function startSubagentConnection(
 ): SubagentConnection | undefined {
     const profile = connectionProfile(ai, connectionType)
     if (!profile) return undefined
-    return {
-        connectionType,
-        model: profile.model,
-        modelName: profile.modelName,
-        contextWindow: profile.contextWindow,
-        maxTokens: profile.maxTokens,
-        reasoning: profile.reasoning,
-        supportsReasoningEffort: profile.supportsReasoningEffort,
-        thinkingLevels: profile.thinkingLevels,
-        input: profile.input,
-        thinkingLevel: profile.thinkingLevel
-    }
-}
-
-/**
- * Applies a chosen model to the sub-agent's connection.
- *
- * The same rule as [`applyModelSelection`], and it has to be: a model carries its own limits, and a
- * model that cannot reason has no reasoning level to keep. Written out rather than shared, because
- * what the two update is a different shape — the parent's selection also has a profile pair to
- * mirror into, and the child has none.
- */
-export function applySubagentModel(
-    connection: SubagentConnection,
-    model: AiModelOption
-): SubagentConnection {
-    return {
-        ...connection,
-        model: model.id,
-        modelName: model.name,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-        reasoning: model.reasoning,
-        supportsReasoningEffort: model.supportsReasoningEffort,
-        thinkingLevels: model.thinkingLevels,
-        input: model.input,
-        thinkingLevel: keepThinkingLevel(model, connection.thinkingLevel)
-    }
-}
-
-/**
- * The same re-read as [`adoptModelReasoning`], for the sub-agent's own model.
- *
- * It needs its own, because the child's connection is a different shape and its `reasoning` was
- * copied from the parent's profile at the moment the child was first given a model of its own. A
- * profile that said `false` then goes on saying `false` after the catalogue is corrected, which is
- * how the sub-agent kept a reasoning menu offering nothing but `off`.
- */
-export function adoptSubagentReasoning(
-    connection: SubagentConnection,
-    model: AiModelOption
-): SubagentConnection {
-    if (
-        connection.reasoning === model.reasoning
-        && connection.supportsReasoningEffort === model.supportsReasoningEffort
-    ) {
-        return connection
-    }
-    return {
-        ...connection,
-        reasoning: model.reasoning,
-        supportsReasoningEffort: model.supportsReasoningEffort,
-        thinkingLevels: model.thinkingLevels,
-        thinkingLevel: keepThinkingLevel(model, connection.thinkingLevel)
-    }
+    return {connectionType, model: profile.model}
 }
 
 export function formatBytes(bytes: number) {

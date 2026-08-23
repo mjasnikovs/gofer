@@ -6,6 +6,7 @@ import {HealthGate} from './HealthGate'
 import type {HealthReport} from '../../models/health'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush} from '../../test/flush'
+import {CommandFailure, installBackend} from '../../test/backend'
 import {createManualScheduler, setScheduler, timerScheduler} from '../../services/clock'
 
 const tauri = createDesktopFake()
@@ -81,7 +82,7 @@ afterEach(() => {
 
 describe('HealthGate', () => {
     it('opens straight into the workspace when nothing is wrong', async () => {
-        tauri.invoke.mockResolvedValue(readyWorkspace)
+        installBackend(tauri, {health: readyWorkspace})
         const onReady = vi.fn()
 
         const {container} = render(<HealthGate onReady={onReady} />)
@@ -97,7 +98,11 @@ describe('HealthGate', () => {
      * assertion is about what a slow check shows, not about how long the machine took to notice.
      */
     it('says the check is running once it has taken a while', async () => {
-        tauri.invoke.mockReturnValue(new Promise(() => undefined))
+        // Never answered: the assertion is about what a slow check shows, and this is the check
+        // still running.
+        installBackend(tauri, {
+            answers: {check_workspace_health: () => new Promise(() => undefined)}
+        })
 
         render(<HealthGate onReady={vi.fn()} />)
         await flush()
@@ -111,7 +116,7 @@ describe('HealthGate', () => {
     })
 
     it('names every blocking problem and offers the fix for it', async () => {
-        tauri.invoke.mockResolvedValue(emptyFolder)
+        installBackend(tauri, {health: emptyFolder})
 
         render(<HealthGate onReady={vi.fn()} />)
         await flush()
@@ -129,18 +134,27 @@ describe('HealthGate', () => {
 
     it('applies a fix and continues once the last blocker is gone', async () => {
         const user = userEvent.setup()
-        tauri.invoke.mockResolvedValueOnce(emptyFolder).mockResolvedValueOnce(readyWorkspace)
         const onReady = vi.fn()
+        // `git init` is what both blockers were waiting on, so the report the fix answers with is
+        // a project with nothing wrong left in it.
+        const server = installBackend(tauri, {
+            health: emptyFolder,
+            answers: {
+                apply_health_remedy: (_, answer) => {
+                    server.state.health = readyWorkspace
+                    return answer()
+                }
+            }
+        })
 
         render(<HealthGate onReady={onReady} />)
         await flush()
+        expect(screen.getByText('Git repository')).toBeInTheDocument()
         await user.click(screen.getByRole('button', {name: 'Initialize a Git repository'}))
         await flush()
 
-        expect(tauri.invoke).toHaveBeenLastCalledWith('apply_health_remedy', {
-            request: {action: 'initialize-git-repository'}
-        })
         expect(onReady).toHaveBeenCalled()
+        expect(screen.queryByText('Git repository')).not.toBeInTheDocument()
     })
 
     it('asks for a folder before applying a fix that needs one', async () => {
@@ -162,10 +176,17 @@ describe('HealthGate', () => {
                 }
             ]
         }
-        tauri.invoke.mockImplementation(command => {
-            if (command === 'plugin:dialog|open') return Promise.resolve('/home/dev/other')
-            if (command === 'apply_health_remedy') return Promise.resolve(readyWorkspace)
-            return Promise.resolve(chooseWorkspace)
+        const server = installBackend(tauri, {
+            health: chooseWorkspace,
+            answers: {
+                'plugin:dialog|open': () => '/home/dev/other',
+                apply_health_remedy: ({request}) => {
+                    // The folder the picker answered with is the whole point of this remedy, so
+                    // the fake only opens the project when it was carried through.
+                    if (request.path === '/home/dev/other') server.state.health = readyWorkspace
+                    return server.state.health
+                }
+            }
         })
 
         render(<HealthGate onReady={vi.fn()} />)
@@ -173,9 +194,7 @@ describe('HealthGate', () => {
         await user.click(screen.getByRole('button', {name: 'Choose project folder…'}))
         await flush()
 
-        expect(tauri.invoke).toHaveBeenCalledWith('apply_health_remedy', {
-            request: {action: 'choose-workspace', path: '/home/dev/other'}
-        })
+        expect(screen.queryByText('Project folder')).not.toBeInTheDocument()
     })
 
     it('leaves the workspace alone when the folder picker is cancelled', async () => {
@@ -197,9 +216,9 @@ describe('HealthGate', () => {
                 }
             ]
         }
-        tauri.invoke.mockImplementation(command => {
-            if (command === 'plugin:dialog|open') return Promise.resolve(null)
-            return Promise.resolve(workspaceOnly)
+        installBackend(tauri, {
+            health: workspaceOnly,
+            answers: {'plugin:dialog|open': () => null}
         })
 
         render(<HealthGate onReady={vi.fn()} />)
@@ -216,11 +235,16 @@ describe('HealthGate', () => {
 
     it('reports a fix that failed without losing the checklist', async () => {
         const user = userEvent.setup()
-        tauri.invoke.mockImplementation(command => {
-            if (command === 'apply_health_remedy') {
-                return Promise.reject(new Error('Could not create the first commit: read-only'))
+        installBackend(tauri, {
+            health: emptyFolder,
+            answers: {
+                apply_health_remedy: () => {
+                    throw new CommandFailure(
+                        'workspace_not_repaired',
+                        'Could not create the first commit: read-only'
+                    )
+                }
             }
-            return Promise.resolve(emptyFolder)
         })
 
         render(<HealthGate onReady={vi.fn()} />)
@@ -233,6 +257,7 @@ describe('HealthGate', () => {
     })
 
     it('never gates the browser-driven suites, which have no workspace', async () => {
+        installBackend(tauri, {health: readyWorkspace})
         tauri.isTauri.mockReturnValue(false)
         const onReady = vi.fn()
 
@@ -244,7 +269,7 @@ describe('HealthGate', () => {
     })
 
     it('has no automatically detectable accessibility violations', async () => {
-        tauri.invoke.mockResolvedValue(emptyFolder)
+        installBackend(tauri, {health: emptyFolder})
 
         const {container} = render(<HealthGate onReady={vi.fn()} />)
         await flush()

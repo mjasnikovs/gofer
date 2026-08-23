@@ -241,6 +241,9 @@ struct GenerationSettings {
 
 /// Every level in Gofer's vocabulary, in the order a menu should offer them. `off` is not one:
 /// it is the absence of an effort, not an effort.
+///
+/// The same list, in the same order, is `NAMED_EFFORTS` in `settings.rs` and `KNOWN_EFFORTS` in
+/// `thinking-level.mjs`; `check-command-surface.mjs` reconciles the copies.
 const KNOWN_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The efforts a chat template will accept, read out of the template itself.

@@ -1,10 +1,12 @@
 {
-    "$comment": "The parameters of every tool operation, and the sentence a model reads when it gets one wrong. Hand-written: this is the specification, and it covers the catalogue exhaustively \u2014 `every_catalog_operation_declares_its_parameters` fails if an operation is added without an entry here. `scripts/generate-command-surface.mjs` emits the Rust table that refuses a call, the signature the model is shown, and the addon-side guard for the operations the addon answers.",
-    "$commandComment": "`command` is the addon command that answers the operation, and its absence \u2014 with `answeredBy: \"rust\"` in its place \u2014 means the operation never reaches the addon. Those are checked in Rust and deserialize into a typed request behind it; `every_rust_answered_operation_matches_its_request` holds this file to those structs.",
+    "$comment": "The parameters of every tool operation, and the sentence a model reads when it gets one wrong. Hand-written: this is the specification, and it covers the catalogue exhaustively — `every_catalog_operation_declares_its_parameters` fails if an operation is added without an entry here. `scripts/generate-command-surface.mjs` emits the Rust table that refuses a call, the signature the model is shown, and the addon-side guard for the operations the addon answers.",
+    "$commandComment": "`command` is the addon command that answers the operation, and its absence — with `answeredBy: \"rust\"` in its place — means the operation never reaches the addon. Those are checked in Rust and deserialize into a typed request behind it; `every_rust_answered_operation_matches_its_request` holds this file to those structs.",
+    "$summaryComment": "`summary` is what the model reads about the operation, one sentence or several, and it is the half of the tool description a person writes. It lives here rather than in Rust because everything else about the same operation already did — the parameters it takes, what answers it, where it may sit in an `ops` list, whether the user is asked first — and the worker is sent one object per operation carrying all of it. Written apart, the view the model receives was assembled at serialization time out of two files nothing held together, and a test had to read English out of Rust source to check the seam.",
     "$acceptsComment": "`accepts` names a parameter the addon reads and the model is never told about. `scene` is the only one: every node command takes it and defaults it to the scene the editor already has open, so the desktop client passes it and the model has no reason to.",
     "$gatedComment": "`gated` is the sentence the user is shown before the agent may run this operation. Its absence means auto-allowed, so a new operation is allowed by default and has to be gated deliberately. It lives beside the parameters and the route because all three are facts about the same operation, and keeping the safety model in a table of its own meant a fifth place to look and a fifth thing to hold to the catalogue afterwards.",
+    "$writesComment": "`writes` names what an operation writes where one of the user's enforced Godot rules may refuse it: `projectSetting` and `editorSetting` are the two settings surfaces, `scriptText` is a call carrying GDScript source. `godot_policy::enforcement_refusal` reads the tag rather than matching on the tool and the operation, so an operation renamed here cannot quietly stop being enforced. Absence means no rule keys on this operation — which is every operation but five.",
     "$aloneComment": "`alone` narrows where an operation may sit in an `ops` list, and carries the sentence a caller reads when it gets that wrong. Every tool call is a list, so a model wanting three inspections writes one call rather than three. `scope: \"repeat\"` is the ordinary case: the operation may sit beside other operations, and may not appear twice, because it takes no parameters to vary or drives something the session owns exactly one of — the open scene, the running game, the undo stack, the dialog. The router runs a list in order, so a second one would only redo or undo the first. `scope: \"exclusive\"` is the debugger, where each answer decides what the next operation means, so the operation has to be the only entry of its call. Absence means the operation may appear as often as a list names it.",
-    "$vocabularyComment": "`vocabularies` names a set of words a parameter accepts inside a structure, where `kind` cannot reach: `key` sits inside each entry of an `events` list. `accepted` is printed into the signature the model reads, because a generated signature is measurably more reliable than a sentence \u2014 see the note on `Kind` in tool_params.rs. `refused` is names the engine does not have, and it exists so `every_key_name_the_catalog_advertises_is_one_the_engine_knows` can prove the accepted list is meaningful rather than merely present. Both used to be written out twice, in English, inside two catalogue summaries, and read back out of the prose by a parser that split on the literal string \u201cAccepted: \u201d.",
+    "$vocabularyComment": "`vocabularies` names a set of words a parameter accepts inside a structure, where `kind` cannot reach: `key` sits inside each entry of an `events` list. `accepted` is printed into the signature the model reads, because a generated signature is measurably more reliable than a sentence — see the note on `Kind` in tool_params.rs. `refused` is names the engine does not have, and it exists so `every_key_name_the_catalog_advertises_is_one_the_engine_knows` can prove the accepted list is meaningful rather than merely present. Both used to be written out twice, in English, inside two catalogue summaries, and read back out of the prose by a parser that split on the literal string “Accepted: ”.",
     "vocabularies": {
         "godotKeyName": {
             "note": "Godot's own name for a key, not the browser's.",
@@ -42,6 +44,7 @@
         {
             "tool": "godot_session",
             "op": "status",
+            "summary": "Reports the session state, ports, engine version, and worktree.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -52,6 +55,7 @@
         {
             "tool": "godot_session",
             "op": "start",
+            "summary": "Starts the editor session for the active task worktree.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one editor session, so a second one in the same call is the first one again."
@@ -62,6 +66,7 @@
         {
             "tool": "godot_session",
             "op": "stop",
+            "summary": "Stops the editor session and removes the staged Gofer addon.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one editor session, so a second one in the same call is the first one again."
@@ -72,6 +77,7 @@
         {
             "tool": "godot_session",
             "op": "get_state",
+            "summary": "Asks the addon for readiness, the open scene, its revision, and the dialog the editor is waiting on. A `dialog` is a question only a person can answer — its text and the buttons it offers — and until someone presses one the editor will not run the game. Nothing else reports it: commands are still answered while one is up, and a screenshot of the editor need not contain it.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -81,7 +87,26 @@
         },
         {
             "tool": "godot_session",
+            "op": "answer_dialog",
+            "summary": "Presses a button on the dialog the editor is waiting on, by its label — one of the `buttons` the dialog was reported with. Use it when a dialog is blocking the work; there is no other way past one, and nothing else you can do will clear it. Read what it asks before choosing: the buttons do what they say, and some of them change the project.",
+            "alone": {
+                "scope": "repeat",
+                "why": "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press."
+            },
+            "params": [
+                {
+                    "name": "button",
+                    "kind": "text",
+                    "required": true
+                }
+            ],
+            "command": "session.answer_dialog",
+            "gated": "Answering an editor dialog presses that button in the editor, exactly as clicking it would."
+        },
+        {
+            "tool": "godot_session",
             "op": "undo",
+            "summary": "Undoes the last editor operation.",
             "alone": {
                 "scope": "repeat",
                 "why": "One undo stack, walked in order: what the second call undoes depends on what the first one did."
@@ -100,6 +125,7 @@
         {
             "tool": "godot_session",
             "op": "redo",
+            "summary": "Redoes the last undone editor operation.",
             "alone": {
                 "scope": "repeat",
                 "why": "One undo stack, walked in order: what the second call undoes depends on what the first one did."
@@ -116,25 +142,9 @@
             "command": "session.redo"
         },
         {
-            "tool": "godot_session",
-            "op": "answer_dialog",
-            "alone": {
-                "scope": "repeat",
-                "why": "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press."
-            },
-            "params": [
-                {
-                    "name": "button",
-                    "kind": "text",
-                    "required": true
-                }
-            ],
-            "command": "session.answer_dialog",
-            "gated": "Answering an editor dialog presses that button in the editor, exactly as clicking it would."
-        },
-        {
             "tool": "godot_scene",
             "op": "list",
+            "summary": "Lists the scene files in the project.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -145,6 +155,7 @@
         {
             "tool": "godot_scene",
             "op": "open",
+            "summary": "Opens a scene.",
             "alone": {
                 "scope": "repeat",
                 "why": "One scene is open at a time, so a second one would act on whatever the first left open."
@@ -161,6 +172,7 @@
         {
             "tool": "godot_scene",
             "op": "create",
+            "summary": "Creates a scene and opens it. It is checked against the revision of the scene being *replaced*, because creating a scene discards whatever is unsaved in the open one — which is what the check is for. The router holds that number already.",
             "params": [
                 {
                     "name": "path",
@@ -190,6 +202,7 @@
         {
             "tool": "godot_scene",
             "op": "get_tree",
+            "summary": "Returns the edited scene hierarchy and its revision. Read it to see what the scene holds, not to fetch a revision: every mutation is checked against a number the router already has, and answers with the next one.",
             "params": [
                 {
                     "name": "root",
@@ -215,6 +228,7 @@
         {
             "tool": "godot_scene",
             "op": "save",
+            "summary": "Saves the edited scene.",
             "alone": {
                 "scope": "repeat",
                 "why": "One scene is open at a time, so a second one would act on whatever the first left open."
@@ -233,6 +247,7 @@
         {
             "tool": "godot_scene",
             "op": "save_as",
+            "summary": "Saves the edited scene to a new path.",
             "alone": {
                 "scope": "repeat",
                 "why": "One scene is open at a time, so a second one would act on whatever the first left open."
@@ -256,6 +271,7 @@
         {
             "tool": "godot_scene",
             "op": "reload",
+            "summary": "Reloads the edited scene from disk, discarding in-memory edits.",
             "alone": {
                 "scope": "repeat",
                 "why": "One scene is open at a time, so a second one would act on whatever the first left open."
@@ -274,6 +290,7 @@
         {
             "tool": "godot_node",
             "op": "inspect",
+            "summary": "Inspects a node. Answers with its type, every property with its current value, its groups, every signal it can emit, and the connections it already has. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
             "params": [
                 {
                     "name": "node",
@@ -287,6 +304,7 @@
         {
             "tool": "godot_node",
             "op": "create",
+            "summary": "Creates a node. `parent` is the parent's path — the root's own path, like /Level1, for a direct child.",
             "params": [
                 {
                     "name": "parent",
@@ -322,16 +340,33 @@
         {
             "tool": "godot_node",
             "op": "create_nodes",
+            "summary": "Creates several nodes in one call, as one revision and one undo step. Prefer this over calling create in a row: create answers with the revision the next create needs, so forty nodes one at a time is forty round trips. Each `nodes` entry is exactly what create takes. Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent, and a whole subtree goes in at once. Nothing is attached unless every entry is accepted.",
             "params": [
                 {
                     "name": "nodes",
                     "kind": "list",
                     "required": true,
                     "entry": [
-                        {"name": "parent", "kind": "text", "required": true},
-                        {"name": "type", "kind": "text", "required": true},
-                        {"name": "name", "kind": "text", "required": true},
-                        {"name": "index", "kind": "int", "required": false}
+                        {
+                            "name": "parent",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "type",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "name",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "index",
+                            "kind": "int",
+                            "required": false
+                        }
                     ],
                     "note": "Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent."
                 },
@@ -349,6 +384,7 @@
         {
             "tool": "godot_node",
             "op": "instantiate",
+            "summary": "Places an instance of a saved scene under a node. This is how a level repeats a thing — build the coin once as its own scene, then instantiate it wherever a coin goes, and one edit reaches every placement. `node.create` cannot do this: it only builds engine classes.",
             "params": [
                 {
                     "name": "parent",
@@ -384,6 +420,7 @@
         {
             "tool": "godot_node",
             "op": "duplicate",
+            "summary": "Duplicates a node.",
             "params": [
                 {
                     "name": "node",
@@ -409,6 +446,7 @@
         {
             "tool": "godot_node",
             "op": "rename",
+            "summary": "Renames a node.",
             "params": [
                 {
                     "name": "node",
@@ -434,6 +472,7 @@
         {
             "tool": "godot_node",
             "op": "reparent",
+            "summary": "Reparents a node.",
             "params": [
                 {
                     "name": "node",
@@ -464,6 +503,7 @@
         {
             "tool": "godot_node",
             "op": "delete",
+            "summary": "Deletes a node.",
             "params": [
                 {
                     "name": "node",
@@ -484,6 +524,7 @@
         {
             "tool": "godot_node",
             "op": "set_property",
+            "summary": "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are null, bool, int, rect2 and rect2i (four numbers each), vector2i, vector3, vector3i, vector4, vector4i, quaternion, plane, transform2d, basis, transform3d, array (of tagged values) and dictionary (of key and value pairs of them).",
             "params": [
                 {
                     "name": "node",
@@ -515,14 +556,23 @@
         {
             "tool": "godot_node",
             "op": "set_properties",
+            "summary": "Sets several properties in one call, as one revision and one undo step. Prefer this over calling set_property in a row, for the same reason create_nodes exists: each single write answers with the revision the next one needs. Each `properties` entry is exactly what set_property takes, with `value` tagged the same way, and entries may name different nodes. Nothing is written unless every entry is accepted.",
             "params": [
                 {
                     "name": "properties",
                     "kind": "list",
                     "required": true,
                     "entry": [
-                        {"name": "node", "kind": "text", "required": true},
-                        {"name": "property", "kind": "text", "required": true},
+                        {
+                            "name": "node",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "property",
+                            "kind": "text",
+                            "required": true
+                        },
                         {
                             "name": "value",
                             "kind": "tagged",
@@ -546,6 +596,7 @@
         {
             "tool": "godot_node",
             "op": "add_to_group",
+            "summary": "Puts a node in a group the saved scene keeps. Groups are how a running game finds every coin or enemy at once, with get_tree().get_nodes_in_group(\"…\").",
             "params": [
                 {
                     "name": "node",
@@ -570,6 +621,7 @@
         {
             "tool": "godot_node",
             "op": "remove_from_group",
+            "summary": "Takes a node out of a group.",
             "params": [
                 {
                     "name": "node",
@@ -594,6 +646,7 @@
         {
             "tool": "godot_node",
             "op": "connect_signal",
+            "summary": "Connects a node's signal to a method, as an editor connection the scene keeps. `target` is the node carrying the method and defaults to the scene root; the method has to exist there already, so write the script first. `binds` are extra tagged values passed after the signal's own arguments. This is how a scene wires itself up without a `connect` call in _ready.",
             "params": [
                 {
                     "name": "node",
@@ -643,6 +696,7 @@
         {
             "tool": "godot_node",
             "op": "disconnect_signal",
+            "summary": "Removes a connection. `binds` are tagged values like connect_signal's, and have to match the ones the connection was made with or nothing is found to remove.",
             "params": [
                 {
                     "name": "node",
@@ -682,6 +736,7 @@
         {
             "tool": "godot_node",
             "op": "set_cells",
+            "summary": "Paints tiles onto a TileMapLayer. This is how a 2D level is built — one TileMapLayer carrying a tileset, rather than a node per block. `x`/`y` are cell coordinates, not pixels, and `width`/`height` default to 1 so a rectangle is one entry — a whole ground row is {\"x\": 0, \"y\": 12, \"width\": 200, \"height\": 2, \"atlas\": [0, 0]}. `atlas` is the [column, row] of the tile in the tileset, which resource.describe_tileset lists. An entry with no `atlas` erases the cells it covers. The node needs its `tile_set` property set first, with node.set_property and a resource value.",
             "params": [
                 {
                     "name": "node",
@@ -693,17 +748,37 @@
                     "kind": "list",
                     "required": true,
                     "entry": [
-                        {"name": "x", "kind": "int", "required": true},
-                        {"name": "y", "kind": "int", "required": true},
-                        {"name": "width", "kind": "int", "required": false},
-                        {"name": "height", "kind": "int", "required": false},
+                        {
+                            "name": "x",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "y",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "width",
+                            "kind": "int",
+                            "required": false
+                        },
+                        {
+                            "name": "height",
+                            "kind": "int",
+                            "required": false
+                        },
                         {
                             "name": "atlas",
                             "kind": "list",
                             "required": false,
                             "note": "A [column, row] pair, naming the tile in the atlas. An entry without one erases the cells it covers."
                         },
-                        {"name": "source", "kind": "int", "required": false}
+                        {
+                            "name": "source",
+                            "kind": "int",
+                            "required": false
+                        }
                     ]
                 },
                 {
@@ -719,6 +794,7 @@
         {
             "tool": "godot_node",
             "op": "get_cells",
+            "summary": "Reads back what a TileMapLayer holds. Answers with how many cells are painted, the rectangle they span, and the tile each one draws.",
             "params": [
                 {
                     "name": "node",
@@ -736,6 +812,7 @@
         {
             "tool": "godot_project",
             "op": "get_settings",
+            "summary": "Returns the project settings overview.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -746,6 +823,7 @@
         {
             "tool": "godot_project",
             "op": "search_settings",
+            "summary": "Searches project settings by name. Answers with at most 50 matches, plus `totalMatches` and `truncated` — narrow the query rather than ask for more, because there is no limit to raise.",
             "params": [
                 {
                     "name": "query",
@@ -758,6 +836,7 @@
         {
             "tool": "godot_project",
             "op": "get_setting",
+            "summary": "Reads one project setting.",
             "params": [
                 {
                     "name": "name",
@@ -770,6 +849,7 @@
         {
             "tool": "godot_project",
             "op": "set_setting",
+            "summary": "Writes one project setting. `value` is tagged with its type, the same shape node.set_property takes: {\"type\": \"int\", \"value\": 1152}, {\"type\": \"string\", \"value\": \"res://main.tscn\"}, {\"type\": \"vector2\", \"value\": [12, 34]}. A bare number or string is refused.",
             "params": [
                 {
                     "name": "name",
@@ -782,11 +862,13 @@
                     "required": true
                 }
             ],
-            "command": "project.set_setting"
+            "command": "project.set_setting",
+            "writes": "projectSetting"
         },
         {
             "tool": "godot_project",
             "op": "reset_setting",
+            "summary": "Resets a project setting to its default.",
             "params": [
                 {
                     "name": "name",
@@ -794,11 +876,13 @@
                     "required": true
                 }
             ],
-            "command": "project.reset_setting"
+            "command": "project.reset_setting",
+            "writes": "projectSetting"
         },
         {
             "tool": "godot_project",
             "op": "list_autoloads",
+            "summary": "Lists the configured autoloads.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -809,6 +893,7 @@
         {
             "tool": "godot_project",
             "op": "set_autoload",
+            "summary": "Adds or updates an autoload.",
             "params": [
                 {
                     "name": "name",
@@ -831,6 +916,7 @@
         {
             "tool": "godot_project",
             "op": "remove_autoload",
+            "summary": "Removes an autoload.",
             "params": [
                 {
                     "name": "name",
@@ -843,6 +929,7 @@
         {
             "tool": "godot_project",
             "op": "list_input_actions",
+            "summary": "Lists the Input Map actions.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -853,6 +940,7 @@
         {
             "tool": "godot_project",
             "op": "set_input_action",
+            "summary": "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
             "params": [
                 {
                     "name": "name",
@@ -864,8 +952,29 @@
                     "name": "events",
                     "kind": "list",
                     "required": true,
-                    "note": "Each event is {\"kind\": \"key\", \"key\": \"A\"}, with Godot's key name rather than the browser's.",
-                    "vocabulary": "godotKeyName"
+                    "note": "The key is Godot's name for it, not the browser's.",
+                    "vocabulary": "godotKeyName",
+                    "entry": [
+                        {
+                            "name": "kind",
+                            "kind": "choice",
+                            "of": ["key", "mouse_button", "joypad_button"],
+                            "required": true,
+                            "note": "Which of the three an event is. Any other kind is refused here rather than in the editor."
+                        },
+                        {
+                            "name": "key",
+                            "kind": "text",
+                            "required": false,
+                            "vocabulary": "godotKeyName"
+                        },
+                        {
+                            "name": "button",
+                            "kind": "int",
+                            "required": false,
+                            "note": "A mouse button is an index of 1 or higher; a joypad button an index."
+                        }
+                    ]
                 },
                 {
                     "name": "deadzone",
@@ -878,6 +987,7 @@
         {
             "tool": "godot_project",
             "op": "remove_input_action",
+            "summary": "Removes a project input action.",
             "params": [
                 {
                     "name": "name",
@@ -890,6 +1000,7 @@
         {
             "tool": "godot_project",
             "op": "reset_input_action",
+            "summary": "Drops the override of a built-in action.",
             "params": [
                 {
                     "name": "name",
@@ -902,6 +1013,7 @@
         {
             "tool": "godot_project",
             "op": "list_plugins",
+            "summary": "Lists the project's editor plugins.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -912,6 +1024,7 @@
         {
             "tool": "godot_project",
             "op": "set_plugin_enabled",
+            "summary": "Enables or disables a plugin.",
             "params": [
                 {
                     "name": "plugin",
@@ -930,6 +1043,7 @@
         {
             "tool": "godot_project",
             "op": "search_editor_settings",
+            "summary": "Searches machine-wide editor settings by name. Capped at 50 matches, like search_settings.",
             "params": [
                 {
                     "name": "query",
@@ -942,6 +1056,7 @@
         {
             "tool": "godot_project",
             "op": "get_editor_setting",
+            "summary": "Reads one machine-wide editor setting.",
             "params": [
                 {
                     "name": "name",
@@ -954,6 +1069,7 @@
         {
             "tool": "godot_project",
             "op": "set_editor_setting",
+            "summary": "Writes one machine-wide editor setting. `value` is tagged with its type, as {\"type\": \"bool\", \"value\": true} — the same shape set_setting and node.set_property take.",
             "params": [
                 {
                     "name": "name",
@@ -967,17 +1083,19 @@
                 }
             ],
             "command": "editor.set_setting",
-            "gated": "Editor settings are machine-wide: they live outside the task worktree and outside Git, so this change is not part of anything the task can roll back."
+            "gated": "Editor settings are machine-wide: they live outside the task worktree and outside Git, so this change is not part of anything the task can roll back.",
+            "writes": "editorSetting"
         },
         {
             "tool": "godot_resource",
             "op": "list",
+            "summary": "Lists the files in the task worktree with their sizes. `under` narrows it to one directory — `assets`, named the way the project names it — and without it you get the whole worktree, which is a lot to read to see one folder. `hashes: true` reads every file so that a later delete of one is refused if it changed in the meantime. The router holds what it read; you never see it and never pass it. That is a read of the whole project, so ask for it before deleting files you have not opened, not to look around.",
             "params": [
                 {
                     "name": "under",
                     "kind": "text",
                     "required": false,
-                    "note": "A directory to list, named the way the project names it \u2014 `assets`, not its full path. Omit it for every file in the worktree."
+                    "note": "A directory to list, named the way the project names it — `assets`, not its full path. Omit it for every file in the worktree."
                 },
                 {
                     "name": "hashes",
@@ -990,6 +1108,7 @@
         {
             "tool": "godot_resource",
             "op": "rescan",
+            "summary": "Tells the editor filesystem about files that changed. `path` is one file or a list of them — name everything you just wrote in one call, because a batch is imported in one pass and a call per file is not. Omit it to walk the whole project.",
             "params": [
                 {
                     "name": "path",
@@ -1003,7 +1122,7 @@
                         }
                     ],
                     "required": false,
-                    "note": "The file that changed, or a list of them \u2014 name every file you just wrote in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs."
+                    "note": "The file that changed, or a list of them — name every file you just wrote in one call rather than one call each. Omitted, the whole project is walked, which is what a directory made after the editor started needs."
                 }
             ],
             "command": "resource.rescan"
@@ -1011,6 +1130,7 @@
         {
             "tool": "godot_resource",
             "op": "create_tileset",
+            "summary": "Cuts a texture into a TileSet and saves it. `path` is the .tres to write, `texture` an image the project already holds, and `tileSize` one number or two — 16 or [16, 16] — defaulting to 16. `tiles` is the [column, row] list to define and defaults to every tile the texture holds; `solid` is the subset that gets collision, either a list or \"all\", and a tile with no collision is scenery the player falls through. Answers with the atlas grid it found. Build a tileset with this rather than writing one as text: a TileSet carries a record per tile and a polygon per solid one, and a hand-written one opens as a resource with no tiles in it.",
             "params": [
                 {
                     "name": "path",
@@ -1062,12 +1182,24 @@
         {
             "tool": "godot_resource",
             "op": "create_texture",
+            "summary": "Draws a PNG and imports it, which is how a project with no art gets some. `path` is the .png to write and `size` is one number or two — 16 or [16, 24]. `rects` are filled rectangles painted over `background` in the order they are named, and without a `background` the image starts transparent, which is what a sprite wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is one texture with a rectangle per tile, laid out on the grid create_tileset then cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by the time this answers, so it needs no rescan and create_tileset can name it straight away. Draw art with this rather than through bash: an image library is not something every machine has.",
             "params": [
-                {"name": "path", "kind": "text", "required": true},
+                {
+                    "name": "path",
+                    "kind": "text",
+                    "required": true
+                },
                 {
                     "name": "size",
                     "kind": "either",
-                    "of": [{"kind": "number"}, {"kind": "list"}],
+                    "of": [
+                        {
+                            "kind": "number"
+                        },
+                        {
+                            "kind": "list"
+                        }
+                    ],
                     "required": true,
                     "note": "One number or two: 16 or [16, 24]."
                 },
@@ -1082,10 +1214,26 @@
                     "kind": "list",
                     "required": false,
                     "entry": [
-                        {"name": "x", "kind": "int", "required": true},
-                        {"name": "y", "kind": "int", "required": true},
-                        {"name": "width", "kind": "int", "required": true},
-                        {"name": "height", "kind": "int", "required": true},
+                        {
+                            "name": "x",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "y",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "width",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "height",
+                            "kind": "int",
+                            "required": true
+                        },
                         {
                             "name": "color",
                             "kind": "text",
@@ -1101,6 +1249,7 @@
         {
             "tool": "godot_resource",
             "op": "create_shape",
+            "summary": "Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of RectangleShape2D (size as [width, height]), CircleShape2D (radius), CapsuleShape2D (radius and height), SegmentShape2D (points as [ax, ay, bx, by]), or WorldBoundaryShape2D (nothing). Set the node's `shape` property to the path afterwards — a CollisionShape2D without one collides with nothing, and a shape can only be assigned from a file that already exists.",
             "params": [
                 {
                     "name": "path",
@@ -1145,6 +1294,7 @@
         {
             "tool": "godot_resource",
             "op": "describe_tileset",
+            "summary": "Reports what a saved TileSet holds. Answers with its tile size, its sources, and every tile they define with whether it is solid — which is where the [column, row] pairs godot_node set_cells takes come from.",
             "params": [
                 {
                     "name": "path",
@@ -1157,6 +1307,7 @@
         {
             "tool": "godot_resource",
             "op": "move",
+            "summary": "Moves a file or directory inside the worktree.",
             "params": [
                 {
                     "name": "from",
@@ -1175,6 +1326,7 @@
         {
             "tool": "godot_resource",
             "op": "delete",
+            "summary": "Deletes a file or directory. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
             "params": [
                 {
                     "name": "path",
@@ -1195,6 +1347,7 @@
         {
             "tool": "godot_script",
             "op": "list",
+            "summary": "Lists the GDScript files in the worktree with their size. `under` narrows it to one directory, named the way the project names it — `scripts`, not its full path — and omitting it lists every script. This is the call for finding a script whose name you do not know; a shell `find` is not, and it is refused outside the worktree anyway.",
             "params": [
                 {
                     "name": "under",
@@ -1208,6 +1361,7 @@
         {
             "tool": "godot_script",
             "op": "open",
+            "summary": "Opens a script as a language-server document. `path` is one script or a list of them — open everything you are about to query in one call, not one call each. A list answers with `files`, one entry per path.",
             "params": [
                 {
                     "name": "path",
@@ -1229,6 +1383,7 @@
         {
             "tool": "godot_script",
             "op": "update",
+            "summary": "Reports an in-memory buffer change.",
             "params": [
                 {
                     "name": "path",
@@ -1245,7 +1400,47 @@
         },
         {
             "tool": "godot_script",
+            "op": "edit",
+            "summary": "Changes existing scripts by replacing exact text, and answers with each file's diagnostics. Put every change to one file in that file's `edits`, and every file in one call: this is one call, not one per change. `oldText` must appear exactly once in the file, so extend it with a neighbouring line when it would not; it is quoted from the file, so read the file first. Either every file is written or none is. To create a script, use `save`.",
+            "params": [
+                {
+                    "name": "files",
+                    "kind": "list",
+                    "required": true,
+                    "entry": [
+                        {
+                            "name": "path",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "edits",
+                            "kind": "list",
+                            "required": true,
+                            "entry": [
+                                {
+                                    "name": "oldText",
+                                    "kind": "text",
+                                    "required": true
+                                },
+                                {
+                                    "name": "newText",
+                                    "kind": "text",
+                                    "required": true
+                                }
+                            ]
+                        }
+                    ],
+                    "note": "Every `oldText` must match one region of that file exactly and must not overlap another edit of the same file. Entries may name different files, and either every file is written or none is."
+                }
+            ],
+            "answeredBy": "rust",
+            "writes": "scriptText"
+        },
+        {
+            "tool": "godot_script",
             "op": "save",
+            "summary": "Writes a whole file and answers with the file's diagnostics, the same way `edit` does. Use it to create a script, or to replace one outright; to change part of one, `edit` is the call, and it does not send the file back. A file that already exists is only written over what you have read, so open it first — the router holds the hash that read answered with. A script you are creating needs no read. `update` does not write anything: it reports a buffer change to the language server, and this is the call that puts it on disk. Do not follow this with a `diagnostics` call about the same file: the verdict is already here. `published: false` means the server had not spoken about the text yet, which is not the same as the file being clean.",
             "params": [
                 {
                     "name": "path",
@@ -1265,36 +1460,13 @@
                     "hidden": true
                 }
             ],
-            "answeredBy": "rust"
-        },
-        {
-            "tool": "godot_script",
-            "op": "edit",
-            "params": [
-                {
-                    "name": "files",
-                    "kind": "list",
-                    "required": true,
-                    "entry": [
-                        {"name": "path", "kind": "text", "required": true},
-                        {
-                            "name": "edits",
-                            "kind": "list",
-                            "required": true,
-                            "entry": [
-                                {"name": "oldText", "kind": "text", "required": true},
-                                {"name": "newText", "kind": "text", "required": true}
-                            ]
-                        }
-                    ],
-                    "note": "Every `oldText` must match one region of that file exactly and must not overlap another edit of the same file. Entries may name different files, and either every file is written or none is."
-                }
-            ],
-            "answeredBy": "rust"
+            "answeredBy": "rust",
+            "writes": "scriptText"
         },
         {
             "tool": "godot_script",
             "op": "close",
+            "summary": "Closes the document. `path` is one script or a list of them, and a list answers with `files`, one entry per path.",
             "params": [
                 {
                     "name": "path",
@@ -1316,6 +1488,7 @@
         {
             "tool": "godot_script",
             "op": "format",
+            "summary": "Formats source through the pinned gdformat sidecar.",
             "params": [
                 {
                     "name": "source",
@@ -1328,6 +1501,7 @@
         {
             "tool": "godot_script",
             "op": "hover",
+            "summary": "Hover documentation.",
             "params": [
                 {
                     "name": "path",
@@ -1339,8 +1513,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
@@ -1350,6 +1532,7 @@
         {
             "tool": "godot_script",
             "op": "completion",
+            "summary": "Completion items.",
             "params": [
                 {
                     "name": "path",
@@ -1361,8 +1544,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
@@ -1372,6 +1563,7 @@
         {
             "tool": "godot_script",
             "op": "signature_help",
+            "summary": "Signature help.",
             "params": [
                 {
                     "name": "path",
@@ -1383,8 +1575,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
@@ -1394,6 +1594,7 @@
         {
             "tool": "godot_script",
             "op": "definition",
+            "summary": "Go to definition.",
             "params": [
                 {
                     "name": "path",
@@ -1405,8 +1606,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
@@ -1416,6 +1625,7 @@
         {
             "tool": "godot_script",
             "op": "declaration",
+            "summary": "Go to declaration.",
             "params": [
                 {
                     "name": "path",
@@ -1427,8 +1637,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
@@ -1438,6 +1656,7 @@
         {
             "tool": "godot_script",
             "op": "references",
+            "summary": "Find references.",
             "params": [
                 {
                     "name": "path",
@@ -1449,8 +1668,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 },
@@ -1465,6 +1692,7 @@
         {
             "tool": "godot_script",
             "op": "highlights",
+            "summary": "Document highlights.",
             "params": [
                 {
                     "name": "path",
@@ -1476,8 +1704,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
@@ -1487,6 +1723,7 @@
         {
             "tool": "godot_script",
             "op": "diagnostics",
+            "summary": "Diagnostics the server published for a file. `path` is one script or a list of them — ask about every script you just wrote in one call, not one call each, because a list shares one wait for the whole batch and a call per file waits that long per file. A list answers with `files`, one entry per path. Answers `published: false` when the server has not said anything about that file yet, which is not the same as the file being clean — ask again rather than take an empty list for an answer. An empty list with `published: true` is a file that parses.",
             "params": [
                 {
                     "name": "path",
@@ -1513,6 +1750,7 @@
         {
             "tool": "godot_script",
             "op": "document_symbols",
+            "summary": "Symbols of one document.",
             "params": [
                 {
                     "name": "path",
@@ -1525,6 +1763,7 @@
         {
             "tool": "godot_script",
             "op": "workspace_symbols",
+            "summary": "Symbols across the worktree.",
             "params": [
                 {
                     "name": "query",
@@ -1537,6 +1776,7 @@
         {
             "tool": "godot_script",
             "op": "prepare_rename",
+            "summary": "Checks whether a symbol can be renamed. Answers `renameable`: false is the language server declining this position, and rename will decline it too.",
             "params": [
                 {
                     "name": "path",
@@ -1548,8 +1788,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 }
@@ -1559,6 +1807,7 @@
         {
             "tool": "godot_script",
             "op": "rename",
+            "summary": "Plans a rename without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files. Pass what it answers to apply_rename unchanged.",
             "params": [
                 {
                     "name": "path",
@@ -1570,8 +1819,16 @@
                     "kind": "object",
                     "required": true,
                     "entry": [
-                        {"name": "line", "kind": "int", "required": true},
-                        {"name": "character", "kind": "int", "required": true}
+                        {
+                            "name": "line",
+                            "kind": "int",
+                            "required": true
+                        },
+                        {
+                            "name": "character",
+                            "kind": "int",
+                            "required": true
+                        }
                     ],
                     "note": "Zero-based: the first character of the first line is {\"line\": 0, \"character\": 0}."
                 },
@@ -1586,11 +1843,34 @@
         {
             "tool": "godot_script",
             "op": "apply_rename",
+            "summary": "Applies a planned rename in one transaction. `files` is the list `rename` answered with, passed back unchanged; a hand-built one is refused.",
             "params": [
                 {
                     "name": "files",
                     "kind": "list",
                     "required": true,
+                    "entry": [
+                        {
+                            "name": "path",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "originalText",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "originalHash",
+                            "kind": "text",
+                            "required": true
+                        },
+                        {
+                            "name": "updatedText",
+                            "kind": "text",
+                            "required": true
+                        }
+                    ],
                     "note": "The list `rename` answered with, passed back unchanged."
                 }
             ],
@@ -1599,6 +1879,7 @@
         {
             "tool": "godot_debug",
             "op": "status",
+            "summary": "Connects to the adapter and reports its capabilities.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -1609,6 +1890,7 @@
         {
             "tool": "godot_debug",
             "op": "set_breakpoints",
+            "summary": "Replaces the breakpoints of one script.",
             "params": [
                 {
                     "name": "path",
@@ -1626,6 +1908,7 @@
         {
             "tool": "godot_debug",
             "op": "breakpoint_locations",
+            "summary": "Validates candidate lines.",
             "params": [
                 {
                     "name": "path",
@@ -1643,6 +1926,7 @@
         {
             "tool": "godot_debug",
             "op": "launch",
+            "summary": "Runs the project under the debugger. Give `breakpoints` when the game has to stop somewhere before you can look at it; without them it runs to completion and there is nothing to inspect.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1677,6 +1961,7 @@
         {
             "tool": "godot_debug",
             "op": "attach",
+            "summary": "Attaches to a game already running under this adapter.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -1687,6 +1972,7 @@
         {
             "tool": "godot_debug",
             "op": "await_stop",
+            "summary": "Waits for the next stop. Null means it ended.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1708,6 +1994,7 @@
         {
             "tool": "godot_debug",
             "op": "threads",
+            "summary": "Lists the debuggable threads.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -1718,6 +2005,7 @@
         {
             "tool": "godot_debug",
             "op": "stack_trace",
+            "summary": "Returns the stopped stack.",
             "params": [
                 {
                     "name": "threadId",
@@ -1730,6 +2018,7 @@
         {
             "tool": "godot_debug",
             "op": "scopes",
+            "summary": "Returns Locals, Members, and Globals of a frame.",
             "params": [
                 {
                     "name": "frameId",
@@ -1742,6 +2031,7 @@
         {
             "tool": "godot_debug",
             "op": "variables",
+            "summary": "Expands a scope or object.",
             "params": [
                 {
                     "name": "variablesReference",
@@ -1754,6 +2044,7 @@
         {
             "tool": "godot_debug",
             "op": "evaluate",
+            "summary": "Evaluates an expression in a frame.",
             "params": [
                 {
                     "name": "expression",
@@ -1771,6 +2062,7 @@
         {
             "tool": "godot_debug",
             "op": "continue",
+            "summary": "Resumes the debuggee.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1787,6 +2079,7 @@
         {
             "tool": "godot_debug",
             "op": "pause",
+            "summary": "Pauses the debuggee.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1803,6 +2096,7 @@
         {
             "tool": "godot_debug",
             "op": "step_over",
+            "summary": "Steps over one line.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1819,6 +2113,7 @@
         {
             "tool": "godot_debug",
             "op": "step_in",
+            "summary": "Steps into the call at the current line.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1835,6 +2130,7 @@
         {
             "tool": "godot_debug",
             "op": "step_out",
+            "summary": "Steps out of the current frame (emulated).",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1851,6 +2147,7 @@
         {
             "tool": "godot_debug",
             "op": "restart",
+            "summary": "Restarts the debuggee with the last launch arguments.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1861,6 +2158,7 @@
         {
             "tool": "godot_debug",
             "op": "terminate",
+            "summary": "Stops the debuggee, keeping the adapter.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1871,6 +2169,7 @@
         {
             "tool": "godot_debug",
             "op": "disconnect",
+            "summary": "Detaches.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -1887,6 +2186,7 @@
         {
             "tool": "godot_runtime",
             "op": "run",
+            "summary": "Runs the project and captures the first frame.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -1897,6 +2197,7 @@
         {
             "tool": "godot_runtime",
             "op": "stop",
+            "summary": "Stops the running game.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -1907,6 +2208,7 @@
         {
             "tool": "godot_runtime",
             "op": "restart",
+            "summary": "Restarts the running game.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
@@ -1917,6 +2219,7 @@
         {
             "tool": "godot_runtime",
             "op": "get_state",
+            "summary": "Reports whether a game is running, its helper is ready, and the debugger has it paused at an error.",
             "alone": {
                 "scope": "repeat",
                 "why": "It takes no parameters, so a second one in the same call is the first one again."
@@ -1927,6 +2230,7 @@
         {
             "tool": "godot_runtime",
             "op": "get_tree",
+            "summary": "Returns the running game's scene tree, and `paused`: whether the tree is paused right now. That one belongs to the SceneTree rather than to any node, so `inspect_node` cannot reach it and this is the only call that reports it.",
             "params": [
                 {
                     "name": "root",
@@ -1952,6 +2256,7 @@
         {
             "tool": "godot_runtime",
             "op": "inspect_node",
+            "summary": "Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap.",
             "params": [
                 {
                     "name": "path",
@@ -1969,6 +2274,7 @@
         {
             "tool": "godot_runtime",
             "op": "input",
+            "summary": "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played.",
             "params": [
                 {
                     "name": "events",
@@ -2049,6 +2355,7 @@
         {
             "tool": "godot_runtime",
             "op": "capture",
+            "summary": "Captures a PNG frame.",
             "params": [
                 {
                     "name": "source",
@@ -2062,6 +2369,7 @@
         {
             "tool": "godot_runtime",
             "op": "wait",
+            "summary": "Lets the game run on for a few frames, then answers with how many passed and how long it took. This is how you wait for something the game does over time — a tween, a timer, a unit walking somewhere — before capturing or inspecting it. Never wait by running `sleep` in bash: that stops this process rather than letting the game advance, and it costs a whole request to do nothing.",
             "params": [
                 {
                     "name": "frames",
@@ -2081,6 +2389,7 @@
         {
             "tool": "godot_runtime",
             "op": "get_monitors",
+            "summary": "Reads engine performance monitors. Without a list it answers with fps, memory_static and object_node_count. The rest are process_time, physics_time, memory_message_buffer, object_count, object_resource_count, object_orphan_node_count, render_objects_in_frame, render_primitives_in_frame, render_draw_calls_in_frame, render_video_memory, render_texture_memory and render_buffer_memory; any other name is an error.",
             "params": [
                 {
                     "name": "monitors",
@@ -2093,6 +2402,7 @@
         {
             "tool": "godot_logs",
             "op": "read",
+            "summary": "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse.",
             "params": [
                 {
                     "name": "after",
@@ -2127,6 +2437,7 @@
         {
             "tool": "godot_docs_search",
             "op": "search",
+            "summary": "Retrieves ranked passages for a question in plain words. Use it to see which chapters the manual has on a subject at all — when the question is which class to reach for, the list of chapters is the answer.",
             "params": [
                 {
                     "name": "question",
@@ -2151,6 +2462,7 @@
         {
             "tool": "godot_docs_search",
             "op": "ask",
+            "summary": "Answers one question from those same passages and hands back a paragraph and a quote instead of the chapters. Use it when you want one fact — a signature, an argument, what a property does — and would only have read one line out of what `search` returns. The quote is checked against the manual: an answer that arrives with a warning that its quote is not there was written from memory, and is not evidence. It needs a model connection, where `search` does not.",
             "params": [
                 {
                     "name": "question",

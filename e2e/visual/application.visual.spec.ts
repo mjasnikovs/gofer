@@ -29,18 +29,25 @@ async function installDesktop(page: Page, state: VisualState) {
             version: 1,
             ai: {
                 connectionType: 'openai-compatible',
-                name: 'Local AI',
-                baseUrl: 'http://127.0.0.1:8080/v1',
-                model: 'local-model',
-                api: 'openai-completions',
-                modelName: 'Gofer Local',
-                contextWindow: 120_064,
-                maxTokens: 8_192,
-                reasoning: true,
-                supportsReasoningEffort: true,
-                thinkingLevels: [],
-                input: ['text', 'image'],
-                thinkingLevel: 'medium',
+                connections: {
+                    'openai-compatible': {
+                        name: 'Local AI',
+                        baseUrl: 'http://127.0.0.1:8080/v1',
+                        api: 'openai-completions',
+                        chatTemplateThinking: false,
+                        model: {
+                            id: 'local-model',
+                            name: 'Gofer Local',
+                            contextWindow: 120_064,
+                            maxTokens: 8_192,
+                            reasoning: true,
+                            supportsReasoningEffort: true,
+                            thinkingLevels: [],
+                            input: ['text', 'image'],
+                            thinkingLevel: 'medium'
+                        }
+                    }
+                },
                 maxRetries: 2,
                 timeoutMs: 120_000
             }

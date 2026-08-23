@@ -312,6 +312,11 @@ export function isAiStreamEvent(value: unknown): value is AiStreamEvent {
             return (
                 isText(value['text'])
                 && isText(value['thinking'])
+                // Checked like the rest, and this is the one the turn's whole ending hangs on:
+                // `applyStreamEvent` reads it to draw a stopped turn as stopped. Unchecked, a `done`
+                // without it passed the guard, was typed as carrying it, read `undefined`, and fell
+                // through to `complete` — the very defect the field was added to fix, silently.
+                && isText(value['stopReason'])
                 && isRenderableUsage(value['usage'])
                 && isText(value['model'])
                 && Array.isArray(value['agentMessages'])
@@ -435,10 +440,25 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
         case 'done': {
             const thinking = streamedOr(message.thinking, event.thinking)
             return {
-                ...withoutActivity(withFallbackText(message, event.text)),
+                ...withoutActivity(
+                    withFallbackText(
+                        // A stopped turn takes its unfinished calls with it exactly as `aborted`
+                        // does. The worker can now answer the cancel line and end its own turn, so
+                        // this is the event a stop arrives on rather than a second, later one.
+                        event.stopReason === 'aborted' ?
+                            settleRunningTools(message, 'Stopped before it finished.')
+                        :   message,
+                        event.text
+                    )
+                ),
                 usage: event.usage,
                 model: event.model,
-                status: 'complete',
+                // A completion whose model stopped because it was aborted is a stopped turn, not a
+                // finished one, whatever it managed to say first. Read from the reason the worker
+                // reports rather than from a separate event: the backend mints its own `aborted`
+                // when it kills a worker that would not answer, and the two used to race — the late
+                // completion arrived last and marked the stopped turn complete.
+                status: event.stopReason === 'aborted' ? 'aborted' : 'complete',
                 ...(thinking !== undefined && {thinking})
             }
         }

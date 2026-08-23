@@ -1,4 +1,12 @@
-//! The parameter contract of every tool operation, and the check that holds a model to it.
+//! Every tool operation, and the check that holds a model to what it takes.
+//!
+//! One [`Operation`] per row of `protocol/schemas/v2/params.json`, carrying everything that is a
+//! fact about a named operation: the prose the model reads, the parameters that refuse a call,
+//! what answers it, how much of an `ops` list it may share, whether the user is asked first, and
+//! what it writes that one of their rules may refuse. The router resolves the row once, as it
+//! reads the entry, and asks it each of those in turn. They were five tables in three modules,
+//! keyed on the same `(tool, op)` pair of strings, and one dispatch looked the same operation up
+//! seven times over.
 //!
 //! Before this existed, four domains — `godot_scene`, `godot_node`, `godot_project` and
 //! `godot_runtime` — were routed to the addon as raw JSON. Nothing between the model and GDScript
@@ -146,7 +154,7 @@ pub const fn speaking(param: Param, vocabulary: &'static [&'static str]) -> Para
 /// neither. So the router rebuilt the addon command by string arithmetic (`format!("scene.{op}")`),
 /// kept a hand-written exception list for each domain that is only partly its own, and two drift
 /// tests re-derived both a second and a third time, in the same file.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Answers {
     /// The addon, under this exact command name.
     Addon(&'static str),
@@ -154,38 +162,247 @@ pub enum Answers {
     Rust,
 }
 
-/// The parameters of one operation, as `domain.op`, and what answers it.
-pub struct OpParams {
-    pub domain: &'static str,
-    pub op: &'static str,
-    pub answers: Answers,
-    pub params: &'static [Param],
+/// How much of an `ops` list one operation may share.
+///
+/// The default for an operation that declares neither is the whole list: it may appear beside
+/// anything, as often as the list names it, which is what `ops` exists for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sharing {
+    /// May sit beside other operations, and may not appear twice.
+    ///
+    /// The router runs a list in order, so a second entry of an operation that takes no parameters
+    /// answers the question the first one already answered, and a second entry of one driving what
+    /// the session owns exactly one of — the open scene, the running game, the undo stack, the
+    /// dialog — acts on whatever the first left behind.
+    Repeat,
+    /// Has to be the only entry of its call.
+    ///
+    /// The debugger, and only the debugger: each answer decides what the next operation means, so a
+    /// list written before the first answer arrived is a list written about a state that no longer
+    /// holds.
+    Exclusive,
 }
 
-const fn op(
-    domain: &'static str,
+/// How much of an `ops` list one operation may share, and the sentence that says why.
+///
+/// A tool call is a list, so a model that wants three inspections writes one call instead of three.
+/// Thirty-five operations are narrower than that, in one of the two ways [`Sharing`] describes, and
+/// the sentence beside each says which. The model is told before it writes the call rather than
+/// after: `ops` exists to save round trips, so learning its narrowing by spending one is the wrong
+/// way round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Lone {
+    pub scope: Sharing,
+    pub why: &'static str,
+}
+
+/// What an operation writes, where one of the user's enforced Godot rules may refuse it.
+///
+/// A tag rather than a `(tool, op)` match. Applying a rule is only half of enforcing it: an agent
+/// that meets a parse error it cannot fix reaches for the setting that produced it, and
+/// [`crate::godot_policy::enforcement_refusal`] is what refuses that. It used to name the five
+/// operations itself, in a match beside every other match on the same pair; the operation knows
+/// what it writes, so it is the operation that carries it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Writes {
+    /// A project setting, which is where the GDScript warning levels live.
+    ProjectSetting,
+    /// A machine-wide editor setting, which is where the game's window placement lives.
+    EditorSetting,
+    /// GDScript source, which is where an annotation can suppress a warning per file.
+    ScriptText,
+}
+
+/// Everything one tool operation is, in one row.
+///
+/// It was five: the prose the model reads, the parameters that refuse a call, the route that
+/// answers it, the narrowing of an `ops` list, and the gate that asks the user first. Each lived in
+/// a table of its own, keyed on the same `(tool, op)` pair of strings, and a single dispatch looked
+/// the same operation up five times over. They are one row of `protocol/schemas/v2/params.json`,
+/// so they are one row here.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Operation {
+    /// The domain tool that offers it. Carried so a refusal can name the whole call the way the
+    /// model wrote it — "godot_node create requires `type`" — rather than being handed a name the
+    /// row already knows.
+    pub tool: &'static str,
+    pub op: &'static str,
+    /// What the model is told this operation is for. See `$summaryComment` in the source.
+    pub summary: &'static str,
+    pub params: &'static [Param],
+    pub answers: Answers,
+    pub alone: Option<Lone>,
+    /// The sentence the user is shown before the agent may run this. `None` is auto-allowed, so a
+    /// new operation is allowed by default and has to be gated deliberately.
+    pub gated: Option<&'static str>,
+    pub writes: Option<Writes>,
+}
+
+/// The wire shape of one operation: what the Node worker is sent, per entry, at startup.
+///
+/// The signature is printed from the row's own parameters rather than stored beside them, because
+/// two spellings of one contract is the drift this file exists to end — see [`signature`].
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Wire<'a> {
     op: &'static str,
-    answers: Answers,
-    params: &'static [Param],
-) -> OpParams {
-    OpParams {
-        domain,
-        op,
-        answers,
-        params,
+    summary: &'static str,
+    signature: String,
+    params: &'a [Param],
+    alone: Option<Lone>,
+}
+
+impl Serialize for Operation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        Wire {
+            op: self.op,
+            summary: self.summary,
+            signature: signature(self.params),
+            params: self.params,
+            alone: self.alone,
+        }
+        .serialize(serializer)
     }
 }
 
-/// What answers `domain.op`, or `None` for an operation this table does not name.
+impl Operation {
+    /// What answers it: the addon under a command name, or the desktop in a handler of its own.
+    pub fn route(&self) -> Answers {
+        self.answers
+    }
+
+    /// How much of an `ops` list it may share, and why, or `None` when it may share all of one.
+    pub fn sharing(&self) -> Option<(Sharing, &'static str)> {
+        self.alone.map(|lone| (lone.scope, lone.why))
+    }
+
+    /// The reason it needs the user's approval, or `None` when the agent may just run it.
+    pub fn gate(&self) -> Option<&'static str> {
+        self.gated
+    }
+
+    /// What it writes that one of the user's enforced rules may refuse, or `None` when no rule
+    /// keys on it. See [`Writes`].
+    pub fn writes(&self) -> Option<Writes> {
+        self.writes
+    }
+
+    /// The values a model wrote in a shape the protocol does not take, rewritten into the one it
+    /// does.
+    ///
+    /// Repair rather than refusal, because the refusal was tried. `{"type": "vector2", "value":
+    /// {"x": 32, "y": 48}}` is what one live turn wrote thirteen times in a single run; the refusal
+    /// was then taught to print the exact value to send instead, and the next run wrote it four
+    /// more times in a row, each answered with `Send {"type": "vector2", "value": [32, 48]}` and
+    /// each ignored. A correction a model will not read is one that cannot help it, and the numbers
+    /// were never in doubt.
+    ///
+    /// Only where the order is not a guess — the same table the correction is printed from — and
+    /// only for a parameter the operation declares as a tagged value, so this can never reach a key
+    /// that means something else. Everything it does not recognise is left exactly as it arrived,
+    /// for [`Operation::check`] to refuse by name.
+    ///
+    /// What is left to the worker's `prepareArguments`, a layer above this, is only what this one
+    /// can no longer reach. The agent loop validates a call against the generated schema *between*
+    /// that hook and this function, so the worker owns exactly the shapes the schema refuses
+    /// outright: the `ops` bracket, the `op` naming an entry, the wrapper the parameters were
+    /// parked under, and the whitespace round a parameter's *name* — a nested entry's schema is
+    /// closed and requires its own names, so `{"properties": [{" node": …}]}` is answered by the
+    /// loop before the router is ever called. The whitespace round a parameter's *value* is here,
+    /// in [`trim_a_name`], and so is every other repair of what a value or a key means.
+    ///
+    /// That split is what makes those repairs reach a caller the worker never sees. The acceptance
+    /// suites call `dispatch` directly, the desktop client calls it with no model in front of it,
+    /// and a fix that lives only in the worker reaches neither — which is what a tagged value
+    /// wrapped in a second copy of its own tag did, unwrapped in JavaScript and refused here.
+    pub fn repair(&self, params: &mut Value) {
+        repair_set(self.params, params);
+    }
+
+    /// Refuses a call whose parameters cannot possibly be right, before it leaves this process.
+    ///
+    /// Everything here is arithmetic on JSON: a name that is not accepted, a missing required
+    /// parameter, a value of the wrong JSON type, a tagged value whose payload does not match its
+    /// own tag. None of it needs the editor, so none of it should cost a round trip to find out.
+    pub fn check(&self, params: &Value) -> Result<(), ToolFailure> {
+        let Some(object) = params.as_object() else {
+            return Ok(());
+        };
+        let call = format!("{} {}", self.tool, self.op);
+        check_set(&call, self.op, "", self.params, object)
+    }
+}
+
+const fn op(
+    tool: &'static str,
+    op: &'static str,
+    summary: &'static str,
+    answers: Answers,
+    params: &'static [Param],
+) -> Operation {
+    Operation {
+        tool,
+        op,
+        summary,
+        params,
+        answers,
+        alone: None,
+        gated: None,
+        writes: None,
+    }
+}
+
+/// The same operation, narrowed to where it may sit in an `ops` list. See [`Lone`].
+const fn alone(operation: Operation, scope: Sharing, why: &'static str) -> Operation {
+    Operation {
+        alone: Some(Lone { scope, why }),
+        ..operation
+    }
+}
+
+/// The same operation, with the sentence the user is asked before it runs.
+const fn gated(operation: Operation, reason: &'static str) -> Operation {
+    Operation {
+        gated: Some(reason),
+        ..operation
+    }
+}
+
+/// The same operation, carrying what it writes that a rule may refuse. See [`Writes`].
+const fn writes(operation: Operation, what: Writes) -> Operation {
+    Operation {
+        writes: Some(what),
+        ..operation
+    }
+}
+
+/// The row `domain.op` was declared in, or `None` for a pair nothing declares.
+///
+/// The lookup by name, and it is read only by tests: the drift checks and the tests that state the
+/// pair they are about hold two strings and nothing else. Nothing in a shipped build looks an
+/// operation up this way — the router resolves the row once, as it reads the entry, and asks that
+/// row everything after.
+#[cfg(test)]
+pub fn operation_of(domain: &str, op: &str) -> Option<&'static Operation> {
+    crate::ai_tools::CATALOG
+        .iter()
+        .find(|entry| entry.name == domain)
+        .and_then(|entry| entry.operation(op))
+}
+
+/// What answers `domain.op`, or `None` for an operation nothing declares.
 ///
 /// Absence is a build-time oversight rather than something a caller can reach: `dispatch` refuses
 /// an operation the catalogue does not offer before it gets here, and
-/// `every_catalog_operation_declares_its_parameters` holds this table to the catalogue.
+/// `every_catalog_operation_declares_its_parameters` holds these rows to the catalogue.
+///
+/// Read only by tests, like the lookup behind it. The router routes what it resolved.
+#[cfg(test)]
 pub fn answers(domain: &str, op: &str) -> Option<Answers> {
-    TABLE
-        .iter()
-        .find(|entry| entry.domain == domain && entry.op == op)
-        .map(|entry| entry.answers)
+    operation_of(domain, op).map(Operation::route)
 }
 
 /// The words a parameter accepts inside a structure, where [`Kind`] cannot reach.
@@ -233,57 +450,133 @@ pub const GODOT_KEY_NAME_REFUSED: &[&str] =
 // GENERATED-END vocabularies
 use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 
-/// Every parameter of every operation the router forwards as raw JSON.
+/// Every operation of every domain tool, one [`Operation`] per row of the source.
 ///
-/// The other five domains deserialize into typed Rust structs already, so serde is their contract
-/// and repeating it here would be a second one. An operation absent from this table is not checked
-/// — absence means unchecked, never "takes nothing" — which is why a new operation that wants
-/// checking has to be added rather than merely written.
-// GENERATED-BEGIN op-params sha256:b50c0866b6ae1b13
-pub const TABLE: &[OpParams] = &[
-    op("godot_session", "status", Answers::Rust, &[]),
-    op("godot_session", "start", Answers::Rust, &[]),
-    op("godot_session", "stop", Answers::Rust, &[]),
-    op(
-        "godot_session",
-        "get_state",
-        Answers::Addon("session.get_state"),
-        &[],
+/// The whole catalogue, with no exceptions list. The first cut of this file covered four domains
+/// and left five to serde, which read as a reasonable division and was not one: `expectedHash`
+/// lives in one of the five, a model copied sixty-three of its sixty-four characters, and nothing
+/// between it and the filesystem counted them. So there is no hole and no way to add one — an
+/// operation reaches the model only through `CATALOG`, and every entry of it is one of these rows.
+///
+/// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
+/// domain is a dead const, which the compiler reports rather than a test.
+// GENERATED-BEGIN operations sha256:7c9d71fff817fbde
+pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
+    alone(
+        op(
+            "godot_session",
+            "status",
+            "Reports the session state, ports, engine version, and worktree.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
-    op(
-        "godot_session",
-        "undo",
-        Answers::Addon("session.undo"),
-        &[noted(
-            hidden("expectedRevision", Int),
-            "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-        )],
+    alone(
+        op(
+            "godot_session",
+            "start",
+            "Starts the editor session for the active task worktree.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Repeat,
+        "There is one editor session, so a second one in the same call is the first one again.",
     ),
-    op(
-        "godot_session",
-        "redo",
-        Answers::Addon("session.redo"),
-        &[noted(
-            hidden("expectedRevision", Int),
-            "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-        )],
+    alone(
+        op(
+            "godot_session",
+            "stop",
+            "Stops the editor session and removes the staged Gofer addon.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Repeat,
+        "There is one editor session, so a second one in the same call is the first one again.",
     ),
-    op(
-        "godot_session",
-        "answer_dialog",
-        Answers::Addon("session.answer_dialog"),
-        &[need("button", Text)],
+    alone(
+        op(
+            "godot_session",
+            "get_state",
+            "Asks the addon for readiness, the open scene, its revision, and the dialog the editor is waiting on. A `dialog` is a question only a person can answer — its text and the buttons it offers — and until someone presses one the editor will not run the game. Nothing else reports it: commands are still answered while one is up, and a screenshot of the editor need not contain it.",
+            Answers::Addon("session.get_state"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
-    op("godot_scene", "list", Answers::Addon("scene.list"), &[]),
-    op(
-        "godot_scene",
-        "open",
-        Answers::Addon("scene.open"),
-        &[need("path", Text)],
+    gated(
+        alone(
+            op(
+                "godot_session",
+                "answer_dialog",
+                "Presses a button on the dialog the editor is waiting on, by its label — one of the `buttons` the dialog was reported with. Use it when a dialog is blocking the work; there is no other way past one, and nothing else you can do will clear it. Read what it asks before choosing: the buttons do what they say, and some of them change the project.",
+                Answers::Addon("session.answer_dialog"),
+                &[need("button", Text)],
+            ),
+            Sharing::Repeat,
+            "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press.",
+        ),
+        "Answering an editor dialog presses that button in the editor, exactly as clicking it would.",
+    ),
+    alone(
+        op(
+            "godot_session",
+            "undo",
+            "Undoes the last editor operation.",
+            Answers::Addon("session.undo"),
+            &[noted(
+                hidden("expectedRevision", Int),
+                "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+            )],
+        ),
+        Sharing::Repeat,
+        "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
+    ),
+    alone(
+        op(
+            "godot_session",
+            "redo",
+            "Redoes the last undone editor operation.",
+            Answers::Addon("session.redo"),
+            &[noted(
+                hidden("expectedRevision", Int),
+                "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+            )],
+        ),
+        Sharing::Repeat,
+        "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
+    ),
+];
+
+pub const GODOT_SCENE_OPERATIONS: &[Operation] = &[
+    alone(
+        op(
+            "godot_scene",
+            "list",
+            "Lists the scene files in the project.",
+            Answers::Addon("scene.list"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
+    ),
+    alone(
+        op(
+            "godot_scene",
+            "open",
+            "Opens a scene.",
+            Answers::Addon("scene.open"),
+            &[need("path", Text)],
+        ),
+        Sharing::Repeat,
+        "One scene is open at a time, so a second one would act on whatever the first left open.",
     ),
     op(
         "godot_scene",
         "create",
+        "Creates a scene and opens it. It is checked against the revision of the scene being *replaced*, because creating a scene discards whatever is unsaved in the open one — which is what the check is for. The router holds that number already.",
         Answers::Addon("scene.create"),
         &[
             need("path", Text),
@@ -298,6 +591,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_scene",
         "get_tree",
+        "Returns the edited scene hierarchy and its revision. Read it to see what the scene holds, not to fetch a revision: every mutation is checked against a number the router already has, and answers with the next one.",
         Answers::Addon("scene.get_tree"),
         &[
             noted(
@@ -314,45 +608,65 @@ pub const TABLE: &[OpParams] = &[
             ),
         ],
     ),
-    op(
-        "godot_scene",
-        "save",
-        Answers::Addon("scene.save"),
-        &[noted(
-            hidden("expectedRevision", Int),
-            "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-        )],
-    ),
-    op(
-        "godot_scene",
-        "save_as",
-        Answers::Addon("scene.save_as"),
-        &[
-            need("path", Text),
-            noted(
+    alone(
+        op(
+            "godot_scene",
+            "save",
+            "Saves the edited scene.",
+            Answers::Addon("scene.save"),
+            &[noted(
                 hidden("expectedRevision", Int),
                 "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-            ),
-        ],
+            )],
+        ),
+        Sharing::Repeat,
+        "One scene is open at a time, so a second one would act on whatever the first left open.",
     ),
-    op(
-        "godot_scene",
-        "reload",
-        Answers::Addon("scene.reload"),
-        &[noted(
-            hidden("expectedRevision", Int),
-            "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
-        )],
+    alone(
+        op(
+            "godot_scene",
+            "save_as",
+            "Saves the edited scene to a new path.",
+            Answers::Addon("scene.save_as"),
+            &[
+                need("path", Text),
+                noted(
+                    hidden("expectedRevision", Int),
+                    "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                ),
+            ],
+        ),
+        Sharing::Repeat,
+        "One scene is open at a time, so a second one would act on whatever the first left open.",
     ),
+    alone(
+        op(
+            "godot_scene",
+            "reload",
+            "Reloads the edited scene from disk, discarding in-memory edits.",
+            Answers::Addon("scene.reload"),
+            &[noted(
+                hidden("expectedRevision", Int),
+                "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+            )],
+        ),
+        Sharing::Repeat,
+        "One scene is open at a time, so a second one would act on whatever the first left open.",
+    ),
+];
+
+pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     op(
         "godot_node",
         "inspect",
+        "Inspects a node. Answers with its type, every property with its current value, its groups, every signal it can emit, and the connections it already has. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
         Answers::Addon("node.inspect"),
         &[need("node", Text), hidden("scene", Text)],
     ),
     op(
         "godot_node",
         "create",
+        "Creates a node. `parent` is the parent's path — the root's own path, like /Level1, for a direct child.",
         Answers::Addon("node.create"),
         &[
             need("parent", Text),
@@ -369,6 +683,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "create_nodes",
+        "Creates several nodes in one call, as one revision and one undo step. Prefer this over calling create in a row: create answers with the revision the next create needs, so forty nodes one at a time is forty round trips. Each `nodes` entry is exactly what create takes. Entries are applied in order, so a later entry may name a node an earlier entry creates as its parent, and a whole subtree goes in at once. Nothing is attached unless every entry is accepted.",
         Answers::Addon("node.create_nodes"),
         &[
             noted(
@@ -393,6 +708,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "instantiate",
+        "Places an instance of a saved scene under a node. This is how a level repeats a thing — build the coin once as its own scene, then instantiate it wherever a coin goes, and one edit reaches every placement. `node.create` cannot do this: it only builds engine classes.",
         Answers::Addon("node.instantiate"),
         &[
             need("parent", Text),
@@ -409,6 +725,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "duplicate",
+        "Duplicates a node.",
         Answers::Addon("node.duplicate"),
         &[
             need("node", Text),
@@ -423,6 +740,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "rename",
+        "Renames a node.",
         Answers::Addon("node.rename"),
         &[
             need("node", Text),
@@ -437,6 +755,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "reparent",
+        "Reparents a node.",
         Answers::Addon("node.reparent"),
         &[
             need("node", Text),
@@ -452,6 +771,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "delete",
+        "Deletes a node.",
         Answers::Addon("node.delete"),
         &[
             need("node", Text),
@@ -465,6 +785,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "set_property",
+        "Sets a property. `value` is tagged with its type — a `type` beside a `value`: {\"type\": \"vector2\", \"value\": [12, 34]}, {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}. A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's `texture` — takes {\"type\": \"resource\", \"value\": {\"path\": \"res://…\"}}, never a string: a path written as a string is refused. A color takes four numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other tags are null, bool, int, rect2 and rect2i (four numbers each), vector2i, vector3, vector3i, vector4, vector4i, quaternion, plane, transform2d, basis, transform3d, array (of tagged values) and dictionary (of key and value pairs of them).",
         Answers::Addon("node.set_property"),
         &[
             need("node", Text),
@@ -483,6 +804,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "set_properties",
+        "Sets several properties in one call, as one revision and one undo step. Prefer this over calling set_property in a row, for the same reason create_nodes exists: each single write answers with the revision the next one needs. Each `properties` entry is exactly what set_property takes, with `value` tagged the same way, and entries may name different nodes. Nothing is written unless every entry is accepted.",
         Answers::Addon("node.set_properties"),
         &[
             noted(
@@ -509,6 +831,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "add_to_group",
+        "Puts a node in a group the saved scene keeps. Groups are how a running game finds every coin or enemy at once, with get_tree().get_nodes_in_group(\"…\").",
         Answers::Addon("node.add_to_group"),
         &[
             need("node", Text),
@@ -522,6 +845,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "remove_from_group",
+        "Takes a node out of a group.",
         Answers::Addon("node.remove_from_group"),
         &[
             need("node", Text),
@@ -535,6 +859,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "connect_signal",
+        "Connects a node's signal to a method, as an editor connection the scene keeps. `target` is the node carrying the method and defaults to the scene root; the method has to exist there already, so write the script first. `binds` are extra tagged values passed after the signal's own arguments. This is how a scene wires itself up without a `connect` call in _ready.",
         Answers::Addon("node.connect_signal"),
         &[
             need("node", Text),
@@ -553,6 +878,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "disconnect_signal",
+        "Removes a connection. `binds` are tagged values like connect_signal's, and have to match the ones the connection was made with or nothing is found to remove.",
         Answers::Addon("node.disconnect_signal"),
         &[
             need("node", Text),
@@ -569,6 +895,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "set_cells",
+        "Paints tiles onto a TileMapLayer. This is how a 2D level is built — one TileMapLayer carrying a tileset, rather than a node per block. `x`/`y` are cell coordinates, not pixels, and `width`/`height` default to 1 so a rectangle is one entry — a whole ground row is {\"x\": 0, \"y\": 12, \"width\": 200, \"height\": 2, \"atlas\": [0, 0]}. `atlas` is the [column, row] of the tile in the tileset, which resource.describe_tileset lists. An entry with no `atlas` erases the cells it covers. The node needs its `tile_set` property set first, with node.set_property and a resource value.",
         Answers::Addon("node.set_cells"),
         &[
             need("node", Text),
@@ -595,66 +922,98 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_node",
         "get_cells",
+        "Reads back what a TileMapLayer holds. Answers with how many cells are painted, the rectangle they span, and the tile each one draws.",
         Answers::Addon("node.get_cells"),
         &[need("node", Text), opt("limit", Int)],
     ),
-    op(
-        "godot_project",
-        "get_settings",
-        Answers::Addon("project.get_settings"),
-        &[],
+];
+
+pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
+    alone(
+        op(
+            "godot_project",
+            "get_settings",
+            "Returns the project settings overview.",
+            Answers::Addon("project.get_settings"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     op(
         "godot_project",
         "search_settings",
+        "Searches project settings by name. Answers with at most 50 matches, plus `totalMatches` and `truncated` — narrow the query rather than ask for more, because there is no limit to raise.",
         Answers::Addon("project.search_settings"),
         &[need("query", Text)],
     ),
     op(
         "godot_project",
         "get_setting",
+        "Reads one project setting.",
         Answers::Addon("project.get_setting"),
         &[need("name", Text)],
     ),
-    op(
-        "godot_project",
-        "set_setting",
-        Answers::Addon("project.set_setting"),
-        &[need("name", Text), need("value", Tagged)],
+    writes(
+        op(
+            "godot_project",
+            "set_setting",
+            "Writes one project setting. `value` is tagged with its type, the same shape node.set_property takes: {\"type\": \"int\", \"value\": 1152}, {\"type\": \"string\", \"value\": \"res://main.tscn\"}, {\"type\": \"vector2\", \"value\": [12, 34]}. A bare number or string is refused.",
+            Answers::Addon("project.set_setting"),
+            &[need("name", Text), need("value", Tagged)],
+        ),
+        Writes::ProjectSetting,
     ),
-    op(
-        "godot_project",
-        "reset_setting",
-        Answers::Addon("project.reset_setting"),
-        &[need("name", Text)],
+    writes(
+        op(
+            "godot_project",
+            "reset_setting",
+            "Resets a project setting to its default.",
+            Answers::Addon("project.reset_setting"),
+            &[need("name", Text)],
+        ),
+        Writes::ProjectSetting,
     ),
-    op(
-        "godot_project",
-        "list_autoloads",
-        Answers::Addon("project.list_autoloads"),
-        &[],
+    alone(
+        op(
+            "godot_project",
+            "list_autoloads",
+            "Lists the configured autoloads.",
+            Answers::Addon("project.list_autoloads"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     op(
         "godot_project",
         "set_autoload",
+        "Adds or updates an autoload.",
         Answers::Addon("project.set_autoload"),
         &[need("name", Text), need("path", Text), opt("enabled", Flag)],
     ),
     op(
         "godot_project",
         "remove_autoload",
+        "Removes an autoload.",
         Answers::Addon("project.remove_autoload"),
         &[need("name", Text)],
     ),
-    op(
-        "godot_project",
-        "list_input_actions",
-        Answers::Addon("project.list_input_actions"),
-        &[],
+    alone(
+        op(
+            "godot_project",
+            "list_input_actions",
+            "Lists the Input Map actions.",
+            Answers::Addon("project.list_input_actions"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     op(
         "godot_project",
         "set_input_action",
+        "Writes an input action. `name` is the action's own name, like move_left, never a settings path. Each event names its kind and its key, as {\"kind\": \"key\", \"key\": \"A\"} — the same shape list_input_actions answers with. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. The other kinds are mouse_button and joypad_button, each taking a `button` index.",
         Answers::Addon("project.set_input_action"),
         &[
             noted(
@@ -662,8 +1021,24 @@ pub const TABLE: &[OpParams] = &[
                 "The action's own name, like move_left, never a settings path.",
             ),
             noted(
-                speaking(need("events", List), GODOT_KEY_NAME),
-                "Each event is {\"kind\": \"key\", \"key\": \"A\"}, with Godot's key name rather than the browser's.",
+                shaped(
+                    speaking(need("events", List), GODOT_KEY_NAME),
+                    &[
+                        noted(
+                            need(
+                                "kind",
+                                Kind::Choice(&["key", "mouse_button", "joypad_button"]),
+                            ),
+                            "Which of the three an event is. Any other kind is refused here rather than in the editor.",
+                        ),
+                        speaking(opt("key", Text), GODOT_KEY_NAME),
+                        noted(
+                            opt("button", Int),
+                            "A mouse button is an index of 1 or higher; a joypad button an index.",
+                        ),
+                    ],
+                ),
+                "The key is Godot's name for it, not the browser's.",
             ),
             opt("deadzone", Number),
         ],
@@ -671,48 +1046,72 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_project",
         "remove_input_action",
+        "Removes a project input action.",
         Answers::Addon("project.remove_input_action"),
         &[need("name", Text)],
     ),
     op(
         "godot_project",
         "reset_input_action",
+        "Drops the override of a built-in action.",
         Answers::Addon("project.reset_input_action"),
         &[need("name", Text)],
     ),
-    op(
-        "godot_project",
-        "list_plugins",
-        Answers::Addon("project.list_plugins"),
-        &[],
+    alone(
+        op(
+            "godot_project",
+            "list_plugins",
+            "Lists the project's editor plugins.",
+            Answers::Addon("project.list_plugins"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
-    op(
-        "godot_project",
-        "set_plugin_enabled",
-        Answers::Addon("project.set_plugin_enabled"),
-        &[need("plugin", Text), need("enabled", Flag)],
+    gated(
+        op(
+            "godot_project",
+            "set_plugin_enabled",
+            "Enables or disables a plugin.",
+            Answers::Addon("project.set_plugin_enabled"),
+            &[need("plugin", Text), need("enabled", Flag)],
+        ),
+        "Enabling or disabling an editor plugin changes what runs inside the editor itself.",
     ),
     op(
         "godot_project",
         "search_editor_settings",
+        "Searches machine-wide editor settings by name. Capped at 50 matches, like search_settings.",
         Answers::Addon("editor.search_settings"),
         &[need("query", Text)],
     ),
     op(
         "godot_project",
         "get_editor_setting",
+        "Reads one machine-wide editor setting.",
         Answers::Addon("editor.get_setting"),
         &[need("name", Text)],
     ),
-    op(
-        "godot_project",
-        "set_editor_setting",
-        Answers::Addon("editor.set_setting"),
-        &[need("name", Text), need("value", Tagged)],
+    writes(
+        gated(
+            op(
+                "godot_project",
+                "set_editor_setting",
+                "Writes one machine-wide editor setting. `value` is tagged with its type, as {\"type\": \"bool\", \"value\": true} — the same shape set_setting and node.set_property take.",
+                Answers::Addon("editor.set_setting"),
+                &[need("name", Text), need("value", Tagged)],
+            ),
+            "Editor settings are machine-wide: they live outside the task worktree and outside Git, so this change is not part of anything the task can roll back.",
+        ),
+        Writes::EditorSetting,
     ),
+];
+
+pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
     op(
         "godot_resource",
         "list",
+        "Lists the files in the task worktree with their sizes. `under` narrows it to one directory — `assets`, named the way the project names it — and without it you get the whole worktree, which is a lot to read to see one folder. `hashes: true` reads every file so that a later delete of one is refused if it changed in the meantime. The router holds what it read; you never see it and never pass it. That is a read of the whole project, so ask for it before deleting files you have not opened, not to look around.",
         Answers::Rust,
         &[
             noted(
@@ -725,6 +1124,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_resource",
         "rescan",
+        "Tells the editor filesystem about files that changed. `path` is one file or a list of them — name everything you just wrote in one call, because a batch is imported in one pass and a call per file is not. Omit it to walk the whole project.",
         Answers::Addon("resource.rescan"),
         &[noted(
             opt("path", Kind::Either(&[Text, List])),
@@ -734,6 +1134,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_resource",
         "create_tileset",
+        "Cuts a texture into a TileSet and saves it. `path` is the .tres to write, `texture` an image the project already holds, and `tileSize` one number or two — 16 or [16, 16] — defaulting to 16. `tiles` is the [column, row] list to define and defaults to every tile the texture holds; `solid` is the subset that gets collision, either a list or \"all\", and a tile with no collision is scenery the player falls through. Answers with the atlas grid it found. Build a tileset with this rather than writing one as text: a TileSet carries a record per tile and a polygon per solid one, and a hand-written one opens as a resource with no tiles in it.",
         Answers::Addon("resource.create_tileset"),
         &[
             need("path", Text),
@@ -752,6 +1153,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_resource",
         "create_texture",
+        "Draws a PNG and imports it, which is how a project with no art gets some. `path` is the .png to write and `size` is one number or two — 16 or [16, 24]. `rects` are filled rectangles painted over `background` in the order they are named, and without a `background` the image starts transparent, which is what a sprite wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is one texture with a rectangle per tile, laid out on the grid create_tileset then cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by the time this answers, so it needs no rescan and create_tileset can name it straight away. Draw art with this rather than through bash: an image library is not something every machine has.",
         Answers::Addon("resource.create_texture"),
         &[
             need("path", Text),
@@ -784,6 +1186,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_resource",
         "create_shape",
+        "Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of RectangleShape2D (size as [width, height]), CircleShape2D (radius), CapsuleShape2D (radius and height), SegmentShape2D (points as [ax, ay, bx, by]), or WorldBoundaryShape2D (nothing). Set the node's `shape` property to the path afterwards — a CollisionShape2D without one collides with nothing, and a shape can only be assigned from a file that already exists.",
         Answers::Addon("resource.create_shape"),
         &[
             need("path", Text),
@@ -806,30 +1209,43 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_resource",
         "describe_tileset",
+        "Reports what a saved TileSet holds. Answers with its tile size, its sources, and every tile they define with whether it is solid — which is where the [column, row] pairs godot_node set_cells takes come from.",
         Answers::Addon("resource.describe_tileset"),
         &[need("path", Text)],
     ),
-    op(
-        "godot_resource",
-        "move",
-        Answers::Rust,
-        &[need("from", Text), need("to", Text)],
+    gated(
+        op(
+            "godot_resource",
+            "move",
+            "Moves a file or directory inside the worktree.",
+            Answers::Rust,
+            &[need("from", Text), need("to", Text)],
+        ),
+        "Moving a path removes the file from where it is now, and can overwrite the destination.",
     ),
-    op(
-        "godot_resource",
-        "delete",
-        Answers::Rust,
-        &[
-            need("path", Text),
-            noted(
-                hidden("expectedHash", Hash),
-                "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own.",
-            ),
-        ],
+    gated(
+        op(
+            "godot_resource",
+            "delete",
+            "Deletes a file or directory. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
+            Answers::Rust,
+            &[
+                need("path", Text),
+                noted(
+                    hidden("expectedHash", Hash),
+                    "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                ),
+            ],
+        ),
+        "Deleting a file removes it from the task worktree; only a Git checkout brings it back.",
     ),
+];
+
+pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
     op(
         "godot_script",
         "list",
+        "Lists the GDScript files in the worktree with their size. `under` narrows it to one directory, named the way the project names it — `scripts`, not its full path — and omitting it lists every script. This is the call for finding a script whose name you do not know; a shell `find` is not, and it is refused outside the worktree anyway.",
         Answers::Rust,
         &[noted(
             opt("under", Text),
@@ -839,6 +1255,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "open",
+        "Opens a script as a language-server document. `path` is one script or a list of them — open everything you are about to query in one call, not one call each. A list answers with `files`, one entry per path.",
         Answers::Rust,
         &[noted(
             need("path", Kind::Either(&[Text, List])),
@@ -848,43 +1265,53 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "update",
+        "Reports an in-memory buffer change.",
         Answers::Rust,
         &[need("path", Text), need("text", Text)],
     ),
-    op(
-        "godot_script",
-        "save",
-        Answers::Rust,
-        &[
-            need("path", Text),
-            need("text", Text),
-            noted(
-                hidden("expectedHash", Hash),
-                "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own.",
-            ),
-        ],
+    writes(
+        op(
+            "godot_script",
+            "edit",
+            "Changes existing scripts by replacing exact text, and answers with each file's diagnostics. Put every change to one file in that file's `edits`, and every file in one call: this is one call, not one per change. `oldText` must appear exactly once in the file, so extend it with a neighbouring line when it would not; it is quoted from the file, so read the file first. Either every file is written or none is. To create a script, use `save`.",
+            Answers::Rust,
+            &[noted(
+                shaped(
+                    need("files", List),
+                    &[
+                        need("path", Text),
+                        shaped(
+                            need("edits", List),
+                            &[need("oldText", Text), need("newText", Text)],
+                        ),
+                    ],
+                ),
+                "Every `oldText` must match one region of that file exactly and must not overlap another edit of the same file. Entries may name different files, and either every file is written or none is.",
+            )],
+        ),
+        Writes::ScriptText,
     ),
-    op(
-        "godot_script",
-        "edit",
-        Answers::Rust,
-        &[noted(
-            shaped(
-                need("files", List),
-                &[
-                    need("path", Text),
-                    shaped(
-                        need("edits", List),
-                        &[need("oldText", Text), need("newText", Text)],
-                    ),
-                ],
-            ),
-            "Every `oldText` must match one region of that file exactly and must not overlap another edit of the same file. Entries may name different files, and either every file is written or none is.",
-        )],
+    writes(
+        op(
+            "godot_script",
+            "save",
+            "Writes a whole file and answers with the file's diagnostics, the same way `edit` does. Use it to create a script, or to replace one outright; to change part of one, `edit` is the call, and it does not send the file back. A file that already exists is only written over what you have read, so open it first — the router holds the hash that read answered with. A script you are creating needs no read. `update` does not write anything: it reports a buffer change to the language server, and this is the call that puts it on disk. Do not follow this with a `diagnostics` call about the same file: the verdict is already here. `published: false` means the server had not spoken about the text yet, which is not the same as the file being clean.",
+            Answers::Rust,
+            &[
+                need("path", Text),
+                need("text", Text),
+                noted(
+                    hidden("expectedHash", Hash),
+                    "Supplied by the router from the read that answered with it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                ),
+            ],
+        ),
+        Writes::ScriptText,
     ),
     op(
         "godot_script",
         "close",
+        "Closes the document. `path` is one script or a list of them, and a list answers with `files`, one entry per path.",
         Answers::Rust,
         &[noted(
             need("path", Kind::Either(&[Text, List])),
@@ -894,12 +1321,14 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "format",
+        "Formats source through the pinned gdformat sidecar.",
         Answers::Rust,
         &[need("source", Text)],
     ),
     op(
         "godot_script",
         "hover",
+        "Hover documentation.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -915,6 +1344,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "completion",
+        "Completion items.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -930,6 +1360,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "signature_help",
+        "Signature help.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -945,6 +1376,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "definition",
+        "Go to definition.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -960,6 +1392,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "declaration",
+        "Go to declaration.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -975,6 +1408,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "references",
+        "Find references.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -991,6 +1425,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "highlights",
+        "Document highlights.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1006,6 +1441,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "diagnostics",
+        "Diagnostics the server published for a file. `path` is one script or a list of them — ask about every script you just wrote in one call, not one call each, because a list shares one wait for the whole batch and a call per file waits that long per file. A list answers with `files`, one entry per path. Answers `published: false` when the server has not said anything about that file yet, which is not the same as the file being clean — ask again rather than take an empty list for an answer. An empty list with `published: true` is a file that parses.",
         Answers::Rust,
         &[
             noted(
@@ -1018,18 +1454,21 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "document_symbols",
+        "Symbols of one document.",
         Answers::Rust,
         &[need("path", Text)],
     ),
     op(
         "godot_script",
         "workspace_symbols",
+        "Symbols across the worktree.",
         Answers::Rust,
         &[need("query", Text)],
     ),
     op(
         "godot_script",
         "prepare_rename",
+        "Checks whether a symbol can be renamed. Answers `renameable`: false is the language server declining this position, and rename will decline it too.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1045,6 +1484,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "rename",
+        "Plans a rename without writing, and refuses when the server plans nothing — every real rename touches at least the declaration, so an empty plan is the server declining rather than a rename that reached no files. Pass what it answers to apply_rename unchanged.",
         Answers::Rust,
         &[
             need("path", Text),
@@ -1061,130 +1501,272 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_script",
         "apply_rename",
+        "Applies a planned rename in one transaction. `files` is the list `rename` answered with, passed back unchanged; a hand-built one is refused.",
         Answers::Rust,
         &[noted(
-            need("files", List),
+            shaped(
+                need("files", List),
+                &[
+                    need("path", Text),
+                    need("originalText", Text),
+                    need("originalHash", Text),
+                    need("updatedText", Text),
+                ],
+            ),
             "The list `rename` answered with, passed back unchanged.",
         )],
     ),
-    op("godot_debug", "status", Answers::Rust, &[]),
+];
+
+pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
+    alone(
+        op(
+            "godot_debug",
+            "status",
+            "Connects to the adapter and reports its capabilities.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
+    ),
     op(
         "godot_debug",
         "set_breakpoints",
+        "Replaces the breakpoints of one script.",
         Answers::Rust,
         &[need("path", Text), opt("lines", List)],
     ),
     op(
         "godot_debug",
         "breakpoint_locations",
+        "Validates candidate lines.",
         Answers::Rust,
         &[need("path", Text), need("line", Int)],
     ),
-    op(
-        "godot_debug",
-        "launch",
-        Answers::Rust,
-        &[
-            opt("playArgs", List),
-            shaped(
-                opt("breakpoints", List),
-                &[
-                    need("path", Text),
-                    noted(
-                        need("lines", List),
-                        "The line numbers to break on, counted from one.",
-                    ),
-                ],
-            ),
-        ],
+    alone(
+        op(
+            "godot_debug",
+            "launch",
+            "Runs the project under the debugger. Give `breakpoints` when the game has to stop somewhere before you can look at it; without them it runs to completion and there is nothing to inspect.",
+            Answers::Rust,
+            &[
+                opt("playArgs", List),
+                shaped(
+                    opt("breakpoints", List),
+                    &[
+                        need("path", Text),
+                        noted(
+                            need("lines", List),
+                            "The line numbers to break on, counted from one.",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op("godot_debug", "attach", Answers::Rust, &[]),
-    op(
-        "godot_debug",
-        "await_stop",
-        Answers::Rust,
-        &[opt("threadId", Int), opt("timeoutMs", Int)],
+    alone(
+        op(
+            "godot_debug",
+            "attach",
+            "Attaches to a game already running under this adapter.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
-    op("godot_debug", "threads", Answers::Rust, &[]),
+    alone(
+        op(
+            "godot_debug",
+            "await_stop",
+            "Waits for the next stop. Null means it ended.",
+            Answers::Rust,
+            &[opt("threadId", Int), opt("timeoutMs", Int)],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
+    ),
+    alone(
+        op(
+            "godot_debug",
+            "threads",
+            "Lists the debuggable threads.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
+    ),
     op(
         "godot_debug",
         "stack_trace",
+        "Returns the stopped stack.",
         Answers::Rust,
         &[opt("threadId", Int)],
     ),
     op(
         "godot_debug",
         "scopes",
+        "Returns Locals, Members, and Globals of a frame.",
         Answers::Rust,
         &[need("frameId", Int)],
     ),
     op(
         "godot_debug",
         "variables",
+        "Expands a scope or object.",
         Answers::Rust,
         &[need("variablesReference", Int)],
     ),
     op(
         "godot_debug",
         "evaluate",
+        "Evaluates an expression in a frame.",
         Answers::Rust,
         &[need("expression", Text), opt("frameId", Int)],
     ),
-    op(
-        "godot_debug",
-        "continue",
-        Answers::Rust,
-        &[opt("threadId", Int)],
+    alone(
+        op(
+            "godot_debug",
+            "continue",
+            "Resumes the debuggee.",
+            Answers::Rust,
+            &[opt("threadId", Int)],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op(
-        "godot_debug",
-        "pause",
-        Answers::Rust,
-        &[opt("threadId", Int)],
+    alone(
+        op(
+            "godot_debug",
+            "pause",
+            "Pauses the debuggee.",
+            Answers::Rust,
+            &[opt("threadId", Int)],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op(
-        "godot_debug",
-        "step_over",
-        Answers::Rust,
-        &[opt("threadId", Int)],
+    alone(
+        op(
+            "godot_debug",
+            "step_over",
+            "Steps over one line.",
+            Answers::Rust,
+            &[opt("threadId", Int)],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op(
-        "godot_debug",
-        "step_in",
-        Answers::Rust,
-        &[opt("threadId", Int)],
+    alone(
+        op(
+            "godot_debug",
+            "step_in",
+            "Steps into the call at the current line.",
+            Answers::Rust,
+            &[opt("threadId", Int)],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op(
-        "godot_debug",
-        "step_out",
-        Answers::Rust,
-        &[opt("threadId", Int)],
+    alone(
+        op(
+            "godot_debug",
+            "step_out",
+            "Steps out of the current frame (emulated).",
+            Answers::Rust,
+            &[opt("threadId", Int)],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op("godot_debug", "restart", Answers::Rust, &[]),
-    op("godot_debug", "terminate", Answers::Rust, &[]),
-    op(
-        "godot_debug",
-        "disconnect",
-        Answers::Rust,
-        &[opt("terminateDebuggee", Flag)],
+    alone(
+        op(
+            "godot_debug",
+            "restart",
+            "Restarts the debuggee with the last launch arguments.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op("godot_runtime", "run", Answers::Addon("runtime.run"), &[]),
-    op("godot_runtime", "stop", Answers::Addon("runtime.stop"), &[]),
-    op(
-        "godot_runtime",
-        "restart",
-        Answers::Addon("runtime.restart"),
-        &[],
+    alone(
+        op(
+            "godot_debug",
+            "terminate",
+            "Stops the debuggee, keeping the adapter.",
+            Answers::Rust,
+            &[],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
     ),
-    op(
-        "godot_runtime",
-        "get_state",
-        Answers::Addon("runtime.get_state"),
-        &[],
+    alone(
+        op(
+            "godot_debug",
+            "disconnect",
+            "Detaches.",
+            Answers::Rust,
+            &[opt("terminateDebuggee", Flag)],
+        ),
+        Sharing::Exclusive,
+        "One debuggee, driven in order: each answer decides what the next call means.",
+    ),
+];
+
+pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
+    alone(
+        op(
+            "godot_runtime",
+            "run",
+            "Runs the project and captures the first frame.",
+            Answers::Addon("runtime.run"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "There is one running game, so a second one in the same call is the first one again.",
+    ),
+    alone(
+        op(
+            "godot_runtime",
+            "stop",
+            "Stops the running game.",
+            Answers::Addon("runtime.stop"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "There is one running game, so a second one in the same call is the first one again.",
+    ),
+    alone(
+        op(
+            "godot_runtime",
+            "restart",
+            "Restarts the running game.",
+            Answers::Addon("runtime.restart"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "There is one running game, so a second one in the same call is the first one again.",
+    ),
+    alone(
+        op(
+            "godot_runtime",
+            "get_state",
+            "Reports whether a game is running, its helper is ready, and the debugger has it paused at an error.",
+            Answers::Addon("runtime.get_state"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
     ),
     op(
         "godot_runtime",
         "get_tree",
+        "Returns the running game's scene tree, and `paused`: whether the tree is paused right now. That one belongs to the SceneTree rather than to any node, so `inspect_node` cannot reach it and this is the only call that reports it.",
         Answers::Addon("runtime.get_tree"),
         &[
             noted(
@@ -1204,12 +1786,14 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_runtime",
         "inspect_node",
+        "Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap.",
         Answers::Addon("runtime.inspect_node"),
         &[need("path", Text), opt("properties", List)],
     ),
     op(
         "godot_runtime",
         "input",
+        "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played.",
         Answers::Addon("runtime.input"),
         &[noted(
             shaped(
@@ -1250,12 +1834,14 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_runtime",
         "capture",
+        "Captures a PNG frame.",
         Answers::Addon("runtime.capture"),
         &[opt("source", Kind::Choice(&["game", "editor"]))],
     ),
     op(
         "godot_runtime",
         "wait",
+        "Lets the game run on for a few frames, then answers with how many passed and how long it took. This is how you wait for something the game does over time — a tween, a timer, a unit walking somewhere — before capturing or inspecting it. Never wait by running `sleep` in bash: that stops this process rather than letting the game advance, and it costs a whole request to do nothing.",
         Answers::Addon("runtime.wait"),
         &[
             noted(
@@ -1271,24 +1857,31 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_runtime",
         "get_monitors",
+        "Reads engine performance monitors. Without a list it answers with fps, memory_static and object_node_count. The rest are process_time, physics_time, memory_message_buffer, object_count, object_resource_count, object_orphan_node_count, render_objects_in_frame, render_primitives_in_frame, render_draw_calls_in_frame, render_video_memory, render_texture_memory and render_buffer_memory; any other name is an error.",
         Answers::Addon("runtime.get_monitors"),
         &[opt("monitors", List)],
     ),
-    op(
-        "godot_logs",
-        "read",
-        Answers::Rust,
-        &[
-            opt("after", Int),
-            opt("minSeverity", Kind::Choice(&["info", "warning", "error"])),
-            opt("source", Kind::Choice(&["editor", "editorError"])),
-            opt("contains", Text),
-            opt("limit", Int),
-        ],
-    ),
+];
+
+pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
+    "godot_logs",
+    "read",
+    "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse.",
+    Answers::Rust,
+    &[
+        opt("after", Int),
+        opt("minSeverity", Kind::Choice(&["info", "warning", "error"])),
+        opt("source", Kind::Choice(&["editor", "editorError"])),
+        opt("contains", Text),
+        opt("limit", Int),
+    ],
+)];
+
+pub const GODOT_DOCS_SEARCH_OPERATIONS: &[Operation] = &[
     op(
         "godot_docs_search",
         "search",
+        "Retrieves ranked passages for a question in plain words. Use it to see which chapters the manual has on a subject at all — when the question is which class to reach for, the list of chapters is the answer.",
         Answers::Rust,
         &[
             need("question", Text),
@@ -1302,6 +1895,7 @@ pub const TABLE: &[OpParams] = &[
     op(
         "godot_docs_search",
         "ask",
+        "Answers one question from those same passages and hands back a paragraph and a quote instead of the chapters. Use it when you want one fact — a signature, an argument, what a property does — and would only have read one line out of what `search` returns. The quote is checked against the manual: an answer that arrives with a warning that its quote is not there was written from memory, and is not evidence. It needs a model connection, where `search` does not.",
         Answers::Rust,
         &[
             need("question", Text),
@@ -1313,270 +1907,7 @@ pub const TABLE: &[OpParams] = &[
         ],
     ),
 ];
-// GENERATED-END op-params
-
-/// How much of an `ops` list one operation may share.
-///
-/// The default for an operation that declares neither is the whole list: it may appear beside
-/// anything, as often as the list names it, which is what `ops` exists for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Sharing {
-    /// May sit beside other operations, and may not appear twice.
-    ///
-    /// The router runs a list in order, so a second entry of an operation that takes no parameters
-    /// answers the question the first one already answered, and a second entry of one driving what
-    /// the session owns exactly one of — the open scene, the running game, the undo stack, the
-    /// dialog — acts on whatever the first left behind.
-    Repeat,
-    /// Has to be the only entry of its call.
-    ///
-    /// The debugger, and only the debugger: each answer decides what the next operation means, so a
-    /// list written before the first answer arrived is a list written about a state that no longer
-    /// holds.
-    Exclusive,
-}
-
-/// One operation that may not share the whole of an `ops` list, and the sentence that says why.
-pub struct LoneOperation {
-    pub domain: &'static str,
-    pub op: &'static str,
-    pub scope: Sharing,
-    pub reason: &'static str,
-}
-
-const fn only(
-    domain: &'static str,
-    op: &'static str,
-    scope: Sharing,
-    reason: &'static str,
-) -> LoneOperation {
-    LoneOperation {
-        domain,
-        op,
-        scope,
-        reason,
-    }
-}
-
-/// The operations that may not share the whole of an `ops` list.
-///
-/// A tool call is a list, so a model that wants three inspections writes one call instead of three.
-/// Thirty-five operations are narrower than that, in one of the two ways [`Sharing`] describes, and
-/// the sentence beside each says which.
-///
-/// Generated from the row that declares the operation, like the parameters and the gate, so an
-/// operation cannot be listed here under a name the catalogue no longer offers.
-// GENERATED-BEGIN alone-operations sha256:c3b06b04fdcf5da4
-pub const ALONE: &[LoneOperation] = &[
-    only(
-        "godot_session",
-        "status",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_session",
-        "start",
-        Sharing::Repeat,
-        "There is one editor session, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_session",
-        "stop",
-        Sharing::Repeat,
-        "There is one editor session, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_session",
-        "get_state",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_session",
-        "undo",
-        Sharing::Repeat,
-        "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
-    ),
-    only(
-        "godot_session",
-        "redo",
-        Sharing::Repeat,
-        "One undo stack, walked in order: what the second call undoes depends on what the first one did.",
-    ),
-    only(
-        "godot_session",
-        "answer_dialog",
-        Sharing::Repeat,
-        "One dialog is up at a time, and pressing a button clears it, so a second press has nothing to press.",
-    ),
-    only(
-        "godot_scene",
-        "list",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_scene",
-        "open",
-        Sharing::Repeat,
-        "One scene is open at a time, so a second one would act on whatever the first left open.",
-    ),
-    only(
-        "godot_scene",
-        "save",
-        Sharing::Repeat,
-        "One scene is open at a time, so a second one would act on whatever the first left open.",
-    ),
-    only(
-        "godot_scene",
-        "save_as",
-        Sharing::Repeat,
-        "One scene is open at a time, so a second one would act on whatever the first left open.",
-    ),
-    only(
-        "godot_scene",
-        "reload",
-        Sharing::Repeat,
-        "One scene is open at a time, so a second one would act on whatever the first left open.",
-    ),
-    only(
-        "godot_project",
-        "get_settings",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_project",
-        "list_autoloads",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_project",
-        "list_input_actions",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_project",
-        "list_plugins",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_debug",
-        "status",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_debug",
-        "launch",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "attach",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_debug",
-        "await_stop",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "threads",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_debug",
-        "continue",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "pause",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "step_over",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "step_in",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "step_out",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "restart",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "terminate",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_debug",
-        "disconnect",
-        Sharing::Exclusive,
-        "One debuggee, driven in order: each answer decides what the next call means.",
-    ),
-    only(
-        "godot_runtime",
-        "run",
-        Sharing::Repeat,
-        "There is one running game, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_runtime",
-        "stop",
-        Sharing::Repeat,
-        "There is one running game, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_runtime",
-        "restart",
-        Sharing::Repeat,
-        "There is one running game, so a second one in the same call is the first one again.",
-    ),
-    only(
-        "godot_runtime",
-        "get_state",
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
-    ),
-];
-// GENERATED-END alone-operations
-
-/// How much of a list `domain.op` may share and why, or `None` when it may share all of one.
-pub fn alone_rule(domain: &str, op: &str) -> Option<(Sharing, &'static str)> {
-    ALONE
-        .iter()
-        .find(|entry| entry.domain == domain && entry.op == op)
-        .map(|entry| (entry.scope, entry.reason))
-}
+// GENERATED-END operations
 
 /// `timeoutMs` is lifted out of the parameters by the router for every command, so it is accepted
 /// everywhere rather than repeated in forty tables.
@@ -1585,12 +1916,11 @@ pub fn alone_rule(domain: &str, op: &str) -> Option<(Sharing, &'static str)> {
 /// of the entry before anything — this check, the policy, the approval, the addon — sees one.
 const UNIVERSAL: &[&str] = &["timeoutMs"];
 
-/// The parameters of one operation, or `None` when it has no table and is therefore unchecked.
+/// The parameters of one operation, or `None` when nothing declares it and it is therefore
+/// unchecked. Read only by tests, like the lookup behind it.
+#[cfg(test)]
 pub fn params_of(domain: &str, op: &str) -> Option<&'static [Param]> {
-    TABLE
-        .iter()
-        .find(|entry| entry.domain == domain && entry.op == op)
-        .map(|entry| entry.params)
+    operation_of(domain, op).map(|operation| operation.params)
 }
 
 /// The signature the model reads, as `{node, property, value, expectedRevision}`. Generated rather
@@ -1683,20 +2013,12 @@ fn short(kind: Kind) -> &'static str {
     }
 }
 
-/// Refuses a call whose parameters cannot possibly be right, before it leaves this process.
-///
-/// Everything here is arithmetic on JSON: a name that is not accepted, a missing required
-/// parameter, a value of the wrong JSON type, a tagged value whose payload does not match its own
-/// tag. None of it needs the editor, so none of it should cost a round trip to find out.
+/// [`Operation::check`], for a caller holding two strings — the drift checks, and the tests that
+/// state the pair they are about. The router resolves the operation once and asks the row, which
+/// is why this door is read only by tests.
+#[cfg(test)]
 pub fn check(domain: &str, op: &str, params: &Value) -> Result<(), ToolFailure> {
-    let Some(spec) = params_of(domain, op) else {
-        return Ok(());
-    };
-    let Some(object) = params.as_object() else {
-        return Ok(());
-    };
-    let call = format!("{domain} {op}");
-    check_set(&call, op, "", spec, object)
+    operation_of(domain, op).map_or(Ok(()), |operation| operation.check(params))
 }
 
 /// One object against one parameter list, at `where_` — the empty string for the call's own
@@ -2192,27 +2514,13 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
     ))
 }
 
-/// The values a model wrote in a shape the protocol does not take, rewritten into the one it does.
-///
-/// Repair rather than refusal, because the refusal was tried. `{"type": "vector2", "value": {"x":
-/// 32, "y": 48}}` is what one live turn wrote thirteen times in a single run; the refusal was then
-/// taught to print the exact value to send instead, and the next run wrote it four more times in a
-/// row, each answered with `Send {"type": "vector2", "value": [32, 48]}` and each ignored. A
-/// correction a model will not read is one that cannot help it, and the numbers were never in doubt.
-///
-/// Only where the order is not a guess — the same table the correction is printed from — and only
-/// for a parameter the operation declares as a tagged value, so this can never reach a key that
-/// means something else. Everything it does not recognise is left exactly as it arrived, for
-/// [`check`] to refuse by name.
-///
-/// The structure of a call is repaired a layer above this, in the worker's `prepareArguments`:
-/// which operation an entry is, which list it belongs in, where its wrapper went. That layer needs
-/// the parameter list and nothing else. This one needs the tag table, which is here.
+/// [`Operation::repair`], for a caller holding two strings. Read only by tests, like the lookup
+/// behind it.
+#[cfg(test)]
 pub fn repair(domain: &str, op: &str, params: &mut Value) {
-    let Some(spec) = params_of(domain, op) else {
-        return;
-    };
-    repair_set(spec, params);
+    if let Some(operation) = operation_of(domain, op) {
+        operation.repair(params);
+    }
 }
 
 fn repair_set(spec: &[Param], params: &mut Value) {
@@ -2388,7 +2696,80 @@ fn sole_entry(value: &Value) -> Option<&Value> {
     object.values().next()
 }
 
+/// The protocol's spelling of a tag a model wrote in the engine's.
+///
+/// `{"type": "String", "value": "Resume"}` is one wrapper written by one model that knew both
+/// words: the protocol tag and Godot's own class name. It was refused sixteen times in one live
+/// turn — the same call resent unchanged, then split into single properties and resent again — and
+/// cost that turn most of its twelve minutes, while the `bool` beside it in the same call went
+/// through. Across five recorded turns 41 of 86 tagged values were wrapped twice, and 22 of the 41
+/// spelled the inner tag with the engine's capital.
+///
+/// Every tag the protocol carries is lowercase and no two of them differ only in case, so the fold
+/// cannot reach two answers. A word that is not a tag in any case is left exactly as it arrived,
+/// so [`check_tagged`] still refuses it in the spelling the caller wrote.
+fn fold_the_tag(held: &mut Value) {
+    let Some(tag) = held.get("type").and_then(Value::as_str) else {
+        return;
+    };
+    if TAGS.iter().any(|(name, _)| *name == tag) {
+        return;
+    }
+    let lowered = tag.to_lowercase();
+    let Some(name) = TAGS
+        .iter()
+        .find(|(name, _)| *name == lowered)
+        .map(|(name, _)| *name)
+    else {
+        return;
+    };
+    if let Some(object) = held.as_object_mut() {
+        object.insert("type".to_owned(), Value::String(name.to_owned()));
+    }
+}
+
+/// The tagged value a model wrapped in a second copy of its own tag, unwrapped.
+///
+/// `{"type": "vector2", "value": {"type": "vector2", "value": [32, 48]}}` is what one live turn
+/// against a local Qwen3.6-27B wrote 51 times in 114 tool calls. The router refused every one of
+/// them by naming the payload it wanted, and the payload it wanted was inside the value it was
+/// handed.
+///
+/// Only the same tag twice, whatever case each side is written in — the two spellings are the
+/// protocol's and the engine's, and [`fold_the_tag`] has already put the outer one back. Two
+/// different tags is not a wrapper anybody meant to write, and deciding which of them is the real
+/// one is not this layer's to do: the router refuses it and says what it received. A `resource`,
+/// whose payload is an object with a `path`, is untouched for the same reason — it is not a tag
+/// inside a tag.
+///
+/// Repeatedly, because three copies is the same mistake as two.
+fn unwrap_a_tag_written_twice(held: &mut Value) {
+    while let Some((tag, payload)) = a_tag_inside_its_own(held) {
+        *held = json!({"type": tag, "value": payload});
+    }
+}
+
+/// The tag and the payload of a value wrapped in a second copy of its own tag, or nothing.
+///
+/// "Exactly" the pair: the inner object holds a `type` and a `value` and nothing else, so a payload
+/// that merely happens to carry a `type` of its own is left alone.
+fn a_tag_inside_its_own(held: &Value) -> Option<(String, Value)> {
+    let tag = held.get("type")?.as_str()?;
+    let inner = held.get("value")?.as_object()?;
+    if inner.len() != 2 {
+        return None;
+    }
+    if !inner.get("type")?.as_str()?.eq_ignore_ascii_case(tag) {
+        return None;
+    }
+    Some((tag.to_owned(), inner.get("value")?.clone()))
+}
+
 fn repair_tagged(held: &mut Value) {
+    // The tag first, because the payload repairs below are chosen by it, and then the wrapper,
+    // because what is inside a wrapper is what the payload repairs are about.
+    fold_the_tag(held);
+    unwrap_a_tag_written_twice(held);
     let Some(tag) = held.get("type").and_then(Value::as_str) else {
         return;
     };
@@ -3392,6 +3773,81 @@ mod tests {
         );
     }
 
+    /// `apply_rename` takes the same parameter name as `edit` and a different shape behind it, and
+    /// for a while it declared no shape at all. Nothing checked it: the schema widened to a bare
+    /// list that swallowed `edit`'s strict branch, and [`check_inside`] returns early on an empty
+    /// entry — so `{"nope": 1}` was accepted by both layers and serde was the first thing to look.
+    ///
+    /// That is the refusal [`check_inside`] exists to replace, so the entry is declared and this
+    /// holds it. `scripts/check-command-surface.mjs` refuses the omission returning.
+    #[test]
+    fn a_rename_plan_is_checked_rather_than_waved_through() {
+        check_ok(
+            "godot_script",
+            "apply_rename",
+            json!({"files": [{
+                "path": "a.gd",
+                "originalText": "x",
+                "originalHash": "h",
+                "updatedText": "y"
+            }]}),
+        );
+        let refused = message(
+            "godot_script",
+            "apply_rename",
+            json!({"files": [{"nope": 1}]}),
+        );
+        assert!(
+            refused.contains("`files[0]`"),
+            "the failure must name the entry that is wrong: {refused}"
+        );
+        let partial = message(
+            "godot_script",
+            "apply_rename",
+            json!({"files": [{"path": "a.gd", "originalText": "x", "originalHash": "h"}]}),
+        );
+        assert!(
+            partial.contains("requires `updatedText`"),
+            "a plan missing a field must say which: {partial}"
+        );
+    }
+
+    /// `set_input_action` takes the same `events` name `runtime.input` takes in another domain,
+    /// and for a while it declared no shape at all: the schema advertised a bare list and
+    /// [`check_inside`] returns early on one, so `{"nope": 1}` crossed the socket and the
+    /// editor's decoder was the first thing to look. The editor's decoder takes three kinds —
+    /// the game's takes five — so the entry names the three, and this holds them.
+    #[test]
+    fn an_input_action_event_is_checked_rather_than_waved_through() {
+        check_ok(
+            "godot_project",
+            "set_input_action",
+            json!({"name": "move_left", "events": [
+                {"kind": "key", "key": "Left"},
+                {"kind": "mouse_button", "button": 1},
+                {"kind": "joypad_button", "button": 5}
+            ]}),
+        );
+        let refused = message(
+            "godot_project",
+            "set_input_action",
+            json!({"name": "move_left", "events": [{"nope": 1}]}),
+        );
+        assert!(
+            refused.contains("`events[0]`"),
+            "the failure must name the entry that is wrong: {refused}"
+        );
+        let partial = message(
+            "godot_project",
+            "set_input_action",
+            json!({"name": "jump", "events": [{"key": "Space"}]}),
+        );
+        assert!(
+            partial.contains("requires `kind`"),
+            "an event missing its kind must say which: {partial}"
+        );
+    }
+
     /// The nesting is printed as deeply as it goes, because the signature is where a model reads
     /// the contract — the same measurement that put kinds there in the first place.
     #[test]
@@ -3818,40 +4274,55 @@ mod tests {
     /// counted them. A schema with a hole in it is not a schema, so there is no hole and no way to
     /// add one — an operation reaches the model only through `CATALOG`, and every entry of it has
     /// to be declared here.
+    ///
+    /// It cannot be missed any more: an operation *is* one of these rows, so there is no second
+    /// list to add one to. What is left to check is that the row says something — a row reaching
+    /// the model with no prose is an operation it is told the name of and nothing else, which is
+    /// the one thing this catalogue may not be.
     #[test]
     fn every_catalog_operation_declares_its_parameters() {
-        let undeclared: Vec<String> = CATALOG
+        let mute: Vec<String> = CATALOG
             .iter()
             .flat_map(|domain| {
                 domain
                     .operations
                     .iter()
-                    .filter(move |operation| params_of(domain.name, operation.op).is_none())
+                    .filter(|operation| {
+                        params_of(domain.name, operation.op).is_none()
+                            || operation.summary.trim().is_empty()
+                    })
                     .map(move |operation| format!("{} {}", domain.name, operation.op))
             })
             .collect();
         assert!(
-            undeclared.is_empty(),
-            "these operations reach a handler with nothing checking their parameters:\n{}",
-            undeclared.join("\n")
+            mute.is_empty(),
+            "these operations reach the model with no contract and nothing said about them:\n{}",
+            mute.join("\n")
         );
     }
 
-    /// Every declared operation is one the catalogue really offers, so a rename cannot leave a
-    /// table behind that quietly stops checking anything.
+    /// Every declared operation is offered by the domain it names, so a domain cannot be handed
+    /// another domain's rows.
+    ///
+    /// A list nobody hands to a domain at all is a dead const rather than a test failure: only
+    /// `CATALOG` names one, so the compiler reports it. What a compiler cannot see is a domain
+    /// handed the wrong list — every row would still be a real row, checked against a real
+    /// parameter table, under a tool that does not offer it.
     #[test]
     fn no_table_outlives_the_operation_it_declares() {
-        for entry in TABLE {
-            let domain = CATALOG
-                .iter()
-                .find(|domain| domain.name == entry.domain)
-                .unwrap_or_else(|| panic!("{} is a catalog domain", entry.domain));
+        for domain in CATALOG {
             assert!(
-                domain.operations.iter().any(|op| op.op == entry.op),
-                "{} {} is declared and is not an operation",
-                entry.domain,
-                entry.op
+                !domain.operations.is_empty(),
+                "{} offers nothing",
+                domain.name
             );
+            for operation in domain.operations {
+                assert_eq!(
+                    operation.tool, domain.name,
+                    "{} was handed {}'s {} row",
+                    domain.name, operation.tool, operation.op
+                );
+            }
         }
     }
 
@@ -3920,5 +4391,171 @@ mod tests {
             "{parent: text, type: text, name: text, index?: int}"
         );
         assert_eq!(signature(&[]), "");
+    }
+
+    /// A tagged value wrapped in a second copy of its own tag, unwrapped rather than refused.
+    ///
+    /// One live turn against a local Qwen3.6-27B sent 51 of these in 114 tool calls, and every one
+    /// was refused by a sentence that named the shape it wanted and never noticed that the shape it
+    /// wanted was sitting inside the one it got.
+    ///
+    /// This lived in the worker until it was moved here. It was the only place a live turn's
+    /// commonest wrong shape was repaired, and the acceptance suites — which call `dispatch`
+    /// directly — never ran it at all.
+    #[test]
+    fn a_tag_written_twice_is_unwrapped_rather_than_refused() {
+        let repaired = |value: Value| {
+            let mut params = json!({"node": "/Player", "property": "position", "value": value});
+            repair("godot_node", "set_property", &mut params);
+            params["value"].clone()
+        };
+
+        assert_eq!(
+            repaired(json!({"type": "vector2", "value": {"type": "vector2", "value": [32, 48]}})),
+            json!({"type": "vector2", "value": [32, 48]})
+        );
+
+        // The protocol's word outside and the engine's inside. One live turn wrote
+        // `{type: "string", value: {type: "String", value: "Resume"}}` and was refused sixteen
+        // times over twelve minutes, while `{type: "bool", value: {type: "bool", value: false}}` in
+        // the same call went straight through. Across five recorded turns 41 of 86 tagged values
+        // were wrapped twice and 22 of the 41 spelled the inner tag with the engine's capital. No
+        // two protocol tags differ only in case, so folding it is safe, and the value that comes
+        // out carries the lowercase spelling whichever side wrote it.
+        for wrapper in [
+            json!({"type": "string", "value": {"type": "String", "value": "Resume"}}),
+            json!({"type": "String", "value": {"type": "string", "value": "Resume"}}),
+        ] {
+            assert_eq!(
+                repaired(wrapper.clone()),
+                json!({"type": "string", "value": "Resume"}),
+                "{wrapper}"
+            );
+        }
+
+        // And one wrapper written the same way. The model that knew both words wrote Godot's
+        // spelling in the tag it wrote once as readily as in the tag it wrote twice, and `check`
+        // looks the tag up case-sensitively — so `{type: "String", value: "Resume"}` was refused
+        // with "`String` is not a value type" while the double-wrapped form beside it in the same
+        // call was repaired.
+        assert_eq!(
+            repaired(json!({"type": "String", "value": "Resume"})),
+            json!({"type": "string", "value": "Resume"})
+        );
+
+        // Three copies is the same mistake as two.
+        assert_eq!(
+            repaired(json!({
+                "type": "int",
+                "value": {"type": "int", "value": {"type": "int", "value": 2}}
+            })),
+            json!({"type": "int", "value": 2})
+        );
+
+        // Only the same tag twice. Two different tags is not a wrapper a caller meant to write, and
+        // guessing which of them is the real one is not this layer's to do — the refusal says what
+        // it received. A word that is not a tag in any case keeps the spelling it arrived in, so
+        // the refusal quotes what the caller wrote.
+        for left in [
+            json!({"type": "vector2", "value": {"type": "float", "value": 1}}),
+            json!({"type": "int", "value": {"type": "float", "value": 1}}),
+            json!({"type": "Vektor2", "value": [1, 2]}),
+            // A `resource` carries an object with a `path`, which is not a tag inside a tag.
+            json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}}),
+        ] {
+            assert_eq!(repaired(left.clone()), left, "{left}");
+        }
+
+        // Inside a list parameter's entries too, which is where `set_properties` carries them.
+        let mut listed = json!({"properties": [
+            {"node": "/P", "property": "position",
+             "value": {"type": "vector2", "value": {"type": "vector2", "value": [1, 2]}}},
+            {"node": "/P", "property": "visible", "value": {"type": "bool", "value": true}},
+        ]});
+        repair("godot_node", "set_properties", &mut listed);
+        assert_eq!(
+            listed["properties"][0]["value"],
+            json!({"type": "vector2", "value": [1, 2]}),
+            "{listed}"
+        );
+        assert_eq!(
+            listed["properties"][1]["value"],
+            json!({"type": "bool", "value": true}),
+            "{listed}"
+        );
+        check_ok("godot_node", "set_properties", listed);
+    }
+
+    /// The shape the fixture says a recorded call has to be repaired into is the shape `check`
+    /// accepts, proven rather than maintained by hand.
+    ///
+    /// `fixtures/recorded-tool-calls.json` carries nine calls under `repairs` that a model really
+    /// wrote and the router really refused, each beside the `repaired` form it had to become. That
+    /// field used to be asserted only against the worker's normalizer, in JavaScript, in another
+    /// process — so if it drifted from what this file accepts, both tests stayed green and the live
+    /// call was still refused.
+    ///
+    /// So the fixture is run down the path the router really takes: repair, then check. Three
+    /// things have to hold for every entry, and the third is what keeps this from being vacuous —
+    /// the call as the model wrote it has to be one `check` refuses, or the fixture is recording a
+    /// repair that does nothing.
+    #[test]
+    fn every_shape_the_fixture_records_as_repaired_is_the_shape_the_router_accepts() {
+        let recorded: Value = serde_json::from_slice(
+            &std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../fixtures/recorded-tool-calls.json"),
+            )
+            .expect("read the recorded calls"),
+        )
+        .expect("parse the recorded calls");
+        let repairs = recorded["repairs"].as_array().expect("recorded repairs");
+        assert!(repairs.len() > 5, "the fixture lost its repairs");
+
+        let without_op = |entry: &Value| {
+            let mut params = entry.clone();
+            if let Some(object) = params.as_object_mut() {
+                object.remove("op");
+            }
+            params
+        };
+        for case in repairs {
+            let tool = case["tool"].as_str().expect("case tool");
+            let written = case["ops"].as_array().expect("case ops");
+            let wanted = case["repaired"].as_array().expect("case repaired");
+            assert_eq!(
+                written.len(),
+                wanted.len(),
+                "{tool} records {} calls and {} repairs of them",
+                written.len(),
+                wanted.len()
+            );
+            let mut refused_as_written = 0;
+            for (entry, want) in written.iter().zip(wanted) {
+                let op = entry["op"].as_str().expect("an op name");
+                assert_eq!(
+                    want["op"].as_str(),
+                    Some(op),
+                    "{tool} records a repair of another operation"
+                );
+                let mut params = without_op(entry);
+                if check(tool, op, &params).is_err() {
+                    refused_as_written += 1;
+                }
+                repair(tool, op, &mut params);
+                assert_eq!(
+                    params,
+                    without_op(want),
+                    "{tool} {op} was repaired into a shape the fixture does not name"
+                );
+                check(tool, op, &params).unwrap_or_else(|failure| {
+                    panic!("{tool} {op} is refused after repair: {}", failure.message)
+                });
+            }
+            assert!(
+                refused_as_written > 0,
+                "{tool} records a repair of a call nothing was going to refuse"
+            );
+        }
     }
 }

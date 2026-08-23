@@ -58,7 +58,7 @@ fn paths(tree: &Value) -> Vec<String> {
 /// readable, so the default is what this pins.
 #[test]
 fn a_tree_past_the_answers_budget_is_bounded_and_says_so() {
-    /// The worker's cap on a tool result, from `MAX_TOOL_TEXT_CHARS` in `scripts/ai-host.mjs`.
+    /// The worker's cap on a tool result, from `MAX_TOOL_TEXT_CHARS` in `scripts/tool-result.mjs`.
     const WORKER_CAP: usize = 24_000;
     /// What `DEFAULT_TREE_NODES` in the addon answers with when a call names no `limit`.
     const DEFAULT_NODES: usize = 150;

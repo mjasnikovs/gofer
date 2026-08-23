@@ -196,6 +196,52 @@ describe('applyStreamEvent', () => {
         expect(message.usage).toEqual(USAGE)
     })
 
+    it('marks a completion the model was stopped mid-way as stopped, not as complete', () => {
+        // The worker answers the backend's cancel line now: it aborts its own agent, checkpoints
+        // what the model had done and ends the turn on its own completion. That completion arrives
+        // AFTER the `aborted` the backend mints, and a `done` that always meant `complete` marked
+        // the stopped turn finished — the last event won, and it was the wrong one.
+        const message = replay([
+            {type: 'text-delta', delta: 'Half an ans'},
+            {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
+            {type: 'aborted'},
+            {
+                type: 'done',
+                text: 'Half an ans',
+                thinking: '',
+                stopReason: 'aborted',
+                usage: USAGE,
+                model: 'local',
+                agentMessages: []
+            }
+        ])
+        expect(message.status).toBe('aborted')
+        // What it managed to say is kept, which is the whole reason the worker is asked before it
+        // is killed.
+        expect(message.text).toBe('Half an ans')
+        expect(message.tools?.[0]?.status).toBe('error')
+    })
+
+    it('settles the calls a stopped turn left running, on the completion as well', () => {
+        // A stop the backend never had to mint an `aborted` for: the worker answered, so the
+        // completion is the only event saying the turn ended, and the spinning row is still there.
+        const message = replay([
+            {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
+            {
+                type: 'done',
+                text: '',
+                thinking: '',
+                stopReason: 'aborted',
+                usage: USAGE,
+                model: 'local',
+                agentMessages: []
+            }
+        ])
+        expect(message.status).toBe('aborted')
+        expect(message.tools?.[0]?.status).toBe('error')
+        expect(message.tools?.[0]?.output).toBe('Stopped before it finished.')
+    })
+
     it('falls back to the final message when the turn streamed no text', () => {
         const message = replay([
             {

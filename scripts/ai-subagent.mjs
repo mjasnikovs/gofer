@@ -37,15 +37,19 @@
  *                      nowhere: it is answering, it is calling tools, and it is spending the machine.
  */
 
+import {Agent, createBashTool, createReadTool} from '@earendil-works/pi-agent-core/node'
+import {createAssistantMessageEventStream} from '@earendil-works/pi-ai'
+import {createGodotTools} from './godot-tools.mjs'
 import {
-    Agent,
-    NodeExecutionEnv,
-    createBashTool,
-    createReadTool
-} from '@earendil-works/pi-agent-core/node'
-import {createAssistantMessageEventStream, isRetryableAssistantError} from '@earendil-works/pi-ai'
-import {isContextOverflow} from '@earendil-works/pi-ai/compat'
-import {createGodotTools, withoutPictures, withoutRepeatingARefusal} from './ai-host.mjs'
+    abortableWait,
+    createToolEnv,
+    decorateTools,
+    isWorthRetrying,
+    modelReadsImages,
+    realTimers,
+    textContent,
+    zeroUsage
+} from './agent-runtime.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
 import {ASK_USER_TOOL_NAME, createAskUserTool} from './ai-ask.mjs'
 import {toolStepLine} from './tool-target.mjs'
@@ -208,17 +212,6 @@ export function subagentFailure(reason) {
     )
 }
 
-function zeroUsage() {
-    return {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}
-    }
-}
-
 function addUsage(total, usage) {
     if (!usage) return total
     return {
@@ -235,13 +228,6 @@ function addUsage(total, usage) {
             total: total.cost.total + (usage.cost?.total ?? 0)
         }
     }
-}
-
-function textContent(content) {
-    return (content ?? [])
-        .filter(part => part.type === 'text')
-        .map(part => part.text)
-        .join('')
 }
 
 /**
@@ -440,59 +426,26 @@ export function createChildTools(
     // Asked before anything is built: a name with no constructor behind it would otherwise fail as
     // `undefined is not a function`, which names neither the tool nor the rule it broke.
     assertChildTools([], toolNames)
-    const env = new NodeExecutionEnv({cwd: workspacePath})
-    const context = {env}
+    const env = createToolEnv(workspacePath)
     const built = toolNames.map(name =>
         name in CONFINED_CHILD_TOOLS ?
             confineTool(CONFINED_CHILD_TOOLS[name](), workspacePath)
         :   REACHING_CHILD_TOOLS[name](deps)
     )
-    const tools = built
-        .map(tool => ({
-            ...tool,
-            execute: (id, params, signal, onUpdate) =>
-                tool.execute(id, params, signal, onUpdate, context)
-        }))
+    const tools = decorateTools({
+        env,
+        tools: built,
         // The child's own model, which may not be the parent's and may not have its eyes.
-        .map(tool => (readsImages(deps.model) ? tool : withoutPictures(tool)))
-        // A child loops the way a parent does, and its tools are built per call, so the counter is
-        // per child.
-        .map(withoutRepeatingARefusal)
-        .map(tool => underCommandClock(tool, {timeoutMs: bounds.commandTimeoutMs, timers}))
+        model: deps.model,
+        // The one thing a child's tools have that a turn's do not: no shell command it runs may
+        // outlive the call that started it.
+        extras: [tool => underCommandClock(tool, {timeoutMs: bounds.commandTimeoutMs, timers})]
+    })
     assertChildTools(tools, toolNames)
     return {env, tools}
 }
 
-/**
- * Can this model be shown a picture?
- *
- * Read off the model rather than assumed, because a model that cannot is not lenient about it: the
- * provider refuses the whole request, so an unchecked image ends the child at its first step rather
- * than going unnoticed in it. A model that says nothing about its inputs is taken at its word — no
- * claim to read images is not a claim to read them.
- */
-export function readsImages(model) {
-    return Array.isArray(model?.input) && model.input.includes('image')
-}
-
-/**
- * Real timers, and the seam every clock here is tested through.
- *
- * Injectable because the alternative is a test that waits out a five-minute ceiling to prove the
- * ceiling works. `now` is separate from `schedule` because the silence clock polls: it asks how long
- * it has been rather than being re-armed on every one of the thousands of events a stream emits.
- */
-export const realTimers = {
-    now: () => Date.now(),
-    schedule: (fn, ms) => setTimeout(fn, ms),
-    cancel: handle => {
-        clearTimeout(handle)
-    },
-    repeat: (fn, ms) => setInterval(fn, ms),
-    stopRepeat: handle => {
-        clearInterval(handle)
-    }
-}
+export {realTimers}
 
 /**
  * The clock on model silence.
@@ -632,15 +585,16 @@ export function toolProgress(onUpdate) {
  *
  * A brief's research workers are not tool calls in anybody's conversation — they are the host loop's
  * own children — so they have no `onUpdate` to write to and reach their panel down the same event
- * pipe every other phase boundary uses. `type` and `extra` are the caller's because the vocabulary
+ * pipe every other phase boundary uses. `build` and `extra` are the caller's because the vocabulary
  * is: `brief-worker-step` is a word `scripts/brief/catalogue.mjs` owns and a checker reconciles, and
- * a name invented here would be a second owner of it.
+ * a name invented here would be a second owner of it. It is the constructor rather than the name,
+ * so the two events this makes are built the one way every other event is.
  */
-export function eventProgress(emit, type, extra = {}) {
+export function eventProgress(emit, build, extra = {}) {
     if (typeof emit !== 'function') return noProgress
-    if (typeof type !== 'string' || type === '')
-        throw new Error('A progress event was asked for without a name to emit it under.')
-    return status => emit({type, ...extra, line: status.line ?? '', steps: status.count})
+    if (typeof build !== 'function')
+        throw new Error('A progress event was asked for without a constructor to build it with.')
+    return status => emit(build({...extra, line: status.line ?? '', steps: status.count}))
 }
 
 /**
@@ -675,7 +629,7 @@ async function attemptSubagent({
     // it is not a soft one: a picture sent to a text-only model has the provider refuse the whole
     // request, so an unchecked image ends the child at its first step instead of costing it a
     // detail. Every caller may pass what it has and let the model decide.
-    const pictures = readsImages(model) ? images : []
+    const pictures = modelReadsImages(model) ? images : []
 
     let requests = 0
     let overran = false
@@ -808,6 +762,10 @@ export class SubagentStopped extends Error {
     constructor(reason) {
         super(reason)
         this.reason = reason
+        // Said on the error rather than asked about by type, because the classifier is shared with
+        // the turn and a turn has never heard of this class. "Never retried" is the same rule
+        // either way; only where it is written down changed.
+        this.retryable = false
     }
 }
 
@@ -855,25 +813,6 @@ function cutAnswer(text, maxChars) {
         + `${String(text.length)} characters, which is not a distilled answer. Ask it something `
         + `narrower.]`
     )
-}
-
-/**
- * Whether asking again is worth anything.
- *
- * Pi's own classifier, not a second list of provider wording kept in step with it by hand. Context
- * overflow is asked first and always answered no, exactly as the parent turn does: it is
- * deterministic, it fails identically every time, and the child has no compaction to repair it with —
- * a narrower question is the repair, and only the parent can ask one.
- */
-function isWorthAnotherAttempt(failure, model) {
-    if (failure instanceof SubagentStopped) return false
-    if (failure.retryable !== undefined) return failure.retryable
-    const message = failure.assistantMessage ?? {
-        stopReason: 'error',
-        errorMessage: failure.reason
-    }
-    if (isContextOverflow(message, model.contextWindow)) return false
-    return isRetryableAssistantError(message)
 }
 
 /**
@@ -925,7 +864,7 @@ export async function runSubagentOutcome({
     if (typeof progress !== 'function')
         throw new Error(
             'A sub-agent was started without saying where its progress goes. Pass '
-                + 'toolProgress(onUpdate) for a chat tool row, eventProgress(emit, type, extra) for '
+                + 'toolProgress(onUpdate) for a chat tool row, eventProgress(emit, build, extra) for '
                 + 'a panel, or noProgress to run it silent on purpose.'
         )
     if (signal?.aborted) return {kind: 'stopped', reason: 'the turn was stopped'}
@@ -957,14 +896,19 @@ export async function runSubagentOutcome({
             if (!(error instanceof SubagentFailed) && !(error instanceof SubagentStopped))
                 throw error
             if (error instanceof SubagentStopped) return {kind: 'stopped', reason: error.reason}
-            if (attempt >= bounds.retryAttempts || !isWorthAnotherAttempt(error, model))
+            if (attempt >= bounds.retryAttempts || !isWorthRetrying(error, model))
                 return {
                     kind: 'failed',
                     cause: error.cause,
                     reason: error.reason,
                     attempts: attempt + 1
                 }
-            await wait(bounds.retryBaseDelayMs * 2 ** attempt, signal, timers)
+            await abortableWait(
+                bounds.retryBaseDelayMs * 2 ** attempt,
+                signal,
+                timers,
+                subagentFailure('the turn was stopped')
+            )
         }
     }
 }
@@ -980,22 +924,6 @@ export async function runSubagent(options) {
     const outcome = await runSubagentOutcome(options)
     if (outcome.kind === 'ok') return outcome
     throw new Error(subagentFailure(outcome.reason))
-}
-
-/** A wait a stopped turn does not have to sit through. */
-function wait(ms, signal, timers) {
-    return new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error(subagentFailure('the turn was stopped')))
-        const handle = timers.schedule(resolve, ms)
-        signal?.addEventListener(
-            'abort',
-            () => {
-                timers.cancel(handle)
-                reject(new Error(subagentFailure('the turn was stopped')))
-            },
-            {once: true}
-        )
-    })
 }
 
 /**

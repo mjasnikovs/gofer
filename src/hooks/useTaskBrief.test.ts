@@ -5,6 +5,8 @@ import {useTaskBrief} from './useTaskBrief'
 import {clearTurnActivity, isTurnRunning} from '../services/turn-activity'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 import {flush} from '../test/flush'
+import {CommandFailure, installBackend} from '../test/backend'
+import type {BackendAnswers, BackendOptions} from '../test/backend'
 import type {BriefEvent} from '../models/brief'
 import type {ChatAttachment} from '../models/chat'
 
@@ -13,6 +15,26 @@ const tauri = createDesktopFake()
 /** Sends what the backend would send, to whoever the hook subscribed with. */
 let deliver: (event: BriefEvent) => void = () => undefined
 
+/** The shared in-memory backend, with whatever this test needs held or refused on top. */
+const backend = (options: BackendOptions = {}) => installBackend(tauri, options)
+
+/** A run held open, so the window can be read while the plan is still going. */
+function heldRun(): {answers: BackendAnswers; endRun: () => void} {
+    let endRun: () => void = () => undefined
+    const answers: BackendAnswers = {
+        run_task_brief: () =>
+            new Promise<void>(resolve => {
+                endRun = resolve
+            })
+    }
+    return {
+        answers,
+        endRun: () => {
+            endRun()
+        }
+    }
+}
+
 beforeEach(() => {
     // The fake is built once at module scope, so its call history outlives a test unless it is
     // cleared here. Without this, "nothing was started" passes or fails on what the previous test
@@ -20,7 +42,7 @@ beforeEach(() => {
     tauri.invoke.mockReset()
     tauri.listen.mockReset()
     installDesktopFake(tauri)
-    tauri.invoke.mockResolvedValue(undefined)
+    backend()
     tauri.listen.mockImplementation(async (name, handler) => {
         if (name === 'ai-brief') {
             deliver = event => {
@@ -148,11 +170,11 @@ describe('starting a plan from the composer', () => {
      * spawns, for a result the database already held.
      */
     it('knows a plan was already asked for when the row on disk says so', async () => {
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command === 'read_task_brief') {
-                return {
+        backend({
+            briefs: {
+                'task-1': {
                     taskId: 'task-1',
-                    status: 'ended',
+                    status: 'done',
                     phase: 'compose',
                     rawPrompt: 'add a pause menu',
                     refined: null,
@@ -162,7 +184,6 @@ describe('starting a plan from the composer', () => {
                     reason: null
                 }
             }
-            return undefined
         })
 
         const {view} = mount('task-1')
@@ -176,9 +197,12 @@ describe('starting a plan from the composer', () => {
 
     /** A brief that cannot be read is one re-offered control, not an error in front of the user. */
     it('says nothing when the stored brief cannot be read', async () => {
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command === 'read_task_brief') throw new Error('the database was busy')
-            return undefined
+        backend({
+            answers: {
+                read_task_brief: () => {
+                    throw new CommandFailure('brief_unavailable', 'the database was busy')
+                }
+            }
         })
 
         const {view, onError} = mount('task-1')
@@ -268,13 +292,8 @@ describe('a plan that is running', () => {
      * Every planned task ended that way.
      */
     it('waits for the run to end before sending the specification', async () => {
-        let endRun: () => void = () => undefined
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command !== 'run_task_brief') return undefined
-            return new Promise<void>(resolve => {
-                endRun = resolve
-            })
-        })
+        const {answers, endRun} = heldRun()
+        backend({answers})
         const {startTurn, view} = mount('task-1')
         await plan(view)
 
@@ -300,13 +319,8 @@ describe('a plan that is running', () => {
      * of the turn it was pointed at, and the window was told the agent was occupied forever.
      */
     it('closes the panel when the plan finishes, and hands the window back', async () => {
-        let endRun: () => void = () => undefined
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command !== 'run_task_brief') return undefined
-            return new Promise<void>(resolve => {
-                endRun = resolve
-            })
-        })
+        const {answers, endRun} = heldRun()
+        backend({answers})
         const {startTurn, view} = mount('task-1')
         await plan(view)
 
@@ -329,13 +343,8 @@ describe('a plan that is running', () => {
 
     // And the ending a run did report survives the command answering after it.
     it('keeps the ending a broken run reported', async () => {
-        let endRun: () => void = () => undefined
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command !== 'run_task_brief') return undefined
-            return new Promise<void>(resolve => {
-                endRun = resolve
-            })
-        })
+        const {answers, endRun} = heldRun()
+        backend({answers})
         const {view} = mount('task-1')
         await plan(view)
 
@@ -389,9 +398,12 @@ describe('a plan that is running', () => {
      * with it, in the one case that button exists for.
      */
     it('reports a plan that could not be started at all, and keeps the panel', async () => {
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command === 'run_task_brief') throw new Error('a turn is already running')
-            return undefined
+        backend({
+            answers: {
+                run_task_brief: () => {
+                    throw new CommandFailure('ai_request_in_progress', 'a turn is already running')
+                }
+            }
         })
         const {onError, view} = mount('task-1')
         await plan(view)

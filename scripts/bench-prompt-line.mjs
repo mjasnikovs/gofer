@@ -36,7 +36,7 @@ import {
     createReadTool,
     createWriteTool
 } from '@earendil-works/pi-agent-core/node'
-import {createGodotTools} from './ai-host.mjs'
+import {createGodotTools} from './godot-tools.mjs'
 import {validateBashCommand} from './workspace-confinement.mjs'
 
 const ENDPOINT = process.env.GOFER_BENCH_ENDPOINT ?? 'http://127.0.0.1:8080/v1/chat/completions'

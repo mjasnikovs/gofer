@@ -12,7 +12,7 @@ import {messageUsage} from '../../utils/chat-format'
 import {attachmentData, pngFile} from '../../services/chat-storage'
 import {draftKey} from '../../services/ui-state'
 import {isTurnRunning, watchTurn} from '../../services/turn-activity'
-import {ALL_THINKING_LEVELS, NO_THINKING_LEVELS} from '../../models/settings'
+import {NO_THINKING_LEVELS, activeModel, thinkingLevelsFor} from '../../models/settings'
 import {useAiConnection} from '../../hooks/useAiConnection'
 import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useConversation} from '../../hooks/useConversation'
@@ -454,7 +454,9 @@ export function Workspace({
     }
 
     const usage = messageUsage(messages)
-    const supportsImages = Boolean(settings?.ai.input.includes('image'))
+    /** The model the composer is about to send to, which is the live connection's. */
+    const model = activeModel(settings)
+    const supportsImages = Boolean(model?.input.includes('image'))
 
     /**
      * Swaps in the drawn-on picture, keeping the original and the strokes beside it.
@@ -548,8 +550,8 @@ export function Workspace({
         state: {
             draft,
             draftAttachments,
-            selectedModel: settings?.ai.modelName ?? settings?.ai.model ?? 'Loading model…',
-            thinkingLevel: settings?.ai.thinkingLevel ?? 'off',
+            selectedModel: model?.name ?? model?.id ?? 'Loading model…',
+            thinkingLevel: model?.thinkingLevel ?? 'off',
             usage,
             ...(streamError && {streamError})
         },
@@ -567,7 +569,7 @@ export function Workspace({
         },
         meta: {
             canAttachImages: supportsImages && !isBusy && !isSavingAttachments && isTauri(),
-            contextWindow: settings?.ai.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+            contextWindow: model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
             isSavingAttachments,
             // The chat has to have been read before this can mean anything: an unread task reports
             // no messages, which is the same shape as a task that genuinely has none.
@@ -575,7 +577,12 @@ export function Workspace({
             isStreaming: isBusy,
             models,
             supportsImages,
-            thinkingLevels: settings?.ai.reasoning ? ALL_THINKING_LEVELS : NO_THINKING_LEVELS,
+            // Asked, not re-derived. The composer's copy of this rule read `reasoning` alone, so a
+            // chat template that thinks and names no efforts — llama.cpp reports exactly that pair
+            // for a Qwen build — was offered `minimal` through `max` here and `off`/`on` in
+            // settings. The template raises on an effort it does not know, and llama.cpp turns that
+            // into an HTTP 500 on every request of the turn.
+            thinkingLevels: model ? thinkingLevelsFor(model) : NO_THINKING_LEVELS,
             ...(settings && {settings})
         }
     }

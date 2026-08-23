@@ -1,7 +1,13 @@
 import {createInterface} from 'node:readline'
 import {registerBunOAuthFlows} from '@earendil-works/pi-ai/bun-oauth'
 import {cleanupSessionResources} from '@earendil-works/pi-ai/compat'
-import {CREDENTIAL_PREFIX, EVENT_PREFIX, TOOL_PREFIX, createToolHost} from './ai-host.mjs'
+import {
+    CREDENTIAL_PREFIX,
+    EVENT_PREFIX,
+    TOOL_PREFIX,
+    createCancellation,
+    createToolHost
+} from './ai-host.mjs'
 import {runAgent} from './ai-provider.mjs'
 
 export {EVENT_PREFIX}
@@ -41,20 +47,20 @@ function write(prefix, message) {
  * work a stale bundle has never heard of would otherwise quietly run an ordinary empty turn and leave
  * nothing anywhere pointing at why.
  */
-async function runRequest(request, {host, credentialHost, emit}) {
+async function runRequest(request, {host, credentialHost, emit, signal}) {
     const mode = request.mode ?? 'turn'
     if (mode === 'turn') {
-        await runAgent({...request, host, credentialHost, emit})
+        await runAgent({...request, host, credentialHost, emit, signal})
         return
     }
     if (mode === 'brief') {
         const {runBrief} = await import('./brief/run.mjs')
-        await runBrief({...request, host, credentialHost, emit})
+        await runBrief({...request, host, credentialHost, emit, signal})
         return
     }
     if (mode === 'judge') {
         const {runMemoryJudge} = await import('./memory-judge.mjs')
-        await runMemoryJudge({...request, host, credentialHost, emit})
+        await runMemoryJudge({...request, host, credentialHost, emit, signal})
         return
     }
     throw new Error(
@@ -83,12 +89,19 @@ try {
     const request = JSON.parse(first.value)
     const host = createToolHost(call => write(TOOL_PREFIX, call))
     const credentialHost = createToolHost(call => write(CREDENTIAL_PREFIX, call), 'credential')
+    // The stop, read off the same channel the answers ride. Built here rather than inside the job
+    // because it is the channel that carries the cancel line, and the job is only the thing that
+    // reads its signal.
+    const cancellation = createCancellation()
     // Deliberately not awaited: the reader ends only when the backend closes the channel, which
     // happens after the turn it is feeding. Awaiting it would outlive the agent and hang the exit.
     void (async () => {
         for await (const line of lines) {
             if (line.trim() === '') continue
             const response = JSON.parse(line)
+            // Ahead of the hosts, because a cancel is the one line that is not addressed to a
+            // pending call and aborting is what settles the calls that are.
+            if (cancellation.deliver(response)) continue
             host.deliver(response)
             credentialHost.deliver(response)
         }
@@ -101,7 +114,8 @@ try {
         await runRequest(request, {
             host,
             credentialHost,
-            emit: event => write(EVENT_PREFIX, event)
+            emit: event => write(EVENT_PREFIX, event),
+            signal: cancellation.signal
         })
     } finally {
         host.close('The agent turn ended')

@@ -281,12 +281,12 @@ const MUTATING_COMMANDS: Array[String] = [
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:c33af5a5603569bc
+# GENERATED-BEGIN command-params sha256:7483fa1decd0e07f
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
+    "session.answer_dialog": {"required": ["button"], "optional": []},
     "session.undo": {"required": [], "optional": []},
     "session.redo": {"required": [], "optional": []},
-    "session.answer_dialog": {"required": ["button"], "optional": []},
     "scene.list": {"required": [], "optional": []},
     "scene.open": {"required": ["path"], "optional": []},
     "scene.create": {"required": ["path", "rootType"], "optional": ["rootName"]},

@@ -5,6 +5,10 @@
 //! with no turn anywhere, and the retrieval is a search. What kept it there is that embedding needs
 //! the memory worker, which `storage` cannot reach — so this sits between the two and belongs to
 //! neither.
+//!
+//! The backfill itself has since gone the other way. It is `Memories`' own upkeep now, collected
+//! with everything else the memory view owns, and it reaches back here through [`memory_vector`]
+//! for the one step that needs the worker. What is on this side is what has to leave the process.
 
 use crate::command_error::CommandError;
 use crate::files::Snapshot;
@@ -14,9 +18,6 @@ use crate::storage::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-/// How many memories one backfill will re-embed before leaving the rest for the next run.
-const BACKFILL_LIMIT: usize = 200;
 
 /// How many memories one listing hands the window.
 ///
@@ -149,9 +150,7 @@ pub(crate) fn remember_completed_turn(
 }
 
 fn embed_memory(storage: &ProjectStorage, memory_id: &str, content: &str) -> Result<(), String> {
-    let vector = crate::memory::embed_documents(&[content.to_owned()], &crate::rag::cache_path()?)?
-        .pop()
-        .ok_or_else(|| "The memory worker returned no document vector".to_owned())?;
+    let vector = memory_vector(content)?;
     storage
         .memory()
         .save_embedding(&SaveMemoryEmbeddingRequest {
@@ -162,22 +161,16 @@ fn embed_memory(storage: &ProjectStorage, memory_id: &str, content: &str) -> Res
         .map_err(|failure| failure.message)
 }
 
-/// Re-embeds memories that lost or never received a vector, returning how many were restored.
+/// The vector for one memory's text, from the worker that makes them.
 ///
-/// Embedding needs the memory worker, so this cannot live in `storage`. It stops at the first
-/// failure because every remaining memory would fail the same way when the worker is unavailable.
-pub(crate) fn backfill_memory_embeddings(storage: &ProjectStorage) -> usize {
-    let Ok(pending) = storage.memory().missing_embeddings(BACKFILL_LIMIT) else {
-        return 0;
-    };
-    let mut restored = 0;
-    for memory in pending {
-        if embed_memory(storage, &memory.id, &memory.content).is_err() {
-            break;
-        }
-        restored += 1;
-    }
-    restored
+/// The one step of remembering that `storage` cannot do for itself, which is the whole reason this
+/// module sits between the two. The re-embedding backfill it used to own now runs as `Memories`'
+/// own upkeep, under the single write lock maintenance takes — so what is left here is the part
+/// that has to reach a subprocess, and storage reaches back through this for it.
+pub(crate) fn memory_vector(content: &str) -> Result<Vec<f32>, String> {
+    crate::memory::embed_documents(&[content.to_owned()], &crate::rag::cache_path()?)?
+        .pop()
+        .ok_or_else(|| "The memory worker returned no document vector".to_owned())
 }
 
 fn truncate_text(text: &str, maximum: usize) -> String {
@@ -581,9 +574,8 @@ fn anchor_path(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryCheck, backfill_memory_embeddings, basename_index, check_memory,
-        list_checked_memories, record_judgement, remember_completed_turn, retrieve_memory_context,
-        save_memory, set_memory_states,
+        MemoryCheck, basename_index, check_memory, list_checked_memories, record_judgement,
+        remember_completed_turn, retrieve_memory_context, save_memory, set_memory_states,
     };
     use crate::files::Snapshot;
     use crate::storage::{MemoryRecord, ProjectStorage, UpsertMemoryRequest};
@@ -659,10 +651,13 @@ mod tests {
         remember_completed_turn(&storage, None, "  ", "a menu was added").expect("no prompt");
         remember_completed_turn(&storage, None, "add a pause menu", "\n").expect("no completion");
 
-        assert_eq!(
-            backfill_memory_embeddings(&storage),
-            0,
-            "nothing was stored"
+        assert!(
+            storage
+                .memory()
+                .missing_embeddings(10)
+                .expect("pending memories")
+                .is_empty(),
+            "nothing was stored, so maintenance has nothing to re-embed"
         );
     }
 

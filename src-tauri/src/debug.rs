@@ -112,6 +112,38 @@ pub enum DebugRequest {
     },
 }
 
+/// The fields one [`DebugRequest`] variant deserializes, as serde spells them on the wire, and
+/// whether a call may leave one out.
+///
+/// Declared beside the enum rather than recovered from it. `tool_drift` holds the catalogue's
+/// parameter table to what the handler behind it really reads, and it used to do that by parsing
+/// this file: find `enum DebugRequest {`, read to the first `\n}`, find the variant, split each
+/// line on its first `:`. A field whose type wrapped onto a second line was dropped without a
+/// word, and a rename left the whole comparison iterating an empty set — a check that passes on
+/// nothing. What a request takes is a fact about the request, so it is written here, where
+/// changing the variant and not the list is the same edit.
+///
+/// Optional means what serde means: the type is an `Option`, or the field carries
+/// `#[serde(default)]`. `None` is for a name no variant answers, which is what makes a catalogue
+/// operation added without a variant fail loudly rather than be skipped.
+#[cfg(test)]
+pub fn request_fields(op: &str) -> Option<&'static [(&'static str, bool)]> {
+    const ON_A_THREAD: &[(&str, bool)] = &[("threadId", true)];
+    Some(match op {
+        "status" | "attach" | "threads" | "restart" | "terminate" => &[],
+        "set_breakpoints" => &[("path", false), ("lines", true)],
+        "breakpoint_locations" => &[("path", false), ("line", false)],
+        "launch" => &[("playArgs", true), ("breakpoints", true)],
+        "stack_trace" | "continue" | "pause" | "step_over" | "step_in" | "step_out" => ON_A_THREAD,
+        "scopes" => &[("frameId", false)],
+        "variables" => &[("variablesReference", false)],
+        "evaluate" => &[("expression", false), ("frameId", true)],
+        "await_stop" => &[("threadId", true), ("timeoutMs", true)],
+        "disconnect" => &[("terminateDebuggee", true)],
+        _ => return None,
+    })
+}
+
 /// The breakpoint lines to install in one script.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -20,13 +20,15 @@ one chooses.
 **Project data** — everything Gofer knows about a workspace, kept in `.gofer/` inside the workspace
 itself, so moving the folder moves what Gofer remembers about it.
 
-**Ledger** — one narrow view over the project database: `chats`, `tasks`, `runs`, `memory`,
-`project`. One connection, one schema, one write lock; five interfaces, so a caller that wants the
-conversation learns what a conversation can do rather than everything a project can. Each view names
-its own failures: a rejection carries the code chosen where the failure happened, not at the seam it
-crosses — a task that is not there is `task_not_found` whichever view was asked, and a view names
-the situation only for a sentence nobody has classified. A task's brief travels with `tasks`,
-because it belongs to one task and is deleted with it.
+**Ledger** — one narrow view over the project database: `chats`, `tasks`, `runs`, `sketches`,
+`memory`, `project`. One connection, one schema, one write lock; six interfaces, so a caller that
+wants the conversation learns what a conversation can do rather than everything a project can. Each
+view owns its own upkeep as well as its own tables — maintenance is a fold over the six, not one
+view reaching into the others' rows, which is how the two newest arrived with nothing collecting
+them at all. Each view names its own failures: a rejection carries the code chosen where the failure
+happened, not at the seam it crosses — a task that is not there is `task_not_found` whichever view
+was asked, and a view names the situation only for a sentence nobody has classified. A task's brief
+travels with `tasks`, because it belongs to one task and is deleted with it.
 
 **Task** — one unit of work in the sidebar: a conversation, and a git branch to do it in. Tasks are
 created, activated, deleted, and merged back. A task made before the repository existed gets its

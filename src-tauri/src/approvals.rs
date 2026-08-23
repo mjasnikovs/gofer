@@ -17,6 +17,14 @@
 //! bash is the deliberate exception in the other direction: it stays autonomous inside the active
 //! task worktree even where the equivalent typed delete stops here, because a shell that asks for
 //! permission per command is a shell the agent cannot use.
+//!
+//! Which operations those are is not written here. A gate is a fact about one named operation, so
+//! it is carried on the operation's own row — `gated` in `protocol/schemas/v2/params.json`, read
+//! by [`crate::tool_params::Operation::gate`] — beside its parameters, its route and its
+//! narrowing. Written here it was a table of its own keyed on the same `(tool, op)` pair, and a
+//! gate naming an operation that had been renamed meant an operation quietly running unapproved,
+//! catchable only by a test that ran after the fact. Absence is still auto-allowed, so a new
+//! operation is allowed by default and has to be gated deliberately.
 
 use crate::ask::{AskError, MAIN_WINDOW, Registry};
 use serde::Serialize;
@@ -67,64 +75,6 @@ impl ApprovalError {
         self.details = details;
         self
     }
-}
-
-/// One operation the agent may not run on its own, and the reason the user is shown.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GatedOperation {
-    pub tool: &'static str,
-    pub op: &'static str,
-    pub reason: &'static str,
-}
-
-const fn gate(tool: &'static str, op: &'static str, reason: &'static str) -> GatedOperation {
-    GatedOperation { tool, op, reason }
-}
-
-/// Every AI operation that requires approval. Anything absent is auto-allowed, so a new catalog
-/// operation is allowed by default and has to be gated deliberately.
-///
-/// Emitted from `protocol/schemas/v2/params.json`, beside the parameters and the route, because all
-/// three are facts about the same operation. Written by hand, this was a fifth surface keyed on the
-/// same `(tool, op)` and a fifth thing to hold to the catalogue afterwards: a gate naming an
-/// operation that had been renamed meant an operation quietly running unapproved, and the only
-/// thing that would have caught it was a test that ran after the fact.
-// GENERATED-BEGIN gated-operations sha256:a12b8949339ad09e
-pub const GATED: &[GatedOperation] = &[
-    gate(
-        "godot_session",
-        "answer_dialog",
-        "Answering an editor dialog presses that button in the editor, exactly as clicking it would.",
-    ),
-    gate(
-        "godot_project",
-        "set_plugin_enabled",
-        "Enabling or disabling an editor plugin changes what runs inside the editor itself.",
-    ),
-    gate(
-        "godot_project",
-        "set_editor_setting",
-        "Editor settings are machine-wide: they live outside the task worktree and outside Git, so this change is not part of anything the task can roll back.",
-    ),
-    gate(
-        "godot_resource",
-        "move",
-        "Moving a path removes the file from where it is now, and can overwrite the destination.",
-    ),
-    gate(
-        "godot_resource",
-        "delete",
-        "Deleting a file removes it from the task worktree; only a Git checkout brings it back.",
-    ),
-];
-// GENERATED-END gated-operations
-
-/// The reason one operation needs approval, or `None` when the agent may just run it.
-pub fn gate_reason(tool: &str, op: &str) -> Option<&'static str> {
-    GATED
-        .iter()
-        .find(|gated| gated.tool == tool && gated.op == op)
-        .map(|gated| gated.reason)
 }
 
 /// One gated operation inside a call. It names the operation and carries the parameters, because
@@ -384,8 +334,15 @@ pub(crate) fn serialize_gate_tests() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_tools::CATALOG;
     use std::thread;
+
+    /// The reason one operation needs approval, by name, for the tests that state the pair they
+    /// are about. The router reads it off the operation it has already resolved.
+    fn gate(tool: &str, op: &str) -> Option<&'static str> {
+        crate::tool_params::operation_of(tool, op)
+            .unwrap_or_else(|| panic!("{tool}.{op} is a catalogue operation"))
+            .gate()
+    }
 
     /// A turn is running: prompts are only ever raised from inside one, so every test that drives
     /// the gate opens it the way `run_ai_worker_with` does.
@@ -427,22 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn gated_operations_name_real_catalog_operations() {
-        for gated in GATED {
-            let domain = CATALOG
-                .iter()
-                .find(|domain| domain.name == gated.tool)
-                .unwrap_or_else(|| panic!("{} is not a tool", gated.tool));
-            assert!(
-                domain.operations.iter().any(|entry| entry.op == gated.op),
-                "{} has no {} operation",
-                gated.tool,
-                gated.op
-            );
-        }
-    }
-
-    #[test]
     fn the_safety_model_auto_allows_recoverable_work() {
         // Reads, editor and debugger control, runtime actions, saves, undoable scene changes, and
         // worktree project settings all run without asking.
@@ -457,13 +398,13 @@ mod tests {
             ("godot_runtime", "input"),
             ("godot_docs_search", "search"),
         ] {
-            assert_eq!(gate_reason(tool, op), None, "{tool}.{op} must be allowed");
+            assert_eq!(gate(tool, op), None, "{tool}.{op} must be allowed");
         }
         // A node delete is undoable in the editor; a file delete is not.
-        assert!(gate_reason("godot_resource", "delete").is_some());
-        assert!(gate_reason("godot_resource", "move").is_some());
-        assert!(gate_reason("godot_project", "set_editor_setting").is_some());
-        assert!(gate_reason("godot_project", "set_plugin_enabled").is_some());
+        assert!(gate("godot_resource", "delete").is_some());
+        assert!(gate("godot_resource", "move").is_some());
+        assert!(gate("godot_project", "set_editor_setting").is_some());
+        assert!(gate("godot_project", "set_plugin_enabled").is_some());
     }
 
     #[test]

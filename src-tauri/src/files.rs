@@ -226,6 +226,43 @@ pub struct MovePathRequest {
     pub to: String,
 }
 
+/// What `godot_resource list` takes: one directory to narrow the walk to, and whether to hash
+/// every file it reports.
+///
+/// A type rather than two `params.get` lookups, because the agent router used to read this call's
+/// JSON by hand and `tool_drift` recovered its contract by parsing the arm's own source text —
+/// which held the arm to a shape, an indentation and a spelling that no compiler was checking.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListPathsRequest {
+    /// The directory to list, named the way the project names it. `None` is the whole worktree.
+    #[serde(default)]
+    pub under: Option<String>,
+    /// Hashing is asked for rather than always done — see the arm that answers this.
+    #[serde(default)]
+    pub hashes: bool,
+}
+
+/// The fields [`DeletePathRequest`] deserializes, as serde spells them on the wire, and whether a
+/// call may leave each one out.
+///
+/// Declared beside the type rather than recovered from it. `tool_drift` holds the catalogue's
+/// parameter table to what the handler behind it really reads, and it used to do that by parsing
+/// this file: find `struct X {`, read to the first `\n}`, split each line on its first `:`. A
+/// field whose type wrapped onto a second line was dropped without a word, and a rename left the
+/// whole comparison iterating an empty set. What a request takes is a fact about the request, so
+/// it is written here, where changing the struct and not the list is the same edit.
+#[cfg(test)]
+pub const DELETE_PATH_FIELDS: &[(&str, bool)] = &[("path", false), ("expectedHash", true)];
+
+/// The fields [`MovePathRequest`] deserializes. See [`DELETE_PATH_FIELDS`].
+#[cfg(test)]
+pub const MOVE_PATH_FIELDS: &[(&str, bool)] = &[("from", false), ("to", false)];
+
+/// The fields [`ListPathsRequest`] deserializes. See [`DELETE_PATH_FIELDS`].
+#[cfg(test)]
+pub const LIST_PATHS_FIELDS: &[(&str, bool)] = &[("under", true), ("hashes", true)];
+
 /// A canonical worktree root plus every operation allowed inside it.
 #[derive(Clone, Debug)]
 pub struct Workspace {
@@ -491,6 +528,18 @@ impl Workspace {
 }
 
 // coverage-critical-start: path
+/// Cleans one worktree-relative path, and refuses one that is not.
+///
+/// It takes `res://` off as well, and that is the confinement backstop rather than the place the
+/// two conventions are reconciled. The router normalises every path an operation declares before an
+/// arm sees it — see `ai_tools::as_the_worktree_names_them` — so nothing routed should still carry
+/// the scheme by the time it arrives here; what does arrive with one is a caller that never went
+/// through the router, which is the renderer's own commands.
+///
+/// Stripping here is also what made the missing normalisation invisible: an unnormalised
+/// `godot_resource delete {"path": "res://levels/level.tscn"}` deleted the right file, while the
+/// read ledger — keyed on the string the caller wrote — held no record of it and attached no hash
+/// to guard it with. So this strips to refuse, never to translate.
 fn validate_relative(relative: &str) -> Result<PathBuf, FileError> {
     let trimmed = relative.strip_prefix("res://").unwrap_or(relative);
     if trimmed.is_empty()

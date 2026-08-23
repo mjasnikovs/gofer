@@ -10,7 +10,7 @@
 
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -19,38 +19,32 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::model_server::ServedModel;
 
+/// The one service every secret is kept under. Which of them a slot holds is `Secret::username`.
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
-const API_KEY_USERNAME: &str = "ai-default";
-/// OpenRouter's key, under its own username. Sharing `ai-default` with the local driver would mean
-/// configuring one wipes the other, and would send a key meant for openrouter.ai as bearer to
-/// whatever is listening on the user's own machine.
-const OPENROUTER_KEY_USERNAME: &str = "ai-openrouter";
 /// OpenRouter's address, which the user never types. Mirrors `OPENROUTER_BASE_URL` in settings.ts.
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-const CHATGPT_CREDENTIAL_USERNAME: &str = "ai-openai-codex";
-/// A second username under the one service, which is how this keyring holds more than one secret.
-const BRAVE_KEY_USERNAME: &str = "web-brave-search";
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
 const SETTINGS_VERSION: u32 = 1;
 
-/// The levels a model with named efforts can be asked at.
-const EFFORT_THINKING_LEVELS: &[&str] =
-    &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/// The levels a model with named efforts can be asked at. The menu, not the validation set: it is
+/// `EFFORT_LEVELS` in `settings.ts` too, and neither of them holds `on`.
+const EFFORT_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// Every level a settings file may legally name. `on` belongs to a model that thinks and has no
 /// efforts to name; the rest belong to one that has. Which of them a given model actually offers is
 /// `thinking_levels`, and this is only what is not a typo.
-const ALL_THINKING_LEVELS: &[&str] = &[
+const EVERY_LEVEL: &[&str] = &[
     "off", "on", "minimal", "low", "medium", "high", "xhigh", "max",
 ];
 
-/// Every word that names an effort, which is `ALL_THINKING_LEVELS` without the two that do not.
+/// Every word that names an effort, which is `EVERY_LEVEL` without the two that do not.
 ///
 /// `off` is the absence of an effort and `on` belongs to a template with none to name, so neither
 /// can arrive from a catalogue. The same list, in the same order, is `KNOWN_EFFORTS` in
-/// `model_server.rs` and in `thinking-level.mjs`.
+/// `model_server.rs` and in `thinking-level.mjs`, and `check-command-surface.mjs` holds all five
+/// copies to each other rather than leaving this sentence to be believed.
 const NAMED_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
@@ -97,86 +91,74 @@ impl Default for GodotSettings {
     }
 }
 
+/// What the user chose: which driver is live, the connections they configured, and the tuning.
+///
+/// The live connection is stored once, in `connections`, under the driver that runs it. It used to
+/// be stored twice — flattened here and mirrored into a slot — and the invariant "flat is the
+/// original, slot is the copy" had to be restated by hand at every write and in three languages.
+/// The three copies of that paragraph had already drifted: Rust matched the driver exactly while
+/// the worker treated anything that was not ChatGPT or OpenRouter as the local one.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "AiSettingsFile")]
 pub(crate) struct AiSettings {
+    /// Which of the connections below is live. The only thing that decides.
     pub(crate) connection_type: AiConnectionType,
-    pub(crate) name: String,
-    pub(crate) base_url: String,
-    pub(crate) model: String,
-    pub(crate) api: ApiDialect,
-    #[serde(default)]
-    pub(crate) model_name: String,
-    #[serde(default = "default_context_window")]
-    pub(crate) context_window: u64,
-    #[serde(default = "default_max_tokens")]
-    pub(crate) max_tokens: u64,
-    #[serde(default)]
-    pub(crate) reasoning: bool,
-    #[serde(default)]
-    pub(crate) supports_reasoning_effort: bool,
-    /// Whether thinking is turned on by a chat-template argument rather than by an effort field.
+    /// Every connection this settings file holds, by the driver that runs it.
     ///
-    /// True for a llama.cpp host: it takes `chat_template_kwargs.enable_thinking` and silently
-    /// ignores `reasoning_effort`, so a build that sent only the effort field never turned thinking
-    /// on or off for one of these at all. Derived from the server, never typed.
-    #[serde(default)]
-    pub(crate) chat_template_thinking: bool,
-    /// The efforts this model's server said it will accept, or empty when nothing has said.
+    /// One entry per driver and no second copy of any of them, so "which one is live" is a lookup
+    /// rather than a rule. A driver with no entry has never been configured — which a ChatGPT-only
+    /// install's local driver never is — and a driver with no entry is not offered in the picker.
     ///
-    /// The menu, in other words. Empty is not "none" — it is "unasked", and the reasoning flags
-    /// answer instead. A list rather than a flag because a chat template refuses the efforts it
-    /// does not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the
-    /// other two with HTTP 500 on every request of the turn.
-    #[serde(default)]
-    pub(crate) thinking_levels: Vec<String>,
-    #[serde(default = "default_model_input")]
-    pub(crate) input: Vec<String>,
-    #[serde(default = "default_thinking_level")]
-    pub(crate) thinking_level: String,
-    #[serde(default = "default_max_retries")]
+    /// Ordered rather than hashed so the file this is written into does not shuffle its own keys
+    /// between two saves that changed nothing.
+    connections: BTreeMap<AiConnectionType, AiConnectionProfile>,
     pub(crate) max_retries: u32,
-    #[serde(default = "default_timeout_ms")]
     pub(crate) timeout_ms: u64,
-    #[serde(default = "default_compaction_percent")]
     pub(crate) compaction_percent: u32,
-    #[serde(default)]
     pub(crate) subagent: SubagentSettings,
-    #[serde(default)]
     pub(crate) web: WebSettings,
-    /// Absent until the user has configured a local server, which a ChatGPT-only install never does.
-    #[serde(default)]
-    pub(crate) local: Option<AiConnectionProfile>,
-    /// Always present, so the renderer never has to know what a ChatGPT connection looks like.
-    #[serde(default = "default_chatgpt_profile")]
-    pub(crate) chatgpt: AiConnectionProfile,
-    /// Always present, for a reason the local profile does not share: a driver with no profile is
-    /// not offered in the picker, and a driver that is not offered can never be selected in order
-    /// to be configured. OpenRouter's address and dialect are constants, so there is nothing to
-    /// wait for.
-    #[serde(default = "default_openrouter_profile")]
-    pub(crate) openrouter: AiConnectionProfile,
 }
 
+/// One connection and the model chosen on it: an address half, and a `ModelChoice`.
+///
+/// The split is the point. The address is the connection's — where it is, which dialect it speaks,
+/// how thinking is turned on there — and the model half is what a catalogue can answer for and a
+/// sub-agent can override. `SubagentConnection` borrows the first and replaces the second, which is
+/// one field rather than nine `map_or` lines.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "AiConnectionProfileFile")]
 pub(crate) struct AiConnectionProfile {
     name: String,
     base_url: String,
-    model: String,
     api: ApiDialect,
-    model_name: String,
-    context_window: u64,
-    max_tokens: u64,
-    reasoning: bool,
-    supports_reasoning_effort: bool,
     /// Whether thinking is turned on by a chat-template argument rather than by an effort field.
     ///
     /// True for a llama.cpp host: it takes `chat_template_kwargs.enable_thinking` and silently
     /// ignores `reasoning_effort`, so a build that sent only the effort field never turned thinking
     /// on or off for one of these at all. Derived from the server, never typed.
-    #[serde(default)]
     chat_template_thinking: bool,
+    model: ModelChoice,
+}
+
+/// A model, as the user chose it: which one, what it can do, and the level it is asked at.
+///
+/// The same nine facts wherever a model is chosen — on a connection, or by the sub-agent — so the
+/// rules that correct them are written once. Everything but the level is the model's own and is
+/// re-derived from the catalogue and the server on every read; the level is the user's.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelChoice {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_context_window")]
+    context_window: u64,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: u64,
+    #[serde(default)]
+    reasoning: bool,
+    #[serde(default)]
+    supports_reasoning_effort: bool,
     /// The efforts this model's server said it will accept, or empty when nothing has said.
     ///
     /// The menu, in other words. Empty is not "none" — it is "unasked", and the reasoning flags
@@ -185,8 +167,53 @@ pub(crate) struct AiConnectionProfile {
     /// other two with HTTP 500 on every request of the turn.
     #[serde(default)]
     thinking_levels: Vec<String>,
+    #[serde(default = "default_model_input")]
     input: Vec<String>,
+    #[serde(default = "default_thinking_level")]
     thinking_level: String,
+}
+
+impl AiSettings {
+    /// The connection the live driver runs on, or nothing when that driver has none.
+    pub(crate) fn connection(&self) -> Option<&AiConnectionProfile> {
+        self.connection_for(self.connection_type)
+    }
+
+    /// Which stored connection serves a driver. One lookup, and the only one there is.
+    pub(crate) fn connection_for(&self, driver: AiConnectionType) -> Option<&AiConnectionProfile> {
+        self.connections.get(&driver)
+    }
+
+    /// The shipped settings, pointed at one server with one model on it, for a suite that brings
+    /// its own. Where the model is, and that a failed request is not asked again, is all an
+    /// acceptance run chooses; the rest of the turn is the one the application composes.
+    #[cfg(all(test, feature = "godot-acceptance"))]
+    pub(crate) fn served_by(base_url: String, model: String) -> Self {
+        let mut settings = Self {
+            max_retries: 0,
+            ..Self::default()
+        };
+        if let Some(local) = settings
+            .connections
+            .get_mut(&AiConnectionType::OpenaiCompatible)
+        {
+            local.base_url = base_url;
+            local.model.name.clone_from(&model);
+            local.model.id = model;
+        }
+        settings
+    }
+}
+
+/// Where the live connection points and which model it names, as one line for a report.
+///
+/// Here rather than at the call site because the caller has a health check to write and no reason
+/// to know that a settings file holds more than one connection.
+pub(crate) fn active_endpoint(ai: &AiSettings) -> (String, String) {
+    ai.connection().map_or_else(
+        || (String::new(), String::new()),
+        |connection| (connection.base_url.clone(), connection.model.id.clone()),
+    )
 }
 
 /// What the agent's two outward-facing tools are configured with.
@@ -279,36 +306,15 @@ pub(crate) struct SubagentSettings {
 /// the reasoning level it is asked at. The address, the dialect and the credential belong to the
 /// connection, are configured in one place, and are never copied here to drift out of step.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", from = "SubagentConnectionFile")]
 pub(crate) struct SubagentConnection {
     /// Which stored connection serves this model. Independent of the parent's choice.
     pub(crate) connection_type: AiConnectionType,
-    pub(crate) model: String,
-    #[serde(default)]
-    pub(crate) model_name: String,
-    #[serde(default = "default_context_window")]
-    pub(crate) context_window: u64,
-    #[serde(default = "default_max_tokens")]
-    pub(crate) max_tokens: u64,
-    #[serde(default)]
-    pub(crate) reasoning: bool,
-    #[serde(default)]
-    pub(crate) supports_reasoning_effort: bool,
-    /// The efforts this model's server said it will accept, or empty when nothing has said.
-    ///
-    /// The menu, in other words. Empty is not "none" — it is "unasked", and the reasoning flags
-    /// answer instead. A list rather than a flag because a chat template refuses the efforts it
-    /// does not know, loudly: one Qwen build accepts three of Gofer's seven levels and answers the
-    /// other two with HTTP 500 on every request of the turn.
-    #[serde(default)]
-    pub(crate) thinking_levels: Vec<String>,
-    #[serde(default = "default_model_input")]
-    pub(crate) input: Vec<String>,
-    #[serde(default = "default_thinking_level")]
-    pub(crate) thinking_level: String,
+    /// The model half of that connection, replaced. The address half is borrowed as it stands.
+    pub(crate) model: ModelChoice,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum AiConnectionType {
     OpenaiCompatible,
@@ -321,6 +327,180 @@ pub(crate) enum AiConnectionType {
 pub(crate) enum ApiDialect {
     OpenaiCompletions,
     OpenaiCodexResponses,
+}
+
+/// A model as a settings file names it, in either of the two shapes one has ever been written in.
+///
+/// The shape this build writes is the model and its facts together. The shape before it was an id
+/// with its facts scattered beside it, in whichever struct the id happened to sit in — which is why
+/// this is one type rather than three: the reading is the same wherever it happens.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredModel {
+    Chosen(ModelChoice),
+    Id(String),
+}
+
+/// The facts a flat settings file scattered beside a model id, all of them optional.
+///
+/// Read, never written. `AiSettings`, `AiConnectionProfile` and `SubagentConnection` all serialize
+/// as themselves; this is only what an older file has to be understood as.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelChoiceFile {
+    model_name: Option<String>,
+    context_window: Option<u64>,
+    max_tokens: Option<u64>,
+    reasoning: Option<bool>,
+    supports_reasoning_effort: Option<bool>,
+    thinking_levels: Option<Vec<String>>,
+    input: Option<Vec<String>>,
+    thinking_level: Option<String>,
+}
+
+impl ModelChoiceFile {
+    /// The model this file names, whichever of the two shapes it named it in.
+    fn choice(self, model: StoredModel) -> ModelChoice {
+        match model {
+            StoredModel::Chosen(chosen) => chosen,
+            StoredModel::Id(id) => ModelChoice {
+                name: self
+                    .model_name
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| id.clone()),
+                id,
+                context_window: self.context_window.unwrap_or_else(default_context_window),
+                max_tokens: self.max_tokens.unwrap_or_else(default_max_tokens),
+                reasoning: self.reasoning.unwrap_or_default(),
+                supports_reasoning_effort: self.supports_reasoning_effort.unwrap_or_default(),
+                thinking_levels: self.thinking_levels.unwrap_or_default(),
+                input: self.input.unwrap_or_else(default_model_input),
+                thinking_level: self.thinking_level.unwrap_or_else(default_thinking_level),
+            },
+        }
+    }
+}
+
+/// One connection as a settings file holds it, in either shape.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiConnectionProfileFile {
+    name: String,
+    base_url: String,
+    api: ApiDialect,
+    #[serde(default)]
+    chat_template_thinking: bool,
+    model: StoredModel,
+    #[serde(flatten)]
+    model_fields: ModelChoiceFile,
+}
+
+impl From<AiConnectionProfileFile> for AiConnectionProfile {
+    fn from(file: AiConnectionProfileFile) -> Self {
+        Self {
+            name: file.name,
+            base_url: file.base_url,
+            api: file.api,
+            chat_template_thinking: file.chat_template_thinking,
+            model: file.model_fields.choice(file.model),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubagentConnectionFile {
+    connection_type: AiConnectionType,
+    model: StoredModel,
+    #[serde(flatten)]
+    model_fields: ModelChoiceFile,
+}
+
+impl From<SubagentConnectionFile> for SubagentConnection {
+    fn from(file: SubagentConnectionFile) -> Self {
+        Self {
+            connection_type: file.connection_type,
+            model: file.model_fields.choice(file.model),
+        }
+    }
+}
+
+/// The settings file as every Gofer before the connections map wrote it.
+///
+/// The live connection was flattened onto `ai` and mirrored into a slot named after its driver, and
+/// the flat half was the original: a save wrote it first and copied it second. So the flat half is
+/// read last here, over the slot it was mirrored into, and the mirror is dropped rather than
+/// merged. This is the only code left that knows either shape existed.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiSettingsFile {
+    connection_type: AiConnectionType,
+    /// Present in every file this build writes, and in none written before it.
+    #[serde(default)]
+    connections: Option<BTreeMap<AiConnectionType, AiConnectionProfile>>,
+    name: Option<String>,
+    base_url: Option<String>,
+    api: Option<ApiDialect>,
+    #[serde(default)]
+    chat_template_thinking: bool,
+    model: Option<StoredModel>,
+    #[serde(default)]
+    local: Option<AiConnectionProfile>,
+    #[serde(default)]
+    chatgpt: Option<AiConnectionProfile>,
+    #[serde(default)]
+    openrouter: Option<AiConnectionProfile>,
+    #[serde(default = "default_max_retries")]
+    max_retries: u32,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default = "default_compaction_percent")]
+    compaction_percent: u32,
+    #[serde(default)]
+    subagent: SubagentSettings,
+    #[serde(default)]
+    web: WebSettings,
+    #[serde(flatten)]
+    model_fields: ModelChoiceFile,
+}
+
+impl From<AiSettingsFile> for AiSettings {
+    fn from(file: AiSettingsFile) -> Self {
+        let mut connections = file.connections.unwrap_or_default();
+        if connections.is_empty() {
+            for (driver, mirrored) in [
+                (AiConnectionType::OpenaiCompatible, file.local),
+                (AiConnectionType::OpenaiCodex, file.chatgpt),
+                (AiConnectionType::Openrouter, file.openrouter),
+            ] {
+                if let Some(profile) = mirrored {
+                    connections.insert(driver, profile);
+                }
+            }
+            // Last, so the original wins over the copy of itself. See the note above.
+            if let Some(model) = file.model {
+                connections.insert(
+                    file.connection_type,
+                    AiConnectionProfile {
+                        name: file.name.unwrap_or_default(),
+                        base_url: file.base_url.unwrap_or_default(),
+                        api: file.api.unwrap_or(ApiDialect::OpenaiCompletions),
+                        chat_template_thinking: file.chat_template_thinking,
+                        model: file.model_fields.choice(model),
+                    },
+                );
+            }
+        }
+        Self {
+            connection_type: file.connection_type,
+            connections,
+            max_retries: file.max_retries,
+            timeout_ms: file.timeout_ms,
+            compaction_percent: file.compaction_percent,
+            subagent: file.subagent,
+            web: file.web,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -652,28 +832,50 @@ impl Default for AiSettings {
     fn default() -> Self {
         Self {
             connection_type: AiConnectionType::OpenaiCompatible,
-            name: "Local AI".to_owned(),
-            base_url: "http://127.0.0.1:8080/v1".to_owned(),
-            model: "Qwen3.6-27B-UD-Q4_K_XL.gguf".to_owned(),
-            api: ApiDialect::OpenaiCompletions,
-            model_name: "Qwen3.6 27B".to_owned(),
-            context_window: default_context_window(),
-            max_tokens: default_max_tokens(),
-            reasoning: false,
-            supports_reasoning_effort: false,
-            chat_template_thinking: false,
-            thinking_levels: Vec::new(),
-            input: default_model_input(),
-            thinking_level: default_thinking_level(),
+            connections: default_connections(default_local_profile()),
             max_retries: default_max_retries(),
             timeout_ms: default_timeout_ms(),
             compaction_percent: default_compaction_percent(),
             subagent: SubagentSettings::default(),
             web: WebSettings::default(),
-            local: None,
-            chatgpt: default_chatgpt_profile(),
-            openrouter: default_openrouter_profile(),
         }
+    }
+}
+
+/// The three connections a settings file starts life with, around whichever local one is known.
+///
+/// ChatGPT and OpenRouter are always there for a reason the local one used to have to earn: a
+/// driver with no connection is not offered in the picker, and a driver that is not offered can
+/// never be selected in order to be configured. Both of their addresses and dialects are constants,
+/// so there is nothing to wait for.
+fn default_connections(
+    local: AiConnectionProfile,
+) -> BTreeMap<AiConnectionType, AiConnectionProfile> {
+    BTreeMap::from([
+        (AiConnectionType::OpenaiCompatible, local),
+        (AiConnectionType::OpenaiCodex, default_chatgpt_profile()),
+        (AiConnectionType::Openrouter, default_openrouter_profile()),
+    ])
+}
+
+/// What a local connection is before Pi's catalogue or the server itself has said anything.
+fn default_local_profile() -> AiConnectionProfile {
+    AiConnectionProfile {
+        name: "Local AI".to_owned(),
+        base_url: "http://127.0.0.1:8080/v1".to_owned(),
+        api: ApiDialect::OpenaiCompletions,
+        chat_template_thinking: false,
+        model: ModelChoice {
+            id: "Qwen3.6-27B-UD-Q4_K_XL.gguf".to_owned(),
+            name: "Qwen3.6 27B".to_owned(),
+            context_window: default_context_window(),
+            max_tokens: default_max_tokens(),
+            reasoning: false,
+            supports_reasoning_effort: false,
+            thinking_levels: Vec::new(),
+            input: default_model_input(),
+            thinking_level: default_thinking_level(),
+        },
     }
 }
 
@@ -686,36 +888,21 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
     AiConnectionProfile {
         name: "ChatGPT subscription".to_owned(),
         base_url: "https://chatgpt.com/backend-api".to_owned(),
-        model: "gpt-5.6-terra".to_owned(),
         api: ApiDialect::OpenaiCodexResponses,
-        model_name: "GPT-5.6 Terra".to_owned(),
-        context_window: 272_000,
-        max_tokens: 128_000,
-        reasoning: true,
-        supports_reasoning_effort: true,
         // ChatGPT takes a reasoning effort like any OpenAI endpoint. Nothing about a chat template
         // reaches it, and there is no `/props` behind that address to say otherwise.
         chat_template_thinking: false,
-        thinking_levels: Vec::new(),
-        input: vec!["text".to_owned(), "image".to_owned()],
-        thinking_level: "high".to_owned(),
-    }
-}
-
-/// The connection a driver runs on, or nothing when that driver has never been configured.
-///
-/// The active driver is read from the flat fields, not from its slot: the flat fields are what the
-/// settings page validated, and the slot is the copy it mirrored. Reading the mirror for the driver
-/// that is switched on would be trusting a copy over the original. Mirrors `connectionProfile` in
-/// settings.ts, which draws the same line for the same reason.
-fn driver_profile(settings: &AiSettings, driver: AiConnectionType) -> Option<AiConnectionProfile> {
-    if settings.connection_type == driver {
-        return Some(profile_of(settings));
-    }
-    match driver {
-        AiConnectionType::OpenaiCompatible => settings.local.clone(),
-        AiConnectionType::OpenaiCodex => Some(settings.chatgpt.clone()),
-        AiConnectionType::Openrouter => Some(settings.openrouter.clone()),
+        model: ModelChoice {
+            id: "gpt-5.6-terra".to_owned(),
+            name: "GPT-5.6 Terra".to_owned(),
+            context_window: 272_000,
+            max_tokens: 128_000,
+            reasoning: true,
+            supports_reasoning_effort: true,
+            thinking_levels: Vec::new(),
+            input: vec!["text".to_owned(), "image".to_owned()],
+            thinking_level: "high".to_owned(),
+        },
     }
 }
 
@@ -739,18 +926,20 @@ fn default_openrouter_profile() -> AiConnectionProfile {
     AiConnectionProfile {
         name: "OpenRouter".to_owned(),
         base_url: OPENROUTER_BASE_URL.to_owned(),
-        model: "nvidia/nemotron-3.5-lightning:free".to_owned(),
         api: ApiDialect::OpenaiCompletions,
-        model_name: "NVIDIA: Nemotron 3.5 Lightning".to_owned(),
-        context_window: 1_000_000,
-        max_tokens: 1_000_000,
-        reasoning: false,
-        supports_reasoning_effort: false,
         // A chat template is a llama.cpp mechanism. There is no `/props` behind this address.
         chat_template_thinking: false,
-        thinking_levels: Vec::new(),
-        input: vec!["text".to_owned()],
-        thinking_level: "off".to_owned(),
+        model: ModelChoice {
+            id: "nvidia/nemotron-3.5-lightning:free".to_owned(),
+            name: "NVIDIA: Nemotron 3.5 Lightning".to_owned(),
+            context_window: 1_000_000,
+            max_tokens: 1_000_000,
+            reasoning: false,
+            supports_reasoning_effort: false,
+            thinking_levels: Vec::new(),
+            input: vec!["text".to_owned()],
+            thinking_level: "off".to_owned(),
+        },
     }
 }
 
@@ -776,8 +965,10 @@ pub(crate) fn docs_expansion_connection(
     let chosen = settings.subagent.connection.as_ref();
     let driver = chosen.map_or(settings.connection_type, |c| c.connection_type);
     // The address, the dialect and the credential are the connection's; the model and the level it
-    // is asked at are the child's own. Exactly how `subagentModelFor` splits them in the worker.
-    let profile = driver_profile(settings, driver)?;
+    // is asked at are the child's own. Two typed halves merged, which is what the child *is*, and
+    // exactly how `subagentModelFor` splits them in the worker.
+    let connection = settings.connection_for(driver)?;
+    let model = chosen.map_or(&connection.model, |c| &c.model);
     let codex = driver == AiConnectionType::OpenaiCodex;
     if codex && oauth_credential.is_none() {
         return None;
@@ -785,9 +976,9 @@ pub(crate) fn docs_expansion_connection(
     Some(crate::rag::RetrieveConnection {
         connection_type: driver_id(driver).to_owned(),
         oauth_credential: if codex { oauth_credential } else { None },
-        base_url: profile.base_url.clone(),
-        model: chosen.map_or_else(|| profile.model.clone(), |c| c.model.clone()),
-        model_name: chosen.map_or_else(|| profile.model_name.clone(), |c| c.model_name.clone()),
+        base_url: connection.base_url.clone(),
+        model: model.id.clone(),
+        model_name: model.name.clone(),
         // ChatGPT authenticates with the credential above and takes no key. The other two each
         // take their own, from their own keyring slot — a key sent to the wrong address is a key
         // handed to a machine that was never meant to see it.
@@ -796,23 +987,15 @@ pub(crate) fn docs_expansion_connection(
             AiConnectionType::OpenaiCompatible => api_key,
             AiConnectionType::Openrouter => openrouter_api_key,
         },
-        thinking_level: chosen.map_or_else(
-            || settings.thinking_level.clone(),
-            |c| c.thinking_level.clone(),
-        ),
-        context_window: chosen.map_or(profile.context_window, |c| c.context_window),
-        max_tokens: chosen.map_or(profile.max_tokens, |c| c.max_tokens),
-        reasoning: chosen.map_or(profile.reasoning, |c| c.reasoning),
-        supports_reasoning_effort: chosen.map_or(profile.supports_reasoning_effort, |c| {
-            c.supports_reasoning_effort
-        }),
-        thinking_levels: chosen.map_or_else(
-            || profile.thinking_levels.clone(),
-            |c| c.thinking_levels.clone(),
-        ),
+        thinking_level: model.thinking_level.clone(),
+        context_window: model.context_window,
+        max_tokens: model.max_tokens,
+        reasoning: model.reasoning,
+        supports_reasoning_effort: model.supports_reasoning_effort,
+        thinking_levels: model.thinking_levels.clone(),
         // The connection's, never the child's: the child borrows an address, and how thinking is
         // turned on is a fact about the server at that address.
-        chat_template_thinking: profile.chat_template_thinking,
+        chat_template_thinking: connection.chat_template_thinking,
         timeout_ms: settings.timeout_ms,
         max_retries: settings.max_retries,
     })
@@ -857,30 +1040,6 @@ fn model_facts(catalog: &PiCatalog, base_url: &str, model_id: &str) -> Option<Mo
     })
 }
 
-/// Every field a connection holds about its model, borrowed from whichever connection it is.
-///
-/// Three shapes hold the same facts — the flat settings, the saved local profile and the sub-agent's
-/// connection — and all three are corrected by the same rules. Borrowed rather than copied so the
-/// correction lands on the real thing, and written once rather than three times because the last
-/// build's copies drifted apart.
-struct ModelFields<'a> {
-    /// The address the model is resolved against. The sub-agent has none of its own — it borrows
-    /// the connection it names — so this is passed in rather than read off the connection.
-    base_url: String,
-    model: &'a mut String,
-    model_name: &'a mut String,
-    context_window: &'a mut u64,
-    max_tokens: &'a mut u64,
-    reasoning: &'a mut bool,
-    supports_reasoning_effort: &'a mut bool,
-    /// Absent for the sub-agent, which has no connection of its own to describe. It borrows the
-    /// local one, and the local one's copy of this is the one the worker reads.
-    chat_template_thinking: Option<&'a mut bool>,
-    thinking_levels: &'a mut Vec<String>,
-    input: &'a mut Vec<String>,
-    thinking_level: &'a mut String,
-}
-
 /// The levels one model may be asked at, which is not one list.
 ///
 /// Four cases. `levels` is what the model's own server said it accepts, and it wins outright: a
@@ -906,7 +1065,7 @@ fn thinking_levels(
             .collect();
     }
     if supports_reasoning_effort {
-        return EFFORT_THINKING_LEVELS
+        return EFFORT_LEVELS
             .iter()
             .map(|level| (*level).to_owned())
             .collect();
@@ -934,10 +1093,17 @@ fn keep_level(
 /// Re-derives every model-owned fact in a settings file, from the catalogue and from the server.
 ///
 /// Called on every read and every save, so what is on disk is never the authority — it is a copy
-/// the next load overwrites. Only the local driver is resolvable here: Pi's `models.json` is a file
-/// on this machine, while ChatGPT's catalogue lives behind a sidecar process that a settings read
-/// cannot afford to start. The ChatGPT half keeps what it has and is refreshed by the model lister
-/// instead, which is the only other writer of these fields.
+/// the next load overwrites. The local driver's connection, and no other. Both sources describe
+/// servers on this machine: Pi's `models.json` is a file naming local providers, and `served` is
+/// what a llama.cpp host answered when it was asked. ChatGPT and OpenRouter keep what they have and
+/// are refreshed by the model lister instead, which is the only other writer of these fields.
+///
+/// Offering the other two would not merely be useless. Both sources are keyed by address alone, and
+/// nothing stops a `~/.pi/agent/models.json` from naming a provider at OpenRouter's — which
+/// `validate_settings` has just pinned to a constant, so the collision is exact and permanent. Pi's
+/// answers would then be written over the user's OpenRouter model on every read and every save,
+/// collapsing an unnamed model's thinking to the provider's single boolean and letting `keep_level`
+/// drop the level they chose.
 ///
 /// Two sources, in order. The catalogue is a file written once and it names models by ids a
 /// llama.cpp host has never heard of, so it answers first and loosely. The server answers last and
@@ -948,156 +1114,106 @@ fn resolve_model_facts(
     catalog: &PiCatalog,
     served: &HashMap<String, ServedModel>,
 ) {
-    if matches!(settings.connection_type, AiConnectionType::OpenaiCompatible) {
-        let base_url = settings.base_url.clone();
-        resolve_connection(
-            ModelFields {
-                base_url,
-                model: &mut settings.model,
-                model_name: &mut settings.model_name,
-                context_window: &mut settings.context_window,
-                max_tokens: &mut settings.max_tokens,
-                reasoning: &mut settings.reasoning,
-                supports_reasoning_effort: &mut settings.supports_reasoning_effort,
-                chat_template_thinking: Some(&mut settings.chat_template_thinking),
-                thinking_levels: &mut settings.thinking_levels,
-                input: &mut settings.input,
-                thinking_level: &mut settings.thinking_level,
-            },
-            catalog,
-            served,
-        );
-    }
     // The sub-agent has no address of its own — it borrows the connection it names. So the server
-    // its model is resolved against is that connection's, not the parent's. Read before the local
-    // profile is borrowed, because after that it cannot be.
+    // its model is resolved against is that connection's, not the parent's. Read before the
+    // connections are borrowed, because after that it cannot be.
     let local_base_url = settings
-        .local
-        .as_ref()
-        .map(|local| local.base_url.clone())
-        .or_else(|| {
-            matches!(settings.connection_type, AiConnectionType::OpenaiCompatible)
-                .then(|| settings.base_url.clone())
-        });
-    if let Some(local) = settings.local.as_mut() {
-        let base_url = local.base_url.clone();
-        resolve_connection(
-            ModelFields {
-                base_url,
-                model: &mut local.model,
-                model_name: &mut local.model_name,
-                context_window: &mut local.context_window,
-                max_tokens: &mut local.max_tokens,
-                reasoning: &mut local.reasoning,
-                supports_reasoning_effort: &mut local.supports_reasoning_effort,
-                chat_template_thinking: Some(&mut local.chat_template_thinking),
-                thinking_levels: &mut local.thinking_levels,
-                input: &mut local.input,
-                thinking_level: &mut local.thinking_level,
-            },
-            catalog,
-            served,
-        );
+        .connection_for(AiConnectionType::OpenaiCompatible)
+        .map(|local| local.base_url.clone());
+    if let Some(local) = settings
+        .connections
+        .get_mut(&AiConnectionType::OpenaiCompatible)
+    {
+        resolve_connection(local, catalog, served);
     }
     if let Some(child) = settings.subagent.connection.as_mut()
         && matches!(child.connection_type, AiConnectionType::OpenaiCompatible)
         && let Some(base_url) = local_base_url
     {
-        resolve_connection(
-            ModelFields {
-                base_url,
-                model: &mut child.model,
-                model_name: &mut child.model_name,
-                context_window: &mut child.context_window,
-                max_tokens: &mut child.max_tokens,
-                reasoning: &mut child.reasoning,
-                supports_reasoning_effort: &mut child.supports_reasoning_effort,
-                chat_template_thinking: None,
-                thinking_levels: &mut child.thinking_levels,
-                input: &mut child.input,
-                thinking_level: &mut child.thinking_level,
-            },
-            catalog,
-            served,
-        );
+        resolve_model(&mut child.model, &base_url, None, catalog, served);
     }
 }
 
 /// One connection, corrected by the catalogue and then by its own server.
 fn resolve_connection(
-    fields: ModelFields<'_>,
+    connection: &mut AiConnectionProfile,
     catalog: &PiCatalog,
     served: &HashMap<String, ServedModel>,
 ) {
-    if let Some(facts) = model_facts(catalog, &fields.base_url, fields.model) {
+    let base_url = connection.base_url.clone();
+    resolve_model(
+        &mut connection.model,
+        &base_url,
+        Some(&mut connection.chat_template_thinking),
+        catalog,
+        served,
+    );
+}
+
+/// One chosen model, corrected by the catalogue and then by the server it is resolved against.
+///
+/// The address is passed in rather than read off anything, because the sub-agent's model has none
+/// of its own: it borrows the connection it names. `chat_template_thinking` is absent for the same
+/// reason — it describes a server, so it belongs to the connection, and the child's answer to it is
+/// the one that connection already holds.
+fn resolve_model(
+    choice: &mut ModelChoice,
+    base_url: &str,
+    chat_template_thinking: Option<&mut bool>,
+    catalog: &PiCatalog,
+    served: &HashMap<String, ServedModel>,
+) {
+    if let Some(facts) = model_facts(catalog, base_url, &choice.id) {
         if let Some(model_name) = facts.model_name {
-            *fields.model_name = model_name;
+            choice.name = model_name;
         }
-        *fields.reasoning = facts.reasoning;
-        *fields.supports_reasoning_effort = facts.supports_reasoning_effort;
+        choice.reasoning = facts.reasoning;
+        choice.supports_reasoning_effort = facts.supports_reasoning_effort;
         if let Some(input) = facts.input {
-            *fields.input = input;
+            choice.input = input;
         }
     }
-    if let Some(model) = served.get(&server_key(&fields.base_url)) {
+    if let Some(model) = served.get(&server_key(base_url)) {
         // The id too, not only the facts about it — but only where there is one model to be. A
         // host serving one file answers to its path, and a stored id naming the file before it was
         // swapped names nothing at all. A router serving a directory of them is the other case:
         // there the id is the user's choice among several, `/props` describes only one of those,
         // and adopting it would move them onto a model they did not pick. So a router's answer is
         // taken only for the model it is actually about.
-        if !model.sole && *fields.model != model.id {
+        if !model.sole && choice.id != model.id {
             return;
         }
-        if *fields.model != model.id {
-            *fields.model = model.id.clone();
-            *fields.model_name = model.id.clone();
+        if choice.id != model.id {
+            choice.id = model.id.clone();
+            choice.name = model.id.clone();
         }
         if let Some(window) = model.context_window {
-            *fields.context_window = window;
+            choice.context_window = window;
             // The output ceiling cannot outlive the window it is spent inside. Clamped rather than
             // replaced, so a user who chose a smaller one keeps it.
-            *fields.max_tokens = (*fields.max_tokens).min(window);
+            choice.max_tokens = choice.max_tokens.min(window);
         }
-        *fields.reasoning = model.reasoning;
-        *fields.supports_reasoning_effort = !model.efforts.is_empty();
-        *fields.thinking_levels = model.efforts.clone();
+        choice.reasoning = model.reasoning;
+        choice.supports_reasoning_effort = !model.efforts.is_empty();
+        choice.thinking_levels = model.efforts.clone();
         // A server that answered `/props` is a llama.cpp host, and thinking is turned on there by
         // a chat-template argument. The effort field it also accepts does nothing.
-        if let Some(chat_template_thinking) = fields.chat_template_thinking {
+        if let Some(chat_template_thinking) = chat_template_thinking {
             *chat_template_thinking = model.reasoning;
         }
         if let Some(input) = model.input.clone() {
-            *fields.input = input;
+            choice.input = input;
         }
     }
     // The level, re-applied against what the model turned out to offer. Resolution can take
     // reasoning away entirely, and it can take the levels away while leaving the thinking — a
     // stored `medium` means nothing to a template whose only answers are on and off.
-    *fields.thinking_level = keep_level(
-        fields.thinking_level,
-        *fields.reasoning,
-        *fields.supports_reasoning_effort,
-        fields.thinking_levels,
+    choice.thinking_level = keep_level(
+        &choice.thinking_level,
+        choice.reasoning,
+        choice.supports_reasoning_effort,
+        &choice.thinking_levels,
     );
-}
-
-fn profile_of(settings: &AiSettings) -> AiConnectionProfile {
-    AiConnectionProfile {
-        name: settings.name.clone(),
-        base_url: settings.base_url.clone(),
-        model: settings.model.clone(),
-        api: settings.api,
-        model_name: settings.model_name.clone(),
-        context_window: settings.context_window,
-        max_tokens: settings.max_tokens,
-        reasoning: settings.reasoning,
-        supports_reasoning_effort: settings.supports_reasoning_effort,
-        chat_template_thinking: settings.chat_template_thinking,
-        thinking_levels: settings.thinking_levels.clone(),
-        input: settings.input.clone(),
-        thinking_level: settings.thinking_level.clone(),
-    }
 }
 
 /// A validated settings payload paired with a ready-to-send request to its models endpoint.
@@ -1129,16 +1245,20 @@ async fn prepare_models_request(
         // local driver's key must never reach openrouter.ai, and OpenRouter's must never reach a
         // server on this machine.
         let api_key = match settings.ai.connection_type {
-            AiConnectionType::Openrouter => {
-                resolve_openrouter_api_key(&request.openrouter_api_key)?
-            }
-            _ => resolve_api_key(&request.api_key)?,
+            AiConnectionType::Openrouter => resolve(
+                &request.openrouter_api_key,
+                Secret::OpenRouter,
+                &SystemSecrets,
+            )?,
+            _ => resolve(&request.api_key, Secret::AiDefault, &SystemSecrets)?,
         };
         Ok::<_, String>((settings, api_key))
     })
     .await
     .map_err(|error| format!("AI settings validation task failed: {error}"))??;
-    let base_url = format!("{}/", settings.ai.base_url.trim_end_matches('/'));
+    // Validated above, so the live driver has a connection: the address is read off it rather
+    // than off a second copy beside it.
+    let base_url = format!("{}/", active_endpoint(&settings.ai).0.trim_end_matches('/'));
     let models_url = reqwest::Url::parse(&base_url)
         .and_then(|url| url.join(path))
         .map_err(|error| format!("Could not construct the models endpoint: {error}"))?;
@@ -1162,24 +1282,21 @@ pub(crate) async fn run_connection_test(
         AiConnectionType::OpenaiCodex
     ) {
         let settings = validate_settings(request.settings)?;
+        let chosen = active_endpoint(&settings.ai).1;
         return tauri::async_runtime::spawn_blocking(move || {
             check_chatgpt_credential()?;
             let models = chatgpt_models()?;
-            let available = models.iter().any(|model| model.id == settings.ai.model);
+            let available = models.iter().any(|model| model.id == chosen);
             Ok(if available {
                 ConnectionTestResult {
                     status: ConnectionTestStatus::Connected,
-                    message: format!(
-                        "Signed in with ChatGPT. Model '{}' is available.",
-                        settings.ai.model
-                    ),
+                    message: format!("Signed in with ChatGPT. Model '{chosen}' is available."),
                 }
             } else {
                 ConnectionTestResult {
                     status: ConnectionTestStatus::ModelUnavailable,
                     message: format!(
-                        "Signed in with ChatGPT, but model '{}' is not in this Pi release.",
-                        settings.ai.model
+                        "Signed in with ChatGPT, but model '{chosen}' is not in this Pi release."
                     ),
                 }
             })
@@ -1229,29 +1346,23 @@ pub(crate) async fn run_connection_test(
     // The key is good. Whether the chosen model is still in the catalogue is a second question,
     // and a public endpoint answers it without spending the credential again.
     if openrouter {
-        return Ok(openrouter_model_available(&settings.ai.model, timeout).await);
+        return Ok(openrouter_model_available(&active_endpoint(&settings.ai).1, timeout).await);
     }
 
     let models = response.json::<ModelsResponse>().await.map_err(|error| {
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
-    if models
-        .data
-        .iter()
-        .any(|model| model.id == settings.ai.model)
-    {
+    let chosen = active_endpoint(&settings.ai).1;
+    if models.data.iter().any(|model| model.id == chosen) {
         return Ok(ConnectionTestResult {
             status: ConnectionTestStatus::Connected,
-            message: format!("Connected. Model '{}' is available.", settings.ai.model),
+            message: format!("Connected. Model '{chosen}' is available."),
         });
     }
 
     Ok(ConnectionTestResult {
         status: ConnectionTestStatus::ModelUnavailable,
-        message: format!(
-            "Connected, but model '{}' is not available on this server.",
-            settings.ai.model
-        ),
+        message: format!("Connected, but model '{chosen}' is not available on this server."),
     })
 }
 
@@ -1326,11 +1437,15 @@ pub(crate) async fn list_ai_models_with(
     let models = response.json::<ModelsResponse>().await.map_err(|error| {
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
+    let connection = settings
+        .ai
+        .connection()
+        .ok_or_else(|| "The chosen AI driver has no connection configured".to_owned())?;
     Ok(local_model_options(
         models.data,
         &pi_catalog().unwrap_or_default(),
-        &settings.ai,
-        crate::model_server::served_model(&settings.ai.base_url).as_ref(),
+        connection,
+        crate::model_server::served_model(&connection.base_url).as_ref(),
     ))
 }
 
@@ -1347,12 +1462,12 @@ pub(crate) async fn list_ai_models_with(
 fn local_model_options(
     remote: Vec<Model>,
     catalog: &PiCatalog,
-    ai: &AiSettings,
+    connection: &AiConnectionProfile,
     served: Option<&ServedModel>,
 ) -> Vec<AiModelOption> {
     let server_reasoning = catalog
         .servers
-        .get(&server_key(&ai.base_url))
+        .get(&server_key(&connection.base_url))
         .copied()
         .unwrap_or(false);
     remote
@@ -1363,7 +1478,7 @@ fn local_model_options(
                 .meta
                 .and_then(|meta| meta.n_ctx)
                 .or_else(|| known.map(|model| model.context_window))
-                .unwrap_or(ai.context_window);
+                .unwrap_or(connection.model.context_window);
             // And the server outranks both, for the model it says it has loaded. It is the only
             // one of the three that changes when the user swaps the file it was started with.
             let loaded = served.filter(|model| model.id == remote.id);
@@ -1390,7 +1505,7 @@ fn local_model_options(
                 input: loaded
                     .and_then(|model| model.input.clone())
                     .or_else(|| known.map(|model| model.input.clone()))
-                    .unwrap_or_else(|| ai.input.clone()),
+                    .unwrap_or_else(|| connection.model.input.clone()),
             }
         })
         .collect()
@@ -1578,25 +1693,19 @@ fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
     Ok(settings)
 }
 
-/// Asks every local server this settings file points at what it is serving.
+/// Asks the local server this settings file points at what it is serving.
 ///
-/// Two addresses at most, and usually the same one twice: the connection the parent is on and the
-/// saved local profile. ChatGPT has no `/props` and is not asked.
+/// One address, because there is one local connection. It used to be two — the connection the
+/// parent was on and the saved local profile, which were the same one written down twice — and the
+/// second was asked only to be told what the first had already answered. ChatGPT and OpenRouter
+/// have no `/props` and are not asked.
 fn ask_servers(ai: &AiSettings) -> HashMap<String, ServedModel> {
-    let addresses = [
-        matches!(ai.connection_type, AiConnectionType::OpenaiCompatible)
-            .then(|| ai.base_url.clone()),
-        ai.local.as_ref().map(|local| local.base_url.clone()),
-    ];
     let mut served = HashMap::new();
-    for base_url in addresses.into_iter().flatten() {
-        let key = server_key(&base_url);
-        if served.contains_key(&key) {
-            continue;
-        }
-        if let Some(model) = crate::model_server::served_model(&base_url) {
-            served.insert(key, model);
-        }
+    let Some(local) = ai.connection_for(AiConnectionType::OpenaiCompatible) else {
+        return served;
+    };
+    if let Some(model) = crate::model_server::served_model(&local.base_url) {
+        served.insert(server_key(&local.base_url), model);
     }
     served
 }
@@ -1709,27 +1818,28 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
         version: SETTINGS_VERSION,
         ai: AiSettings {
             connection_type: AiConnectionType::OpenaiCompatible,
-            name: "Local AI".to_owned(),
-            base_url: provider.base_url.clone(),
-            model: model.id.clone(),
-            api: ApiDialect::OpenaiCompletions,
-            model_name: model.name.clone(),
-            context_window: model.context_window,
-            max_tokens: model.max_tokens,
-            reasoning: known.reasoning,
-            supports_reasoning_effort: known.supports_reasoning_effort,
-            chat_template_thinking: false,
-            thinking_levels: Vec::new(),
-            input: model.input.clone(),
-            thinking_level: default_thinking_level(),
+            connections: default_connections(AiConnectionProfile {
+                name: "Local AI".to_owned(),
+                base_url: provider.base_url.clone(),
+                api: ApiDialect::OpenaiCompletions,
+                chat_template_thinking: false,
+                model: ModelChoice {
+                    id: model.id.clone(),
+                    name: model.name.clone(),
+                    context_window: model.context_window,
+                    max_tokens: model.max_tokens,
+                    reasoning: known.reasoning,
+                    supports_reasoning_effort: known.supports_reasoning_effort,
+                    thinking_levels: Vec::new(),
+                    input: model.input.clone(),
+                    thinking_level: default_thinking_level(),
+                },
+            }),
             max_retries: default_max_retries(),
             timeout_ms: default_timeout_ms(),
             compaction_percent: default_compaction_percent(),
             subagent: SubagentSettings::default(),
             web: WebSettings::default(),
-            local: None,
-            chatgpt: default_chatgpt_profile(),
-            openrouter: default_openrouter_profile(),
         },
         godot: GodotSettings::default(),
     })
@@ -1780,36 +1890,27 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
             settings.version
         ));
     }
-    settings.ai.name = required_value("Connection name", settings.ai.name)?;
-    settings.ai.model = required_value("Model ID", settings.ai.model)?;
-    if settings.ai.name.len() > 100 {
-        return Err("Connection names cannot exceed 100 bytes".to_owned());
-    }
-    if settings.ai.model.len() > 512 {
-        return Err("Model IDs cannot exceed 512 bytes".to_owned());
-    }
-    if settings.ai.model_name.trim().is_empty() {
-        settings.ai.model_name = settings.ai.model.clone();
-    } else {
-        settings.ai.model_name = settings.ai.model_name.trim().to_owned();
-    }
-    if settings.ai.model_name.len() > 512 {
-        return Err("Model names cannot exceed 512 bytes".to_owned());
-    }
-    if settings.ai.input.is_empty()
-        || settings.ai.input.len() > 16
-        || settings
-            .ai
-            .input
-            .iter()
-            .any(|input| input.is_empty() || input.len() > 64)
+    // OpenRouter's address and dialect are not the user's to set, so they are corrected rather
+    // than validated. A settings file hand-edited to point this driver somewhere else would send
+    // the OpenRouter key to that address, and the catalogue parser to a server that answers a
+    // different shape.
+    if let Some(openrouter) = settings
+        .ai
+        .connections
+        .get_mut(&AiConnectionType::Openrouter)
     {
-        return Err("Model input types are invalid".to_owned());
+        openrouter.base_url = OPENROUTER_BASE_URL.to_owned();
+        openrouter.api = ApiDialect::OpenaiCompletions;
+        openrouter.chat_template_thinking = false;
     }
-    if settings.ai.context_window == 0 || settings.ai.max_tokens == 0 {
-        return Err(
-            "Context window and maximum output tokens must be greater than zero".to_owned(),
-        );
+    // Every connection, not only the live one. They are all the user's to save and any of them can
+    // be the one a sub-agent runs on, so a rule that held for whichever was switched on was a rule
+    // the other two were exempt from.
+    for connection in settings.ai.connections.values_mut() {
+        validate_connection(connection)?;
+    }
+    if settings.ai.connection().is_none() {
+        return Err("The chosen AI driver has no connection configured".to_owned());
     }
     if settings.ai.max_retries > 10 {
         return Err("Maximum retries cannot exceed 10".to_owned());
@@ -1822,46 +1923,11 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     if !(1_000..=3_600_000).contains(&settings.ai.timeout_ms) {
         return Err("Request timeout must be between 1,000 and 3,600,000 milliseconds".to_owned());
     }
-    if !ALL_THINKING_LEVELS.contains(&settings.ai.thinking_level.as_str()) {
-        return Err("Reasoning level is invalid".to_owned());
-    }
-    settings.ai.thinking_level = keep_level(
-        &settings.ai.thinking_level,
-        settings.ai.reasoning,
-        settings.ai.supports_reasoning_effort,
-        &settings.ai.thinking_levels,
-    );
-    // OpenRouter's address and dialect are not the user's to set, so they are corrected rather
-    // than validated. A settings file hand-edited to point this driver somewhere else would send
-    // the OpenRouter key to that address, and the catalogue parser to a server that answers a
-    // different shape.
-    if matches!(settings.ai.connection_type, AiConnectionType::Openrouter) {
-        settings.ai.base_url = OPENROUTER_BASE_URL.to_owned();
-        settings.ai.api = ApiDialect::OpenaiCompletions;
-        settings.ai.chat_template_thinking = false;
-    }
-    settings.ai.base_url = settings.ai.base_url.trim().trim_end_matches('/').to_owned();
-    let url = reqwest::Url::parse(&settings.ai.base_url)
-        .map_err(|error| format!("Base URL must be a valid absolute URL: {error}"))?;
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return Err("Base URL must use http or https".to_owned());
-    }
-    if url.cannot_be_a_base()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || settings.ai.base_url.len() > 2_048
-    {
-        return Err("Base URL cannot contain credentials, a query, or a fragment".to_owned());
-    }
-    // After the parent's rules, because whether a local connection exists depends on the parent: a
-    // file whose driver is local carries it in the flat fields and has no `local` profile until the
-    // mirror below writes one.
-    let has_local = matches!(
-        settings.ai.connection_type,
-        AiConnectionType::OpenaiCompatible
-    ) || settings.ai.local.is_some();
+    validate_subagent_bounds(&settings.ai.subagent)?;
+    let has_local = settings
+        .ai
+        .connection_for(AiConnectionType::OpenaiCompatible)
+        .is_some();
     if let Some(connection) = settings.ai.subagent.connection.take() {
         settings.ai.subagent.connection =
             Some(validate_subagent_connection(connection, has_local)?);
@@ -1871,13 +1937,128 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     if !SEARCH_PROVIDERS.contains(&settings.ai.web.search_provider.as_str()) {
         settings.ai.web.search_provider = default_search_provider();
     }
-    let active_profile = profile_of(&settings.ai);
-    match settings.ai.connection_type {
-        AiConnectionType::OpenaiCompatible => settings.ai.local = Some(active_profile),
-        AiConnectionType::OpenaiCodex => settings.ai.chatgpt = active_profile,
-        AiConnectionType::Openrouter => settings.ai.openrouter = active_profile,
-    }
     Ok(settings)
+}
+
+/// One connection held to its own rules: the address it points at, and the model chosen on it.
+fn validate_connection(connection: &mut AiConnectionProfile) -> Result<(), String> {
+    connection.name = required_value("Connection name", std::mem::take(&mut connection.name))?;
+    if connection.name.len() > 100 {
+        return Err("Connection names cannot exceed 100 bytes".to_owned());
+    }
+    validate_model_choice(&mut connection.model, "Model ID")?;
+    connection.base_url = connection.base_url.trim().trim_end_matches('/').to_owned();
+    let url = reqwest::Url::parse(&connection.base_url)
+        .map_err(|error| format!("Base URL must be a valid absolute URL: {error}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("Base URL must use http or https".to_owned());
+    }
+    if url.cannot_be_a_base()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || connection.base_url.len() > 2_048
+    {
+        return Err("Base URL cannot contain credentials, a query, or a fragment".to_owned());
+    }
+    Ok(())
+}
+
+/// Everything a chosen model can be wrong about, wherever it was chosen.
+///
+/// One function because there is one rule. It used to be two, kept in step by hand — the parent's
+/// written against the flat settings and the sub-agent's against its own shape — and the only thing
+/// they differed in is what a missing model id is called on screen, which is the argument.
+fn validate_model_choice(choice: &mut ModelChoice, id_name: &str) -> Result<(), String> {
+    choice.id = required_value(id_name, std::mem::take(&mut choice.id))?;
+    if choice.id.len() > 512 {
+        return Err("Model IDs cannot exceed 512 bytes".to_owned());
+    }
+    if choice.name.trim().is_empty() {
+        choice.name = choice.id.clone();
+    } else {
+        choice.name = choice.name.trim().to_owned();
+    }
+    if choice.name.len() > 512 {
+        return Err("Model names cannot exceed 512 bytes".to_owned());
+    }
+    if choice.input.is_empty()
+        || choice.input.len() > 16
+        || choice
+            .input
+            .iter()
+            .any(|input| input.is_empty() || input.len() > 64)
+    {
+        return Err("Model input types are invalid".to_owned());
+    }
+    if choice.context_window == 0 || choice.max_tokens == 0 {
+        return Err(
+            "Context window and maximum output tokens must be greater than zero".to_owned(),
+        );
+    }
+    if !EVERY_LEVEL.contains(&choice.thinking_level.as_str()) {
+        return Err("Reasoning level is invalid".to_owned());
+    }
+    choice.thinking_level = keep_level(
+        &choice.thinking_level,
+        choice.reasoning,
+        choice.supports_reasoning_effort,
+        &choice.thinking_levels,
+    );
+    Ok(())
+}
+
+/// One ceiling: the name a settings file spells it with, how to read it, and the range it may hold.
+type SubagentBound = (&'static str, fn(&SubagentSettings) -> u32, u32, u32);
+
+/// What each of the sub-agent's ceilings may be set to, by the name a settings file spells it.
+///
+/// The same bounds as `SUBAGENT_RANGES` in `settings.ts`, which is the slider that offers them, and
+/// `check-command-surface.mjs` holds the two lists to each other. The slider was the only thing
+/// enforcing them: a hand-edited `settings.json` saying `maxTurns: 100000` loaded, was validated,
+/// and was obeyed. The top of each range is the largest value that is still a ceiling rather than
+/// an absence of one, and every range starts where "off" is a real answer — except the retry wait,
+/// which is only read when a retry happens and has no meaning at zero.
+const SUBAGENT_BOUNDS: [SubagentBound; 7] = [
+    (
+        "commandTimeoutMinutes",
+        |s| s.command_timeout_minutes,
+        0,
+        30,
+    ),
+    (
+        "streamInactivityMinutes",
+        |s| s.stream_inactivity_minutes,
+        0,
+        30,
+    ),
+    ("maxTurns", |s| s.max_turns, 0, 40),
+    ("maxAnswerChars", |s| s.max_answer_chars, 0, 24_000),
+    ("maxShows", |s| s.max_shows, 0, 12),
+    ("retryAttempts", |s| s.retry_attempts, 0, 5),
+    (
+        "retryBaseDelaySeconds",
+        |s| s.retry_base_delay_seconds,
+        1,
+        10,
+    ),
+];
+
+/// Every ceiling held to its own range, named the way the file that carries it names it.
+///
+/// The name in the message is the settings file's own spelling rather than a prose label, because
+/// the only way past the slider is to have typed that key by hand.
+fn validate_subagent_bounds(subagent: &SubagentSettings) -> Result<(), String> {
+    for (name, chosen, low, high) in SUBAGENT_BOUNDS {
+        let value = chosen(subagent);
+        if !(low..=high).contains(&value) {
+            return Err(format!(
+                "The sub-agent's {name} must be between {low} and {high}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The same rules the parent's model is held to, applied to the sub-agent's.
@@ -1899,41 +2080,7 @@ fn validate_subagent_connection(
             "The sub-agent cannot use the local connection until one is configured".to_owned(),
         );
     }
-    connection.model = required_value("Sub-agent model ID", connection.model)?;
-    if connection.model.len() > 512 {
-        return Err("Model IDs cannot exceed 512 bytes".to_owned());
-    }
-    if connection.model_name.trim().is_empty() {
-        connection.model_name = connection.model.clone();
-    } else {
-        connection.model_name = connection.model_name.trim().to_owned();
-    }
-    if connection.model_name.len() > 512 {
-        return Err("Model names cannot exceed 512 bytes".to_owned());
-    }
-    if connection.input.is_empty()
-        || connection.input.len() > 16
-        || connection
-            .input
-            .iter()
-            .any(|input| input.is_empty() || input.len() > 64)
-    {
-        return Err("Model input types are invalid".to_owned());
-    }
-    if connection.context_window == 0 || connection.max_tokens == 0 {
-        return Err(
-            "Context window and maximum output tokens must be greater than zero".to_owned(),
-        );
-    }
-    if !ALL_THINKING_LEVELS.contains(&connection.thinking_level.as_str()) {
-        return Err("Reasoning level is invalid".to_owned());
-    }
-    connection.thinking_level = keep_level(
-        &connection.thinking_level,
-        connection.reasoning,
-        connection.supports_reasoning_effort,
-        &connection.thinking_levels,
-    );
+    validate_model_choice(&mut connection.model, "Sub-agent model ID")?;
     Ok(connection)
 }
 
@@ -1987,130 +2134,133 @@ const NO_CREDENTIAL_STORE: &str = "This machine has no credential store, so Gofe
      Secret Service provider — GNOME Keyring or KWallet — and Gofer needs one running to hold a \
      key.";
 
-trait CredentialStore {
-    fn clear(&self) -> Result<(), String>;
-    fn load(&self) -> Result<Option<String>, String>;
-    fn store(&self, value: &str) -> Result<(), String>;
+/// One secret Gofer keeps, and everything that is particular to it.
+///
+/// Four secrets used to be four hand-copied implementations of one idea: a keyring slot, a noun for
+/// the sentence a failure is reported in, and what an empty box means. Only one of them went
+/// through a seam a test could drive, so the two with the *other* blank rule were the two nothing
+/// held to it. This carries the three differences, and everything else is written once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Secret {
+    /// The AI key of the local, OpenAI-compatible driver.
+    AiDefault,
+    /// The Brave Search key. In the keyring rather than in `settings.json`, on the same reasoning
+    /// as the AI key: the settings file is plain text a person may copy, diff or paste into a bug
+    /// report, and a search key is a credential. Nothing is an ordinary state, not a fault — the
+    /// two other engines need no key, and `web_search` says so itself when Brave is chosen
+    /// without one.
+    Brave,
+    OpenRouter,
+    ChatGpt,
 }
 
-struct SystemCredentialStore;
+/// What empty text means for one secret, which is not the same answer for all four.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Blank {
+    /// Refused. The AI key's box is the connection's own field, and saving a connection with a
+    /// blank key would silently take the key off a server that needs one.
+    Refused,
+    /// Takes the key off the machine. Emptying the field and saving is how a person removes a key
+    /// they typed, and an empty entry left behind reads as a configured key every request is then
+    /// rejected for.
+    Clears,
+}
 
-impl CredentialStore for SystemCredentialStore {
-    fn clear(&self) -> Result<(), String> {
-        match credential_entry(API_KEY_USERNAME)?.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(format!("Could not remove the AI API key: {error}")),
+impl Secret {
+    /// The username this secret is stored under, beneath the one service. A second username is how
+    /// this keyring holds more than one secret.
+    const fn username(self) -> &'static str {
+        match self {
+            Self::AiDefault => "ai-default",
+            // Its own slot, not `ai-default`. Two key-based drivers sharing one entry means
+            // configuring the second wipes the first, and — worse — a key meant for openrouter.ai
+            // being sent as bearer to whatever `http://127.0.0.1:8080` happens to be.
+            Self::OpenRouter => "ai-openrouter",
+            Self::ChatGpt => "ai-openai-codex",
+            Self::Brave => "web-brave-search",
         }
     }
 
-    fn load(&self) -> Result<Option<String>, String> {
-        let Some(entry) = entry_in_a_store(API_KEY_USERNAME)? else {
+    /// What this secret is called in the one sentence a user ever reads about it.
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::AiDefault => "AI API key",
+            Self::OpenRouter => "OpenRouter API key",
+            Self::ChatGpt => "ChatGPT credential",
+            Self::Brave => "Brave Search key",
+        }
+    }
+
+    const fn blank(self) -> Blank {
+        match self {
+            Self::AiDefault | Self::ChatGpt => Blank::Refused,
+            Self::Brave | Self::OpenRouter => Blank::Clears,
+        }
+    }
+}
+
+/// Where the four secrets are kept. The seam, and it takes the slot.
+///
+/// It used to take none: one implementation was hardcoded to `ai-default` and the other three
+/// reached past it to the keyring, so a test could drive one flag of the four.
+pub(crate) trait Secrets {
+    fn clear(&self, secret: Secret) -> Result<(), String>;
+    fn read(&self, secret: Secret) -> Result<Option<String>, String>;
+    fn write(&self, secret: Secret, value: &str) -> Result<(), String>;
+}
+
+pub(crate) struct SystemSecrets;
+
+impl Secrets for SystemSecrets {
+    fn clear(&self, secret: Secret) -> Result<(), String> {
+        match credential_entry(secret.username())?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(error) => Err(format!("Could not remove the {}: {error}", secret.noun())),
+        }
+    }
+
+    fn read(&self, secret: Secret) -> Result<Option<String>, String> {
+        #[cfg(feature = "webdriver")]
+        if matches!(secret, Secret::AiDefault)
+            && std::env::var_os("GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE").is_some()
+        {
+            return Ok(None);
+        }
+        let Some(entry) = entry_in_a_store(secret.username())? else {
             return Ok(None);
         };
         match entry.get_password() {
+            // What a blank *slot* means, which is the same question [`Blank`] answers for a blank
+            // box. Nothing here writes one, so this is about a slot an older build left behind: a
+            // key it reads back as configured is one every request is then rejected for.
+            Ok(value) if matches!(secret.blank(), Blank::Clears) && value.trim().is_empty() => {
+                Ok(None)
+            }
             Ok(value) => Ok(Some(value)),
             Err(KeyringError::NoEntry) => Ok(None),
             Err(error) => Err(format!(
-                "Could not read the AI API key from the credential store: {error}"
+                "Could not read the {} from the credential store: {error}",
+                secret.noun()
             )),
         }
     }
 
-    fn store(&self, value: &str) -> Result<(), String> {
-        credential_entry(API_KEY_USERNAME)?
+    fn write(&self, secret: Secret, value: &str) -> Result<(), String> {
+        credential_entry(secret.username())?
             .set_password(value)
-            .map_err(|error| format!("Could not store the AI API key: {error}"))
+            .map_err(|error| format!("Could not store the {}: {error}", secret.noun()))
     }
-}
-
-pub(crate) fn stored_api_key() -> Result<Option<String>, String> {
-    SystemCredentialStore.load()
-}
-
-pub(crate) fn ai_worker_api_key() -> Result<Option<String>, String> {
-    #[cfg(feature = "webdriver")]
-    if std::env::var_os("GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE").is_some() {
-        return Ok(None);
-    }
-    stored_api_key()
-}
-
-/// OpenRouter's key, or nothing when the user has not set one.
-///
-/// Its own slot, not `ai-default`. Two key-based drivers sharing one entry means configuring the
-/// second wipes the first, and — worse — a key meant for openrouter.ai being sent as bearer to
-/// whatever `http://127.0.0.1:8080` happens to be.
-pub(crate) fn stored_openrouter_api_key() -> Result<Option<String>, String> {
-    let Some(entry) = entry_in_a_store(OPENROUTER_KEY_USERNAME)? else {
-        return Ok(None);
-    };
-    match entry.get_password() {
-        Ok(value) if value.trim().is_empty() => Ok(None),
-        Ok(value) => Ok(Some(value)),
-        Err(KeyringError::NoEntry) => Ok(None),
-        Err(error) => Err(format!("Could not read the OpenRouter API key: {error}")),
-    }
-}
-
-/// Stores OpenRouter's key, or removes it when the text is blank. The same rule as the Brave key:
-/// an empty entry left behind reads as a configured key that every request is then rejected for.
-pub(crate) fn store_openrouter_api_key(key: &str) -> Result<(), String> {
-    let entry = credential_entry(OPENROUTER_KEY_USERNAME)?;
-    if key.trim().is_empty() {
-        return match entry.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(format!("Could not remove the OpenRouter API key: {error}")),
-        };
-    }
-    entry
-        .set_password(key)
-        .map_err(|error| format!("Could not store the OpenRouter API key: {error}"))
-}
-
-/// The Brave Search key, or nothing when the user has not set one.
-///
-/// In the keyring rather than in `settings.json`, on the same reasoning as the AI key: the settings
-/// file is plain text a person may copy, diff or paste into a bug report, and a search key is a
-/// credential. Nothing is an ordinary state, not a fault — the two other engines need no key, and
-/// `web_search` says so itself when Brave is chosen without one.
-pub(crate) fn stored_brave_api_key() -> Result<Option<String>, String> {
-    let Some(entry) = entry_in_a_store(BRAVE_KEY_USERNAME)? else {
-        return Ok(None);
-    };
-    match entry.get_password() {
-        Ok(value) if value.trim().is_empty() => Ok(None),
-        Ok(value) => Ok(Some(value)),
-        Err(KeyringError::NoEntry) => Ok(None),
-        Err(error) => Err(format!("Could not read the Brave Search key: {error}")),
-    }
-}
-
-/// Stores the Brave key, or removes it when the text is blank.
-///
-/// Blank means remove rather than store-an-empty-string, so that clearing the field in the settings
-/// page and saving actually takes the key off the machine. An empty entry left behind would read as
-/// a configured key that every request is then rejected for.
-pub(crate) fn store_brave_api_key(key: &str) -> Result<(), String> {
-    let entry = credential_entry(BRAVE_KEY_USERNAME)?;
-    if key.trim().is_empty() {
-        return match entry.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(format!("Could not remove the Brave Search key: {error}")),
-        };
-    }
-    entry
-        .set_password(key)
-        .map_err(|error| format!("Could not save the Brave Search key: {error}"))
 }
 
 pub(crate) fn stored_chatgpt_credential() -> Result<Option<serde_json::Value>, String> {
-    let Some(entry) = entry_in_a_store(CHATGPT_CREDENTIAL_USERNAME)? else {
+    chatgpt_credential_in(&SystemSecrets)
+}
+
+/// The stored ChatGPT credential, parsed. The one secret that is not a key: it is an OAuth grant,
+/// so what comes out of the slot has to be readable as one before it counts as stored at all.
+fn chatgpt_credential_in(secrets: &impl Secrets) -> Result<Option<serde_json::Value>, String> {
+    let Some(value) = secrets.read(Secret::ChatGpt)? else {
         return Ok(None);
-    };
-    let value = match entry.get_password() {
-        Ok(value) => value,
-        Err(KeyringError::NoEntry) => return Ok(None),
-        Err(error) => return Err(format!("Could not read the ChatGPT credential: {error}")),
     };
     serde_json::from_str(&value).map(Some).map_err(|error| {
         format!("The stored ChatGPT credential is invalid and must be replaced: {error}")
@@ -2142,16 +2292,11 @@ pub(crate) fn store_chatgpt_credential(credential: &serde_json::Value) -> Result
     if serialized.len() > MAX_API_KEY_BYTES {
         return Err("The ChatGPT credential cannot exceed 16 KiB".to_owned());
     }
-    credential_entry(CHATGPT_CREDENTIAL_USERNAME)?
-        .set_password(&serialized)
-        .map_err(|error| format!("Could not store the ChatGPT credential: {error}"))
+    SystemSecrets.write(Secret::ChatGpt, &serialized)
 }
 
 pub(crate) fn clear_chatgpt_credential() -> Result<(), String> {
-    match credential_entry(CHATGPT_CREDENTIAL_USERNAME)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(error) => Err(format!("Could not remove the ChatGPT credential: {error}")),
-    }
+    SystemSecrets.clear(Secret::ChatGpt)
 }
 
 pub(crate) fn settings_response(settings: GoferSettings) -> SettingsResponse {
@@ -2166,20 +2311,21 @@ pub(crate) fn settings_response(settings: GoferSettings) -> SettingsResponse {
             credential_store_error: None,
         };
     }
-    settings_response_with(&SystemCredentialStore, settings)
+    settings_response_with(&SystemSecrets, settings)
 }
 
-fn settings_response_with(
-    store: &impl CredentialStore,
-    settings: GoferSettings,
-) -> SettingsResponse {
-    match store.load() {
+/// Which of the four the machine is holding, every one of them read through the one store.
+///
+/// Three of these flags used to reach past the injected store to the real keyring, so a test could
+/// drive one of the four — and not either of the two whose blank rule differs.
+fn settings_response_with(secrets: &impl Secrets, settings: GoferSettings) -> SettingsResponse {
+    match secrets.read(Secret::AiDefault) {
         Ok(api_key) => SettingsResponse {
             settings,
             has_api_key: api_key.is_some(),
-            has_chat_gpt_credential: stored_chatgpt_credential().ok().flatten().is_some(),
-            has_brave_api_key: stored_brave_api_key().ok().flatten().is_some(),
-            has_openrouter_api_key: stored_openrouter_api_key().ok().flatten().is_some(),
+            has_chat_gpt_credential: chatgpt_credential_in(secrets).ok().flatten().is_some(),
+            has_brave_api_key: secrets.read(Secret::Brave).ok().flatten().is_some(),
+            has_openrouter_api_key: secrets.read(Secret::OpenRouter).ok().flatten().is_some(),
             credential_store_error: None,
         },
         Err(error) => SettingsResponse {
@@ -2193,98 +2339,136 @@ fn settings_response_with(
     }
 }
 
-pub(crate) fn apply_api_key_update(update: &ApiKeyUpdate) -> Result<(), String> {
-    apply_api_key_update_with(&SystemCredentialStore, update)
+/// One slot a save wrote, and what was in it beforehand. See [`apply_saved_secrets`].
+pub(crate) struct WrittenSecret {
+    secret: Secret,
+    previous: Option<String>,
 }
 
-/// The same three-way rule as the AI key, against the Brave entry.
+/// The three secrets a settings save carries, in the order they are written.
+fn saved_secrets(request: &SettingsRequest) -> [(Secret, &ApiKeyUpdate); 3] {
+    [
+        (Secret::AiDefault, &request.api_key),
+        (Secret::Brave, &request.brave_api_key),
+        (Secret::OpenRouter, &request.openrouter_api_key),
+    ]
+}
+
+/// Writes every secret a save carries, and answers with the slots it actually wrote.
 ///
-/// `Set` with blank text is a clear rather than an error, unlike the AI key: emptying the field and
-/// saving is how a person takes a key off the machine, and refusing it would leave the old key in
-/// the keyring while the page showed an empty box.
-pub(crate) fn apply_brave_key_update(update: &ApiKeyUpdate) -> Result<(), String> {
-    match update {
-        ApiKeyUpdate::Keep => Ok(()),
-        ApiKeyUpdate::Set { value } => {
-            if value.len() > MAX_API_KEY_BYTES {
-                return Err("API keys cannot exceed 16 KiB".to_owned());
-            }
-            store_brave_api_key(value)
-        }
-        ApiKeyUpdate::Clear => store_brave_api_key(""),
-    }
+/// The answer is the rollback window: a settings file that then fails to write must leave the
+/// machine as it found it, and what has to be put back is exactly what was taken out. It used to be
+/// the AI key alone, with the other two written before the window and two hand-written comments
+/// explaining why the AI key's restore could not put them back. It could not because it was the AI
+/// key's; a restore that names its slot has no such problem.
+pub(crate) fn apply_saved_secrets(request: &SettingsRequest) -> Result<Vec<WrittenSecret>, String> {
+    apply_saved_secrets_with(&SystemSecrets, request)
 }
 
-/// The same three-way rule again, against the OpenRouter entry. Blank clears, as with Brave.
-pub(crate) fn apply_openrouter_key_update(update: &ApiKeyUpdate) -> Result<(), String> {
-    match update {
-        ApiKeyUpdate::Keep => Ok(()),
-        ApiKeyUpdate::Set { value } => {
-            if value.len() > MAX_API_KEY_BYTES {
-                return Err("API keys cannot exceed 16 KiB".to_owned());
-            }
-            store_openrouter_api_key(value)
+fn apply_saved_secrets_with(
+    secrets: &impl Secrets,
+    request: &SettingsRequest,
+) -> Result<Vec<WrittenSecret>, String> {
+    let mut written = Vec::new();
+    for (secret, update) in saved_secrets(request) {
+        // A slot nobody asked about is never read, so a save that touches no key costs no keyring
+        // lookup and has nothing to put back.
+        if matches!(update, ApiKeyUpdate::Keep) {
+            continue;
         }
-        ApiKeyUpdate::Clear => store_openrouter_api_key(""),
+        match write_one_secret(secret, update, secrets) {
+            Ok(slot) => written.push(slot),
+            Err(failure) => {
+                // Put back here, because the window goes back with the answer and an `Err` carries
+                // no window. `lib.rs` propagates this with `?` and the settings file is then never
+                // written — so a keyring failure on the second of three slots used to leave the
+                // first one changed, the file unchanged, and nothing anywhere able to undo it.
+                //
+                // A restore that fails too is not reported over the failure that caused it: the
+                // first one is what the user did and what they can act on.
+                let _ = restore_saved_secrets_with(secrets, &written);
+                return Err(failure);
+            }
+        }
     }
+    Ok(written)
+}
+
+/// One slot: what was in it, and what the save puts there.
+fn write_one_secret(
+    secret: Secret,
+    update: &ApiKeyUpdate,
+    secrets: &impl Secrets,
+) -> Result<WrittenSecret, String> {
+    let previous = secrets.read(secret)?;
+    apply(update, secret, secrets)?;
+    Ok(WrittenSecret { secret, previous })
+}
+
+/// Puts back what [`apply_saved_secrets`] took out, slot by slot.
+pub(crate) fn restore_saved_secrets(written: &[WrittenSecret]) -> Result<(), String> {
+    restore_saved_secrets_with(&SystemSecrets, written)
+}
+
+fn restore_saved_secrets_with(
+    secrets: &impl Secrets,
+    written: &[WrittenSecret],
+) -> Result<(), String> {
+    for slot in written {
+        restore(slot.secret, slot.previous.as_deref(), secrets)?;
+    }
+    Ok(())
 }
 
 // coverage-critical-start: credential
-fn apply_api_key_update_with(
-    store: &impl CredentialStore,
-    update: &ApiKeyUpdate,
-) -> Result<(), String> {
+/// The three-way rule a settings page's key box is saved by, for any of the four secrets.
+///
+/// `Keep` is what an untouched box means, because the page never reads a stored secret back and so
+/// cannot send one. `Clear` is the removal button. `Set` is typed text — and blank typed text is
+/// the one place the four differ: see [`Blank`].
+fn apply(update: &ApiKeyUpdate, secret: Secret, secrets: &impl Secrets) -> Result<(), String> {
     match update {
         ApiKeyUpdate::Keep => Ok(()),
         ApiKeyUpdate::Set { value } => {
             let value = value.trim();
             if value.is_empty() {
-                return Err("API key cannot be empty when setting a credential".to_owned());
+                return match secret.blank() {
+                    Blank::Refused => {
+                        Err("API key cannot be empty when setting a credential".to_owned())
+                    }
+                    Blank::Clears => secrets.clear(secret),
+                };
             }
             if value.len() > MAX_API_KEY_BYTES {
                 return Err("API keys cannot exceed 16 KiB".to_owned());
             }
-            store.store(value)
+            secrets.write(secret, value)
         }
-        ApiKeyUpdate::Clear => store.clear(),
+        ApiKeyUpdate::Clear => secrets.clear(secret),
     }
 }
 
-pub(crate) fn restore_api_key(value: Option<&str>) -> Result<(), String> {
-    restore_api_key_with(&SystemCredentialStore, value)
-}
-
-fn restore_api_key_with(store: &impl CredentialStore, value: Option<&str>) -> Result<(), String> {
+/// Puts one slot back the way it was, which for a slot that held nothing is emptying it.
+fn restore(secret: Secret, value: Option<&str>, secrets: &impl Secrets) -> Result<(), String> {
     match value {
-        Some(value) => store
-            .store(value)
-            .map_err(|error| format!("Could not restore the previous AI API key: {error}")),
-        None => store.clear(),
+        Some(value) => secrets
+            .write(secret, value)
+            .map_err(|error| format!("Could not restore the previous {}: {error}", secret.noun())),
+        None => secrets.clear(secret),
     }
 }
 
-/// The same three-way read against OpenRouter's slot. Separate from `resolve_api_key` because the
-/// stored value it falls back to is a different credential in a different keyring entry.
-fn resolve_openrouter_api_key(update: &ApiKeyUpdate) -> Result<Option<String>, String> {
+/// The key a connection test should send, which is the typed one or the stored one.
+///
+/// Not [`apply`]: nothing is written here. Blank typed text is refused for every secret, because a
+/// test of a blank credential is a test of nothing — the removal button is what says "no key".
+fn resolve(
+    update: &ApiKeyUpdate,
+    secret: Secret,
+    secrets: &impl Secrets,
+) -> Result<Option<String>, String> {
     match update {
-        ApiKeyUpdate::Keep => Ok(stored_openrouter_api_key().unwrap_or(None)),
-        ApiKeyUpdate::Set { value } => {
-            let value = value.trim();
-            if value.is_empty() {
-                return Err("API key cannot be empty when testing a credential".to_owned());
-            }
-            if value.len() > MAX_API_KEY_BYTES {
-                return Err("API keys cannot exceed 16 KiB".to_owned());
-            }
-            Ok(Some(value.to_owned()))
-        }
-        ApiKeyUpdate::Clear => Ok(None),
-    }
-}
-
-fn resolve_api_key(update: &ApiKeyUpdate) -> Result<Option<String>, String> {
-    match update {
-        ApiKeyUpdate::Keep => Ok(stored_api_key().unwrap_or(None)),
+        ApiKeyUpdate::Keep => Ok(secrets.read(secret).unwrap_or(None)),
         ApiKeyUpdate::Set { value } => {
             let value = value.trim();
             if value.is_empty() {
@@ -2309,52 +2493,109 @@ mod tests {
     use std::thread;
     use tempfile::TempDir;
 
+    /// Four slots, in memory. The point of the slot being an argument: every secret is reachable.
     #[derive(Default)]
-    struct FakeCredentialStore {
-        value: Mutex<Option<String>>,
+    struct FakeSecrets {
+        slots: Mutex<BTreeMap<&'static str, String>>,
         fail_clear: bool,
         fail_load: bool,
         fail_store: bool,
     }
 
-    impl CredentialStore for FakeCredentialStore {
-        fn clear(&self) -> Result<(), String> {
+    impl FakeSecrets {
+        fn put(&self, secret: Secret, value: &str) {
+            self.slots
+                .lock()
+                .expect("fake credential lock")
+                .insert(secret.username(), value.to_owned());
+        }
+    }
+
+    impl Secrets for FakeSecrets {
+        fn clear(&self, secret: Secret) -> Result<(), String> {
             if self.fail_clear {
                 return Err("fake clear failure".to_owned());
             }
-            *self.value.lock().expect("fake credential lock") = None;
+            self.slots
+                .lock()
+                .expect("fake credential lock")
+                .remove(secret.username());
             Ok(())
         }
 
-        fn load(&self) -> Result<Option<String>, String> {
+        fn read(&self, secret: Secret) -> Result<Option<String>, String> {
             if self.fail_load {
                 return Err("fake load failure".to_owned());
             }
-            Ok(self.value.lock().expect("fake credential lock").clone())
+            Ok(self
+                .slots
+                .lock()
+                .expect("fake credential lock")
+                .get(secret.username())
+                .cloned())
         }
 
-        fn store(&self, value: &str) -> Result<(), String> {
+        fn write(&self, secret: Secret, value: &str) -> Result<(), String> {
             if self.fail_store {
                 return Err("fake store failure".to_owned());
             }
-            *self.value.lock().expect("fake credential lock") = Some(value.to_owned());
+            self.put(secret, value);
             Ok(())
         }
     }
 
+    /// One local connection, named and pointed somewhere, with everything else shipped.
+    fn connection(base_url: impl Into<String>, model: impl Into<String>) -> AiConnectionProfile {
+        let mut connection = default_local_profile();
+        connection.name = " Test connection ".to_owned();
+        connection.base_url = base_url.into();
+        connection.model.id = model.into();
+        connection.model.name = connection.model.id.clone();
+        connection
+    }
+
     fn settings(base_url: impl Into<String>, model: impl Into<String>) -> GoferSettings {
-        GoferSettings {
-            version: SETTINGS_VERSION,
-            ai: AiSettings {
-                connection_type: AiConnectionType::OpenaiCompatible,
-                name: " Test connection ".to_owned(),
-                base_url: base_url.into(),
-                model: model.into(),
-                api: ApiDialect::OpenaiCompletions,
-                ..AiSettings::default()
-            },
-            godot: GodotSettings::default(),
-        }
+        settings_on(
+            AiConnectionType::OpenaiCompatible,
+            connection(base_url, model),
+        )
+    }
+
+    /// The shipped settings with one driver live and one connection under it.
+    fn settings_on(driver: AiConnectionType, connection: AiConnectionProfile) -> GoferSettings {
+        let mut settings = GoferSettings::default();
+        settings.ai.connection_type = driver;
+        settings.ai.connections.insert(driver, connection);
+        settings
+    }
+
+    /// A settings file holding one connection and no other, which is what a ChatGPT-only install
+    /// that has never configured a local server has.
+    fn settings_only_on(
+        driver: AiConnectionType,
+        connection: AiConnectionProfile,
+    ) -> GoferSettings {
+        let mut settings = settings_on(driver, connection);
+        settings
+            .ai
+            .connections
+            .retain(|stored, _| *stored == driver);
+        settings
+    }
+
+    /// The connection the live driver runs on, in a test that already knows there is one.
+    fn live(settings: &GoferSettings) -> &AiConnectionProfile {
+        settings.ai.connection().expect("a live connection")
+    }
+
+    /// The same one, to be edited into whatever shape the test is about.
+    fn live_mut(settings: &mut GoferSettings) -> &mut AiConnectionProfile {
+        let driver = settings.ai.connection_type;
+        settings
+            .ai
+            .connections
+            .get_mut(&driver)
+            .expect("a live connection")
     }
 
     fn request(base_url: impl Into<String>, model: impl Into<String>) -> SettingsRequest {
@@ -2376,7 +2617,7 @@ mod tests {
     /// decoded 89,311 and past 48,000.
     #[test]
     fn a_response_may_not_be_as_long_as_the_whole_window() {
-        let shipped = AiSettings::default();
+        let shipped = default_local_profile().model;
         assert!(
             shipped.max_tokens < shipped.context_window / 4,
             "the output ceiling has to be a ceiling: {} of {}",
@@ -2399,7 +2640,8 @@ mod tests {
             shipped.max_tokens
         );
 
-        // A stored ceiling is the user's, and reading their settings never replaces it.
+        // A stored ceiling is the user's, and reading their settings never replaces it — even out
+        // of a settings file written in the flat shape, which is what this one is.
         let chosen: AiSettings = serde_json::from_value(serde_json::json!({
             "connectionType": "openai-compatible",
             "name": "Local AI",
@@ -2409,64 +2651,301 @@ mod tests {
             "maxTokens": 120_064
         }))
         .expect("settings");
-        assert_eq!(chosen.max_tokens, 120_064);
+        assert_eq!(
+            chosen
+                .connection()
+                .expect("a live connection")
+                .model
+                .max_tokens,
+            120_064
+        );
     }
 
     #[test]
     fn credential_updates_use_the_injected_store() {
-        let store = FakeCredentialStore::default();
-        apply_api_key_update_with(
-            &store,
+        let store = FakeSecrets::default();
+        apply(
             &ApiKeyUpdate::Set {
                 value: " secret ".to_owned(),
             },
+            Secret::AiDefault,
+            &store,
         )
         .expect("set credential");
         assert_eq!(
-            store.load().expect("load set credential").as_deref(),
+            store
+                .read(Secret::AiDefault)
+                .expect("load set credential")
+                .as_deref(),
             Some("secret")
         );
 
-        apply_api_key_update_with(&store, &ApiKeyUpdate::Keep).expect("keep credential");
+        apply(&ApiKeyUpdate::Keep, Secret::AiDefault, &store).expect("keep credential");
         assert_eq!(
-            store.load().expect("load kept credential").as_deref(),
+            store
+                .read(Secret::AiDefault)
+                .expect("load kept credential")
+                .as_deref(),
             Some("secret")
         );
 
-        apply_api_key_update_with(&store, &ApiKeyUpdate::Clear).expect("clear credential");
-        assert_eq!(store.load().expect("load cleared credential"), None);
+        apply(&ApiKeyUpdate::Clear, Secret::AiDefault, &store).expect("clear credential");
+        assert_eq!(
+            store
+                .read(Secret::AiDefault)
+                .expect("load cleared credential"),
+            None
+        );
+    }
+
+    /// The rule the two untested copies held, and the one thing the four secrets do not share.
+    ///
+    /// Blank typed text is a removal for the two search-and-router keys and a refusal for the AI
+    /// key, because emptying the box is how a person takes a key they typed off the machine, while
+    /// the AI key's box is a field of the connection being saved. Both halves are asserted here, so
+    /// a `Secret` given the wrong `blank()` fails rather than quietly changing what saving does.
+    #[test]
+    fn a_blank_box_clears_the_keys_it_is_meant_to_and_is_refused_where_it_is_not() {
+        let store = FakeSecrets::default();
+        for secret in [Secret::Brave, Secret::OpenRouter] {
+            store.put(secret, "already-stored");
+            apply(
+                &ApiKeyUpdate::Set {
+                    value: "   ".to_owned(),
+                },
+                secret,
+                &store,
+            )
+            .expect("a blank box removes these");
+            assert_eq!(store.read(secret).expect("read cleared slot"), None);
+        }
+
+        store.put(Secret::AiDefault, "already-stored");
+        assert_eq!(
+            apply(
+                &ApiKeyUpdate::Set {
+                    value: "   ".to_owned()
+                },
+                Secret::AiDefault,
+                &store,
+            ),
+            Err("API key cannot be empty when setting a credential".to_owned())
+        );
+        // Refused *before* the store is touched: a rejected save must leave the key it was going
+        // to replace exactly where it was.
+        assert_eq!(
+            store
+                .read(Secret::AiDefault)
+                .expect("read untouched slot")
+                .as_deref(),
+            Some("already-stored")
+        );
+    }
+
+    /// One slot written never touches another. Four secrets, four keyring usernames.
+    #[test]
+    fn every_secret_is_written_to_its_own_slot() {
+        let store = FakeSecrets::default();
+        for secret in [
+            Secret::AiDefault,
+            Secret::Brave,
+            Secret::OpenRouter,
+            Secret::ChatGpt,
+        ] {
+            apply(
+                &ApiKeyUpdate::Set {
+                    value: format!("  {}-key  ", secret.username()),
+                },
+                secret,
+                &store,
+            )
+            .expect("set one secret");
+        }
+        for secret in [
+            Secret::AiDefault,
+            Secret::Brave,
+            Secret::OpenRouter,
+            Secret::ChatGpt,
+        ] {
+            assert_eq!(
+                store.read(secret).expect("read one secret"),
+                Some(format!("{}-key", secret.username()))
+            );
+        }
+
+        apply(&ApiKeyUpdate::Clear, Secret::Brave, &store).expect("clear one secret");
+        assert_eq!(store.read(Secret::Brave).expect("read cleared"), None);
+        assert!(
+            store
+                .read(Secret::OpenRouter)
+                .expect("read neighbour")
+                .is_some()
+        );
+    }
+
+    /// Every one of the four flags, answered by the injected store.
+    ///
+    /// Three of them used to reach past it to the real keyring, which is why nothing could say what
+    /// they reported. The ChatGPT flag is the one that is not simply "something is there": an
+    /// OAuth grant that will not parse is not a credential the user is signed in with.
+    #[test]
+    fn the_response_reports_all_four_secrets_through_the_one_store() {
+        let store = FakeSecrets::default();
+        let empty = settings_response_with(&store, settings("http://localhost", "model"));
+        assert!(!empty.has_api_key);
+        assert!(!empty.has_brave_api_key);
+        assert!(!empty.has_openrouter_api_key);
+        assert!(!empty.has_chat_gpt_credential);
+
+        store.put(Secret::AiDefault, "sk-1");
+        store.put(Secret::Brave, "brave-1");
+        store.put(Secret::OpenRouter, "sk-or-1");
+        store.put(Secret::ChatGpt, "not json");
+        let partial = settings_response_with(&store, settings("http://localhost", "model"));
+        assert!(partial.has_api_key);
+        assert!(partial.has_brave_api_key);
+        assert!(partial.has_openrouter_api_key);
+        assert!(!partial.has_chat_gpt_credential);
+
+        store.put(
+            Secret::ChatGpt,
+            &serde_json::json!({"type": "oauth", "access": "a", "refresh": "r", "expires": 1.0})
+                .to_string(),
+        );
+        let full = settings_response_with(&store, settings("http://localhost", "model"));
+        assert!(full.has_chat_gpt_credential);
+    }
+
+    /// The rollback window, which now holds every slot a save wrote rather than the AI key alone.
+    ///
+    /// A settings file that will not write must leave the machine as it found it. It used to leave
+    /// a cleared Brave key cleared and a rotated OpenRouter key rotated, because the restore was
+    /// the AI key's own function and could not name another slot; two hand-written comments in
+    /// `save_settings` explained that as a decision.
+    #[test]
+    fn a_failed_settings_write_puts_back_every_slot_the_save_wrote() {
+        let store = FakeSecrets::default();
+        store.put(Secret::AiDefault, "old-ai");
+        store.put(Secret::Brave, "old-brave");
+
+        let request = SettingsRequest {
+            settings: settings("http://localhost", "model"),
+            api_key: ApiKeyUpdate::Set {
+                value: "new-ai".to_owned(),
+            },
+            brave_api_key: ApiKeyUpdate::Clear,
+            // Untouched, so it is never read and never put back.
+            openrouter_api_key: ApiKeyUpdate::Keep,
+        };
+        let written = apply_saved_secrets_with(&store, &request).expect("write the save's secrets");
+        assert_eq!(written.len(), 2);
+        assert_eq!(
+            store.read(Secret::AiDefault).expect("read ai").as_deref(),
+            Some("new-ai")
+        );
+        assert_eq!(store.read(Secret::Brave).expect("read brave"), None);
+
+        restore_saved_secrets_with(&store, &written).expect("roll the save back");
+        assert_eq!(
+            store.read(Secret::AiDefault).expect("read ai").as_deref(),
+            Some("old-ai")
+        );
+        assert_eq!(
+            store.read(Secret::Brave).expect("read brave").as_deref(),
+            Some("old-brave")
+        );
+    }
+
+    /// A slot that will not write puts back the ones that already did, before it answers.
+    ///
+    /// The rollback window travels with the answer, and a failure carries no window: the caller gets
+    /// an `Err`, propagates it, and never writes the settings file. So a keyring failure on the
+    /// second of three slots left the first one changed, the file as it was, and nothing anywhere
+    /// holding what had been taken out of it.
+    #[test]
+    fn a_secret_that_will_not_write_puts_back_the_ones_that_already_did() {
+        let store = FakeSecrets {
+            fail_clear: true,
+            ..Default::default()
+        };
+        store.put(Secret::AiDefault, "old-ai");
+
+        let request = SettingsRequest {
+            settings: settings("http://localhost", "model"),
+            api_key: ApiKeyUpdate::Set {
+                value: "new-ai".to_owned(),
+            },
+            // The second slot, and the one the keyring refuses.
+            brave_api_key: ApiKeyUpdate::Clear,
+            openrouter_api_key: ApiKeyUpdate::Keep,
+        };
+
+        // `err()` rather than `unwrap_err()`: the window holds the keys that were taken out, and a
+        // type that can print itself is one an assertion can print them with.
+        assert_eq!(
+            apply_saved_secrets_with(&store, &request).err(),
+            Some("fake clear failure".to_owned())
+        );
+        assert_eq!(
+            store.read(Secret::AiDefault).expect("read ai").as_deref(),
+            Some("old-ai"),
+            "the slot that wrote first was left changed with nothing to put it back"
+        );
+    }
+
+    /// A save that says nothing about any key touches nothing, so there is nothing to roll back.
+    #[test]
+    fn a_save_that_keeps_every_key_reads_no_slot_at_all() {
+        let unreadable = FakeSecrets {
+            fail_load: true,
+            fail_store: true,
+            fail_clear: true,
+            ..Default::default()
+        };
+        let request = SettingsRequest {
+            settings: settings("http://localhost", "model"),
+            api_key: ApiKeyUpdate::Keep,
+            brave_api_key: ApiKeyUpdate::Keep,
+            openrouter_api_key: ApiKeyUpdate::Keep,
+        };
+        let written = apply_saved_secrets_with(&unreadable, &request).expect("nothing to write");
+        assert!(written.is_empty());
+        restore_saved_secrets_with(&unreadable, &written).expect("nothing to restore");
     }
 
     #[test]
     fn credential_updates_validate_before_using_the_store() {
-        let store = FakeCredentialStore {
+        let store = FakeSecrets {
             fail_store: true,
             ..Default::default()
         };
         assert_eq!(
-            apply_api_key_update_with(
-                &store,
+            apply(
                 &ApiKeyUpdate::Set {
                     value: "  ".to_owned()
-                }
+                },
+                Secret::AiDefault,
+                &store,
             ),
             Err("API key cannot be empty when setting a credential".to_owned())
         );
         assert_eq!(
-            apply_api_key_update_with(
-                &store,
+            apply(
                 &ApiKeyUpdate::Set {
                     value: "x".repeat(MAX_API_KEY_BYTES + 1)
-                }
+                },
+                Secret::AiDefault,
+                &store,
             ),
             Err("API keys cannot exceed 16 KiB".to_owned())
         );
         assert_eq!(
-            apply_api_key_update_with(
-                &store,
+            apply(
                 &ApiKeyUpdate::Set {
                     value: "secret".to_owned()
-                }
+                },
+                Secret::AiDefault,
+                &store,
             ),
             Err("fake store failure".to_owned())
         );
@@ -2474,29 +2953,49 @@ mod tests {
 
     #[test]
     fn credential_clear_and_restore_errors_are_propagated() {
-        let clear_failure = FakeCredentialStore {
+        let clear_failure = FakeSecrets {
             fail_clear: true,
             ..Default::default()
         };
         assert_eq!(
-            apply_api_key_update_with(&clear_failure, &ApiKeyUpdate::Clear),
+            apply(&ApiKeyUpdate::Clear, Secret::AiDefault, &clear_failure),
             Err("fake clear failure".to_owned())
         );
         assert_eq!(
-            restore_api_key_with(&clear_failure, None),
+            restore(Secret::AiDefault, None, &clear_failure),
             Err("fake clear failure".to_owned())
         );
 
-        let store_failure = FakeCredentialStore {
+        let store_failure = FakeSecrets {
             fail_store: true,
             ..Default::default()
         };
         assert_eq!(
-            restore_api_key_with(&store_failure, Some("previous")),
+            restore(Secret::AiDefault, Some("previous"), &store_failure),
             Err("Could not restore the previous AI API key: fake store failure".to_owned())
         );
+        // The same sentence, about the slot it is actually about.
+        assert_eq!(
+            restore(Secret::Brave, Some("previous"), &store_failure),
+            Err("Could not restore the previous Brave Search key: fake store failure".to_owned())
+        );
 
-        let load_failure = FakeCredentialStore {
+        // And the way round it is meant to work: a slot that held something gets it back, and a
+        // slot that held nothing is emptied.
+        let store = FakeSecrets::default();
+        store.put(Secret::AiDefault, "written-by-the-save");
+        restore(Secret::AiDefault, Some("previous"), &store).expect("restore a previous key");
+        assert_eq!(
+            store
+                .read(Secret::AiDefault)
+                .expect("read restored")
+                .as_deref(),
+            Some("previous")
+        );
+        restore(Secret::AiDefault, None, &store).expect("restore an empty slot");
+        assert_eq!(store.read(Secret::AiDefault).expect("read emptied"), None);
+
+        let load_failure = FakeSecrets {
             fail_load: true,
             ..Default::default()
         };
@@ -2563,8 +3062,8 @@ mod tests {
         .expect("write pi catalogue");
 
         let inherited = read_settings_from_paths(&missing, Some(&pi)).expect("pi settings");
-        assert_eq!(inherited.ai.model, "inherited.gguf");
-        assert_eq!(inherited.ai.base_url, "http://127.0.0.1:9099/v1");
+        assert_eq!(live(&inherited).model.id, "inherited.gguf");
+        assert_eq!(live(&inherited).base_url, "http://127.0.0.1:9099/v1");
 
         // An unreadable or unparseable catalogue is not a failure, it is simply no inheritance.
         let broken = directory.path().join("broken.json");
@@ -2637,29 +3136,31 @@ mod tests {
             docs_expansion_connection(&AiSettings::default(), Some("k".to_owned()), None, None)
                 .expect("a local parent with no sub-agent connection lends its own");
         assert_eq!(borrowed.connection_type, "openai-compatible");
-        assert_eq!(borrowed.base_url, AiSettings::default().base_url);
-        assert_eq!(borrowed.model, AiSettings::default().model);
+        assert_eq!(borrowed.base_url, default_local_profile().base_url);
+        assert_eq!(borrowed.model, default_local_profile().model.id);
         assert_eq!(borrowed.api_key.as_deref(), Some("k"));
         assert_eq!(borrowed.oauth_credential, None);
 
         let local_child = SubagentConnection {
             connection_type: AiConnectionType::OpenaiCompatible,
-            model: "small.gguf".to_owned(),
-            model_name: "Small".to_owned(),
-            context_window: 8_192,
-            max_tokens: 4_096,
-            reasoning: true,
-            supports_reasoning_effort: true,
-            thinking_levels: Vec::new(),
-            input: default_model_input(),
-            thinking_level: "low".to_owned(),
+            model: ModelChoice {
+                id: "small.gguf".to_owned(),
+                name: "Small".to_owned(),
+                context_window: 8_192,
+                max_tokens: 4_096,
+                reasoning: true,
+                supports_reasoning_effort: true,
+                thinking_levels: Vec::new(),
+                input: default_model_input(),
+                thinking_level: "low".to_owned(),
+            },
         };
         let mut own = AiSettings::default();
         own.subagent.connection = Some(local_child.clone());
         let child = docs_expansion_connection(&own, None, None, None)
             .expect("a local sub-agent is reachable");
         // The address stays the connection's; the model and its level are the child's own.
-        assert_eq!(child.base_url, AiSettings::default().base_url);
+        assert_eq!(child.base_url, default_local_profile().base_url);
         assert_eq!(child.model, "small.gguf");
         assert_eq!(child.thinking_level, "low");
         assert_eq!(child.max_tokens, 4_096);
@@ -2667,8 +3168,10 @@ mod tests {
         let mut chatgpt = AiSettings::default();
         chatgpt.subagent.connection = Some(SubagentConnection {
             connection_type: AiConnectionType::OpenaiCodex,
-            model: "gpt-5.6-luna".to_owned(),
-            ..local_child
+            model: ModelChoice {
+                id: "gpt-5.6-luna".to_owned(),
+                ..local_child.model
+            },
         });
         let credential = serde_json::json!({"type": "oauth", "refresh": "r"});
         let followed = docs_expansion_connection(
@@ -2691,11 +3194,8 @@ mod tests {
             "a ChatGPT sub-agent with no stored credential has nothing to authenticate with"
         );
 
-        let codex_only = AiSettings {
-            connection_type: AiConnectionType::OpenaiCodex,
-            local: None,
-            ..AiSettings::default()
-        };
+        let codex_only =
+            settings_only_on(AiConnectionType::OpenaiCodex, default_chatgpt_profile()).ai;
         assert_eq!(
             docs_expansion_connection(&codex_only, None, None, None),
             None,
@@ -2754,15 +3254,17 @@ mod tests {
     fn a_subagent_model_is_held_to_the_same_rules_as_the_parents() {
         let connection = SubagentConnection {
             connection_type: AiConnectionType::OpenaiCodex,
-            model: "  gpt-5.4-mini  ".to_owned(),
-            model_name: String::new(),
-            context_window: 272_000,
-            max_tokens: 128_000,
-            reasoning: true,
-            supports_reasoning_effort: true,
-            thinking_levels: Vec::new(),
-            input: default_model_input(),
-            thinking_level: "low".to_owned(),
+            model: ModelChoice {
+                id: "  gpt-5.4-mini  ".to_owned(),
+                name: String::new(),
+                context_window: 272_000,
+                max_tokens: 128_000,
+                reasoning: true,
+                supports_reasoning_effort: true,
+                thinking_levels: Vec::new(),
+                input: default_model_input(),
+                thinking_level: "low".to_owned(),
+            },
         };
         let mut settings = GoferSettings::default();
         settings.ai.subagent.connection = Some(connection.clone());
@@ -2776,15 +3278,18 @@ mod tests {
 
         // Trimmed, and named after itself when the name was left blank — exactly what the parent's
         // model gets.
-        assert_eq!(stored.model, "gpt-5.4-mini");
-        assert_eq!(stored.model_name, "gpt-5.4-mini");
-        assert_eq!(stored.thinking_level, "low");
+        assert_eq!(stored.model.id, "gpt-5.4-mini");
+        assert_eq!(stored.model.name, "gpt-5.4-mini");
+        assert_eq!(stored.model.thinking_level, "low");
 
         // A model that cannot reason has no level to keep, so the level is dropped rather than left
         // pointing at nothing.
         let mut settings = GoferSettings::default();
         settings.ai.subagent.connection = Some(SubagentConnection {
-            reasoning: false,
+            model: ModelChoice {
+                reasoning: false,
+                ..connection.model.clone()
+            },
             ..connection.clone()
         });
 
@@ -2796,13 +3301,17 @@ mod tests {
                 .subagent
                 .connection
                 .expect("the sub-agent connection")
+                .model
                 .thinking_level,
             "off"
         );
 
         let mut settings = GoferSettings::default();
         settings.ai.subagent.connection = Some(SubagentConnection {
-            model: "   ".to_owned(),
+            model: ModelChoice {
+                id: "   ".to_owned(),
+                ..connection.model
+            },
             ..connection
         });
 
@@ -2819,21 +3328,21 @@ mod tests {
     fn a_subagent_on_a_local_connection_that_does_not_exist_is_refused() {
         let local = SubagentConnection {
             connection_type: AiConnectionType::OpenaiCompatible,
-            model: "Qwen3.6-27B-UD-Q4_K_XL.gguf".to_owned(),
-            model_name: String::new(),
-            context_window: default_context_window(),
-            max_tokens: default_context_window(),
-            reasoning: false,
-            supports_reasoning_effort: false,
-            thinking_levels: Vec::new(),
-            input: default_model_input(),
-            thinking_level: "off".to_owned(),
+            model: ModelChoice {
+                id: "Qwen3.6-27B-UD-Q4_K_XL.gguf".to_owned(),
+                name: String::new(),
+                context_window: default_context_window(),
+                max_tokens: default_context_window(),
+                reasoning: false,
+                supports_reasoning_effort: false,
+                thinking_levels: Vec::new(),
+                input: default_model_input(),
+                thinking_level: "off".to_owned(),
+            },
         };
 
-        let mut settings = GoferSettings::default();
-        settings.ai.connection_type = AiConnectionType::OpenaiCodex;
-        settings.ai.api = ApiDialect::OpenaiCodexResponses;
-        settings.ai.local = None;
+        let mut settings =
+            settings_only_on(AiConnectionType::OpenaiCodex, default_chatgpt_profile());
         settings.ai.subagent.connection = Some(local.clone());
 
         assert_eq!(
@@ -2841,8 +3350,8 @@ mod tests {
             "The sub-agent cannot use the local connection until one is configured"
         );
 
-        // The same child is fine the moment a local connection exists — including the case where it
-        // is the parent's own, which lives in the flat fields until the mirror below writes it.
+        // The same child is fine the moment a local connection exists — including the case where
+        // it is the parent's own.
         let mut settings = GoferSettings::default();
         settings.ai.subagent.connection = Some(local);
 
@@ -2907,12 +3416,12 @@ mod tests {
 
         assert!(!saved.godot.strict_typing);
         assert!(saved.godot.embed_game_window);
-        assert_eq!(saved.ai.model, "stored-model");
+        assert_eq!(live(&saved).model.id, "stored-model");
 
         // What came back is what landed on disk, not just what was computed in memory.
         let loaded = read_settings_from_path(&path).expect("read settings");
         assert_eq!(loaded, saved);
-        assert_eq!(loaded.ai.base_url, "http://localhost:9999/v1");
+        assert_eq!(live(&loaded).base_url, "http://localhost:9999/v1");
     }
 
     #[test]
@@ -2925,18 +3434,192 @@ mod tests {
         write_settings_to_path(&path, &normalized).expect("write settings");
         let loaded = read_settings_from_path(&path).expect("read settings");
 
-        assert_eq!(loaded.ai.name, "Test connection");
-        assert_eq!(loaded.ai.model, "model");
-        assert_eq!(loaded.ai.base_url, "http://localhost:8080/v1");
-        let local = loaded.ai.local.as_ref().expect("saved local profile");
+        // One connection under the live driver, and no second copy of it anywhere.
+        let local = live(&loaded);
         assert_eq!(local.name, "Test connection");
-        assert_eq!(local.model, "model");
+        assert_eq!(local.model.id, "model");
         assert_eq!(local.base_url, "http://localhost:8080/v1");
-        assert_eq!(loaded.ai.chatgpt, default_chatgpt_profile());
+        assert_eq!(
+            loaded.ai.connection_for(AiConnectionType::OpenaiCodex),
+            Some(&default_chatgpt_profile())
+        );
         assert!(
             fs::read_to_string(path)
                 .expect("settings contents")
                 .ends_with('\n')
+        );
+    }
+
+    /// A settings file written before the connections map opens, and comes out as one map.
+    ///
+    /// The whole of the old shape in one file: the live connection flattened onto `ai`, the mirror
+    /// of it in `local`, the two drivers it is not on in their own slots, and a sub-agent whose
+    /// model is an id with its facts scattered beside it. Everything the user chose has to survive,
+    /// the mirror has to lose to the original it was a copy of, and what is written back has to be
+    /// the new shape — this is somebody's real settings.json, and it may not break.
+    #[test]
+    fn a_settings_file_from_before_the_connections_map_still_opens() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "ai": {
+                    "connectionType": "openai-compatible",
+                    "name": "My server",
+                    "baseUrl": "http://127.0.0.1:8080/v1",
+                    "model": "chosen.gguf",
+                    "api": "openai-completions",
+                    "modelName": "Chosen",
+                    "contextWindow": 65536,
+                    "maxTokens": 8192,
+                    "reasoning": true,
+                    "supportsReasoningEffort": true,
+                    "chatTemplateThinking": true,
+                    "thinkingLevels": ["low", "medium", "high"],
+                    "input": ["text", "image"],
+                    "thinkingLevel": "medium",
+                    "maxRetries": 1,
+                    "timeoutMs": 90000,
+                    "compactionPercent": 75,
+                    "subagent": {
+                        "maxTurns": 9,
+                        "connection": {
+                            "connectionType": "openai-codex",
+                            "model": "gpt-5.4-mini",
+                            "modelName": "GPT-5.4 mini",
+                            "contextWindow": 272000,
+                            "maxTokens": 128000,
+                            "reasoning": true,
+                            "supportsReasoningEffort": true,
+                            "thinkingLevels": [],
+                            "input": ["text"],
+                            "thinkingLevel": "low"
+                        }
+                    },
+                    "web": {"searchProvider": "brave"},
+                    "local": {
+                        "name": "My server",
+                        "baseUrl": "http://127.0.0.1:8080/v1",
+                        "model": "stale.gguf",
+                        "api": "openai-completions",
+                        "modelName": "Stale",
+                        "contextWindow": 4096,
+                        "maxTokens": 4096,
+                        "reasoning": false,
+                        "supportsReasoningEffort": false,
+                        "chatTemplateThinking": false,
+                        "thinkingLevels": [],
+                        "input": ["text"],
+                        "thinkingLevel": "off"
+                    },
+                    "chatgpt": {
+                        "name": "ChatGPT subscription",
+                        "baseUrl": "https://chatgpt.com/backend-api",
+                        "model": "gpt-5.6-terra",
+                        "api": "openai-codex-responses",
+                        "modelName": "GPT-5.6 Terra",
+                        "contextWindow": 272000,
+                        "maxTokens": 128000,
+                        "reasoning": true,
+                        "supportsReasoningEffort": true,
+                        "thinkingLevels": [],
+                        "input": ["text", "image"],
+                        "thinkingLevel": "high"
+                    },
+                    "openrouter": {
+                        "name": "OpenRouter",
+                        "baseUrl": "https://openrouter.ai/api/v1",
+                        "model": "z-ai/glm-5.2:free",
+                        "api": "openai-completions",
+                        "modelName": "GLM 5.2",
+                        "contextWindow": 256000,
+                        "maxTokens": 8000,
+                        "reasoning": false,
+                        "supportsReasoningEffort": false,
+                        "thinkingLevels": [],
+                        "input": ["text"],
+                        "thinkingLevel": "off"
+                    }
+                },
+                "godot": {"strictTyping": false, "embedGameWindow": true}
+            }"#,
+        )
+        .expect("write an older settings file");
+
+        let loaded = read_settings_from_paths(&path, None).expect("an older file still opens");
+
+        // The flat fields were the original and the slot was the copy, so the original wins.
+        let local = live(&loaded);
+        assert_eq!(local.name, "My server");
+        assert_eq!(local.base_url, "http://127.0.0.1:8080/v1");
+        assert_eq!(local.model.id, "chosen.gguf");
+        assert_eq!(local.model.name, "Chosen");
+        assert_eq!(local.model.context_window, 65_536);
+        assert_eq!(local.model.max_tokens, 8_192);
+        assert!(local.model.reasoning);
+        assert!(local.chat_template_thinking);
+        assert_eq!(local.model.thinking_levels, ["low", "medium", "high"]);
+        assert_eq!(local.model.input, ["text", "image"]);
+        assert_eq!(local.model.thinking_level, "medium");
+
+        // The two drivers it was not on came out of their slots unchanged.
+        let openrouter = loaded
+            .ai
+            .connection_for(AiConnectionType::Openrouter)
+            .expect("the OpenRouter connection");
+        assert_eq!(openrouter.model.id, "z-ai/glm-5.2:free");
+        assert_eq!(openrouter.model.context_window, 256_000);
+        assert_eq!(
+            loaded.ai.connection_for(AiConnectionType::OpenaiCodex),
+            Some(&default_chatgpt_profile())
+        );
+
+        // The sub-agent's model was an id with its facts beside it, and is a `ModelChoice` now.
+        let child = loaded
+            .ai
+            .subagent
+            .connection
+            .as_ref()
+            .expect("the sub-agent connection");
+        assert_eq!(child.connection_type, AiConnectionType::OpenaiCodex);
+        assert_eq!(child.model.id, "gpt-5.4-mini");
+        assert_eq!(child.model.name, "GPT-5.4 mini");
+        assert_eq!(child.model.max_tokens, 128_000);
+        assert_eq!(child.model.thinking_level, "low");
+
+        // And nothing else the user chose moved.
+        assert_eq!(loaded.ai.max_retries, 1);
+        assert_eq!(loaded.ai.timeout_ms, 90_000);
+        assert_eq!(loaded.ai.compaction_percent, 75);
+        assert_eq!(loaded.ai.subagent.max_turns, 9);
+        assert_eq!(loaded.ai.subagent.stream_inactivity_minutes, 10);
+        assert_eq!(loaded.ai.web.search_provider, "brave");
+        assert!(!loaded.godot.strict_typing);
+
+        // Written back in the new shape — one map, and no flat copy of anything in it — and read
+        // back as the very same value.
+        write_settings_to_path(&path, &loaded).expect("write the migrated settings");
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("settings contents"))
+                .expect("settings as json");
+        let ai = written["ai"].as_object().expect("the ai settings");
+        assert!(ai.contains_key("connections"));
+        for gone in [
+            "name",
+            "baseUrl",
+            "model",
+            "api",
+            "modelName",
+            "local",
+            "chatgpt",
+        ] {
+            assert!(!ai.contains_key(gone), "{gone} is still written to disk");
+        }
+        assert_eq!(
+            read_settings_from_paths(&path, None).expect("the migrated file reopens"),
+            loaded
         );
     }
 
@@ -2951,7 +3634,12 @@ mod tests {
         );
 
         let mut blank_name = settings("http://localhost/v1", "model");
-        blank_name.ai.name = "  ".to_owned();
+        blank_name
+            .ai
+            .connections
+            .get_mut(&AiConnectionType::OpenaiCompatible)
+            .expect("the local connection")
+            .name = "  ".to_owned();
         assert_eq!(
             validate_settings(blank_name).unwrap_err(),
             "Connection name is required"
@@ -3083,7 +3771,7 @@ mod tests {
 
         // `none` is OpenRouter's word for "can be switched off", not an effort. `off` is prepended
         // by the menu itself, and passing `none` through would put a level in the settings file
-        // that `ALL_THINKING_LEVELS` does not contain.
+        // that `EVERY_LEVEL` does not contain.
         let optional = &options[3];
         assert_eq!(optional.thinking_levels, ["max", "high", "low"]);
         // Pi types a model's input as text or image and nothing else. Video and file have nowhere
@@ -3096,25 +3784,33 @@ mod tests {
     fn an_openrouter_connection_is_pinned_and_kept_beside_the_others() {
         let mut settings = GoferSettings::default();
         settings.ai.connection_type = AiConnectionType::Openrouter;
-        settings.ai.name = "OpenRouter".to_owned();
-        settings.ai.model = "nvidia/nemotron-3.5-lightning:free".to_owned();
+        let stored = settings
+            .ai
+            .connections
+            .get_mut(&AiConnectionType::Openrouter)
+            .expect("the OpenRouter connection");
+        stored.name = "OpenRouter".to_owned();
+        stored.model.id = "nvidia/nemotron-3.5-lightning:free".to_owned();
         // A hand-edited file pointing this driver at somebody else's server would send the
         // OpenRouter key there. It is put back rather than refused.
-        settings.ai.base_url = "https://not-openrouter.example/v1".to_owned();
-        settings.ai.api = ApiDialect::OpenaiCodexResponses;
-        settings.ai.chat_template_thinking = true;
+        stored.base_url = "https://not-openrouter.example/v1".to_owned();
+        stored.api = ApiDialect::OpenaiCodexResponses;
+        stored.chat_template_thinking = true;
 
         let saved = validate_settings(settings).expect("an OpenRouter connection is valid");
-        assert_eq!(saved.ai.base_url, OPENROUTER_BASE_URL);
-        assert_eq!(saved.ai.api, ApiDialect::OpenaiCompletions);
-        assert!(!saved.ai.chat_template_thinking);
-        // Mirrored into its own slot, and the local one is untouched.
+        assert_eq!(live(&saved).base_url, OPENROUTER_BASE_URL);
+        assert_eq!(live(&saved).api, ApiDialect::OpenaiCompletions);
+        assert!(!live(&saved).chat_template_thinking);
+        // Stored under its own driver, and the other two are untouched.
+        assert_eq!(live(&saved).model.id, "nvidia/nemotron-3.5-lightning:free");
         assert_eq!(
-            saved.ai.openrouter.model,
-            "nvidia/nemotron-3.5-lightning:free"
+            saved.ai.connection_for(AiConnectionType::OpenaiCompatible),
+            Some(&default_local_profile())
         );
-        assert_eq!(saved.ai.local, None);
-        assert_eq!(saved.ai.chatgpt.model, default_chatgpt_profile().model);
+        assert_eq!(
+            saved.ai.connection_for(AiConnectionType::OpenaiCodex),
+            Some(&default_chatgpt_profile())
+        );
     }
 
     /// The sub-agent may run on OpenRouter, and it takes OpenRouter's key rather than the AI one.
@@ -3123,15 +3819,17 @@ mod tests {
         let mut settings = AiSettings::default();
         settings.subagent.connection = Some(SubagentConnection {
             connection_type: AiConnectionType::Openrouter,
-            model: "z-ai/glm-5.2:free".to_owned(),
-            model_name: "GLM 5.2".to_owned(),
-            context_window: 256_000,
-            max_tokens: 8_000,
-            reasoning: true,
-            supports_reasoning_effort: true,
-            thinking_levels: vec!["xhigh".to_owned(), "high".to_owned()],
-            input: vec!["text".to_owned()],
-            thinking_level: "high".to_owned(),
+            model: ModelChoice {
+                id: "z-ai/glm-5.2:free".to_owned(),
+                name: "GLM 5.2".to_owned(),
+                context_window: 256_000,
+                max_tokens: 8_000,
+                reasoning: true,
+                supports_reasoning_effort: true,
+                thinking_levels: vec!["xhigh".to_owned(), "high".to_owned()],
+                input: vec!["text".to_owned()],
+                thinking_level: "high".to_owned(),
+            },
         });
 
         let connection = docs_expansion_connection(
@@ -3184,9 +3882,9 @@ mod tests {
             Some(&true)
         );
         let defaults = default_settings_from_pi_path(&path).expect("Pi defaults");
-        assert_eq!(defaults.ai.model, "vision-model");
-        assert_eq!(defaults.ai.context_window, 8_192);
-        assert!(defaults.ai.supports_reasoning_effort);
+        assert_eq!(live(&defaults).model.id, "vision-model");
+        assert_eq!(live(&defaults).model.context_window, 8_192);
+        assert!(live(&defaults).model.supports_reasoning_effort);
 
         fs::write(&path, "not-json").expect("write invalid Pi models");
         assert!(pi_catalog_from_path(&path).unwrap_err().contains("invalid"));
@@ -3277,7 +3975,7 @@ mod tests {
         )
         .expect("write Pi models");
         let catalog = pi_catalog_from_path(&path).expect("Pi catalog");
-        let ai = settings("http://127.0.0.1:8080/v1", "/models/Qwen3.8-27B-NVFP4.gguf").ai;
+        let ai = connection("http://127.0.0.1:8080/v1", "/models/Qwen3.8-27B-NVFP4.gguf");
 
         let served = local_model_options(
             vec![
@@ -3307,7 +4005,7 @@ mod tests {
         assert_eq!(served[1].name, "Qwen3.8 27B");
 
         // And a server Pi says nothing about grants nothing. Silence is not a capability.
-        let elsewhere = settings("http://127.0.0.1:9999/v1", "mystery.gguf").ai;
+        let elsewhere = connection("http://127.0.0.1:9999/v1", "mystery.gguf");
         let unknown = local_model_options(
             vec![Model {
                 id: "mystery.gguf".to_owned(),
@@ -3329,24 +4027,26 @@ mod tests {
     /// offering seven reasoning levels to a template that has none.
     #[test]
     fn the_loaded_model_outranks_every_written_copy_of_it() {
-        let mut ai = settings("http://127.0.0.1:8080/v1", "old.gguf").ai;
-        ai.model_name = "Old Model".to_owned();
-        ai.reasoning = true;
-        ai.supports_reasoning_effort = true;
-        ai.thinking_level = "medium".to_owned();
-        ai.max_tokens = 200_000;
-        ai.local = Some(profile_of(&ai));
+        let mut local = connection("http://127.0.0.1:8080/v1", "old.gguf");
+        local.model.name = "Old Model".to_owned();
+        local.model.reasoning = true;
+        local.model.supports_reasoning_effort = true;
+        local.model.thinking_level = "medium".to_owned();
+        local.model.max_tokens = 200_000;
+        let mut ai = settings_on(AiConnectionType::OpenaiCompatible, local).ai;
         ai.subagent.connection = Some(SubagentConnection {
             connection_type: AiConnectionType::OpenaiCompatible,
-            model: "old.gguf".to_owned(),
-            model_name: "Old Model".to_owned(),
-            context_window: 200_000,
-            max_tokens: 200_000,
-            reasoning: true,
-            supports_reasoning_effort: true,
-            thinking_levels: Vec::new(),
-            input: vec!["text".to_owned(), "image".to_owned()],
-            thinking_level: "high".to_owned(),
+            model: ModelChoice {
+                id: "old.gguf".to_owned(),
+                name: "Old Model".to_owned(),
+                context_window: 200_000,
+                max_tokens: 200_000,
+                reasoning: true,
+                supports_reasoning_effort: true,
+                thinking_levels: Vec::new(),
+                input: vec!["text".to_owned(), "image".to_owned()],
+                thinking_level: "high".to_owned(),
+            },
         });
 
         let served = HashMap::from([(
@@ -3362,47 +4062,30 @@ mod tests {
         )]);
         resolve_model_facts(&mut ai, &PiCatalog::default(), &served);
 
-        let local = ai.local.as_ref().expect("the saved local profile");
+        let local = ai
+            .connection_for(AiConnectionType::OpenaiCompatible)
+            .expect("the local connection");
         let child = ai.subagent.connection.as_ref().expect("the sub-agent");
-        for (model, name, effort, level, window, tokens, input) in [
-            (
-                &ai.model,
-                &ai.model_name,
-                ai.supports_reasoning_effort,
-                &ai.thinking_level,
-                ai.context_window,
-                ai.max_tokens,
-                &ai.input,
-            ),
-            (
-                &local.model,
-                &local.model_name,
-                local.supports_reasoning_effort,
-                &local.thinking_level,
-                local.context_window,
-                local.max_tokens,
-                &local.input,
-            ),
-            (
-                &child.model,
-                &child.model_name,
-                child.supports_reasoning_effort,
-                &child.thinking_level,
-                child.context_window,
-                child.max_tokens,
-                &child.input,
-            ),
-        ] {
-            assert_eq!(model, "/models/new.gguf", "the id the server answers to");
-            assert_eq!(name, "/models/new.gguf");
-            assert!(!effort, "the loaded template takes no effort");
-            assert_eq!(level, "off", "so there is no level to be asked at");
-            assert_eq!(window, 120_064, "the window the host was started with");
-            assert_eq!(tokens, 120_064, "clamped into it");
-            assert_eq!(input, &["text".to_owned()], "and no pictures");
+        for model in [&local.model, &child.model] {
+            assert_eq!(model.id, "/models/new.gguf", "the id the server answers to");
+            assert_eq!(model.name, "/models/new.gguf");
+            assert!(
+                !model.supports_reasoning_effort,
+                "the loaded template takes no effort"
+            );
+            assert_eq!(
+                model.thinking_level, "off",
+                "so there is no level to be asked at"
+            );
+            assert_eq!(
+                model.context_window, 120_064,
+                "the window the host was started with"
+            );
+            assert_eq!(model.max_tokens, 120_064, "clamped into it");
+            assert_eq!(model.input, ["text".to_owned()], "and no pictures");
         }
         assert!(
-            ai.reasoning,
+            local.model.reasoning,
             "it still thinks, it just cannot be told how hard"
         );
     }
@@ -3414,10 +4097,11 @@ mod tests {
     /// to no other.
     #[test]
     fn a_router_answers_only_for_the_model_it_named() {
-        let mut ai = settings("http://127.0.0.1:8080/v1", "chosen.gguf").ai;
-        ai.reasoning = true;
-        ai.supports_reasoning_effort = true;
-        ai.thinking_level = "medium".to_owned();
+        let mut chosen = connection("http://127.0.0.1:8080/v1", "chosen.gguf");
+        chosen.model.reasoning = true;
+        chosen.model.supports_reasoning_effort = true;
+        chosen.model.thinking_level = "medium".to_owned();
+        let mut ai = settings_on(AiConnectionType::OpenaiCompatible, chosen).ai;
         let before = ai.clone();
         let served = HashMap::from([(
             "http://127.0.0.1:8080/v1".to_owned(),
@@ -3434,13 +4118,55 @@ mod tests {
         assert_eq!(ai, before, "another model's facts are not this model's");
     }
 
+    /// A local catalogue at OpenRouter's address does not get to answer for OpenRouter's model.
+    ///
+    /// Both sources here are keyed by address and nothing else, and `validate_settings` pins the
+    /// OpenRouter connection's address to a constant — so a `~/.pi/agent/models.json` naming a
+    /// provider there collides exactly, on every read and every save. Resolving it would collapse
+    /// an unnamed model's two thinking flags to that provider's single boolean, and `keep_level`
+    /// would then drop the level the user chose down to `off`.
+    #[test]
+    fn a_local_catalogue_does_not_answer_for_a_hosted_model() {
+        let mut hosted = default_openrouter_profile();
+        hosted.model.id = "z-ai/glm-5.2".to_owned();
+        hosted.model.name = "GLM 5.2".to_owned();
+        hosted.model.reasoning = true;
+        hosted.model.supports_reasoning_effort = true;
+        hosted.model.thinking_level = "high".to_owned();
+        let mut ai = settings_on(AiConnectionType::Openrouter, hosted).ai;
+        let before = ai.clone();
+
+        // A Pi provider that happens to sit at the address OpenRouter is pinned to, and a llama.cpp
+        // host answering at the same one. Neither knows this model.
+        let catalog = PiCatalog {
+            models: Vec::new(),
+            servers: HashMap::from([(OPENROUTER_BASE_URL.to_owned(), false)]),
+        };
+        let served = HashMap::from([(
+            OPENROUTER_BASE_URL.to_owned(),
+            ServedModel {
+                id: "z-ai/glm-5.2".to_owned(),
+                context_window: Some(4_096),
+                reasoning: false,
+                efforts: Vec::new(),
+                input: Some(vec!["text".to_owned()]),
+                sole: true,
+            },
+        )]);
+
+        resolve_model_facts(&mut ai, &catalog, &served);
+
+        assert_eq!(ai, before, "a local catalogue answered for a hosted model");
+    }
+
     /// A server that does not answer `/props` leaves every written copy exactly as it was.
     #[test]
     fn a_server_with_nothing_to_say_changes_nothing() {
-        let mut ai = settings("http://127.0.0.1:8080/v1", "old.gguf").ai;
-        ai.reasoning = true;
-        ai.supports_reasoning_effort = true;
-        ai.thinking_level = "medium".to_owned();
+        let mut stale = connection("http://127.0.0.1:8080/v1", "old.gguf");
+        stale.model.reasoning = true;
+        stale.model.supports_reasoning_effort = true;
+        stale.model.thinking_level = "medium".to_owned();
+        let mut ai = settings_on(AiConnectionType::OpenaiCompatible, stale).ai;
         let before = ai.clone();
         resolve_model_facts(&mut ai, &PiCatalog::default(), &HashMap::new());
         assert_eq!(ai, before);
@@ -3473,20 +4199,20 @@ mod tests {
 
         let path = directory.path().join("settings.json");
         let mut stale = settings("http://127.0.0.1:8080/v1", "/models/served.gguf");
-        stale.ai.reasoning = false;
-        stale.ai.supports_reasoning_effort = false;
-        stale.ai.thinking_level = "off".to_owned();
+        let stored = live_mut(&mut stale);
+        stored.model.reasoning = false;
+        stored.model.supports_reasoning_effort = false;
+        stored.model.thinking_level = "off".to_owned();
+        let stored = stored.model.clone();
         stale.ai.subagent.connection = Some(SubagentConnection {
             connection_type: AiConnectionType::OpenaiCompatible,
-            model: "/models/served.gguf".to_owned(),
-            model_name: "/models/served.gguf".to_owned(),
-            context_window: 120_064,
-            max_tokens: 120_064,
-            reasoning: false,
-            supports_reasoning_effort: false,
-            thinking_levels: Vec::new(),
-            input: vec!["text".to_owned()],
-            thinking_level: "off".to_owned(),
+            model: ModelChoice {
+                name: "/models/served.gguf".to_owned(),
+                context_window: 120_064,
+                max_tokens: 120_064,
+                input: vec!["text".to_owned()],
+                ..stored.clone()
+            },
         });
         fs::write(
             &path,
@@ -3496,32 +4222,29 @@ mod tests {
 
         let loaded = read_settings_from_paths(&path, Some(&pi)).expect("read settings");
 
-        // The flat fields.
-        assert!(loaded.ai.reasoning);
-        assert!(loaded.ai.supports_reasoning_effort);
-        // The saved local profile.
-        let local = loaded.ai.local.as_ref().expect("local profile");
-        assert!(local.reasoning);
-        assert!(local.supports_reasoning_effort);
-        // And the sub-agent's own connection, which is the copy that outlived the other two.
+        // The connection the driver runs on.
+        let local = live(&loaded);
+        assert!(local.model.reasoning);
+        assert!(local.model.supports_reasoning_effort);
+        // And the sub-agent's own, which is a second model rather than a second copy of this one.
         let child = loaded
             .ai
             .subagent
             .connection
             .as_ref()
             .expect("sub-agent connection");
-        assert!(child.reasoning);
-        assert!(child.supports_reasoning_effort);
+        assert!(child.model.reasoning);
+        assert!(child.model.supports_reasoning_effort);
 
         // What the user owns is untouched. Only what the model decides is re-derived.
-        assert_eq!(loaded.ai.model, "/models/served.gguf");
-        assert_eq!(loaded.ai.context_window, stale.ai.context_window);
+        assert_eq!(local.model.id, "/models/served.gguf");
+        assert_eq!(local.model.context_window, stored.context_window);
         // And what the catalogue does not know, it does not answer. A server's declared reasoning
         // says nothing about what a model it has never described accepts, so the stored input
         // stands — inventing `["text", "image"]` here turns the composer's image control on and
         // ships pictures to a server that refuses them.
-        assert_eq!(loaded.ai.input, stale.ai.input);
-        assert_eq!(loaded.ai.model_name, stale.ai.model_name);
+        assert_eq!(local.model.input, stored.input);
+        assert_eq!(local.model.name, stored.name);
     }
 
     /// A model the catalogue names answers for itself, even when its server would say otherwise.
@@ -3545,9 +4268,10 @@ mod tests {
 
         let path = directory.path().join("settings.json");
         let mut stale = settings("http://127.0.0.1:8080/v1", "plain.gguf");
-        stale.ai.reasoning = true;
-        stale.ai.supports_reasoning_effort = true;
-        stale.ai.thinking_level = "high".to_owned();
+        let stored = live_mut(&mut stale);
+        stored.model.reasoning = true;
+        stored.model.supports_reasoning_effort = true;
+        stored.model.thinking_level = "high".to_owned();
         fs::write(
             &path,
             serde_json::to_string(&stale).expect("serialize settings"),
@@ -3556,11 +4280,11 @@ mod tests {
 
         let loaded = read_settings_from_paths(&path, Some(&pi)).expect("read settings");
 
-        assert!(!loaded.ai.reasoning);
-        assert!(!loaded.ai.supports_reasoning_effort);
+        assert!(!live(&loaded).model.reasoning);
+        assert!(!live(&loaded).model.supports_reasoning_effort);
         // A level pointing at nothing is not left standing.
-        assert_eq!(loaded.ai.thinking_level, "off");
-        assert_eq!(loaded.ai.model_name, "Plain");
+        assert_eq!(live(&loaded).model.thinking_level, "off");
+        assert_eq!(live(&loaded).model.name, "Plain");
     }
 
     /// Silence is not an answer. A catalogue that says nothing leaves the stored copy alone.
@@ -3575,9 +4299,10 @@ mod tests {
 
         let path = directory.path().join("settings.json");
         let mut stored = settings("http://127.0.0.1:8080/v1", "thinker.gguf");
-        stored.ai.reasoning = true;
-        stored.ai.supports_reasoning_effort = true;
-        stored.ai.thinking_level = "high".to_owned();
+        let chosen = live_mut(&mut stored);
+        chosen.model.reasoning = true;
+        chosen.model.supports_reasoning_effort = true;
+        chosen.model.thinking_level = "high".to_owned();
         fs::write(
             &path,
             serde_json::to_string(&stored).expect("serialize settings"),
@@ -3586,11 +4311,15 @@ mod tests {
 
         let loaded = read_settings_from_paths(&path, Some(&pi)).expect("read settings");
 
-        assert!(loaded.ai.reasoning);
-        assert_eq!(loaded.ai.thinking_level, "high");
-        // And the ChatGPT profile, which Pi's file never describes, keeps everything it had.
-        assert!(loaded.ai.chatgpt.reasoning);
-        assert!(loaded.ai.chatgpt.supports_reasoning_effort);
+        assert!(live(&loaded).model.reasoning);
+        assert_eq!(live(&loaded).model.thinking_level, "high");
+        // And the ChatGPT connection, which Pi's file never describes, keeps everything it had.
+        let chatgpt = loaded
+            .ai
+            .connection_for(AiConnectionType::OpenaiCodex)
+            .expect("the ChatGPT connection");
+        assert!(chatgpt.model.reasoning);
+        assert!(chatgpt.model.supports_reasoning_effort);
     }
 
     #[test]
@@ -3720,42 +4449,42 @@ mod tests {
         let invalid_settings = [
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.name = "x".repeat(101);
+                live_mut(&mut value).name = "x".repeat(101);
                 value
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.model = "x".repeat(513);
+                live_mut(&mut value).model.id = "x".repeat(513);
                 value
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.model_name = "x".repeat(513);
+                live_mut(&mut value).model.name = "x".repeat(513);
                 value
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.input = Vec::new();
+                live_mut(&mut value).model.input = Vec::new();
                 value
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.input = vec!["text".to_owned(); 17];
+                live_mut(&mut value).model.input = vec!["text".to_owned(); 17];
                 value
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.input = vec![String::new()];
+                live_mut(&mut value).model.input = vec![String::new()];
                 value
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.context_window = 0;
+                live_mut(&mut value).model.context_window = 0;
                 value
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.max_tokens = 0;
+                live_mut(&mut value).model.max_tokens = 0;
                 value
             },
             {
@@ -3770,7 +4499,7 @@ mod tests {
             },
             {
                 let mut value = settings("http://localhost", "model");
-                value.ai.thinking_level = "impossible".to_owned();
+                live_mut(&mut value).model.thinking_level = "impossible".to_owned();
                 value
             },
             // A line drawn this low summarises a conversation that has barely started; drawn above
@@ -3785,6 +4514,45 @@ mod tests {
                 value.ai.compaction_percent = 101;
                 value
             },
+            // The sub-agent's seven ceilings, which nothing in Rust bounded: the slider was the
+            // only thing enforcing them, and a hand-edited settings file never touches a slider.
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.command_timeout_minutes = 31;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.stream_inactivity_minutes = 31;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.max_turns = 100_000;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.max_answer_chars = 24_001;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.max_shows = 13;
+                value
+            },
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.retry_attempts = 6;
+                value
+            },
+            // Zero is the one floor that is not zero: the wait is read only when a retry happens,
+            // and a retry that waits for nothing is not a retry policy.
+            {
+                let mut value = settings("http://localhost", "model");
+                value.ai.subagent.retry_base_delay_seconds = 0;
+                value
+            },
             settings("https://example.com/v1#fragment", "model"),
             settings("https://user:password@example.com/v1", "model"),
             settings(
@@ -3796,41 +4564,50 @@ mod tests {
             assert!(validate_settings(value).is_err());
         }
 
-        assert_eq!(resolve_api_key(&ApiKeyUpdate::Clear), Ok(None));
-        assert!(
-            resolve_api_key(&ApiKeyUpdate::Set {
-                value: " ".to_owned()
-            })
-            .is_err()
-        );
-        assert!(
-            resolve_api_key(&ApiKeyUpdate::Set {
-                value: "x".repeat(MAX_API_KEY_BYTES + 1)
-            })
-            .is_err()
-        );
-
-        // OpenRouter's slot is a second copy of the same three-way read, and a copy is exactly the
-        // thing that drifts. It is held to the same three answers rather than trusted to match.
-        assert_eq!(resolve_openrouter_api_key(&ApiKeyUpdate::Clear), Ok(None));
-        assert_eq!(
-            resolve_openrouter_api_key(&ApiKeyUpdate::Set {
-                value: "  sk-or-v1-key  ".to_owned()
-            }),
-            Ok(Some("sk-or-v1-key".to_owned()))
-        );
-        assert!(
-            resolve_openrouter_api_key(&ApiKeyUpdate::Set {
-                value: " ".to_owned()
-            })
-            .is_err()
-        );
-        assert!(
-            resolve_openrouter_api_key(&ApiKeyUpdate::Set {
-                value: "x".repeat(MAX_API_KEY_BYTES + 1)
-            })
-            .is_err()
-        );
+        // The four answers a connection test's key is read by, held once against every slot rather
+        // than written out per slot. OpenRouter's copy of this used to be its own function, which
+        // is what made it the credential module's coverage gap in the first place.
+        let store = FakeSecrets::default();
+        for secret in [Secret::AiDefault, Secret::OpenRouter, Secret::Brave] {
+            assert_eq!(resolve(&ApiKeyUpdate::Clear, secret, &store), Ok(None));
+            assert_eq!(
+                resolve(
+                    &ApiKeyUpdate::Set {
+                        value: "  sk-or-v1-key  ".to_owned()
+                    },
+                    secret,
+                    &store,
+                ),
+                Ok(Some("sk-or-v1-key".to_owned()))
+            );
+            assert!(
+                resolve(
+                    &ApiKeyUpdate::Set {
+                        value: " ".to_owned()
+                    },
+                    secret,
+                    &store,
+                )
+                .is_err()
+            );
+            assert!(
+                resolve(
+                    &ApiKeyUpdate::Set {
+                        value: "x".repeat(MAX_API_KEY_BYTES + 1)
+                    },
+                    secret,
+                    &store,
+                )
+                .is_err()
+            );
+            // `Keep` is the stored key of *that* slot, which is the whole reason the slot is an
+            // argument: a test that sent the local key to openrouter.ai would pass without it.
+            store.put(secret, secret.username());
+            assert_eq!(
+                resolve(&ApiKeyUpdate::Keep, secret, &store),
+                Ok(Some(secret.username().to_owned()))
+            );
+        }
     }
 }
 
@@ -3864,8 +4641,12 @@ mod probe_cost_tests {
         let path = directory.path().join("settings.json");
         let mut settings = GoferSettings::default();
         settings.ai.connection_type = AiConnectionType::OpenaiCompatible;
-        settings.ai.base_url = base_url.to_owned();
-        settings.ai.local = None;
+        settings
+            .ai
+            .connections
+            .get_mut(&AiConnectionType::OpenaiCompatible)
+            .expect("the local connection")
+            .base_url = base_url.to_owned();
         fs::write(
             &path,
             serde_json::to_string(&settings).expect("settings as json"),

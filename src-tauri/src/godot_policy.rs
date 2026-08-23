@@ -36,6 +36,7 @@
 //! arguing for the rule.
 
 use crate::settings::GodotSettings;
+use crate::tool_params::Writes;
 use serde_json::{Value, json};
 
 /// The five GDScript warnings that together mean "statically typed, no Variant access".
@@ -129,6 +130,10 @@ pub(crate) fn policy_calls(settings: &GodotSettings) -> Vec<PolicyCall> {
 
 /// Why an enforced rule refuses this tool call, or `None` when the call is the agent's to make.
 ///
+/// Keyed on what the operation writes rather than on its name: [`Writes`] is carried by the row
+/// that declares the operation, so an operation renamed there cannot quietly stop being enforced,
+/// and this reads the rule rather than a fifth match on `(tool, op)`.
+///
 /// Three doors, because the live run walked toward all three. Writing or resetting anything under
 /// `debug/gdscript/warnings/` is the direct one. Writing `game_embed_mode` is the same move against
 /// the other rule — approval-gated already, but an approval is a question, and a rule the user
@@ -142,16 +147,15 @@ pub(crate) fn policy_calls(settings: &GodotSettings) -> Vec<PolicyCall> {
 /// the reminder to look the type up in the docs rather than half-remember it.
 pub(crate) fn enforcement_refusal(
     settings: &GodotSettings,
-    tool: &str,
-    op: &str,
+    writes: Option<Writes>,
     params: &Value,
 ) -> Option<String> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    match (tool, op) {
-        ("godot_project", "set_setting" | "reset_setting")
+    match writes? {
+        Writes::ProjectSetting
             if settings.strict_typing && name.starts_with(WARNING_SETTING_PREFIX) =>
         {
             Some(format!(
@@ -164,16 +168,14 @@ pub(crate) fn enforcement_refusal(
                  Only the user can turn this rule off."
             ))
         }
-        ("godot_project", "set_editor_setting")
-            if settings.embed_game_window && name == GAME_EMBED_MODE =>
-        {
+        Writes::EditorSetting if settings.embed_game_window && name == GAME_EMBED_MODE => {
             Some(format!(
                 "REFUSED: `{name}`. An embedded game window is enforced, and the game runs inside \
                  the editor.\n\
                  Only the user can turn this rule off."
             ))
         }
-        ("godot_script", "save" | "edit") if settings.strict_typing => {
+        Writes::ScriptText if settings.strict_typing => {
             // A save carries the whole file, so the whole file is what it proposes. An edit carries
             // only the text it introduces, and only that text is its to answer for: refusing an
             // edit for an annotation already in the file would refuse every edit of that file
@@ -332,8 +334,13 @@ mod tests {
         ("godot_project", op.to_owned(), json!({"name": name}))
     }
 
+    /// One call, put through the same two steps the router takes: the operation is resolved by
+    /// name, and what it writes is read off the row rather than restated here. A tag that fell off
+    /// an operation in `params.json` fails these tests rather than silently unenforcing the rule.
     fn refusal(settings: &GodotSettings, call: &(&'static str, String, Value)) -> Option<String> {
-        enforcement_refusal(settings, call.0, &call.1, &call.2)
+        let operation = crate::tool_params::operation_of(call.0, &call.1)
+            .unwrap_or_else(|| panic!("{} {} is a catalogue operation", call.0, call.1));
+        enforcement_refusal(settings, operation.writes(), &call.2)
     }
 
     /// The direct move, and the one a live run made: meet the parse error, find the warning, write

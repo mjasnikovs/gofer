@@ -2,7 +2,13 @@ import {useCallback, useEffect, useRef, useState} from 'react'
 import {defer} from '../services/clock'
 import {invoke, isTauri, listen} from '../services/desktop'
 import {commandErrorMessage} from '../utils/command-error'
-import {adoptModelReasoning, applyModelSelection, normalizeSettings} from '../models/settings'
+import {
+    activeConnection,
+    adoptModelReasoning,
+    applyModelSelection,
+    normalizeSettings,
+    withActiveConnection
+} from '../models/settings'
 import type {AiModelOption, AiSettings, GoferSettings, ThinkingLevel} from '../models/settings'
 
 export type ConnectionState = 'connecting' | 'connected' | 'offline'
@@ -66,10 +72,11 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
     const applyModel = useCallback(
         async (model: AiModelOption, previous?: GoferSettings) => {
             if (!previous) return
-            await saveSettings(
-                {...previous, ai: applyModelSelection(previous.ai, model)},
-                'The model selection could not be saved'
-            )
+            const ai = withActiveConnection(previous.ai, connection => ({
+                ...connection,
+                model: applyModelSelection(connection.model, model)
+            }))
+            await saveSettings({...previous, ai}, 'The model selection could not be saved')
         },
         [saveSettings]
     )
@@ -77,10 +84,11 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
     const applyThinkingLevel = useCallback(
         async (thinkingLevel: ThinkingLevel, previous?: GoferSettings) => {
             if (!previous) return
-            await saveSettings(
-                {...previous, ai: {...previous.ai, thinkingLevel}},
-                'The reasoning level could not be saved'
-            )
+            const ai = withActiveConnection(previous.ai, connection => ({
+                ...connection,
+                model: {...connection.model, thinkingLevel}
+            }))
+            await saveSettings({...previous, ai}, 'The reasoning level could not be saved')
         },
         [saveSettings]
     )
@@ -95,14 +103,17 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
      */
     const reconcileModel = useCallback(
         async (available: readonly AiModelOption[], loaded: GoferSettings) => {
-            const configured = available.find(model => model.id === loaded.ai.model)
+            const chosen = activeConnection(loaded.ai)
+            const configured = available.find(model => model.id === chosen?.model.id)
             if (!configured) {
                 const onlyModel = available.length === 1 ? available[0] : undefined
                 if (onlyModel) await applyModel(onlyModel, loaded)
                 return
             }
-            const ai = adoptModelReasoning(loaded.ai, configured)
-            if (ai === loaded.ai) return
+            if (!chosen) return
+            const model = adoptModelReasoning(chosen.model, configured)
+            if (model === chosen.model) return
+            const ai = withActiveConnection(loaded.ai, connection => ({...connection, model}))
             await saveSettings({...loaded, ai}, "The model's reasoning support could not be saved")
         },
         [applyModel, saveSettings]
@@ -171,5 +182,5 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
 
 /** What decides which models exist: the driver, and where it is. Not which one is selected. */
 function catalogueOf(ai: AiSettings) {
-    return `${ai.connectionType} ${ai.baseUrl}`
+    return `${ai.connectionType} ${activeConnection(ai)?.baseUrl ?? ''}`
 }

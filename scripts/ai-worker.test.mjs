@@ -6,19 +6,15 @@ import {join} from 'node:path'
 import {spawn, spawnSync} from 'node:child_process'
 import {createInterface} from 'node:readline'
 import test from 'node:test'
-import {canSeePictures} from './ai-provider.mjs'
 import {pathToFileURL} from 'node:url'
 import {
+    CANCEL_TYPE,
     EVENT_PREFIX,
     TOOL_PREFIX,
-    createGodotTools,
-    createToolHost,
-    normalizeToolCalls,
-    toolResult,
-    withoutPictures,
-    withoutRepeatingARefusal
+    createCancellation,
+    createToolHost
 } from './ai-host.mjs'
-import Ajv from 'ajv'
+import {createGodotTools} from './godot-tools.mjs'
 
 import {probeTools} from './ai-reachability.mjs'
 import {createChildTools} from './ai-subagent.mjs'
@@ -47,10 +43,37 @@ const PRELOAD_SKIP =
         'the preload patches a module graph a bundled worker does not share'
     )
 
+const MODEL_ID = 'Qwen3.6-27B-UD-Q4_K_XL.gguf'
+
 const settings = {
-    name: 'Local AI',
-    baseUrl: '',
-    model: 'Qwen3.6-27B-UD-Q4_K_XL.gguf'
+    connectionType: 'openai-compatible',
+    connections: {
+        'openai-compatible': {
+            name: 'Local AI',
+            baseUrl: '',
+            api: 'openai-completions',
+            chatTemplateThinking: false,
+            model: {id: MODEL_ID}
+        }
+    }
+}
+
+/**
+ * The same settings pointed at one server, with whatever this test needs changed on the way.
+ *
+ * `model` lands on the live connection's model half and `connection` on its address half; anything
+ * else is the file's own tuning. Written once because forty-odd tests here differ from each other
+ * only in which port the mock server came up on.
+ */
+function servedBy(baseUrl, {model = {}, connection = {}, ...tuning} = {}) {
+    const live = settings.connections['openai-compatible']
+    return {
+        ...settings,
+        ...tuning,
+        connections: {
+            'openai-compatible': {...live, ...connection, baseUrl, model: {...live.model, ...model}}
+        }
+    }
 }
 
 async function temporaryWorkspace(files = {}, outsideFiles = {}) {
@@ -81,7 +104,7 @@ function startServer() {
                     id: 'chatcmpl-test',
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [
                         {
                             index: 0,
@@ -96,7 +119,7 @@ function startServer() {
                     id: 'chatcmpl-test',
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [{index: 0, delta: {content: ' Gofer'}, finish_reason: null}]
                 })}\n\n`
             )
@@ -105,7 +128,7 @@ function startServer() {
                     id: 'chatcmpl-test',
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [{index: 0, delta: {}, finish_reason: 'stop'}],
                     usage: {prompt_tokens: 4, completion_tokens: 2, total_tokens: 6}
                 })}\n\n`
@@ -132,7 +155,7 @@ test('carries the task through to the request, so a server can route it to its o
 
     try {
         await runAgent({
-            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             sessionId: 'task-9f2c',
             workspacePath: workspace.path,
@@ -155,7 +178,7 @@ test('streams a Pi AI completion through the configured local provider', async c
 
     try {
         const completion = await runAgent({
-            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
             apiKey: 'secret',
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
@@ -171,7 +194,7 @@ test('streams a Pi AI completion through the configured local provider', async c
             ['Hello', ' Gofer']
         )
         assert.equal(request.authorization, 'Bearer secret')
-        assert.equal(request.body.model, settings.model)
+        assert.equal(request.body.model, MODEL_ID)
         assert.equal(request.body.messages.at(-1).role, 'user')
         assert.deepEqual(
             request.body.tools.map(tool => tool.function.name),
@@ -191,11 +214,9 @@ test('sends image-only prompts as OpenAI image content', async context => {
 
     try {
         await runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
-                input: ['text', 'image']
-            },
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`, {
+                model: {input: ['text', 'image']}
+            }),
             messages: [
                 {
                     sender: 'user',
@@ -226,11 +247,9 @@ test('sends mixed text and image prompts without dropping either part', async co
     const address = mock.server.address()
 
     await runAgent({
-        settings: {
-            ...settings,
-            baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
-            input: ['text', 'image']
-        },
+        settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`, {
+            model: {input: ['text', 'image']}
+        }),
         messages: [
             {
                 sender: 'user',
@@ -261,7 +280,7 @@ test('restores renderer history when native agent history is unavailable', async
     const address = mock.server.address()
 
     await runAgent({
-        settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+        settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
         messages: [
             {sender: 'user', text: 'Earlier question', timestamp: 1},
             {sender: 'assistant', text: 'Earlier answer', timestamp: 2},
@@ -312,7 +331,7 @@ test('reports a turn that ran out of context rather than recording it as an answ
                     id: 'chatcmpl-full',
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [{index: 0, delta: {role: 'assistant', content: 'I'}}]
                 })}\n\n`
             )
@@ -321,7 +340,7 @@ test('reports a turn that ran out of context rather than recording it as an answ
                     id: 'chatcmpl-full',
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [{index: 0, delta: {}, finish_reason: 'length'}],
                     usage: {prompt_tokens: 116_449, completion_tokens: 1, total_tokens: 116_450}
                 })}\n\n`
@@ -335,12 +354,10 @@ test('reports a turn that ran out of context rather than recording it as an answ
 
     await assert.rejects(
         runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
-                contextWindow: 120_064,
-                maxRetries: 0
-            },
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`, {
+                maxRetries: 0,
+                model: {contextWindow: 120_064}
+            }),
             messages: [{sender: 'user', text: 'Carry on', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -363,11 +380,7 @@ test('rejects malformed and interrupted provider streams', async context => {
 
     await assert.rejects(
         runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
-                maxRetries: 0
-            },
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`, {maxRetries: 0}),
             messages: [{sender: 'user', text: 'Respond', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -391,12 +404,10 @@ test('cancels an active provider stream through AbortSignal', async context => {
     const address = server.address()
     const controller = new AbortController()
     const completion = runAgent({
-        settings: {
-            ...settings,
-            baseUrl: `http://127.0.0.1:${String(address.port)}/v1`,
+        settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`, {
             maxRetries: 0,
             timeoutMs: 60_000
-        },
+        }),
         messages: [{sender: 'user', text: 'Wait', timestamp: 1}],
         workspacePath: workspace.path,
         emit: () => undefined,
@@ -485,7 +496,7 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
                     id: `chatcmpl-${requestCount}`,
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [{index: 0, delta, finish_reason: null}]
                 })}\n\n`
             )
@@ -494,7 +505,7 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
                     id: `chatcmpl-${requestCount}`,
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [
                         {
                             index: 0,
@@ -514,7 +525,7 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
 
     try {
         const completion = await runAgent({
-            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
             messages: [{sender: 'user', text: 'Read package.json', timestamp: 1}],
             workspacePath: workspace.path,
             emit: event => events.push(event)
@@ -539,7 +550,7 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
         assert.equal(events.filter(event => event.type === 'tool-cost').length, 1)
 
         await runAgent({
-            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
             messages: [
                 {sender: 'user', text: 'Read package.json', timestamp: 1},
                 {sender: 'assistant', text: completion.text, timestamp: 2},
@@ -652,6 +663,20 @@ test('the tool host correlates results, failures, cancellation, and closure', as
     )
 })
 
+test('the cancel line is the only line that is not an answer', () => {
+    const cancellation = createCancellation()
+    assert.equal(cancellation.signal.aborted, false)
+
+    // A tool result is not a stop, and a stop is not a tool result: answering `false` is what puts
+    // a line in front of the hosts, and answering `true` is what keeps it away from them.
+    assert.equal(cancellation.deliver({type: 'tool-result', id: 'call-1', ok: true}), false)
+    assert.equal(cancellation.deliver(undefined), false)
+    assert.equal(cancellation.signal.aborted, false)
+
+    assert.equal(cancellation.deliver({type: CANCEL_TYPE}), true)
+    assert.equal(cancellation.signal.aborted, true)
+})
+
 test('two hosts reading one stream never answer each other', async () => {
     const toolCalls = []
     const credentialCalls = []
@@ -703,955 +728,6 @@ test('domain tools carry the router catalog and forward every call', async () =>
     assert.equal(createGodotTools(undefined, host).length, 0)
 })
 
-/**
- * The two narrowings read differently, and neither one caps the list.
- *
- * `godot_session` used to advertise a list of exactly one, because all seven of its operations were
- * marked alone. The mark meant two different things, and the schema said the stricter of them about
- * both: a live project wrote `[stop, start]` and `[get_state, answer_dialog]` and was refused, for
- * ordinary two-step requests the router walks in order. Only the debugger is exclusive now.
- */
-test('an exclusive operation and a once-only operation are advertised apart', () => {
-    const session = [
-        {
-            op: 'status',
-            summary: 'Reports the session state.',
-            alone: {scope: 'repeat', why: 'It takes no parameters.'}
-        },
-        {
-            op: 'undo',
-            summary: 'Undoes the last operation.',
-            alone: {scope: 'repeat', why: 'One undo stack, walked in order.'}
-        }
-    ]
-    const debug = [
-        {op: 'threads', summary: 'Lists the threads.', alone: null},
-        {
-            op: 'continue',
-            summary: 'Resumes the debuggee.',
-            alone: {scope: 'exclusive', why: 'One debuggee, driven in order.'}
-        }
-    ]
-    const [owned, driven] = createGodotTools(
-        [
-            {name: 'godot_session', description: 'd', operations: session},
-            {name: 'godot_debug', description: 'd', operations: debug}
-        ],
-        {call: async () => ({})}
-    )
-
-    // Nothing is capped: a list of two different operations is what `ops` is for.
-    assert.equal(owned.parameters.properties.ops.maxItems, undefined)
-    assert.equal(driven.parameters.properties.ops.maxItems, undefined)
-
-    // A repeat operation is named as one that may not appear twice, never as one that must be alone.
-    assert.match(owned.parameters.properties.ops.description, /may not appear twice: status, undo/u)
-    assert.doesNotMatch(owned.parameters.properties.ops.description, /only entry of their call/u)
-    assert.match(owned.description, /not twice in one call: It takes no parameters\./u)
-
-    // An exclusive one keeps the stronger sentence, and only it.
-    assert.match(
-        driven.parameters.properties.ops.description,
-        /only entry of their call: continue/u
-    )
-    assert.doesNotMatch(driven.parameters.properties.ops.description, /may not appear twice/u)
-    assert.match(driven.description, /only entry of its call: One debuggee, driven in order\./u)
-})
-
-/**
- * The domains as `createGodotTools` receives them, built from the declared parameter contract.
- *
- * The real catalogue is serialized by the Rust crate, which merges prose from `ai_tools.rs` with
- * this file. Only the parameters and the narrowing reach the JSON schema — a summary is a sentence
- * in the description — so reading them here costs no cargo build, and `check:command-surface` is
- * what holds the two halves together.
- */
-async function declaredDomains() {
-    const {operations} = JSON.parse(
-        await readFile(new URL('../protocol/schemas/v2/params.json', import.meta.url), 'utf8')
-    )
-    const domains = new Map()
-    for (const entry of operations) {
-        const operations = domains.get(entry.tool) ?? []
-        operations.push({
-            op: entry.op,
-            summary: `${entry.op}.`,
-            params: entry.params ?? [],
-            alone: entry.alone ?? null
-        })
-        domains.set(entry.tool, operations)
-    }
-    return [...domains].map(([name, operations]) => ({name, description: name, operations}))
-}
-
-/**
- * Every distinct `ops` shape a model wrote across real work validates against the schema.
- *
- * `fixtures/recorded-tool-calls.json` is 712 calls from a live project reduced to their distinct
- * operation lists, and 178 more from five live turns against a real editor. The Rust gate has its
- * own pass over the same file; this one is the layer above it, where the agent loop refuses a call
- * before the router ever sees it.
- */
-test('every recorded ops shape validates against the advertised schema', async () => {
-    const recorded = JSON.parse(
-        await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
-    )
-    const tools = createGodotTools(await declaredDomains(), {call: async () => ({})})
-    const validate = new Ajv({strict: false, allErrors: true})
-    let checked = 0
-    for (const recordedCase of recorded.cases) {
-        const tool = tools.find(candidate => candidate.name === recordedCase.tool)
-        assert.ok(tool, `${recordedCase.tool} is recorded and is not advertised`)
-        const check = validate.compile(tool.parameters)
-        assert.ok(
-            check({ops: recordedCase.ops}),
-            `${recordedCase.tool} ${JSON.stringify(recordedCase.ops.map(op => op.op))}: ${validate.errorsText(check.errors)}`
-        )
-        checked += 1
-    }
-    assert.ok(checked > 50, 'the fixture lost its cases')
-})
-
-/**
- * Every shape the same recording needed repairing into, repaired into exactly that.
- *
- * The `repairs` half of the fixture is the calls a model wrote that the router would have refused
- * as written. All nine are the same one: a tagged value wrapped in a second copy of its own tag.
- * Across those five turns the model wrote 86 tagged values, 41 of them double-wrapped, and 22 of
- * the 41 spelled the inner tag with the engine's capital — `{type: "string", value: {type:
- * "String", …}}`. Those 22 were refused, because the unwrapper compared the two tags exactly.
- */
-test('every recorded shape the normalizer repairs is repaired into the shape it names', async () => {
-    const recorded = JSON.parse(
-        await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
-    )
-    const domains = await declaredDomains()
-    assert.ok(recorded.repairs.length > 5, 'the fixture lost its repairs')
-    for (const repair of recorded.repairs) {
-        const domain = domains.find(candidate => candidate.name === repair.tool)
-        assert.ok(domain, `${repair.tool} is recorded and is not advertised`)
-        assert.deepEqual(
-            normalizeToolCalls(domain.operations, {ops: repair.ops}),
-            {ops: repair.repaired},
-            `${repair.tool} ${JSON.stringify(repair.ops).slice(0, 120)}`
-        )
-    }
-})
-
-/**
- * The entry schema is one object per domain, not one branch per operation.
- *
- * Measured, not preferred. Branching per `op` refuses a call by reporting every branch it did not
- * match — a `godot_script save` missing its `text` came back as eight lines, two of them `must be
- * equal to constant` about operations the caller never named. `if`/`then` reports one line, and it
- * is `must match "then" schema`, naming neither parameter nor operation. So the types are enforced
- * here, where an error is about one named key, and which parameters belong to which operation is
- * enforced by `tool_params::check`, which names the parameter and prints the corrected call.
- */
-test('the entry schema types every parameter and leaves the rest to the router', () => {
-    const domain = [
-        {
-            op: 'save',
-            summary: 'Writes a whole file.',
-            params: [
-                {name: 'path', kind: 'text', required: true, entry: []},
-                {name: 'text', kind: 'text', required: true, entry: []},
-                {name: 'expectedHash', kind: 'hash', required: false, entry: []}
-            ]
-        },
-        {
-            op: 'diagnostics',
-            summary: 'Diagnostics for a file.',
-            params: [
-                {
-                    name: 'path',
-                    kind: 'either',
-                    of: [{kind: 'text'}, {kind: 'list'}],
-                    required: true,
-                    entry: []
-                },
-                {name: 'timeoutMs', kind: 'int', required: false, entry: []}
-            ]
-        }
-    ]
-    const [tool] = createGodotTools(
-        [{name: 'godot_script', description: 'd', operations: domain}],
-        {
-            call: async () => ({})
-        }
-    )
-    const entry = tool.parameters.properties.ops.items
-
-    // Every kind is a real JSON type, which is the whole reason this schema is generated.
-    assert.deepEqual(entry.properties.text, {type: 'string'})
-    assert.deepEqual(entry.properties.timeoutMs, {type: 'integer'})
-    assert.deepEqual(entry.properties.expectedHash, {
-        type: 'string',
-        pattern: '^[0-9a-f]{64}$'
-    })
-    // Two operations, two shapes for one name: the entry accepts either and the router decides.
-    assert.deepEqual(entry.properties.path, {anyOf: [{type: 'string'}, {type: 'array'}]})
-
-    // Only `op` is required here. A missing parameter is the router's to name.
-    assert.deepEqual(entry.required, ['op'])
-    assert.deepEqual(entry.properties.op.enum, ['save', 'diagnostics'])
-    assert.equal(entry.additionalProperties, true)
-})
-
-// Every call below was written by a model in a recorded turn and refused. The op is real, the
-// parameters are real, and only the wrapper was in the wrong place.
-test('the wrapper a model got wrong is repaired rather than refused', () => {
-    const script = [
-        {op: 'open', params: [{name: 'path', kind: 'text', required: true}]},
-        {
-            op: 'edit',
-            params: [
-                {
-                    name: 'files',
-                    kind: 'list',
-                    required: true,
-                    entry: [
-                        {name: 'path', kind: 'text', required: true},
-                        {name: 'edits', kind: 'list', required: true}
-                    ]
-                }
-            ]
-        },
-        {
-            op: 'diagnostics',
-            params: [
-                {name: 'path', kind: 'text', required: true},
-                {name: 'timeoutMs', kind: 'int', required: false}
-            ]
-        }
-    ]
-    const runtime = [
-        {
-            op: 'inspect_node',
-            params: [
-                {name: 'path', kind: 'text', required: true},
-                {name: 'properties', kind: 'list', required: false}
-            ]
-        }
-    ]
-
-    // The parameter list flat beside the op, which is the shape the schema now asks for.
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{op: 'open', path: 'scripts/enemy.gd'}]}), {
-        ops: [{path: 'scripts/enemy.gd', op: 'open'}]
-    })
-
-    // The wrapper under the name the prose uses.
-    assert.deepEqual(
-        normalizeToolCalls(runtime, {
-            ops: [{op: 'inspect_node', parameters: {path: '/root/Main/Game'}}]
-        }),
-        {ops: [{path: '/root/Main/Game', op: 'inspect_node'}]}
-    )
-
-    // One parameter hoisted out of a wrapper that is otherwise right.
-    assert.deepEqual(
-        normalizeToolCalls([{op: 'set', params: [{name: 'node'}, {name: 'expectedRevision'}]}], {
-            ops: [{op: 'set', expectedRevision: 0, params: {node: '/Main'}}]
-        }),
-        {ops: [{expectedRevision: 0, node: '/Main', op: 'set'}]}
-    )
-
-    // A key no parameter is named after reaches the router, which refuses it by name and offers
-    // the near miss. Dropped here, the call would run without it and answer as if it had worked.
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{op: 'open', file: 'scripts/enemy.gd'}]}), {
-        ops: [{file: 'scripts/enemy.gd', op: 'open'}]
-    })
-
-    // Unless a wrapper was written too, which is the shape the dropping was measured on: the
-    // parameters in their wrapper, and something loose beside it that was never one of them.
-    assert.deepEqual(
-        normalizeToolCalls(script, {
-            ops: [{op: 'open', thinking: 'now open it', params: {path: 'a.gd'}}]
-        }),
-        {ops: [{path: 'a.gd', op: 'open'}]}
-    )
-
-    // The wrapper as sent stays the wrapper, and it wins over a flat key of the same name.
-    assert.deepEqual(
-        normalizeToolCalls(script, {ops: [{op: 'open', path: 'a.gd', params: {path: 'b.gd'}}]}),
-        {ops: [{path: 'b.gd', op: 'open'}]}
-    )
-
-    // No list at all: the previous shape, and what a model writes when it wants one thing. A list
-    // of one rather than a refusal, because refusing it would spend a round trip teaching a bracket.
-    assert.deepEqual(normalizeToolCalls(script, {op: 'open', path: 'a.gd'}), {
-        ops: [{path: 'a.gd', op: 'open'}]
-    })
-
-    // A domain with one operation still does not need to be told which: there is only one, so a
-    // call that omits `op` is not ambiguous.
-    assert.deepEqual(normalizeToolCalls([script[0]], {ops: [{path: 'a.gd'}]}), {
-        ops: [{path: 'a.gd', op: 'open'}]
-    })
-
-    // The operation under the word the prose uses. A live turn wrote this and was refused with four
-    // `must not have additional properties` lines that never named the key it should have written.
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{operation: 'open', path: 'a.gd'}]}), {
-        ops: [{path: 'a.gd', op: 'open'}]
-    })
-
-    // `method` is a real parameter on other operations, so it is never read as the operation.
-    assert.deepEqual(
-        normalizeToolCalls([{op: 'connect', params: [{name: 'method'}]}], {
-            ops: [{op: 'connect', method: '_on_pressed'}]
-        }),
-        {ops: [{method: '_on_pressed', op: 'connect'}]}
-    )
-
-    // One list parameter split across the `ops` list. Recorded four times in one project, always
-    // the same way: the first file inside a proper `edit` entry, and every file after it written
-    // as a sibling of that entry instead of a sibling of the first file. Every one was refused
-    // with `ops.1.op: must have required properties op` — a line that names neither the key that
-    // is wrong nor the list it belonged in — and the largest of them lost six files at once.
-    assert.deepEqual(
-        normalizeToolCalls(script, {
-            ops: [
-                {op: 'edit', files: [{path: 'a.gd', edits: [{oldText: 'x', newText: 'y'}]}]},
-                {path: 'b.gd', edits: [{oldText: 'p', newText: 'q'}]},
-                {path: 'c.gd', edits: [{oldText: 'm', newText: 'n'}]}
-            ]
-        }),
-        {
-            ops: [
-                {
-                    op: 'edit',
-                    files: [
-                        {path: 'a.gd', edits: [{oldText: 'x', newText: 'y'}]},
-                        {path: 'b.gd', edits: [{oldText: 'p', newText: 'q'}]},
-                        {path: 'c.gd', edits: [{oldText: 'm', newText: 'n'}]}
-                    ]
-                }
-            ]
-        }
-    )
-
-    // A stray that does not fit the list is left where it is. The router names the operation it is
-    // missing, which is a better sentence than a file folded into an edit it was never part of.
-    assert.deepEqual(
-        normalizeToolCalls(script, {
-            ops: [
-                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
-                {path: 'b.gd', text: 'extends Node'}
-            ]
-        }),
-        {
-            ops: [
-                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
-                {path: 'b.gd', text: 'extends Node'}
-            ]
-        }
-    )
-
-    // Nothing to fold into, and no operation shaped like it: the first entry of a call is nobody's
-    // stray, and a domain of several operations still cannot guess which one it meant.
-    assert.deepEqual(
-        normalizeToolCalls(script, {
-            ops: [
-                {path: 'b.gd', edits: []},
-                {op: 'open', path: 'a.gd'}
-            ]
-        }),
-        {
-            ops: [
-                {path: 'b.gd', edits: []},
-                {path: 'a.gd', op: 'open'}
-            ]
-        }
-    )
-
-    // The parameters written without the operation they belong to. The fifth recorded refusal was
-    // an `edit` followed by four of these, and `{path, timeoutMs}` is a pair only `diagnostics`
-    // takes — so the operation is not a guess, it is the only one the keys fit.
-    assert.deepEqual(
-        normalizeToolCalls(script, {
-            ops: [
-                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
-                {path: 'a.gd', timeoutMs: 5000}
-            ]
-        }),
-        {
-            ops: [
-                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
-                {path: 'a.gd', timeoutMs: 5000, op: 'diagnostics'}
-            ]
-        }
-    )
-
-    // A pair of operations the same keys fit is still a guess, and is left for the router to name.
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{path: 'a.gd'}, {path: 'b.gd'}]}), {
-        ops: [{path: 'a.gd'}, {path: 'b.gd'}]
-    })
-})
-
-// The tagged value a model wrapped twice. One live turn against a local Qwen3.6-27B sent 51 of
-// these in 114 tool calls, and every one was refused by a sentence that named the shape it wanted
-// and never noticed that the shape it wanted was sitting inside the one it got.
-/**
- * Every repair in this layer leaves a call that was already right alone.
- *
- * The repairs are all "a model wrote this shape and meant that one", and each one is a licence to
- * rewrite a call nobody is watching. This is the other half of that: the 93 distinct shapes sixteen
- * real tasks produced, normalized against the declared contract, must come back meaning the same
- * thing. Key order is not meaning — `op` moves to the end — so the comparison is on sorted keys.
- */
-test('normalizing a recorded call changes nothing about what it says', async () => {
-    const domains = await declaredDomains()
-    const recorded = JSON.parse(
-        await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
-    )
-    const sorted = value =>
-        JSON.stringify(value, (key, held) =>
-            held && typeof held === 'object' && !Array.isArray(held) ?
-                Object.fromEntries(Object.entries(held).sort())
-            :   held
-        )
-    let checked = 0
-    for (const recordedCase of recorded.cases) {
-        const domain = domains.find(candidate => candidate.name === recordedCase.tool)
-        assert.ok(domain, `${recordedCase.tool} is recorded and is not declared`)
-        const normalized = normalizeToolCalls(domain.operations, {ops: recordedCase.ops})
-        assert.equal(
-            sorted(normalized.ops),
-            sorted(recordedCase.ops),
-            `${recordedCase.tool} ${JSON.stringify(recordedCase.ops.map(op => op.op))} was rewritten`
-        )
-        checked += 1
-    }
-    assert.ok(checked > 50, 'the fixture lost its cases')
-})
-
-test('a parameter set parked under an invented key is read as the wrapper it is', async () => {
-    const domains = await declaredDomains()
-    const project = domains.find(domain => domain.name === 'godot_project').operations
-    const script = domains.find(domain => domain.name === 'godot_script').operations
-
-    // What one live turn wrote, twice, then once more with the other parameter's name glued on.
-    assert.deepEqual(
-        normalizeToolCalls(project, {
-            ops: [
-                {
-                    op: 'set_autoload',
-                    enabled: true,
-                    path: 'res://score.gd',
-                    nameScore: {name: 'Score', path: 'res://score.gd'}
-                }
-            ]
-        }),
-        {ops: [{op: 'set_autoload', enabled: true, name: 'Score', path: 'res://score.gd'}]}
-    )
-    assert.deepEqual(
-        normalizeToolCalls(project, {
-            ops: [
-                {
-                    op: 'set_autoload',
-                    enabled: true,
-                    pathScore: {name: 'Score', path: 'res://score.gd'}
-                }
-            ]
-        }),
-        {ops: [{op: 'set_autoload', enabled: true, name: 'Score', path: 'res://score.gd'}]}
-    )
-
-    // A call already carrying every required parameter keeps its stray key, and the refusal that
-    // names it: a model that wrote a whole wrapper deliberately did not also write them flat.
-    const complete = {
-        op: 'save',
-        path: 'a.gd',
-        text: 'extends Node\n',
-        note: {path: 'b.gd', text: 'other'}
-    }
-    assert.deepEqual(normalizeToolCalls(script, {ops: [complete]}), {ops: [complete]})
-
-    // An object that does not hold every required parameter is not the parameter set.
-    const partial = {op: 'set_autoload', enabled: true, thinking: {name: 'Score'}}
-    assert.deepEqual(normalizeToolCalls(project, {ops: [partial]}), {ops: [partial]})
-
-    // An object holding a key no parameter is named after is not it either.
-    const extra = {op: 'set_autoload', held: {name: 'Score', path: 'a.gd', why: 'because'}}
-    assert.deepEqual(normalizeToolCalls(project, {ops: [extra]}), {ops: [extra]})
-
-    // Two that fit make it a guess, and a guess is left for the router to refuse by name.
-    const both = {
-        op: 'set_autoload',
-        one: {name: 'Score', path: 'a.gd'},
-        two: {name: 'Other', path: 'b.gd'}
-    }
-    assert.deepEqual(normalizeToolCalls(project, {ops: [both]}), {ops: [both]})
-})
-
-test('a parameter named with whitespace around it is named without it', async () => {
-    // The real declared contract, not a fixture: the shapes below are what a live turn wrote, and
-    // what makes them repairable is the parameter list the router will hold them to.
-    const domains = await declaredDomains()
-    const node = domains.find(domain => domain.name === 'godot_node').operations
-
-    // Three times in one turn, the same call resent unchanged after being refused by name.
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [
-                {
-                    op: 'connect_signal',
-                    'node ': '/Coin',
-                    'signal ': 'body_entered',
-                    method: '_on_body_entered'
-                }
-            ]
-        }),
-        {
-            ops: [
-                {
-                    op: 'connect_signal',
-                    node: '/Coin',
-                    signal: 'body_entered',
-                    method: '_on_body_entered'
-                }
-            ]
-        }
-    )
-
-    // Inside a list parameter's entries, the same way a double tag is unwrapped there.
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [
-                {
-                    op: 'set_properties',
-                    properties: [
-                        {
-                            ' node': '/Player',
-                            property: 'visible',
-                            value: {type: 'bool', value: true}
-                        }
-                    ]
-                }
-            ]
-        }),
-        {
-            ops: [
-                {
-                    op: 'set_properties',
-                    properties: [
-                        {node: '/Player', property: 'visible', value: {type: 'bool', value: true}}
-                    ]
-                }
-            ]
-        }
-    )
-
-    // A padded key the operation does not declare is left where it is, for the router to refuse by
-    // name — trimming it would invent a parameter and be refused for that instead.
-    assert.deepEqual(
-        normalizeToolCalls(node, {ops: [{op: 'connect_signal', 'signaller ': '/Coin'}]}),
-        {
-            ops: [{op: 'connect_signal', 'signaller ': '/Coin'}]
-        }
-    )
-
-    // A padded key beside the real one is left alone too: the entry already carries the name, and
-    // the model wrote the unpadded one deliberately.
-    assert.deepEqual(
-        normalizeToolCalls(node, {ops: [{op: 'connect_signal', node: '/Coin', 'node ': '/Other'}]}),
-        {ops: [{op: 'connect_signal', node: '/Coin', 'node ': '/Other'}]}
-    )
-
-    // A dictionary payload's keys are the caller's own, and the walk stops at a tagged value rather
-    // than reaching into one.
-    const padded = {
-        type: 'dictionary',
-        value: [{key: {type: 'string', value: 'node '}, value: {type: 'int', value: 1}}]
-    }
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [{op: 'set_property', node: '/P', property: 'meta', value: padded}]
-        }),
-        {ops: [{op: 'set_property', node: '/P', property: 'meta', value: padded}]}
-    )
-})
-
-test('a tagged value wrapped twice is unwrapped rather than refused', () => {
-    const node = [
-        {
-            op: 'set_property',
-            params: [
-                {name: 'node', kind: 'text', required: true},
-                {name: 'property', kind: 'text', required: true},
-                {name: 'value', kind: 'tagged', required: true}
-            ]
-        },
-        {
-            op: 'set_properties',
-            params: [
-                {
-                    name: 'properties',
-                    kind: 'list',
-                    required: true,
-                    entry: [
-                        {name: 'node', kind: 'text', required: true},
-                        {name: 'property', kind: 'text', required: true},
-                        {name: 'value', kind: 'tagged', required: true}
-                    ]
-                }
-            ]
-        }
-    ]
-
-    const twice = tag => ({type: 'vector2', value: tag})
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [
-                {
-                    op: 'set_property',
-                    node: '/Player',
-                    property: 'position',
-                    value: twice({type: 'vector2', value: [32, 48]})
-                }
-            ]
-        }),
-        {
-            ops: [
-                {
-                    op: 'set_property',
-                    node: '/Player',
-                    property: 'position',
-                    value: {type: 'vector2', value: [32, 48]}
-                }
-            ]
-        }
-    )
-
-    // The protocol's word outside and the engine's inside. One live turn wrote
-    // `{type: "string", value: {type: "String", value: "Resume"}}` and was refused sixteen times
-    // over twelve minutes, while `{type: "bool", value: {type: "bool", value: false}}` in the same
-    // call went straight through. No two protocol tags differ only in case, so folding it is safe,
-    // and the value that comes out carries the lowercase spelling whichever side wrote it.
-    for (const wrapper of [
-        {type: 'string', value: {type: 'String', value: 'Resume'}},
-        {type: 'String', value: {type: 'string', value: 'Resume'}}
-    ])
-        assert.deepEqual(
-            normalizeToolCalls(node, {
-                ops: [{op: 'set_property', node: '/Resume', property: 'text', value: wrapper}]
-            }),
-            {
-                ops: [
-                    {
-                        op: 'set_property',
-                        node: '/Resume',
-                        property: 'text',
-                        value: {type: 'string', value: 'Resume'}
-                    }
-                ]
-            }
-        )
-
-    // And one wrapper written the same way. The model that knew both words wrote Godot's spelling
-    // in the tag it wrote once as readily as in the tag it wrote twice, and the router looks the
-    // tag up case-sensitively — so `{type: "String", value: "Resume"}` was refused with "`String`
-    // is not a value type" while the double-wrapped form beside it was repaired.
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [
-                {
-                    op: 'set_property',
-                    node: '/Resume',
-                    property: 'text',
-                    value: {type: 'String', value: 'Resume'}
-                }
-            ]
-        }),
-        {
-            ops: [
-                {
-                    op: 'set_property',
-                    node: '/Resume',
-                    property: 'text',
-                    value: {type: 'string', value: 'Resume'}
-                }
-            ]
-        }
-    )
-
-    // Two tags that are genuinely different are still left for the router, which says what it got.
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [
-                {
-                    op: 'set_property',
-                    node: '/Player',
-                    property: 'speed',
-                    value: {type: 'int', value: {type: 'float', value: 1}}
-                }
-            ]
-        }),
-        {
-            ops: [
-                {
-                    op: 'set_property',
-                    node: '/Player',
-                    property: 'speed',
-                    value: {type: 'int', value: {type: 'float', value: 1}}
-                }
-            ]
-        }
-    )
-
-    // Inside a list parameter's entries too, which is where `set_properties` carries them.
-    assert.deepEqual(
-        normalizeToolCalls(node, {
-            ops: [
-                {
-                    op: 'set_properties',
-                    properties: [
-                        {
-                            node: '/Player',
-                            property: 'position',
-                            value: twice({type: 'vector2', value: [1, 2]})
-                        },
-                        {node: '/Player', property: 'visible', value: {type: 'bool', value: true}}
-                    ]
-                }
-            ]
-        }),
-        {
-            ops: [
-                {
-                    op: 'set_properties',
-                    properties: [
-                        {
-                            node: '/Player',
-                            property: 'position',
-                            value: {type: 'vector2', value: [1, 2]}
-                        },
-                        {node: '/Player', property: 'visible', value: {type: 'bool', value: true}}
-                    ]
-                }
-            ]
-        }
-    )
-
-    // Only the same tag twice. Two different tags is not a wrapper a caller meant to write, and
-    // guessing which of them is the real one is not this layer's to do.
-    const mixed = {
-        op: 'set_property',
-        node: '/Player',
-        property: 'position',
-        value: {type: 'vector2', value: {type: 'float', value: 1}}
-    }
-    assert.deepEqual(normalizeToolCalls(node, {ops: [mixed]}), {ops: [mixed]})
-
-    // And a value that was right is untouched, including one whose payload is an object of its own.
-    const resource = {
-        op: 'set_property',
-        node: '/Player',
-        property: 'script',
-        value: {type: 'resource', value: {path: 'res://scripts/player.gd'}}
-    }
-    assert.deepEqual(normalizeToolCalls(node, {ops: [resource]}), {ops: [resource]})
-})
-
-test('a call is a list, and a bare operation is a list of one', async () => {
-    const calls = []
-    const host = {
-        call: (tool, params) => {
-            calls.push({tool, params})
-            return Promise.resolve({passages: []})
-        }
-    }
-    const [scene, , , docs] = createGodotTools(catalog, host)
-
-    // As the agent loop drives it: arguments are prepared, then validated against the schema, then
-    // executed. Repair that happened after validation would already have been refused.
-    const drive = (tool, id, args) => tool.execute(id, tool.prepareArguments(args))
-
-    // Three questions in one call, which is the whole reason the list exists. Sent one at a time,
-    // each would be a turn of its own waiting on the one before it.
-    await drive(docs, 'call-1', {
-        ops: [{question: 'Camera2D shake'}, {question: 'TileMapLayer'}, {question: 'AnimationTree'}]
-    })
-    // The op is the only one there is, so an entry that omits it is not ambiguous — and a call with
-    // no list at all is the one a model writes when it reads the operation line and nothing else.
-    await drive(docs, 'call-2', {question: 'Camera2D shake'})
-    await drive(docs, 'call-3', {op: 'search', params: {question: 'Camera2D shake'}})
-    assert.deepEqual(
-        calls.map(call => call.params),
-        [
-            {
-                ops: [
-                    {question: 'Camera2D shake', op: 'search'},
-                    {question: 'TileMapLayer', op: 'search'},
-                    {question: 'AnimationTree', op: 'search'}
-                ]
-            },
-            {ops: [{question: 'Camera2D shake', op: 'search'}]},
-            {ops: [{question: 'Camera2D shake', op: 'search'}]}
-        ]
-    )
-
-    // Every tool asks for the list, whatever it holds.
-    assert.deepEqual(scene.parameters.required, ['ops'])
-    assert.deepEqual(docs.parameters.required, ['ops'])
-})
-
-test('captured frames become image content and large results are bounded', () => {
-    const captured = toolResult({
-        running: true,
-        frame: {encoding: 'png-base64', width: 320, height: 240, data: 'iVBORw0KGgo='}
-    })
-
-    assert.deepEqual(captured.content[1], {
-        type: 'image',
-        data: 'iVBORw0KGgo=',
-        mimeType: 'image/png'
-    })
-    assert.equal(JSON.parse(captured.content[0].text).frame.data, undefined)
-    assert.equal(JSON.parse(captured.content[0].text).frame.width, 320)
-    assert.equal(captured.details.frame.data, 'iVBORw0KGgo=')
-
-    // The value that is too big is what gets cut, so the answer around it is still an answer: it
-    // parses, the key is still there, and the cut says how long the value really was.
-    const huge = toolResult({nodes: 'x'.repeat(40_000)})
-    assert.equal(huge.content.length, 1)
-    assert.ok(huge.content[0].text.length <= 24_000)
-    assert.match(JSON.parse(huge.content[0].text).nodes, /… \[truncated, 40000 characters\]$/u)
-    assert.equal(huge.details.nodes.length, 40_000)
-
-    // A call is a list, and one enormous entry used to take the whole list down with it: the
-    // serialized answer was sliced, so the second and third operations were not answered, not
-    // refused, and not mentioned. Every entry survives now, and only the value that was too big
-    // is short.
-    const listed = toolResult({
-        ops: [
-            {op: 'inspect', result: {node: '/Main', properties: {mesh: 'm'.repeat(60_000)}}},
-            {op: 'inspect', result: {node: '/Main/Player', properties: {position: '(0, 0)'}}},
-            {op: 'inspect', result: {node: '/Main/Camera', properties: {zoom: '(2, 2)'}}}
-        ]
-    })
-    const answered = JSON.parse(listed.content[0].text)
-    assert.equal(listed.content[0].text.length <= 24_000, true)
-    assert.equal(answered.ops.length, 3)
-    assert.deepEqual(
-        answered.ops.map(entry => entry.result.node),
-        ['/Main', '/Main/Player', '/Main/Camera']
-    )
-    assert.equal(answered.ops[1].result.properties.position, '(0, 0)')
-    assert.equal(answered.ops[2].result.properties.zoom, '(2, 2)')
-    assert.match(answered.ops[0].result.properties.mesh, /… \[truncated, 60000 characters\]$/u)
-
-    // Several large values in one answer are each cut, rather than the first one paying for all.
-    const two = toolResult({
-        ops: [
-            {op: 'open', result: {path: 'a.gd', text: 'a'.repeat(40_000)}},
-            {op: 'open', result: {path: 'b.gd', text: 'b'.repeat(40_000)}}
-        ]
-    })
-    const both = JSON.parse(two.content[0].text)
-    assert.equal(two.content[0].text.length <= 24_000, true)
-    assert.deepEqual(
-        both.ops.map(entry => entry.result.path),
-        ['a.gd', 'b.gd']
-    )
-    for (const entry of both.ops)
-        assert.match(entry.result.text, /… \[truncated, 40000 characters\]$/u)
-
-    // One length for all of them, not one budget each. A hundred scripts come back as a hundred
-    // paths with their first lines, rather than the first one whole and ninety-nine missing.
-    const listing = toolResult({
-        ops: [
-            {
-                op: 'list',
-                result: {
-                    files: Array.from({length: 100}, (_, index) => ({
-                        path: `scripts/s${String(index)}.gd`,
-                        text: 'x'.repeat(30_000)
-                    }))
-                }
-            }
-        ]
-    })
-    const files = JSON.parse(listing.content[0].text).ops[0].result.files
-    assert.equal(listing.content[0].text.length <= 24_000, true)
-    assert.equal(files.length, 100)
-    assert.equal(files[99].path, 'scripts/s99.gd')
-    assert.equal(new Set(files.map(file => file.text.length)).size, 1)
-
-    // An answer that is repetition rather than one big value: the list loses its tail, and every
-    // entry that stays is whole.
-    //
-    // Capping cannot reach the budget here and every cap makes it worse: `godot_node inspect` on a
-    // Control is four hundred short properties whose longest string is 35 characters, and
-    // `… [truncated, N characters]` is 28. Measured on exactly that answer before this: the search
-    // bottomed out, every property name became `… [truncated, 35 characters]`, the result was
-    // sliced anyway, and what reached the model was 24,031 characters of unparseable rubble
-    // claiming 45,680 characters had been dropped — more than the answer had ever held.
-    const wide = toolResult({
-        ops: [
-            {
-                op: 'inspect',
-                result: {
-                    path: '/Main/Panel',
-                    type: 'PanelContainer',
-                    properties: Array.from({length: 400}, (_, i) => ({
-                        name: `theme_override_constants/margin_${String(i)}`,
-                        value: {type: 'int', value: i},
-                        stored: false
-                    }))
-                }
-            }
-        ]
-    })
-    assert.ok(wide.content[0].text.length <= 24_000)
-    const inspected = JSON.parse(wide.content[0].text).ops[0].result
-    assert.equal(inspected.type, 'PanelContainer', 'the keys around the list all survive')
-    assert.ok(inspected.properties.length > 40, 'a useful number of entries survives whole')
-    assert.deepEqual(
-        inspected.properties[0],
-        {name: 'theme_override_constants/margin_0', value: {type: 'int', value: 0}, stored: false},
-        'and the ones that survive are untouched, names and all'
-    )
-    assert.match(inspected.properties.at(-1), /^… \[truncated, \d+ more entries\]$/u)
-
-    // A short list is left whole, because cutting one makes the answer bigger.
-    //
-    // `… [truncated, N more entries]` is 32 characters and `[12.5,34.25]` is 12, so an encoded
-    // vector2 costs more to shorten than to keep — and every list was shortened whether it helped
-    // or not. Measured on four hundred vector2 properties keyed by name: 31,833 characters in,
-    // 24,031 out, every pair replaced by the marker, and the result sliced anyway and unparseable.
-    // The same rubble the list-shortening was written to stop the string capping making.
-    const paired = toolResult({
-        ops: [
-            {
-                op: 'inspect',
-                result: {
-                    path: '/Main/Panel',
-                    type: 'PanelContainer',
-                    properties: Object.fromEntries(
-                        Array.from({length: 400}, (_, i) => [
-                            `theme_override_constants/margin_${String(i)}`,
-                            {type: 'vector2', value: [12.5 + i, 34.25 + i]}
-                        ])
-                    )
-                }
-            }
-        ]
-    })
-    assert.doesNotMatch(
-        paired.content[0].text,
-        /more entries/u,
-        'a two-entry list costs more to shorten than to keep, so it is kept'
-    )
-    assert.match(paired.content[0].text, /\[12\.5,34\.25\]/u, 'and its values are still there')
-
-    // Nothing long enough to cut, no list to shorten, and still too big: the slice is the answer of
-    // last resort, and it is the behaviour every oversized answer used to get.
-    const many = toolResult(Object.fromEntries(Array.from({length: 4_000}, (_, i) => [`k${i}`, i])))
-    assert.ok(many.content[0].text.length <= 24_100)
-    assert.match(many.content[0].text, /… \[truncated, \d+ characters\]$/u)
-})
-
 /** A model that answers with one tool call, then with text once the tool result comes back. */
 function startToolCallingServer(tool, args) {
     let turn = 0
@@ -1679,7 +755,7 @@ function startToolCallingServer(tool, args) {
                     id: 'chatcmpl-tool',
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [{index: 0, delta, finish_reason: null}]
                 })}\n\n`
             )
@@ -1688,7 +764,7 @@ function startToolCallingServer(tool, args) {
                     id: 'chatcmpl-tool',
                     object: 'chat.completion.chunk',
                     created: 1,
-                    model: settings.model,
+                    model: MODEL_ID,
                     choices: [
                         {index: 0, delta: {}, finish_reason: turn === 1 ? 'tool_calls' : 'stop'}
                     ],
@@ -1735,7 +811,7 @@ test('the worker asks the backend for domain tools over the duplex channel', asy
 
     worker.stdin.write(
         `${JSON.stringify({
-            settings: {...settings, baseUrl: `http://127.0.0.1:${String(port)}/v1`},
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`),
             messages: [{sender: 'user', text: 'Inspect the scene', timestamp: 1}],
             workspacePath: workspace.path,
             tools: catalog
@@ -1766,6 +842,75 @@ test('the worker asks the backend for domain tools over the duplex channel', asy
     assert.equal(events.find(event => event.type === 'done').text, 'Scene inspected')
 })
 
+/**
+ * Stopping a turn used to be one thing: `child.kill()`.
+ *
+ * So the worker's whole abort path — the listener that calls `agent.abort()`, the `aborted`
+ * completion it builds, the interruptible retry wait, the sub-agent's `SubagentStopped` — was
+ * threaded through fifteen functions and reached by no running Gofer: `scripts/ai-worker.mjs` built
+ * no `AbortController` and passed `undefined` where all four read a signal. `grep -c signal
+ * scripts/ai-worker.mjs` answered 0.
+ *
+ * The stop is written while the worker is provably in flight — blocked on a tool call it asked for
+ * — and the answer to that call is written straight after it, so a worker that ignores the line
+ * still finishes. That is what makes this test about which ending the turn reached rather than
+ * about whether it reached one: without the line being honoured the model is asked again, answers,
+ * and the turn ends `stop` with the second answer as its text.
+ */
+test('a cancel line on the channel stops the turn the worker is running', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const server = startToolCallingServer('godot_scene', {op: 'get_tree', params: {}})
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    context.after(() => server.close())
+    const port = server.address().port
+
+    const worker = spawn(process.execPath, [WORKER_ENTRY], {cwd: process.cwd()})
+    context.after(() => worker.kill())
+    const events = []
+    const finished = new Promise(resolve => worker.on('exit', resolve))
+    createInterface({input: worker.stdout}).on('line', line => {
+        if (line.startsWith(TOOL_PREFIX)) {
+            const call = JSON.parse(line.slice(TOOL_PREFIX.length))
+            if (isProbe(call)) {
+                worker.stdin.write(`${JSON.stringify(probeResult(call))}\n`)
+                return
+            }
+            worker.stdin.write(`${JSON.stringify({type: CANCEL_TYPE})}\n`)
+            worker.stdin.write(
+                `${JSON.stringify({
+                    type: 'tool-result',
+                    id: call.id,
+                    ok: true,
+                    result: {root: 'Main', revision: 4}
+                })}\n`
+            )
+            return
+        }
+        if (line.startsWith(EVENT_PREFIX)) events.push(JSON.parse(line.slice(EVENT_PREFIX.length)))
+    })
+
+    worker.stdin.write(
+        `${JSON.stringify({
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`),
+            messages: [{sender: 'user', text: 'Inspect the scene', timestamp: 1}],
+            workspacePath: workspace.path,
+            tools: catalog
+        })}\n`
+    )
+
+    await finished
+    const done = events.find(event => event.type === 'done')
+    assert.equal(done?.stopReason, 'aborted')
+    // The half-finished turn is still on the transcript. That is what a bare kill loses: no step
+    // ends, so nothing checkpoints, and the model's memory of the stopped turn stops at the last
+    // step that had already finished.
+    assert.ok(
+        events.some(event => event.type === 'turn-state'),
+        'a stopped turn checkpoints what the model had done'
+    )
+})
+
 test('a refused tool call reaches the model as an error result', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1788,7 +933,7 @@ test('a refused tool call reaches the model as an error result', async context =
     )
 
     await runAgent({
-        settings: {...settings, baseUrl: `http://127.0.0.1:${String(port)}/v1`},
+        settings: servedBy(`http://127.0.0.1:${String(port)}/v1`),
         messages: [{sender: 'user', text: 'Save the scene', timestamp: 1}],
         workspacePath: workspace.path,
         tools: catalog,
@@ -1815,10 +960,7 @@ test('the system prompt reaches the model as it arrived, with this turn’s memo
         await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
         try {
             await runAgent({
-                settings: {
-                    ...settings,
-                    baseUrl: `http://127.0.0.1:${String(mock.server.address().port)}/v1`
-                },
+                settings: servedBy(`http://127.0.0.1:${String(mock.server.address().port)}/v1`),
                 systemPrompt: 'Be brief. Never mention cats.',
                 messages: [{sender: 'user', text: 'Hello', timestamp: 1}],
                 workspacePath: workspace.path,
@@ -1913,7 +1055,7 @@ function startScriptedServer(turns) {
                 id: `chatcmpl-${String(turn)}`,
                 object: 'chat.completion.chunk',
                 created: 1,
-                model: settings.model,
+                model: MODEL_ID,
                 choices
             })
             response.writeHead(200, {'content-type': 'text/event-stream'})
@@ -1980,7 +1122,7 @@ test('parallel domain calls are answered out of order without crossing results',
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Inspect and capture', timestamp: 1}],
         workspacePath: workspace.path,
         tools: catalog,
@@ -2024,7 +1166,7 @@ test('aborting a turn cancels the domain tool call it is waiting on', async cont
     const events = []
 
     const completion = runAgent({
-        settings: {...settings, baseUrl: url, maxRetries: 0},
+        settings: servedBy(url, {maxRetries: 0}),
         messages: [{sender: 'user', text: 'Inspect the scene', timestamp: 1}],
         workspacePath: workspace.path,
         tools: catalog,
@@ -2067,7 +1209,7 @@ test('a tool call left unanswered is settled when the backend closes the channel
 
     worker.stdin.write(
         `${JSON.stringify({
-            settings: {...settings, baseUrl: url},
+            settings: servedBy(url),
             messages: [{sender: 'user', text: 'Inspect the scene', timestamp: 1}],
             workspacePath: workspace.path,
             tools: catalog
@@ -2106,7 +1248,7 @@ test('a denied approval reaches the model as approval_denied without failing the
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Delete main.tscn', timestamp: 1}],
         workspacePath: workspace.path,
         tools: catalog,
@@ -2149,7 +1291,7 @@ test('a captured frame reaches the model as an image and not as base64 in the to
     const events = []
 
     await runAgent({
-        settings: {...settings, baseUrl: url, input: ['text', 'image']},
+        settings: servedBy(url, {model: {input: ['text', 'image']}}),
         messages: [{sender: 'user', text: 'Capture the game', timestamp: 1}],
         workspacePath: workspace.path,
         tools: catalog,
@@ -2183,7 +1325,7 @@ test('the confined shell does destructive work in the worktree without asking an
     const events = []
 
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Remove the stale file', timestamp: 1}],
         workspacePath: workspace.path,
         tools: catalog,
@@ -2225,7 +1367,7 @@ test('a declared tool that cannot answer stops the turn before the model is aske
 
     await assert.rejects(
         runAgent({
-            settings: {...settings, baseUrl: url},
+            settings: servedBy(url),
             messages: [{sender: 'user', text: 'How does Tween work?', timestamp: 1}],
             workspacePath: workspace.path,
             tools: catalog,
@@ -2284,7 +1426,7 @@ test('a dead tool fails worker startup loudly rather than quietly', async contex
 
     worker.stdin.write(
         `${JSON.stringify({
-            settings: {...settings, baseUrl: url},
+            settings: servedBy(url),
             messages: [{sender: 'user', text: 'How does Tween work?', timestamp: 1}],
             workspacePath: workspace.path,
             tools: catalog
@@ -2310,7 +1452,7 @@ test('the workspace tools are proven against the workspace, not assumed', async 
 
     await assert.rejects(
         runAgent({
-            settings: {...settings, baseUrl: url},
+            settings: servedBy(url),
             messages: [{sender: 'user', text: 'Fix the script', timestamp: 1}],
             // The worktree the turn was given is gone. Every file tool is dead, and the shell has
             // nowhere to start.
@@ -2433,7 +1575,7 @@ function longConversation(pairs, characters) {
             content: [{type: 'text', text: 'a'.repeat(characters)}],
             api: 'openai-completions',
             provider: 'local',
-            model: settings.model,
+            model: MODEL_ID,
             usage: NO_USAGE,
             stopReason: 'stop',
             timestamp: index * 2 + 2
@@ -2451,7 +1593,7 @@ test('a conversation past the compaction line is summarised before the turn', as
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
         agentMessages: history,
         workspacePath: workspace.path,
@@ -2498,7 +1640,7 @@ test('compaction set to 100 percent sends the conversation whole', async context
     const history = longConversation(60, 3_500)
 
     await runAgent({
-        settings: {...settings, baseUrl: url, compactionPercent: 100},
+        settings: servedBy(url, {compactionPercent: 100}),
         systemPrompt: 'You are Gofer.',
         messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
         agentMessages: history,
@@ -2537,7 +1679,7 @@ test('a turn that crosses the line mid-flight compacts before its next request',
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
         agentMessages: history,
         workspacePath: workspace.path,
@@ -2586,7 +1728,7 @@ test('a context overflow from the model compacts and retries instead of failing 
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, baseUrl: url, maxRetries: 0},
+        settings: servedBy(url, {maxRetries: 0}),
         messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
         agentMessages: history,
         workspacePath: workspace.path,
@@ -2622,7 +1764,7 @@ test('overflow recovery is attempted once, not forever', async context => {
 
     await assert.rejects(
         runAgent({
-            settings: {...settings, baseUrl: url, maxRetries: 0},
+            settings: servedBy(url, {maxRetries: 0}),
             messages: [{sender: 'user', text: 'Keep going', timestamp: 999}],
             agentMessages: longConversation(30, 3_500),
             workspacePath: workspace.path,
@@ -2644,7 +1786,7 @@ test('a turn reports what the agent remembers at every step, not only at the end
     const events = []
 
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Run it', timestamp: 1}],
         agentMessages: [],
         workspacePath: workspace.path,
@@ -2677,7 +1819,7 @@ test('a retry drops the abandoned answer and does not ask the prompt twice', asy
             content: [{type: 'text', text: 'Starting on it'}],
             api: 'openai-completions',
             provider: 'local',
-            model: settings.model,
+            model: MODEL_ID,
             usage: NO_USAGE,
             stopReason: 'stop',
             timestamp: 11
@@ -2685,7 +1827,7 @@ test('a retry drops the abandoned answer and does not ask the prompt twice', asy
     ]
 
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Build the level', timestamp: 10}],
         agentMessages: crashed,
         isRetry: true,
@@ -2720,7 +1862,7 @@ function toolStep(marker, at) {
             ],
             api: 'openai-completions',
             provider: 'local',
-            model: settings.model,
+            model: MODEL_ID,
             usage: NO_USAGE,
             stopReason: 'toolUse',
             timestamp: at
@@ -2745,7 +1887,7 @@ function settledTurn(prompt, answer, at) {
             content: [{type: 'text', text: answer}],
             api: 'openai-completions',
             provider: 'local',
-            model: settings.model,
+            model: MODEL_ID,
             usage: NO_USAGE,
             stopReason: 'stop',
             timestamp: at + 1
@@ -2767,7 +1909,7 @@ test('a retry of a turn that never checkpointed keeps the turns before it', asyn
     ]
 
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [
             {sender: 'user', text: 'Build the level', timestamp: 1},
             {sender: 'assistant', text: 'Built it', timestamp: 2},
@@ -2806,7 +1948,7 @@ test('a retry keeps the work the turn already did', async context => {
     ]
 
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         // What `retryPlan` sends: every message except the reply being rewritten, so the last one
         // is the user turn being asked again.
         messages: [
@@ -2842,7 +1984,7 @@ test('a retry of a turn that answered replaces the answer, not the work', async 
             content: [{type: 'text', text: 'I gave up'}],
             api: 'openai-completions',
             provider: 'local',
-            model: settings.model,
+            model: MODEL_ID,
             usage: NO_USAGE,
             stopReason: 'error',
             errorMessage: 'connection lost',
@@ -2851,7 +1993,7 @@ test('a retry of a turn that answered replaces the answer, not the work', async 
     ]
 
     const completion = await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Debug errors', timestamp: 3}],
         agentMessages: transcript,
         isRetry: true,
@@ -2867,7 +2009,32 @@ test('a retry of a turn that answered replaces the answer, not the work', async 
 })
 
 /** The turn-level retry only. `maxRetries: 0` switches the provider's own HTTP retry off. */
-const impatient = {maxRetries: 0, retryBaseDelayMs: 1, retryMaxDelayMs: 1}
+const impatient = {maxRetries: 0}
+
+/**
+ * A clock that owes nothing: every wait is written down and then run at once.
+ *
+ * The retry policy used to be proved by shortening it — `retryBaseDelayMs: 1` — which paid real
+ * milliseconds to test a curve that was no longer the shipped one. On this clock the tests run the
+ * defaults, five seconds doubling to a minute, and `waited` is what the loop actually asked for.
+ */
+function instantTimers() {
+    const waited = []
+    return {
+        waited,
+        now: () => Date.now(),
+        schedule(fn, ms) {
+            waited.push(ms)
+            queueMicrotask(fn)
+            return waited.length
+        },
+        cancel: () => undefined,
+        repeat: (fn, ms) => setInterval(fn, ms),
+        stopRepeat: handle => {
+            clearInterval(handle)
+        }
+    }
+}
 
 test('the wait doubles from five seconds and is held at a minute', () => {
     const policy = {baseDelayMs: 5_000, maxDelayMs: 60_000}
@@ -2888,16 +2055,21 @@ test('a turn whose model drops out is asked again by itself', async context => {
     ])
     const url = await baseUrl(context, mock.server)
     const events = []
+    const timers = instantTimers()
 
     const completion = await runAgent({
-        settings: {...settings, ...impatient, baseUrl: url},
+        settings: servedBy(url, impatient),
         messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
         agentMessages: [],
         workspacePath: workspace.path,
+        timers,
         emit: event => events.push(event)
     })
 
     assert.equal(completion.text, 'Back online')
+    // The shipped policy, run rather than shortened: the first wait is five seconds and nothing
+    // sat through it.
+    assert.deepEqual(timers.waited, [5_000])
     const scheduled = events.filter(event => event.type === 'retry-scheduled')
     assert.equal(scheduled.length, 1)
     assert.equal(scheduled[0].attempt, 1)
@@ -2915,13 +2087,15 @@ test('a turn gives up once its retry budget is spent', async context => {
     const mock = startScriptedServer([{error: {status: 503, message: 'service unavailable'}}])
     const url = await baseUrl(context, mock.server)
     const events = []
+    const timers = instantTimers()
 
     await assert.rejects(
         runAgent({
-            settings: {...settings, ...impatient, baseUrl: url, retryAttempts: 2},
+            settings: servedBy(url, {...impatient, retryAttempts: 2}),
             messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
             agentMessages: [],
             workspacePath: workspace.path,
+            timers,
             emit: event => events.push(event)
         }),
         /unavailable/iu
@@ -2930,6 +2104,8 @@ test('a turn gives up once its retry budget is spent', async context => {
     // The first ask, then two retries. Not forever.
     assert.equal(mock.bodies.length, 3)
     assert.equal(events.filter(event => event.type === 'retry-scheduled').length, 2)
+    // Doubling, on the real numbers, and the whole test paid neither wait.
+    assert.deepEqual(timers.waited, [5_000, 10_000])
 })
 
 test('a failure that will not fix itself is not waited on', async context => {
@@ -2941,13 +2117,15 @@ test('a failure that will not fix itself is not waited on', async context => {
     ])
     const url = await baseUrl(context, mock.server)
     const events = []
+    const timers = instantTimers()
 
     await assert.rejects(
         runAgent({
-            settings: {...settings, ...impatient, baseUrl: url},
+            settings: servedBy(url, impatient),
             messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
             agentMessages: [],
             workspacePath: workspace.path,
+            timers,
             emit: event => events.push(event)
         }),
         /quota/iu
@@ -2955,6 +2133,7 @@ test('a failure that will not fix itself is not waited on', async context => {
 
     assert.equal(mock.bodies.length, 1)
     assert.ok(!events.some(event => event.type === 'retry-scheduled'))
+    assert.deepEqual(timers.waited, [])
 })
 
 test('a turn that stops without saying anything is asked again', async context => {
@@ -2968,10 +2147,11 @@ test('a turn that stops without saying anything is asked again', async context =
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, ...impatient, baseUrl: url},
+        settings: servedBy(url, impatient),
         messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
         agentMessages: [],
         workspacePath: workspace.path,
+        timers: instantTimers(),
         emit: event => events.push(event)
     })
 
@@ -2995,10 +2175,11 @@ test('a turn that only thought and never answered is asked again', async context
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, ...impatient, baseUrl: url, reasoning: true},
+        settings: servedBy(url, {...impatient, model: {reasoning: true}}),
         messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
         agentMessages: [],
         workspacePath: workspace.path,
+        timers: instantTimers(),
         emit: event => events.push(event)
     })
 
@@ -3014,10 +2195,11 @@ test('a turn that only ever stops without saying anything gives up loudly', asyn
 
     await assert.rejects(
         runAgent({
-            settings: {...settings, ...impatient, baseUrl: url, retryAttempts: 2},
+            settings: servedBy(url, {...impatient, retryAttempts: 2}),
             messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
             agentMessages: [],
             workspacePath: workspace.path,
+            timers: instantTimers(),
             emit: () => undefined
         }),
         /empty/iu
@@ -3035,7 +2217,7 @@ test('an ordinary turn keeps the transcript it was given', async context => {
     const history = longConversation(2, 20)
 
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'Next', timestamp: 99}],
         agentMessages: history,
         workspacePath: workspace.path,
@@ -3055,7 +2237,7 @@ test('an empty transcript is rebuilt from the conversation on screen', async con
     // What a task looks like after its first turn failed: three messages on screen, and a model
     // that was never told any of them.
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [
             {sender: 'user', text: 'Earlier question', timestamp: 1},
             {sender: 'assistant', text: 'Earlier answer', timestamp: 2},
@@ -3083,7 +2265,7 @@ test('a first turn with nothing behind it rebuilds nothing', async context => {
     const events = []
 
     await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'First question', timestamp: 1}],
         agentMessages: [],
         workspacePath: workspace.path,
@@ -3112,7 +2294,7 @@ test('a delegated question comes back as an answer, not as what it read', async 
     const events = []
 
     const completion = await runAgent({
-        settings: {...settings, baseUrl: url},
+        settings: servedBy(url),
         messages: [{sender: 'user', text: 'How fast does the player move?', timestamp: 1}],
         workspacePath: workspace.path,
         emit: event => events.push(event)
@@ -3141,14 +2323,16 @@ test('a delegated question comes back as an answer, not as what it read', async 
 /** A child given a model of its own: a small one to read with, on the connection it names. */
 const SMALL_MODEL = {
     connectionType: 'openai-compatible',
-    model: 'small.gguf',
-    modelName: 'Small',
-    contextWindow: 8192,
-    maxTokens: 4096,
-    reasoning: false,
-    supportsReasoningEffort: false,
-    input: ['text'],
-    thinkingLevel: 'off'
+    model: {
+        id: 'small.gguf',
+        name: 'Small',
+        contextWindow: 8192,
+        maxTokens: 4096,
+        reasoning: false,
+        supportsReasoningEffort: false,
+        input: ['text'],
+        thinkingLevel: 'off'
+    }
 }
 
 /*
@@ -3167,19 +2351,15 @@ test('a delegation is answered by the model the sub-agent was given, not the par
     const url = await baseUrl(context, mock.server)
 
     await runAgent({
-        settings: {
-            ...settings,
-            baseUrl: url,
-            subagent: {connection: SMALL_MODEL}
-        },
+        settings: servedBy(url, {subagent: {connection: SMALL_MODEL}}),
         messages: [{sender: 'user', text: 'How fast does the player move?', timestamp: 1}],
         workspacePath: workspace.path,
         emit: () => undefined
     })
 
-    assert.equal(mock.bodies[0].model, settings.model)
+    assert.equal(mock.bodies[0].model, MODEL_ID)
     assert.equal(mock.bodies[1].model, 'small.gguf')
-    assert.equal(mock.bodies[2].model, settings.model)
+    assert.equal(mock.bodies[2].model, MODEL_ID)
 })
 
 /*
@@ -3196,9 +2376,17 @@ test('registers both connections when the sub-agent is on the other one', async 
         settings: {
             ...settings,
             connectionType: 'openai-codex',
-            model: 'gpt-5.4-mini',
             maxRetries: 0,
-            local: {...settings, baseUrl: 'http://127.0.0.1:1/v1'},
+            connections: {
+                ...servedBy('http://127.0.0.1:1/v1').connections,
+                'openai-codex': {
+                    name: 'ChatGPT subscription',
+                    baseUrl: 'https://chatgpt.com/backend-api',
+                    api: 'openai-codex-responses',
+                    chatTemplateThinking: false,
+                    model: {id: 'gpt-5.4-mini'}
+                }
+            },
             subagent: {connection: SMALL_MODEL}
         },
         messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
@@ -3221,7 +2409,7 @@ test('stops the turn by name when the sub-agent has nowhere to run', async conte
 
     const start = configuration =>
         runAgent({
-            settings: {...settings, baseUrl: url, ...configuration},
+            settings: {...servedBy(url), ...configuration},
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -3234,8 +2422,15 @@ test('stops the turn by name when the sub-agent has nowhere to run', async conte
     assert.match(
         await start({
             connectionType: 'openai-codex',
-            model: 'gpt-5.4-mini',
-            local: undefined,
+            connections: {
+                'openai-codex': {
+                    name: 'ChatGPT subscription',
+                    baseUrl: 'https://chatgpt.com/backend-api',
+                    api: 'openai-codex-responses',
+                    chatTemplateThinking: false,
+                    model: {id: 'gpt-5.4-mini'}
+                }
+            },
             subagent: {connection: SMALL_MODEL}
         }),
         /no local connection is configured/u
@@ -3244,7 +2439,12 @@ test('stops the turn by name when the sub-agent has nowhere to run', async conte
     // And a ChatGPT model that is not in this Pi release.
     assert.match(
         await start({
-            subagent: {connection: {...SMALL_MODEL, connectionType: 'openai-codex', model: 'gpt-2'}}
+            subagent: {
+                connection: {
+                    connectionType: 'openai-codex',
+                    model: {...SMALL_MODEL.model, id: 'gpt-2'}
+                }
+            }
         }),
         /'gpt-2' is unavailable on ChatGPT/u
     )
@@ -3325,7 +2525,7 @@ test(
         const session = startWorker(context, {preload: LINGERING_CONNECTION})
 
         session.start({
-            settings: {...settings, baseUrl: url},
+            settings: servedBy(url),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             // The session id is what makes the connection worth caching, so it is what the bug needs.
             sessionId: 'task-9f2c',
@@ -3358,7 +2558,7 @@ test(
         const session = startWorker(context, {preload: LINGERING_CONNECTION})
 
         session.start({
-            settings: {...settings, baseUrl: url, retryAttempts: 0},
+            settings: servedBy(url, {retryAttempts: 0}),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             sessionId: 'task-9f2c',
             workspacePath: workspace.path
@@ -3368,108 +2568,6 @@ test(
         assert.match(session.stderr(), /The request was rejected/u)
     }
 )
-
-/**
- * A picture a text-only model cannot see costs it a sentence, not the whole request.
- *
- * `read` hands back a real image part for a PNG, and llama.cpp refuses the request rather than the
- * part it cannot use: one live turn died on `failed to process mtmd chunk` after the agent read a
- * tileset to match the game's art. Which is exactly what an agent asked about a layout will do.
- */
-test('a tool answering with an image is stripped for a model that cannot see', async () => {
-    const png = {
-        content: [
-            {type: 'text', text: 'Read image file [image/png]'},
-            {type: 'image', data: 'iVBOR', mimeType: 'image/png'}
-        ]
-    }
-    const tool = {name: 'read', execute: () => Promise.resolve(png)}
-
-    const blind = await withoutPictures(tool).execute('id', {})
-    assert.equal(blind.content.length, 2)
-    assert.equal(blind.content[1].type, 'text')
-    assert.match(blind.content[1].text, /you cannot see/u)
-
-    // A model that was declared as taking images keeps them, and a result with none is untouched.
-    assert.equal(canSeePictures({input: ['text', 'image']}), true)
-    assert.equal(canSeePictures({input: ['text']}), false)
-    assert.equal(canSeePictures(undefined), false)
-    const plain = {content: [{type: 'text', text: 'hello'}]}
-    assert.equal(
-        await withoutPictures({name: 'read', execute: () => plain}).execute('id', {}),
-        plain
-    )
-})
-
-test('says so when the same call keeps meeting the same refusal', async () => {
-    // Four live turns went into loops no wording escaped — twelve, thirteen, seventeen and
-    // twenty-four identical calls, each answered identically. The lever left is a different
-    // sentence rather than a better one.
-    const refusing = {
-        name: 'godot_node',
-        execute: () => Promise.reject(new Error('missing_param: requires `parent`'))
-    }
-    const guarded = withoutRepeatingARefusal(refusing)
-    const said = []
-    for (let attempt = 0; attempt < 4; attempt += 1)
-        await guarded
-            .execute('id', {ops: [{op: 'create'}]})
-            .catch(error => said.push(error.message))
-    assert.equal(said[0], 'missing_param: requires `parent`')
-    assert.equal(said[1], 'missing_param: requires `parent`')
-    assert.match(said[2], /refused this exact call 3 times/u)
-    assert.match(said[3], /refused this exact call 4 times/u)
-    // And it does not guess why. The first wording said "an object coming apart as it is written",
-    // and a live turn met it on a `method_not_found` about a method that was genuinely not there.
-    assert.doesNotMatch(said[2], /coming apart/u)
-
-    // A different call is a different count, and a different answer to the same call is a caller
-    // waiting rather than a caller stuck: `runtime.wait` timing out twice carries different output.
-    let answer = 'first'
-    const varying = {
-        name: 'godot_runtime',
-        execute: () => Promise.reject(new Error(answer))
-    }
-    const patient = withoutRepeatingARefusal(varying)
-    const heard = []
-    for (const next of ['first', 'second', 'third', 'fourth']) {
-        answer = next
-        await patient.execute('id', {ops: [{op: 'wait'}]}).catch(error => heard.push(error.message))
-    }
-    assert.deepEqual(heard, ['first', 'second', 'third', 'fourth'])
-
-    // The same call with its keys in another order is the same call, not a new one.
-    const reordered = withoutRepeatingARefusal({
-        name: 'godot_node',
-        execute: () => Promise.reject(new Error('missing_param: requires `parent`'))
-    })
-    const shuffled = []
-    for (const params of [
-        {a: 1, b: 2},
-        {b: 2, a: 1},
-        {a: 1, b: 2}
-    ])
-        await reordered.execute('id', params).catch(error => shuffled.push(error.message))
-    assert.match(shuffled[2], /refused this exact call 3 times/u)
-
-    // A cancelled call is not a refused one: the turn was stopped, and the caller wrote nothing.
-    const stopped = new AbortController()
-    stopped.abort()
-    const cancelled = withoutRepeatingARefusal({
-        name: 'bash',
-        execute: () => Promise.reject(new Error('aborted'))
-    })
-    const stops = []
-    for (let attempt = 0; attempt < 3; attempt += 1)
-        await cancelled
-            .execute('id', {command: 'ls'}, stopped.signal)
-            .catch(error => stops.push(error.message))
-    assert.deepEqual(stops, ['aborted', 'aborted', 'aborted'])
-
-    // And a call that succeeds is not counted at all.
-    const working = {name: 'read', execute: () => Promise.resolve({content: []})}
-    assert.deepEqual(await withoutRepeatingARefusal(working).execute('id', {}), {content: []})
-})
 
 /**
  * A turn that failed its own verification must say so in the answer, not only on the transcript.
@@ -3495,7 +2593,7 @@ test('a turn whose verification failed carries the verdict in its answer', async
 
     try {
         const completion = await runAgent({
-            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
             messages: [{sender: 'user', text: spec, images: [], timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -3526,7 +2624,7 @@ test('a turn that passes its verification says nothing extra', async context => 
 
     try {
         const completion = await runAgent({
-            settings: {...settings, baseUrl: `http://127.0.0.1:${String(address.port)}/v1`},
+            settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
             messages: [{sender: 'user', text: spec, images: [], timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -3549,23 +2647,28 @@ test('a turn that passes its verification says nothing extra', async context => 
  * with a template argument has to say so, or the reasoning level does nothing at all.
  */
 test('a chat-template server is sent the argument that turns thinking on', () => {
-    const settings = {
-        connectionType: 'openai-compatible',
+    const template = {
         name: 'Local AI',
         baseUrl: 'http://127.0.0.1:8080/v1',
-        model: 'local.gguf',
-        modelName: 'local.gguf',
         api: 'openai-completions',
-        contextWindow: 120_064,
-        maxTokens: 120_064,
-        reasoning: true,
-        supportsReasoningEffort: false,
         chatTemplateThinking: true,
-        thinkingLevels: [],
-        input: ['text'],
-        thinkingLevel: 'on'
+        model: {
+            id: 'local.gguf',
+            name: 'local.gguf',
+            contextWindow: 120_064,
+            maxTokens: 120_064,
+            reasoning: true,
+            supportsReasoningEffort: false,
+            thinkingLevels: [],
+            input: ['text'],
+            thinkingLevel: 'on'
+        }
     }
-    const {model} = createModelContext({settings, apiKey: 'local'})
+    const on = connection => ({
+        connectionType: 'openai-compatible',
+        connections: {'openai-compatible': connection}
+    })
+    const {model} = createModelContext({settings: on(template), apiKey: 'local'})
 
     assert.equal(model.compat.thinkingFormat, 'chat-template')
     assert.deepEqual(model.compat.chatTemplateKwargs, {
@@ -3576,7 +2679,10 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
     // A template that names its own efforts gets the effort argument too. The same template raises
     // on an effort it does not know, so this only ever carries a level the server itself named.
     const {model: withEfforts} = createModelContext({
-        settings: {...settings, supportsReasoningEffort: true, thinkingLevel: 'medium'},
+        settings: on({
+            ...template,
+            model: {...template.model, supportsReasoningEffort: true, thinkingLevel: 'medium'}
+        }),
         apiKey: 'local'
     })
     assert.deepEqual(withEfforts.compat.chatTemplateKwargs.reasoning_effort, {
@@ -3587,7 +2693,7 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
     // And a server that never answered `/props` is left exactly as it was: no template argument
     // reaches an endpoint that would reject an unknown field.
     const {model: plain} = createModelContext({
-        settings: {...settings, chatTemplateThinking: false},
+        settings: on({...template, chatTemplateThinking: false}),
         apiKey: 'local'
     })
     assert.equal(plain.compat.thinkingFormat, undefined)
@@ -3612,14 +2718,14 @@ test('the on level reaches a chat-template server as thinking enabled', async co
 
     try {
         await runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
-                reasoning: true,
-                supportsReasoningEffort: false,
-                chatTemplateThinking: true,
-                thinkingLevel: 'on'
-            },
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`, {
+                connection: {chatTemplateThinking: true},
+                model: {
+                    reasoning: true,
+                    supportsReasoningEffort: false,
+                    thinkingLevel: 'on'
+                }
+            }),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -3645,14 +2751,14 @@ test('the off level reaches a chat-template server as thinking disabled', async 
 
     try {
         await runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
-                reasoning: true,
-                supportsReasoningEffort: false,
-                chatTemplateThinking: true,
-                thinkingLevel: 'off'
-            },
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`, {
+                connection: {chatTemplateThinking: true},
+                model: {
+                    reasoning: true,
+                    supportsReasoningEffort: false,
+                    thinkingLevel: 'off'
+                }
+            }),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -3674,14 +2780,14 @@ test('a named effort reaches a chat-template server unchanged', async context =>
 
     try {
         await runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
-                reasoning: true,
-                supportsReasoningEffort: true,
-                chatTemplateThinking: true,
-                thinkingLevel: 'medium'
-            },
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`, {
+                connection: {chatTemplateThinking: true},
+                model: {
+                    reasoning: true,
+                    supportsReasoningEffort: true,
+                    thinkingLevel: 'medium'
+                }
+            }),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -3715,15 +2821,15 @@ test('a level the server named is sent under that name, not the nearest one', as
 
     try {
         await runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
-                reasoning: true,
-                supportsReasoningEffort: true,
-                chatTemplateThinking: true,
-                thinkingLevels: ['low', 'medium', 'xhigh'],
-                thinkingLevel: 'xhigh'
-            },
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`, {
+                connection: {chatTemplateThinking: true},
+                model: {
+                    reasoning: true,
+                    supportsReasoningEffort: true,
+                    thinkingLevels: ['low', 'medium', 'xhigh'],
+                    thinkingLevel: 'xhigh'
+                }
+            }),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined
@@ -3745,17 +2851,17 @@ test('a level the server did not name is never what a request settles on', async
 
     try {
         await runAgent({
-            settings: {
-                ...settings,
-                baseUrl: `http://127.0.0.1:${String(port)}/v1`,
-                reasoning: true,
-                supportsReasoningEffort: true,
-                chatTemplateThinking: true,
-                thinkingLevels: ['low', 'medium', 'xhigh'],
-                // Nothing in the app can pick this — the menu offers what the server named — but a
-                // settings file written against an older model can still hold it.
-                thinkingLevel: 'high'
-            },
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`, {
+                connection: {chatTemplateThinking: true},
+                model: {
+                    reasoning: true,
+                    supportsReasoningEffort: true,
+                    thinkingLevels: ['low', 'medium', 'xhigh'],
+                    // Nothing in the app can pick this — the menu offers what the server named —
+                    // but a settings file written against an older model can still hold it.
+                    thinkingLevel: 'high'
+                }
+            }),
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
             emit: () => undefined

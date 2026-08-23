@@ -399,7 +399,7 @@ export async function search({
 /**
  * How much of a result set is worth sending to the model.
  *
- * `ai-host.mjs` caps only the results it builds itself, so a tool that assembles its own text is
+ * `tool-result.mjs` caps only the results it builds itself, so a tool that assembles its own text is
  * capped by nothing. Twenty results with four-hundred-character snippets is most of a small model's
  * context spent on things it will not read.
  */

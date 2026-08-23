@@ -17,6 +17,14 @@
  * would be a judge that can make its own verdict true, and `assertChildTools` refuses the rest.
  */
 
+import {
+    judgeDone,
+    judgeFailed,
+    judgeStarted,
+    judgeStep,
+    judgeStopped,
+    judgeVerdict
+} from './ai-events.mjs'
 import {createModelContext} from './ai-provider.mjs'
 import {createChildTools, eventProgress, runSubagentOutcome} from './ai-subagent.mjs'
 import {probeTools} from './ai-reachability.mjs'
@@ -130,9 +138,9 @@ export const LIVE_WORLD = {createModelContext, createChildTools, probeTools, run
  * Judges one memory and says so on exactly one event before it returns.
  *
  * Every ending goes out as `judge-verdict`, `judge-stopped` or `judge-failed`, because the Rust side
- * is the only side that survives a stop — a run is cancelled by killing this process — and a panel
- * with no ending sits on a spinner for ever. A child that could not be built and a child that
- * answered nonsense are both endings.
+ * is the only side that always survives a stop — a run is cancelled by asking this process to stop
+ * and killing it if it does not answer — and a panel with no ending sits on a spinner for ever. A
+ * child that could not be built and a child that answered nonsense are both endings.
  */
 export async function runMemoryJudge({
     settings,
@@ -161,7 +169,7 @@ export async function runMemoryJudge({
         sessionId,
         signal
     })
-    emit({type: 'judge-started'})
+    emit(judgeStarted())
     const childDeps = {domains, host}
 
     try {
@@ -189,39 +197,38 @@ export async function runMemoryJudge({
             streamOptions,
             settings: settings?.subagent,
             deps: childDeps,
-            progress: eventProgress(emit, 'judge-step', {memoryId: memory.id}),
+            progress: eventProgress(emit, judgeStep, {memoryId: memory.id}),
             signal
         })
         if (outcome.kind === 'stopped') {
-            emit({type: 'judge-stopped'})
+            emit(judgeStopped())
             return null
         }
         if (outcome.kind === 'failed') {
-            emit({type: 'judge-failed', reason: outcome.reason})
+            emit(judgeFailed(outcome.reason))
             return null
         }
         const {verdict, reason} = parseVerdict(outcome.text)
-        emit({
-            type: 'judge-verdict',
-            verdict,
-            reason,
-            // The child's model, not the parent's. They are allowed to differ and usually do —
-            // a large model drives the conversation while a small local one reads — and a verdict
-            // filed under the wrong name cannot be weighed: the same sentence is worth different
-            // things from a 27B running locally and from the model the user is paying for.
-            model: subagent.model.name || subagent.model.id,
-            input: outcome.usage?.input ?? 0,
-            output: outcome.usage?.output ?? 0
-        })
-        emit({type: 'done', verdict})
+        emit(
+            judgeVerdict({
+                verdict,
+                reason,
+                // The child's model, not the parent's. They are allowed to differ and usually do —
+                // a large model drives the conversation while a small local one reads — and a
+                // verdict filed under the wrong name cannot be weighed: the same sentence is worth
+                // different things from a 27B running locally and from the model the user is
+                // paying for.
+                model: subagent.model.name || subagent.model.id,
+                input: outcome.usage?.input ?? 0,
+                output: outcome.usage?.output ?? 0
+            })
+        )
+        emit(judgeDone(verdict))
         return verdict
     } catch (error) {
         // A probe that refused, a child that could not be built, a fault in here. All three used to
         // be the same thing to the window: nothing, for ever.
-        emit({
-            type: 'judge-failed',
-            reason: error instanceof Error ? error.message : String(error)
-        })
+        emit(judgeFailed(error instanceof Error ? error.message : String(error)))
         throw error
     }
 }

@@ -97,16 +97,53 @@ pub fn forget_worktree(root: &Path) {
 /// a parameter at all: a field a caller cannot pass anywhere is context it pays for and cannot
 /// spend. The renderer's own Tauri commands still get both — Monaco holds a buffer and a token, and
 /// an agent holds neither.
+/// A stamp says what a file now holds. The other two things an answer can say about a file are
+/// that it is gone and that it has moved, and both are read here for the same reason: an arm that
+/// enacts half the ritual is the failure this function exists to make unreachable.
 pub fn reconcile(root: &Path, answer: Value) -> Value {
     let mut answer = answer;
     if let Value::Array(entries) = &mut answer {
         for entry in entries.iter_mut() {
+            what_became_of_the_file(root, entry);
             reconcile_in_place(root, entry);
         }
     } else {
+        what_became_of_the_file(root, &answer);
         reconcile_in_place(root, &mut answer);
     }
     answer
+}
+
+/// Takes a deleted file's record out, and carries a moved file's record with it.
+///
+/// Read off the answer rather than enacted by the arm that produced it. `godot_resource delete`
+/// answers `{path, deleted: true}` and `move` answers `{from, to, moved: true}`, so the answer
+/// already carries everything the ledger needs — and an arm that has to say it a second time is an
+/// arm that can forget to. Both said it by hand, and both said it about the string the caller
+/// wrote: `res://levels/level.tscn` reached neither record, because a record is keyed on the path
+/// the read was answered under.
+///
+/// The content did not change when a file moved, only where it lives, so the record follows it.
+fn what_became_of_the_file(root: &Path, answer: &Value) {
+    let Some(fields) = answer.as_object() else {
+        return;
+    };
+    if fields.get("deleted").and_then(Value::as_bool) == Some(true)
+        && let Some(path) = fields.get("path").and_then(Value::as_str)
+    {
+        forget(root, path);
+    }
+    if fields.get("moved").and_then(Value::as_bool) == Some(true)
+        && let Some((from, to)) = fields
+            .get("from")
+            .and_then(Value::as_str)
+            .zip(fields.get("to").and_then(Value::as_str))
+    {
+        if let Some(hash) = recall(root, from) {
+            remember(root, to, &hash);
+        }
+        forget(root, from);
+    }
 }
 
 /// One stamp, or the `files` list an operation answers with. Nothing deeper: the shapes a file
@@ -379,6 +416,50 @@ mod tests {
             reconcile(&tree, serde_json::json!([1, 2])),
             serde_json::json!([1, 2])
         );
+    }
+
+    /// A delete answers that the file is gone, and that is the whole of the arm's bookkeeping.
+    ///
+    /// Keeping the record would refuse the save that recreates the file — the one case where naming
+    /// no hash is the point — and the arm that used to say `forget` by hand said it about the
+    /// string the caller wrote, so a `res://` delete forgot nothing at all.
+    #[test]
+    fn a_deleted_file_loses_its_record_without_the_arm_saying_so() {
+        let tree = root("reconcile-deleted");
+        remember(&tree, "levels/level.tscn", "aaaa");
+        let answer = reconcile(
+            &tree,
+            serde_json::json!({"path": "levels/level.tscn", "deleted": true}),
+        );
+        assert_eq!(recall(&tree, "levels/level.tscn"), None);
+        assert_eq!(answer["deleted"], true);
+    }
+
+    /// A move answers with both ends, so the record follows the file: the content did not change,
+    /// only where it lives. Left behind, it is a claim about a path that holds nothing and the next
+    /// save over the destination is refused a hash the model cannot see.
+    #[test]
+    fn a_moved_file_carries_its_record_to_where_it_went() {
+        let tree = root("reconcile-moved");
+        remember(&tree, "levels/level.tscn", "bbbb");
+        let answer = reconcile(
+            &tree,
+            serde_json::json!({"from": "levels/level.tscn", "to": "levels/one.tscn", "moved": true}),
+        );
+        assert_eq!(recall(&tree, "levels/level.tscn"), None);
+        assert_eq!(recall(&tree, "levels/one.tscn").as_deref(), Some("bbbb"));
+        assert_eq!(answer["moved"], true);
+    }
+
+    /// A path that was never read moves without inventing a record for where it landed.
+    #[test]
+    fn moving_an_unread_file_records_nothing_at_the_destination() {
+        let tree = root("reconcile-moved-unread");
+        reconcile(
+            &tree,
+            serde_json::json!({"from": "art/a.png", "to": "art/b.png", "moved": true}),
+        );
+        assert_eq!(recall(&tree, "art/b.png"), None);
     }
 
     #[test]

@@ -30,6 +30,11 @@ const MEMORY_EMBEDDING_DIMENSIONS: usize = 1024;
 /// all — so changing the model in one place would leave every old vector in `memory_vectors`,
 /// silently ranked in the same cosine search as the new ones.
 const MEMORY_EMBEDDING_MODEL: &str = crate::memory::MODEL;
+/// How many memories one maintenance pass re-embeds before leaving the rest for the next one.
+///
+/// A ceiling on how long the write lock is held by a pass that finds a whole project unembedded,
+/// not a limit on what gets restored: the next pass takes the next two hundred.
+const BACKFILL_LIMIT: usize = 200;
 const MAX_STORED_CHAT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STORED_CHAT_MESSAGES: usize = 10_000;
 const MAX_STORED_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -537,14 +542,138 @@ pub struct BackupResult {
     pub created_at: u64,
 }
 
-#[derive(Debug, Serialize)]
+/// What one maintenance pass removed, and what each view contributed to it.
+///
+/// The same type on both ends of the fold: a view's [`Collected`] is one of these with only its own
+/// counters filled in, and [`Project::run_maintenance`] adds the six together. One field list rather
+/// than an accumulator beside a result, so a new counter has one place to be added and a view has
+/// nowhere to report something the result would quietly drop.
+///
+/// `memory_embeddings_restored` was that drop. It left here as a hardcoded zero — re-embedding needs
+/// the memory worker, which `storage` cannot reach — and `lib.rs` patched the returned struct
+/// afterwards, so any second caller was handed a number that was simply untrue with nothing saying
+/// so. [`Memories::collect`] fills it in now, and this result is complete when it is returned.
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaintenanceResult {
     pub attachments_removed: usize,
     pub blobs_removed: usize,
     pub godot_runs_removed: usize,
+    pub sketches_removed: usize,
+    pub docs_answers_removed: usize,
+    pub memory_vectors_removed: usize,
     pub backups_removed: usize,
     pub memory_embeddings_restored: usize,
+}
+
+impl MaintenanceResult {
+    /// Adds one view's collection to the running total.
+    fn absorb(&mut self, view: Collected) {
+        self.attachments_removed += view.attachments_removed;
+        self.blobs_removed += view.blobs_removed;
+        self.godot_runs_removed += view.godot_runs_removed;
+        self.sketches_removed += view.sketches_removed;
+        self.docs_answers_removed += view.docs_answers_removed;
+        self.memory_vectors_removed += view.memory_vectors_removed;
+        self.backups_removed += view.backups_removed;
+        self.memory_embeddings_restored += view.memory_embeddings_restored;
+    }
+}
+
+/// What one view's upkeep removed: a [`MaintenanceResult`] carrying only that view's own counters.
+type Collected = MaintenanceResult;
+
+/// What one maintenance pass treats as spent, decided once so that the six views agree.
+///
+/// Read at the top of the fold rather than by each view, because two views that each ask the clock
+/// prune to two different edges — a run row deleted against one reading and its log directory kept
+/// against another is exactly the inconsistency maintenance is for.
+struct Cutoffs {
+    /// An attachment unreferenced since before this is rubbish. A day, because the composer stores
+    /// an image on paste and the row referring to it only appears on send: anything shorter deletes
+    /// the screenshot of somebody who pasted one and went to lunch.
+    attachments_before: i64,
+    /// A run whose output stopped before this goes, with its segments and its log directory. Thirty
+    /// days.
+    runs_before: i64,
+    /// The manual this process has been answered out of, which is what makes every stored answer
+    /// from another corpus superseded. `None` means nothing has asked the manual yet in this
+    /// process: an unknown current version cannot tell a stale corpus from the live one, so nothing
+    /// is dropped rather than the wrong thing being.
+    corpus_version: Option<String>,
+    /// How many backups survive a pass, newest first.
+    backups_kept: usize,
+}
+
+impl Cutoffs {
+    fn current() -> Result<Self, CommandError> {
+        let now = now_millis()?;
+        Ok(Self {
+            attachments_before: now.saturating_sub(24 * 60 * 60 * 1_000),
+            runs_before: now.saturating_sub(30 * 24 * 60 * 60 * 1_000),
+            corpus_version: crate::rag::known_corpus_version(),
+            backups_kept: 5,
+        })
+    }
+}
+
+/// The views maintenance folds over, in the order it visits them.
+///
+/// A chain rather than an array of six, and the difference is what a seventh view costs. Both
+/// matches below stop compiling the moment a variant is added — neither is exhaustive any more — so
+/// the view cannot arrive without being given an upkeep *and* a place in the sequence. An array is
+/// something you can simply forget to append to, and forgetting is not hypothetical here: the two
+/// newest views, `sketches` and the project's `docs_answers`, were collected by nothing at all,
+/// because the one function that knew how to clean anything up lived on a different view and nobody
+/// was told to add to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Upkeep {
+    Chats,
+    Tasks,
+    Runs,
+    Sketches,
+    Memories,
+    Project,
+}
+
+impl Upkeep {
+    /// Every view, once each, in visiting order.
+    fn every() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(Self::Chats), |view| view.following())
+    }
+
+    /// The view after this one, and nothing after the last.
+    fn following(self) -> Option<Self> {
+        match self {
+            Self::Chats => Some(Self::Tasks),
+            Self::Tasks => Some(Self::Runs),
+            Self::Runs => Some(Self::Sketches),
+            Self::Sketches => Some(Self::Memories),
+            Self::Memories => Some(Self::Project),
+            Self::Project => None,
+        }
+    }
+
+    /// Asks one view to collect what it owns.
+    ///
+    /// `pending` is the one thing a view could not work out for itself under the lock: the vectors
+    /// for memories that have none, which come from another process. They are computed before the
+    /// lock is taken and handed in, so what happens here is only the write.
+    fn collect(
+        self,
+        storage: &ProjectStorage,
+        cutoffs: &Cutoffs,
+        pending: &[SaveMemoryEmbeddingRequest],
+    ) -> Result<Collected, CommandError> {
+        match self {
+            Self::Chats => storage.chats().collect(cutoffs),
+            Self::Tasks => storage.tasks().collect(cutoffs),
+            Self::Runs => storage.runs().collect(cutoffs),
+            Self::Sketches => storage.sketches().collect(cutoffs),
+            Self::Memories => storage.memory().collect(cutoffs, pending),
+            Self::Project => storage.project().collect(cutoffs),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -554,13 +683,14 @@ struct SearchScore {
     vector_distance: Option<f64>,
 }
 
-/// One project's database, reached through five ledgers.
+/// One project's database, reached through six ledgers.
 ///
 /// The connection, the schema and the migrations are one thing and stay one thing — a chat, a
 /// task's worktree and a run's output are written under the same lock and read out of the same
-/// file. What is five is the *interface*: [`chats`](Self::chats), [`tasks`](Self::tasks),
-/// [`runs`](Self::runs), [`memory`](Self::memory) and [`project`](Self::project) each hand back a
-/// view over this same handle.
+/// file. What is six is the *interface*: [`chats`](Self::chats), [`tasks`](Self::tasks),
+/// [`runs`](Self::runs), [`sketches`](Self::sketches), [`memory`](Self::memory) and
+/// [`project`](Self::project) each hand back a view over this same handle. `sketches` was the
+/// sixth, and it was counted as five here for as long as it existed.
 ///
 /// It was one type with thirty-five methods over five unrelated subjects, which is the other way
 /// to be shallow: deep in the body and wide at the mouth. Nothing in the type system said that
@@ -1004,7 +1134,14 @@ impl Sketches<'_> {
     /// recoverable: a file with no row is invisible, which is what every sketch saved before this
     /// table existed already is. A row with no file is a list offering something that cannot be
     /// opened.
+    ///
+    /// Under the write lock, and the lock is taken before the files rather than with the row. It is
+    /// what [`collect`](Self::collect) holds for its whole pass, and that pass deletes any file in
+    /// this directory with no row behind it — so a sketch kept while maintenance ran had its markup
+    /// written, then removed under it, and the insert below produced exactly the row with no file
+    /// the ordering above exists to avoid.
     pub fn keep(&self, kept: &KeptSketch<'_>) -> Result<(), CommandError> {
+        let (_write_guard, connection) = self.storage.write_connection()?;
         let directory = self.sketch_directory(kept.sketch_id)?;
         fs::create_dir_all(&directory).map_err(|error| {
             CommandError::from(format!("Could not create {}: {error}", directory.display()))
@@ -1017,7 +1154,6 @@ impl Sketches<'_> {
             &directory.join(format!("{}.source.html", kept.sketch_id)),
             kept.source_html,
         )?;
-        let (_write_guard, connection) = self.storage.write_connection()?;
         connection
             .execute(
                 "INSERT INTO sketches (id, task_id, question_id, question, label, is_approved, saved_at)
@@ -1123,6 +1259,94 @@ impl Sketches<'_> {
         }
         Ok(self.storage.project_directory().join("sketches"))
     }
+
+    /// Rows whose markup is gone, and markup no row names.
+    ///
+    /// Not an age. A sketch is deliberately outlived by nothing: `task_id` clears rather than
+    /// cascades because the layout the user agreed to is still the layout they agreed to after the
+    /// task that produced it is deleted, so there is no date after which one stops being worth
+    /// keeping. What there is instead is the pair coming apart, and [`Sketches::keep`] writes the
+    /// files before the row precisely because the two orderings fail differently — so both halves
+    /// of that failure are what this collects.
+    ///
+    /// A row with no file is the worse half and goes first: it is a list offering the user something
+    /// that cannot be opened. A file with no row is only invisible, which is what every sketch saved
+    /// before this table existed already was — but it is also what a crash between the two writes
+    /// leaves behind, and nothing else would ever remove it.
+    fn collect(&self, _cutoffs: &Cutoffs) -> Result<Collected, CommandError> {
+        let directory = self.storage.project_directory().join("sketches");
+        let connection = self.storage.connection()?;
+        let mut statement = connection
+            .prepare("SELECT id FROM sketches")
+            .map_err(database_error)?;
+        let kept = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        drop(statement);
+        let mut surviving = Vec::with_capacity(kept.len());
+        let mut removed = 0;
+        for id in kept {
+            if directory.join(format!("{id}.html")).is_file() {
+                surviving.push(id);
+                continue;
+            }
+            connection
+                .execute("DELETE FROM sketches WHERE id = ?1", [&id])
+                .map_err(database_error)?;
+            // The second copy can outlive the first, and a row that is going takes both with it.
+            let _ = fs::remove_file(directory.join(format!("{id}.source.html")));
+            removed += 1;
+        }
+        for path in sketch_files(&directory)? {
+            // A name this cannot read is not a sketch, and something that is not ours is not ours
+            // to delete.
+            let Some(id) = sketch_id_of(&path) else {
+                continue;
+            };
+            if surviving.contains(&id) {
+                continue;
+            }
+            fs::remove_file(&path).map_err(|error| {
+                CommandError::from(format!("Could not remove {}: {error}", path.display()))
+            })?;
+        }
+        Ok(Collected {
+            sketches_removed: removed,
+            ..Collected::default()
+        })
+    }
+}
+
+/// Every file in the sketch directory, or none at all when the project has never kept one.
+fn sketch_files(directory: &Path) -> Result<Vec<PathBuf>, CommandError> {
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_dir(directory)
+        .map_err(|error| {
+            CommandError::from(format!("Could not read {}: {error}", directory.display()))
+        })?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.path())
+        .collect())
+}
+
+/// Which sketch a file in that directory belongs to, and nothing for a file that is not one.
+///
+/// Unambiguous because [`is_sketch_id_byte`] allows no dot: `pause-menu.source.html` can only be the
+/// source copy of `pause-menu`, never a sketch called `pause-menu.source`.
+fn sketch_id_of(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name
+        .strip_suffix(".source.html")
+        .or_else(|| name.strip_suffix(".html"))?;
+    if stem.is_empty() || !stem.bytes().all(is_sketch_id_byte) {
+        return None;
+    }
+    Some(stem.to_owned())
 }
 
 fn write_sketch_file(path: &Path, html: &str) -> Result<(), CommandError> {
@@ -1502,6 +1726,66 @@ impl Chats<'_> {
             CommandError::from(format!("Could not import {}: {error}", path.display()))
         })?;
         self.storage.chats().store_attachment(attachment, &bytes)
+    }
+
+    /// Attachments no message refers to any more, and the blobs left holding their bytes.
+    ///
+    /// Only after a day unreferenced. The window between an image being stored and the message
+    /// carrying it being written is real — the composer stores on paste, the row appears on send —
+    /// so anything shorter deletes the screenshot of somebody who pasted one and went to lunch.
+    ///
+    /// `message_attachments` needs no sweep of its own and that is worth saying rather than leaving
+    /// as an absence: it cascades from `messages`, and every connection is opened with foreign keys
+    /// on, so what a deleted conversation leaves behind is the `attachments` row that nothing
+    /// cascades to. That row is what this looks for.
+    ///
+    /// The blob goes last, and only when no attachment still hashes to it. Attachments are
+    /// content-addressed, so the same screenshot pasted into two tasks is one file on disk, and
+    /// deleting it with the first row would blank the image still on screen in the second.
+    fn collect(&self, cutoffs: &Cutoffs) -> Result<Collected, CommandError> {
+        let mut connection = self.storage.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT a.id, a.content_hash FROM attachments a
+                 LEFT JOIN message_attachments ma ON ma.attachment_id = a.id
+                 WHERE ma.attachment_id IS NULL AND a.created_at < ?1",
+            )
+            .map_err(database_error)?;
+        let orphaned = statement
+            .query_map([cutoffs.attachments_before], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        drop(statement);
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        for (id, _) in &orphaned {
+            transaction
+                .execute("DELETE FROM attachments WHERE id = ?1", [id])
+                .map_err(database_error)?;
+        }
+        transaction.commit().map_err(database_error)?;
+        let mut blobs_removed = 0;
+        for (_, hash) in &orphaned {
+            let references: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM attachments WHERE content_hash = ?1",
+                    [hash],
+                    |row| row.get(0),
+                )
+                .map_err(database_error)?;
+            if references == 0 && fs::remove_file(self.storage.blob_path(hash)).is_ok() {
+                blobs_removed += 1;
+            }
+        }
+        Ok(Collected {
+            attachments_removed: orphaned.len(),
+            blobs_removed,
+            ..Collected::default()
+        })
     }
 }
 
@@ -2113,6 +2397,21 @@ impl Tasks<'_> {
             ..worktree
         }
     }
+
+    /// Nothing, and the emptiness is a statement rather than an omission.
+    ///
+    /// A task is removed when the user removes it and on no other occasion: it is the branch their
+    /// work is on, so an age is exactly the wrong reason to touch one. Everything that belongs to a
+    /// task goes with it under `ON DELETE CASCADE` — its messages, their attachment links, its
+    /// brief, its worktree row — and the two rows that deliberately outlive it, a memory and a
+    /// sketch, clear their `task_id` instead and are collected by the views that own them.
+    ///
+    /// So this view has upkeep only if one of those rules changes, and it is written out rather
+    /// than left off the fold so that the next person reads a decision instead of guessing at an
+    /// absence.
+    fn collect(&self, _cutoffs: &Cutoffs) -> Result<Collected, CommandError> {
+        Ok(Collected::default())
+    }
 }
 
 /// Editor runs, and the output they produced.
@@ -2428,6 +2727,50 @@ impl Runs<'_> {
         }
         Ok(())
     }
+
+    /// Runs that ended a month ago, with everything recorded under them.
+    ///
+    /// Only a run that has an `ended_at`. A row with none is either still being written to by a live
+    /// editor session or was left open by one that died, and `close_abandoned_runs` decides which —
+    /// deleting on age here would take the log of the session running now.
+    ///
+    /// The row goes first and the directory after it. `godot_log_segments` and `godot_log_events`
+    /// cascade from the run and the FTS index follows them by trigger, so the delete is one
+    /// statement; what does not cascade is `logs/<run_id>`, because a file is not a foreign key.
+    /// Removing that first would leave rows naming segments that cannot be read.
+    fn collect(&self, cutoffs: &Cutoffs) -> Result<Collected, CommandError> {
+        let mut connection = self.storage.connection()?;
+        let mut statement = connection
+            .prepare("SELECT id FROM godot_runs WHERE ended_at IS NOT NULL AND ended_at < ?1")
+            .map_err(database_error)?;
+        let old_runs = statement
+            .query_map([cutoffs.runs_before], |row| row.get::<_, String>(0))
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        drop(statement);
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        for run_id in &old_runs {
+            transaction
+                .execute("DELETE FROM godot_runs WHERE id = ?1", [run_id])
+                .map_err(database_error)?;
+        }
+        transaction.commit().map_err(database_error)?;
+        for run_id in &old_runs {
+            let path = self.storage.project_directory().join("logs").join(run_id);
+            if path.is_dir() {
+                fs::remove_dir_all(&path).map_err(|error| {
+                    CommandError::from(format!("Could not remove {}: {error}", path.display()))
+                })?;
+            }
+        }
+        Ok(Collected {
+            godot_runs_removed: old_runs.len(),
+            ..Collected::default()
+        })
+    }
 }
 
 /// What the agent has been told to remember, and the embeddings that find it again.
@@ -2512,8 +2855,22 @@ impl Memories<'_> {
     }
 
     fn store_embedding(&self, request: &SaveMemoryEmbeddingRequest) -> Result<(), CommandError> {
-        validate_embedding(request)?;
         let (_write_guard, mut connection) = self.storage.write_connection()?;
+        self.write_embedding(&mut connection, request)
+    }
+
+    /// Writes one vector into both tables, on a connection whose write lock the caller already has.
+    ///
+    /// Split out of [`Memories::save_embedding`] for the backfill in [`Memories::collect`], which
+    /// runs inside maintenance's single write lock. The lock is a plain mutex and is not reentrant,
+    /// so a re-embed that went through `save_embedding` would deadlock against the pass that asked
+    /// for it.
+    fn write_embedding(
+        &self,
+        connection: &mut Connection,
+        request: &SaveMemoryEmbeddingRequest,
+    ) -> Result<(), CommandError> {
+        validate_embedding(request)?;
         let task_id = connection
             .query_row(
                 "SELECT task_id FROM memory_items WHERE id = ?1",
@@ -2573,6 +2930,33 @@ impl Memories<'_> {
     pub fn missing_embeddings(&self, limit: usize) -> Result<Vec<MemoryRecord>, CommandError> {
         self.records_missing_embeddings(limit)
             .map_err(CommandError::or_coded("memory_unavailable"))
+    }
+
+    /// Every vector the maintenance backfill is about to write, worked out before the lock.
+    ///
+    /// None of this needs the write lock and all of it is slow. Reading which memories have no
+    /// vector is a read, and turning their text into a vector is a round trip to the memory worker
+    /// *subprocess* — up to [`BACKFILL_LIMIT`] of them, one after another. Held under the project's
+    /// single write mutex, a project with two hundred unembedded memories blocks every chat save,
+    /// sketch keep, memory upsert and task write for the whole pass.
+    ///
+    /// It stops at the first failure, because a worker that cannot answer for one memory cannot
+    /// answer for the next two hundred either, and each attempt would pay the same timeout.
+    pub(crate) fn embeddings_to_restore(
+        &self,
+    ) -> Result<Vec<SaveMemoryEmbeddingRequest>, CommandError> {
+        let mut prepared = Vec::new();
+        for memory in self.missing_embeddings(BACKFILL_LIMIT)? {
+            let Ok(vector) = crate::project_memory::memory_vector(&memory.content) else {
+                break;
+            };
+            prepared.push(SaveMemoryEmbeddingRequest {
+                memory_id: memory.id,
+                model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                vector,
+            });
+        }
+        Ok(prepared)
     }
 
     fn records_missing_embeddings(&self, limit: usize) -> Result<Vec<MemoryRecord>, CommandError> {
@@ -2769,6 +3153,64 @@ impl Memories<'_> {
         results.sort_by(|left, right| right.score.total_cmp(&left.score));
         results.truncate(limit);
         Ok(results)
+    }
+
+    /// The vectors that should exist and do not, and the ones that exist and should not.
+    ///
+    /// Restoring is what this view collects rather than what it deletes, and it is the only upkeep
+    /// of the six that puts something back. A memory with no vector is not visible as broken: the
+    /// hybrid search still answers, having quietly become lexical-only for that row, so nothing
+    /// short of this ever notices.
+    ///
+    /// The embedding itself has to leave the crate — the vector comes from the memory worker, which
+    /// `storage` cannot reach — so `project_memory` supplies it and this owns both writes. It used
+    /// to be the other way round: the whole backfill lived in `project_memory` and `lib.rs` ran it
+    /// after `run_maintenance` returned, which is exactly why the returned result carried a zero the
+    /// caller had to overwrite.
+    ///
+    /// The vectors arrive already computed, from [`embeddings_to_restore`](Self::embeddings_to_restore),
+    /// which ran before the write lock was taken. Only the writes belong under it.
+    ///
+    /// An orphan vector is a row in `memory_vectors` whose memory is gone. Since schema V3 a
+    /// trigger removes it — the vec0 virtual table is outside the `ON DELETE CASCADE` that
+    /// `memory_embeddings` gets — so what is left is what a database written before V3 kept, and a
+    /// vector nothing can delete is a vector the cosine search keeps ranking forever.
+    fn collect(
+        &self,
+        _cutoffs: &Cutoffs,
+        pending: &[SaveMemoryEmbeddingRequest],
+    ) -> Result<Collected, CommandError> {
+        let mut connection = self.storage.connection()?;
+        let mut restored = 0;
+        for request in pending {
+            self.write_embedding(&mut connection, request)?;
+            restored += 1;
+        }
+        let mut statement = connection
+            .prepare(
+                "SELECT memory_id FROM memory_vectors
+                 WHERE memory_id NOT IN (SELECT id FROM memory_items)",
+            )
+            .map_err(database_error)?;
+        let orphaned = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        drop(statement);
+        for memory_id in &orphaned {
+            connection
+                .execute(
+                    "DELETE FROM memory_vectors WHERE memory_id = ?1",
+                    [memory_id],
+                )
+                .map_err(database_error)?;
+        }
+        Ok(Collected {
+            memory_embeddings_restored: restored,
+            memory_vectors_removed: orphaned.len(),
+            ..Collected::default()
+        })
     }
 }
 
@@ -2990,85 +3432,76 @@ impl Project<'_> {
         })
     }
 
+    /// Answers this project has already paid for that came out of a manual it no longer has, and
+    /// backups past the fifth.
+    ///
+    /// `docs_answers` is keyed by `corpus_version` deliberately — the manual ships inside the
+    /// gofer-rag package, so the package version *is* the manual, and an answer is only good for the
+    /// one it came out of. What that key buys is that an upgrade can never serve an answer from the
+    /// old manual; what it costs is that the previous corpus's rows are unreachable the instant the
+    /// package moves. Nothing had ever removed them, so every upgrade this project had ever seen was
+    /// still in the file.
+    ///
+    /// Only when the current version is known. `rag::known_corpus_version` learns it from the probe
+    /// that runs before a turn, so a process that has not asked the manual anything yet has no
+    /// current version to compare against — and deleting everything that fails to match `None` would
+    /// throw away the live corpus rather than the dead ones.
+    fn collect(&self, cutoffs: &Cutoffs) -> Result<Collected, CommandError> {
+        let connection = self.storage.connection()?;
+        let docs_answers_removed = match &cutoffs.corpus_version {
+            Some(current) => connection
+                .execute(
+                    "DELETE FROM docs_answers WHERE corpus_version <> ?1",
+                    [current],
+                )
+                .map_err(database_error)?,
+            None => 0,
+        };
+        let backups_removed = prune_backups(
+            &self.storage.data_root.join("backups"),
+            cutoffs.backups_kept,
+        )?;
+        Ok(Collected {
+            docs_answers_removed,
+            backups_removed,
+            ..Collected::default()
+        })
+    }
+
+    /// One pass of upkeep over every view, under the project's one write lock.
+    ///
+    /// A fold rather than a function that reaches into five other views' tables, which is what this
+    /// was: eighty lines on `Project` deleting attachments, runs and log directories that belong to
+    /// `Chats` and `Runs`. Two things followed from that and both were real. The result was
+    /// incomplete when it was returned — re-embedding needs the memory worker, so the count left
+    /// here as a zero and `lib.rs` patched it afterwards — and the two views added since, `sketches`
+    /// and the project's own `docs_answers`, were collected by nothing at all, because the one
+    /// function that knew how to clean up was somewhere their authors never looked.
+    ///
+    /// The lock is taken once, here, and held across all six. So a `collect` reads and writes on its
+    /// own connection and must never reach for `write_connection`: the write lock is a plain mutex,
+    /// it is not reentrant, and a second claim would deadlock against this one. That is also why
+    /// [`Memories::collect`] re-embeds through [`Memories::write_embedding`] rather than through
+    /// `save_embedding`.
+    ///
+    /// Held across all six means held for as long as the slowest of them, so nothing that can be
+    /// done before it is done under it. The memory backfill is the only piece with anywhere else to
+    /// be — its vectors come from a subprocess, two hundred round trips at worst — and it is taken
+    /// out of the pass and handed in.
     pub fn run_maintenance(&self) -> Result<MaintenanceResult, CommandError> {
         self.maintain_database()
             .map_err(CommandError::or_coded("storage_not_maintained"))
     }
 
     fn maintain_database(&self) -> Result<MaintenanceResult, CommandError> {
+        let pending = self.storage.memory().embeddings_to_restore()?;
         let _write_guard = self.storage.write_lock()?;
-        let now = now_millis()?;
-        let attachment_cutoff = now.saturating_sub(24 * 60 * 60 * 1_000);
-        let log_cutoff = now.saturating_sub(30 * 24 * 60 * 60 * 1_000);
-        let mut connection = self.storage.connection()?;
-        let mut orphan_statement = connection
-            .prepare(
-                "SELECT a.id, a.content_hash FROM attachments a
-                 LEFT JOIN message_attachments ma ON ma.attachment_id = a.id
-                 WHERE ma.attachment_id IS NULL AND a.created_at < ?1",
-            )
-            .map_err(database_error)?;
-        let orphaned = orphan_statement
-            .query_map([attachment_cutoff], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(database_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        drop(orphan_statement);
-        let mut old_runs_statement = connection
-            .prepare("SELECT id FROM godot_runs WHERE ended_at IS NOT NULL AND ended_at < ?1")
-            .map_err(database_error)?;
-        let old_runs = old_runs_statement
-            .query_map([log_cutoff], |row| row.get::<_, String>(0))
-            .map_err(database_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        drop(old_runs_statement);
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
-        for (id, _) in &orphaned {
-            transaction
-                .execute("DELETE FROM attachments WHERE id = ?1", [id])
-                .map_err(database_error)?;
+        let cutoffs = Cutoffs::current()?;
+        let mut collected = MaintenanceResult::default();
+        for view in Upkeep::every() {
+            collected.absorb(view.collect(self.storage, &cutoffs, &pending)?);
         }
-        for run_id in &old_runs {
-            transaction
-                .execute("DELETE FROM godot_runs WHERE id = ?1", [run_id])
-                .map_err(database_error)?;
-        }
-        transaction.commit().map_err(database_error)?;
-        let mut blobs_removed = 0;
-        for (_, hash) in &orphaned {
-            let references: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM attachments WHERE content_hash = ?1",
-                    [hash],
-                    |row| row.get(0),
-                )
-                .map_err(database_error)?;
-            if references == 0 && fs::remove_file(self.storage.blob_path(hash)).is_ok() {
-                blobs_removed += 1;
-            }
-        }
-        for run_id in &old_runs {
-            let path = self.storage.project_directory().join("logs").join(run_id);
-            if path.is_dir() {
-                fs::remove_dir_all(&path).map_err(|error| {
-                    CommandError::from(format!("Could not remove {}: {error}", path.display()))
-                })?;
-            }
-        }
-        let backups_removed = prune_backups(&self.storage.data_root.join("backups"), 5)?;
-        Ok(MaintenanceResult {
-            attachments_removed: orphaned.len(),
-            blobs_removed,
-            godot_runs_removed: old_runs.len(),
-            backups_removed,
-            // Re-embedding needs the memory worker, so the caller fills this in.
-            memory_embeddings_restored: 0,
-        })
+        Ok(collected)
     }
 }
 
@@ -6664,6 +7097,436 @@ mod tests {
         assert!(
             listed[0].task_id.is_none(),
             "the task it belonged to is cleared"
+        );
+    }
+
+    /// Cutoffs a fixture is written against: everything already in it is spent.
+    ///
+    /// A test says what it is about by moving one field off this, rather than by arithmetic on the
+    /// clock that has to be read twice to see which side of the edge a row is on.
+    fn everything_is_old() -> Cutoffs {
+        Cutoffs {
+            attachments_before: i64::MAX,
+            runs_before: i64::MAX,
+            corpus_version: Some("2.0.0".to_owned()),
+            backups_kept: 5,
+        }
+    }
+
+    /// The fold visits every view, and nothing after it has to finish the answer.
+    ///
+    /// `memory_embeddings_restored` was returned as a hardcoded zero and patched by `lib.rs`
+    /// afterwards, so a second caller was handed a number that was simply untrue. The count of six
+    /// is the other half: a view that is added and not folded over is collected by nothing, which
+    /// is exactly what happened to `sketches` and to `docs_answers`.
+    #[test]
+    fn maintenance_folds_over_every_view_and_needs_no_caller_to_finish_it() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        assert_eq!(Upkeep::every().count(), 6, "one pass, one visit per view");
+        assert_eq!(
+            Upkeep::every().collect::<Vec<_>>(),
+            vec![
+                Upkeep::Chats,
+                Upkeep::Tasks,
+                Upkeep::Runs,
+                Upkeep::Sketches,
+                Upkeep::Memories,
+                Upkeep::Project
+            ]
+        );
+
+        let result = storage.project().run_maintenance().expect("maintenance");
+
+        assert_eq!(result.memory_embeddings_restored, 0);
+        assert_eq!(result.attachments_removed, 0);
+        assert_eq!(result.sketches_removed, 0);
+        assert_eq!(result.docs_answers_removed, 0);
+    }
+
+    /// An attachment nothing refers to goes; a blob two attachments share does not.
+    ///
+    /// Attachments are content-addressed, so the same screenshot pasted into two tasks is one file
+    /// on disk. Deleting it with the first row that stops referring to it would blank the image
+    /// still on screen in the second.
+    #[test]
+    fn the_chats_view_collects_unreferenced_attachments_without_emptying_a_shared_blob() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let referenced = attachment("018f47aa-09d2-7b34-a2d3-8c4e6f000001");
+        let shares_its_bytes = attachment("018f47aa-09d2-7b34-a2d3-8c4e6f000002");
+        let alone = attachment("018f47aa-09d2-7b34-a2d3-8c4e6f000003");
+        for stored in [&referenced, &shares_its_bytes] {
+            storage
+                .chats()
+                .save_attachment(stored, b"hi")
+                .expect("save attachment");
+        }
+        storage
+            .chats()
+            .save_attachment(&alone, b"by")
+            .expect("save attachment");
+        storage
+            .chats()
+            .save(&StoredChat {
+                task_id: None,
+                messages: vec![StoredMessage {
+                    id: 1,
+                    sender: "user".to_owned(),
+                    text: "Look".to_owned(),
+                    timestamp: 10,
+                    attachments: vec![referenced.clone()],
+                    extra: serde_json::Map::new(),
+                }],
+                agent_messages: Vec::new(),
+            })
+            .expect("save the chat");
+
+        let collected = storage
+            .chats()
+            .collect(&everything_is_old())
+            .expect("collect");
+
+        assert_eq!(collected.attachments_removed, 2);
+        assert_eq!(
+            collected.blobs_removed, 1,
+            "only the bytes nothing else hashes to"
+        );
+        assert_eq!(
+            storage
+                .chats()
+                .read_attachment(&referenced)
+                .expect("the referenced attachment is still readable"),
+            b"hi"
+        );
+        assert!(storage.chats().read_attachment(&alone).is_err());
+    }
+
+    /// A day is a floor under the window between a paste and the message that carries it.
+    ///
+    /// The composer stores an image the moment it is pasted and the row referring to it only
+    /// appears when the message is sent, so an attachment is unreferenced for as long as somebody
+    /// takes to finish typing.
+    #[test]
+    fn the_chats_view_leaves_an_attachment_that_has_only_just_been_pasted() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let pasted = attachment("018f47aa-09d2-7b34-a2d3-8c4e6f000004");
+        storage
+            .chats()
+            .save_attachment(&pasted, b"hi")
+            .expect("save attachment");
+
+        let collected = storage
+            .chats()
+            .collect(&Cutoffs {
+                attachments_before: 0,
+                ..everything_is_old()
+            })
+            .expect("collect");
+
+        assert_eq!(collected.attachments_removed, 0);
+        assert_eq!(
+            storage
+                .chats()
+                .read_attachment(&pasted)
+                .expect("still readable"),
+            b"hi"
+        );
+    }
+
+    /// A run that ended long ago goes with its segments and its log directory; a live one stays.
+    ///
+    /// `ended_at` is the whole test. A row without one is either being written to by the editor
+    /// running now or was left open by one that died, and deleting on age would take the log of the
+    /// session on screen.
+    #[test]
+    fn the_runs_view_collects_finished_runs_and_the_directories_holding_their_output() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let finished = storage
+            .runs()
+            .start(&StartGodotRunRequest {
+                task_id: None,
+                session_id: None,
+                godot_version: Some("4.7.2".to_owned()),
+                metadata: serde_json::json!({}),
+            })
+            .expect("start a run");
+        let running = storage
+            .runs()
+            .start(&StartGodotRunRequest {
+                task_id: None,
+                session_id: None,
+                godot_version: Some("4.7.2".to_owned()),
+                metadata: serde_json::json!({}),
+            })
+            .expect("start a second run");
+        for run in [&finished, &running] {
+            storage
+                .runs()
+                .append_logs(&AppendGodotLogsRequest {
+                    run_id: run.id.clone(),
+                    entries: vec![GodotLogEntry {
+                        timestamp: 1,
+                        level: "error".to_owned(),
+                        message: "Nil scene".to_owned(),
+                        source: None,
+                        stack_trace: None,
+                    }],
+                })
+                .expect("append logs");
+        }
+        storage
+            .runs()
+            .finish(&FinishGodotRunRequest {
+                run_id: finished.id.clone(),
+                status: "completed".to_owned(),
+                exit_code: Some(0),
+            })
+            .expect("finish the run");
+        let logs = storage.project_directory().join("logs");
+
+        let collected = storage
+            .runs()
+            .collect(&everything_is_old())
+            .expect("collect");
+
+        assert_eq!(collected.godot_runs_removed, 1);
+        assert!(!logs.join(&finished.id).exists());
+        assert!(
+            logs.join(&running.id).is_dir(),
+            "a run with no end is the session that is still writing"
+        );
+        let connection = storage.connection().expect("connection");
+        let segments = connection
+            .query_row("SELECT count(*) FROM godot_log_segments", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .expect("segment count");
+        assert_eq!(segments, 1, "the segments cascade from the run");
+    }
+
+    /// Sketches were collected by nothing at all, and this is the half of them that goes.
+    ///
+    /// Not an age: `task_id` clears rather than cascades because the layout the user agreed to
+    /// outlives the task that produced it, so there is no date after which one stops being worth
+    /// keeping. What is collected is the row and its markup coming apart — a row offering the user
+    /// something that cannot be opened, and markup no list will ever name again.
+    #[test]
+    fn the_sketches_view_collects_a_row_with_no_markup_and_markup_with_no_row() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        for id in ["question-1-run", "question-2-run"] {
+            storage
+                .sketches()
+                .keep(&kept(id, "Dock", "<p>a</p>", "<p>a</p>"))
+                .expect("keep the sketch");
+        }
+        let sketches = storage.project_directory().join("sketches");
+        fs::remove_file(sketches.join("question-2-run.html")).expect("lose the markup");
+        fs::write(sketches.join("question-3-run.html"), "<p>nobody's</p>").expect("orphan markup");
+        fs::write(sketches.join("notes.txt"), "not a sketch").expect("a file that is not ours");
+
+        let collected = storage
+            .sketches()
+            .collect(&everything_is_old())
+            .expect("collect");
+
+        assert_eq!(collected.sketches_removed, 1);
+        let listed = storage.sketches().list(10).expect("list sketches");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "question-1-run");
+        assert!(
+            !sketches.join("question-2-run.source.html").exists(),
+            "a row that goes takes both of its copies"
+        );
+        assert!(!sketches.join("question-3-run.html").exists());
+        assert!(sketches.join("question-1-run.html").is_file());
+        assert!(sketches.join("question-1-run.source.html").is_file());
+        assert!(
+            sketches.join("notes.txt").is_file(),
+            "a name this cannot read is not a sketch, and not ours to delete"
+        );
+    }
+
+    /// A vector whose memory is gone is a vector the cosine search keeps ranking forever.
+    ///
+    /// `memory_vectors` is a vec0 virtual table, so it is outside the `ON DELETE CASCADE` that
+    /// `memory_embeddings` gets. Since schema V3 a trigger removes it, which leaves what a database
+    /// written before V3 kept — and nothing else would ever look.
+    #[test]
+    fn the_memories_view_collects_vectors_whose_memory_is_gone() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let memory = storage
+            .memory()
+            .upsert(&UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "fact".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "The player scene lives in scenes/player.tscn".to_owned(),
+                provenance: serde_json::json!({"source": "user"}),
+                superseded_by: None,
+            })
+            .expect("save memory");
+        let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        vector[0] = 1.0;
+        storage
+            .memory()
+            .save_embedding(&SaveMemoryEmbeddingRequest {
+                memory_id: memory.id.clone(),
+                model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                vector: vector.clone(),
+            })
+            .expect("save embedding");
+        // What a pre-V3 database is left holding: the memory deleted, the vector not.
+        let connection = storage.connection().expect("connection");
+        connection
+            .execute(
+                "INSERT INTO memory_vectors (memory_id, embedding, scope_key)
+                 VALUES ('01a0-gone', ?1, 'project')",
+                params![vector_bytes(&vector)],
+            )
+            .expect("orphan vector");
+
+        let collected = storage
+            .memory()
+            .collect(&everything_is_old(), &[])
+            .expect("collect");
+
+        assert_eq!(collected.memory_vectors_removed, 1);
+        assert_eq!(
+            collected.memory_embeddings_restored, 0,
+            "every memory here already has its vector, so the worker is never reached"
+        );
+        let vectors = connection
+            .query_row("SELECT count(*) FROM memory_vectors", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .expect("vector count");
+        assert_eq!(vectors, 1, "the memory that is still here keeps its vector");
+        assert_eq!(
+            storage
+                .memory()
+                .search(&SearchMemoryRequest {
+                    query: "player scene".to_owned(),
+                    task_id: None,
+                    vector: Some(vector),
+                    limit: Some(5),
+                })
+                .expect("search")
+                .len(),
+            1
+        );
+    }
+
+    /// Answers out of a manual the project no longer has were collected by nothing at all.
+    ///
+    /// `corpus_version` is part of the key deliberately — the manual ships inside the gofer-rag
+    /// package, so a bumped package cannot serve an answer from the old one. What that key costs is
+    /// that the previous corpus's rows become unreachable rather than stale, and every upgrade the
+    /// project had ever seen was still in the file.
+    #[test]
+    fn the_project_view_collects_answers_from_a_manual_it_no_longer_has() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        for (corpus, answer) in [
+            ("1.4.0", r#"{"text":"old"}"#),
+            ("2.0.0", r#"{"text":"new"}"#),
+        ] {
+            storage
+                .project()
+                .remember_docs_answer(corpus, "ask", "How do I tween?", answer);
+        }
+
+        let collected = storage
+            .project()
+            .collect(&everything_is_old())
+            .expect("collect");
+
+        assert_eq!(collected.docs_answers_removed, 1);
+        assert_eq!(
+            storage
+                .project()
+                .cached_docs_answer("1.4.0", "ask", "How do I tween?"),
+            None
+        );
+        assert_eq!(
+            storage
+                .project()
+                .cached_docs_answer("2.0.0", "ask", "How do I tween?"),
+            Some(r#"{"text":"new"}"#.to_owned()),
+            "the manual in use keeps what it has already paid for"
+        );
+    }
+
+    /// An unknown corpus version drops nothing, because it cannot tell the live manual from a dead
+    /// one. The version is learned from the probe that runs before a turn, so a process that has
+    /// not asked the manual anything has no answer to compare against — and everything fails to
+    /// match `None`.
+    #[test]
+    fn the_project_view_keeps_every_answer_while_it_does_not_know_which_manual_is_current() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        storage.project().remember_docs_answer(
+            "1.4.0",
+            "ask",
+            "How do I tween?",
+            r#"{"text":"old"}"#,
+        );
+
+        let collected = storage
+            .project()
+            .collect(&Cutoffs {
+                corpus_version: None,
+                ..everything_is_old()
+            })
+            .expect("collect");
+
+        assert_eq!(collected.docs_answers_removed, 0);
+        assert!(
+            storage
+                .project()
+                .cached_docs_answer("1.4.0", "ask", "How do I tween?")
+                .is_some()
+        );
+    }
+
+    /// The tasks view collects nothing, and that has to stay a decision rather than an oversight.
+    ///
+    /// A task goes when the user removes it and on no other occasion, and everything belonging to
+    /// one cascades with it. The two rows that deliberately outlive a task — a memory and a sketch —
+    /// clear their `task_id` and are collected by the views that own them.
+    #[test]
+    fn the_tasks_view_collects_nothing_and_leaves_what_outlives_a_task() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        make_repository(&storage.workspace_path.clone());
+        let created = storage
+            .tasks()
+            .create(&storage.switch(&NOTHING_TO_STOP))
+            .expect("create a task");
+        let task_id = created.task_id.expect("the new task");
+
+        let collected = storage
+            .tasks()
+            .collect(&everything_is_old())
+            .expect("collect");
+
+        assert_eq!(collected.attachments_removed, 0);
+        assert_eq!(collected.godot_runs_removed, 0);
+        assert_eq!(collected.sketches_removed, 0);
+        assert_eq!(collected.backups_removed, 0);
+        assert!(
+            storage
+                .tasks()
+                .list()
+                .expect("list tasks")
+                .iter()
+                .any(|task| task.id == task_id),
+            "no upkeep here touches a task"
         );
     }
 }

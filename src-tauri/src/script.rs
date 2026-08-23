@@ -74,6 +74,20 @@ pub struct ScriptDiagnostics {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// What `godot_script list` takes: one directory to narrow the worktree walk to.
+///
+/// A type rather than a `params.get` lookup, because the agent router used to read this call's
+/// JSON by hand and `tool_drift` recovered its contract by parsing the arm's own source text —
+/// which held the arm to a shape, an indentation and a spelling that no compiler was checking.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListScriptsRequest {
+    /// The directory to list, named the way the project names it. `None` is every script in the
+    /// worktree.
+    #[serde(default)]
+    pub under: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenScriptRequest {
@@ -210,6 +224,69 @@ pub enum ScriptRequest {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+}
+
+/// The fields each request in this module deserializes, as serde spells them on the wire, and
+/// whether a call may leave one out.
+///
+/// Declared beside the types rather than recovered from them. `tool_drift` holds the catalogue's
+/// parameter table to what the handler behind it really reads, and it used to do that by parsing
+/// this file: find `struct X {` or `enum X {`, read to the first `\n}`, find the variant, split
+/// each line on its first `:`. A field whose type wrapped onto a second line was dropped without a
+/// word, and a rename left the whole comparison iterating an empty set — a check that passes on
+/// nothing. What a request takes is a fact about the request, so it is written here, where
+/// changing the type and not the list is the same edit.
+///
+/// Optional means what serde means: the type is an `Option`, or the field carries
+/// `#[serde(default)]`. A parameter the catalogue calls required while serde would have filled in
+/// a default is a refusal the handler would never have made, and one it calls optional while serde
+/// demands it is a call refused later and worse.
+#[cfg(test)]
+pub const LIST_SCRIPTS_FIELDS: &[(&str, bool)] = &[("under", true)];
+
+/// The fields [`OpenScriptRequest`] deserializes. See [`LIST_SCRIPTS_FIELDS`].
+#[cfg(test)]
+pub const OPEN_SCRIPT_FIELDS: &[(&str, bool)] = &[("path", false)];
+
+/// The fields [`UpdateScriptRequest`] deserializes. See [`LIST_SCRIPTS_FIELDS`].
+#[cfg(test)]
+pub const UPDATE_SCRIPT_FIELDS: &[(&str, bool)] = &[("path", false), ("text", false)];
+
+/// The fields [`SaveScriptRequest`] deserializes. See [`LIST_SCRIPTS_FIELDS`].
+#[cfg(test)]
+pub const SAVE_SCRIPT_FIELDS: &[(&str, bool)] =
+    &[("path", false), ("text", false), ("expectedHash", true)];
+
+/// The fields [`EditScriptRequest`] deserializes. See [`LIST_SCRIPTS_FIELDS`].
+#[cfg(test)]
+pub const EDIT_SCRIPT_FIELDS: &[(&str, bool)] = &[("files", false)];
+
+/// The fields [`ApplyRenameRequest`] deserializes. See [`LIST_SCRIPTS_FIELDS`].
+#[cfg(test)]
+pub const APPLY_RENAME_FIELDS: &[(&str, bool)] = &[("files", false)];
+
+/// The fields one [`ScriptRequest`] variant deserializes, keyed by the operation that names it.
+///
+/// `None` for a name no variant answers, which is what makes a catalogue operation added without a
+/// variant fail loudly rather than be skipped. See [`LIST_SCRIPTS_FIELDS`].
+#[cfg(test)]
+pub fn language_request_fields(op: &str) -> Option<&'static [(&'static str, bool)]> {
+    const AT_A_POSITION: &[(&str, bool)] = &[("path", false), ("position", false)];
+    Some(match op {
+        "hover" | "completion" | "signature_help" | "definition" | "declaration" | "highlights"
+        | "prepare_rename" => AT_A_POSITION,
+        "resolve_completion" => &[("item", false)],
+        "references" => &[
+            ("path", false),
+            ("position", false),
+            ("includeDeclaration", true),
+        ],
+        "document_symbols" => &[("path", false)],
+        "rename" => &[("path", false), ("position", false), ("newName", false)],
+        "workspace_symbols" => &[("query", false)],
+        "diagnostics" => &[("path", false), ("timeoutMs", true)],
+        _ => return None,
+    })
 }
 
 /// The answer to one [`ScriptRequest`], tagged with the operation that produced it.

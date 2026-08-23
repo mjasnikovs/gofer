@@ -9,6 +9,7 @@
 //! prevents cdylib/staticlib builds from treating them as dead code until those commands land.
 #![allow(dead_code)]
 
+use crate::ai_tools::ToolFailure;
 use crate::godot_rpc;
 use crate::paths;
 use crate::process::{ChildProcess, ProcessSpawner};
@@ -164,6 +165,21 @@ pub enum LogSeverity {
     Error,
 }
 
+/// Every [`LogSeverity`], as serde spells it on the wire.
+///
+/// Declared beside the enum rather than recovered from it. `tool_drift` holds the `godot_logs read`
+/// summary to the vocabulary its handler really accepts, and it used to do that by finding
+/// `enum LogSeverity {` in this file's own source text and reading the lines to the brace that
+/// closed it — the last such parser in the crate, and one a rename would have left comparing
+/// nothing to nothing. What the enum offers is a fact about the enum, so changing the variants and
+/// changing this list is one edit in one place.
+#[cfg(test)]
+pub const LOG_SEVERITY_NAMES: &[&str] = &["info", "warning", "error"];
+
+/// Every [`LogSource`], as serde spells it on the wire. See [`LOG_SEVERITY_NAMES`].
+#[cfg(test)]
+pub const LOG_SOURCE_NAMES: &[&str] = &["editor", "editorError"];
+
 /// One captured line of session output.
 ///
 /// `source` names the stream, not the producer: the editor spawns the game, the importer, and the
@@ -206,6 +222,24 @@ pub struct LogQuery {
     #[serde(default)]
     pub limit: Option<usize>,
 }
+
+/// The fields [`LogQuery`] deserializes, as serde spells them on the wire, and whether a call may
+/// leave one out.
+///
+/// Declared beside the type rather than recovered from it. `tool_drift` holds the catalogue's
+/// parameter table to what the handler behind it really reads, and what a query takes is a fact
+/// about the query — so changing the struct and changing the list is one edit in one place.
+///
+/// Optional means what serde means: the type is an `Option`, or the field carries
+/// `#[serde(default)]`.
+#[cfg(test)]
+pub const LOG_QUERY_FIELDS: &[(&str, bool)] = &[
+    ("after", true),
+    ("minSeverity", true),
+    ("source", true),
+    ("contains", true),
+    ("limit", true),
+];
 
 /// One page of session logs plus the cursor that continues it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -265,19 +299,7 @@ impl LogBuffer {
                 continue;
             }
             cursor = cursor.max(entry.sequence);
-            if query
-                .min_severity
-                .is_some_and(|minimum| entry.severity < minimum)
-            {
-                continue;
-            }
-            if query.source.is_some_and(|source| entry.source != source) {
-                continue;
-            }
-            if needle
-                .as_ref()
-                .is_some_and(|needle| !entry.message.to_lowercase().contains(needle))
-            {
+            if !matches_filters(query, needle.as_deref(), entry) {
                 continue;
             }
             entries.push(entry.clone());
@@ -291,6 +313,51 @@ impl LogBuffer {
             dropped: self.dropped,
         }
     }
+
+    /// The newest entries a query's filters match, oldest of those first.
+    ///
+    /// [`read`](Self::read) pages *forward*: it answers with the first matches after its cursor and
+    /// stops at the limit, so asking it for a tail means reading the whole buffer and hoping the
+    /// limit covers it — and `MAX_LOG_PAGE` is a quarter of `MAX_LOG_ENTRIES`. A game that errors
+    /// once per `_process` frame fills that page in seconds, and from then on every failure carried
+    /// six lines from the start of the run instead of the ones that had just ended it. Walking
+    /// backwards has no page to overflow.
+    fn read_newest(&self, query: &LogQuery, wanted: usize) -> Vec<LogEntry> {
+        let needle = query
+            .contains
+            .as_ref()
+            .map(|contains| contains.to_lowercase());
+        let mut entries: Vec<LogEntry> = self
+            .entries
+            .iter()
+            .rev()
+            .filter(|entry| matches_filters(query, needle.as_deref(), entry))
+            .take(wanted)
+            .cloned()
+            .collect();
+        entries.reverse();
+        entries
+    }
+}
+
+/// Whether one entry passes a query's filters, with the substring already lowercased.
+///
+/// The cursor is not one of them. `after` says where a page begins, and the two readers begin at
+/// opposite ends of the buffer; everything else a query asks for is a fact about the entry alone.
+fn matches_filters(query: &LogQuery, needle: Option<&str>, entry: &LogEntry) -> bool {
+    if query
+        .min_severity
+        .is_some_and(|minimum| entry.severity < minimum)
+    {
+        return false;
+    }
+    if query.source.is_some_and(|source| entry.source != source) {
+        return false;
+    }
+    if needle.is_some_and(|needle| !entry.message.to_lowercase().contains(needle)) {
+        return false;
+    }
+    true
 }
 
 pub struct GodotSession {
@@ -736,6 +803,16 @@ pub fn read_logs(query: &LogQuery) -> Result<LogPage, SessionError> {
     LOGS.lock()
         .map(|logs| logs.read(query))
         .map_err(|_| SessionError::new("lock_poisoned", "The session log lock is poisoned"))
+}
+
+/// Reads the newest captured lines a query matches, oldest of those first.
+///
+/// The tail rather than a page. Nothing outside this module wants it: paging forward is what a
+/// reader of output does, and reading backwards is what the failure messages below do.
+fn newest_logs(query: &LogQuery, wanted: usize) -> Vec<LogEntry> {
+    LOGS.lock()
+        .map(|logs| logs.read_newest(query, wanted))
+        .unwrap_or_default()
 }
 
 /// Appends one line to the session log buffer. The reader threads own this; the acceptance suite
@@ -1243,6 +1320,221 @@ fn parse_lsp_remote_host(text: &str) -> Option<String> {
     None
 }
 
+/// The runtime failures that mean the game is not answering, whatever the reason turns out to be.
+///
+/// Every one of them is the addon reporting a state of the process rather than a fault in the
+/// request: the game is paused at an error, it is gone, it stopped answering, or it is up and its
+/// helper has not loaded. All four are worth the same treatment, because in all four the model's
+/// next question is the same one, and the answer is in the editor's output either way.
+///
+/// `runtime_slow_start` is here for a failure that looks like patience and is not: a parse error in
+/// the addon's own runtime script leaves the game running and its helper never loading, so the
+/// launch times out while the editor is still playing, for ever. Without the output the message
+/// reads as "wait a little longer", and there is nothing to wait for.
+const GAME_IS_NOT_ANSWERING: [&str; 5] = [
+    "runtime_broke",
+    "runtime_not_running",
+    "runtime_slow_start",
+    "runtime_timeout",
+    // The editor, not the game. `session_closed` is what every call answers once the RPC socket
+    // has gone, and on its own it says only that — see `editor_crashed` for what it is usually
+    // hiding.
+    "session_closed",
+];
+
+/// What Godot prints as it dies of a signal.
+const CRASH_MARKER: &str = "Program crashed with signal";
+
+/// The crash line, when the editor died rather than merely stopped answering.
+///
+/// Godot 4.7.2 segfaults when it is asked to play a project whose script will not parse. Watched
+/// three times in one night, always the same four lines:
+///
+/// ```text
+/// SCRIPT ERROR: Parse Error: Function "add_child_node()" not found in base self.
+/// ERROR: Failed to load script "res://scripts/spawner.gd" with error "Parse error".
+/// ERROR: Parameter "t" is null.
+/// handle_crash: Program crashed with signal 11
+/// ```
+///
+/// What reached the model was `session_closed: The RPC session closed`, which is true and tells it
+/// nothing — so it retried, and retried, and two of those three runs never finished. A crash is not
+/// something to retry, and it is not the caller's mistake; the engine is the thing that broke, and
+/// saying so is the difference between restarting the session and arguing with it.
+///
+/// Read without a severity floor on purpose. `handle_crash:` arrives on the editor's stderr and is
+/// not classified as an error line, so the reader that carries error lines never sees it.
+///
+/// Guarded by [`an_editor_is_still_answering`], because the marker on its own does not say whose
+/// death it is: the game inherits the editor's pipes, so a segfaulting game writes the same line
+/// into the same buffer.
+fn editor_crashed() -> Option<String> {
+    if an_editor_is_still_answering() {
+        return None;
+    }
+    newest_logs(
+        &LogQuery {
+            contains: Some(CRASH_MARKER.to_owned()),
+            ..LogQuery::default()
+        },
+        1,
+    )
+    .pop()
+    .map(|entry| entry.message)
+}
+
+/// Whether there is still an editor up and answering, which decides whose crash line that was.
+///
+/// A game the editor launched writes to the editor's own pipes, so a GDExtension fault or a runaway
+/// recursion inside the game puts `handle_crash: Program crashed with signal 11` into the one
+/// buffer [`editor_crashed`] reads. Nothing in the line says which process printed it. Unguarded,
+/// one crashed game turned every later runtime failure of the session into "the Godot editor itself
+/// died — retrying will not help", about an editor sitting there ready; and because that branch
+/// returns early, it also threw away the parse errors this function exists to attach.
+///
+/// A live editor is the one thing a dead one cannot be. `Starting`, `Importing`, `Ready` and
+/// `Playing` all mean the process is up, so a crash line under any of them belongs to something the
+/// editor started rather than to the editor. Only `Error` and `Offline` leave it unclaimed.
+fn an_editor_is_still_answering() -> bool {
+    matches!(
+        current_state(),
+        SessionState::Starting
+            | SessionState::Importing
+            | SessionState::Ready
+            | SessionState::Playing
+    )
+}
+
+/// Puts the error that ended the game into the failure the model is about to read.
+///
+/// The addon knows the game stopped and does not know why. A GDScript parse error is printed by
+/// the engine onto the editor's own stderr and never crosses the debugger bridge, so the addon can
+/// only say that nothing answered — which is how `runtime_broke` came to end with "read the error
+/// in the session output", and how the call after it answered "The game stopped before it could
+/// answer" and named nothing at all.
+///
+/// Gofer has that text. `godot_logs` reads the very same buffer, and a live run showed the two
+/// lines that explained everything sitting in it while the model was told to go and look:
+///
+/// ```text
+/// SCRIPT ERROR: Parse Error: Expected expression after "else".
+/// ERROR: Failed to load script "res://scripts/generate_assets.gd" with error "Parse error".
+/// ```
+///
+/// A pointer to a side channel costs a turn, and the turn after a crash is the one the model has
+/// least to spare. So the lines travel with the failure instead of being described.
+pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -> ToolFailure {
+    if !GAME_IS_NOT_ANSWERING.contains(&failure.code.as_str()) {
+        return failure;
+    }
+    if let Some(crash) = editor_crashed() {
+        failure.message = format!(
+            "{}\n\nThe Godot editor itself died: {crash}. That is the engine crashing, not this \
+             call — retrying it will not help. Start a new session with godot_session start.",
+            failure.message.trim_end()
+        );
+        return failure;
+    }
+    // Not for `session_closed`. That one is about the editor, and an editor that has gone takes the
+    // staged autoload with it — so the check below would be right about the file and wrong about
+    // what happened.
+    if failure.code.starts_with("runtime_")
+        && let Some(missing) = the_helper_is_not_installed()
+    {
+        failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
+        return failure;
+    }
+    if failure.code.starts_with("runtime_")
+        && let Some(held) = the_debugger_holds_the_game()
+    {
+        failure.message = format!("{}\n\n{held}", failure.message.trim_end());
+    }
+    let printed = last_session_errors(CARRIED_ERROR_LINES);
+    if printed.is_empty() {
+        return failure;
+    }
+    failure.message = format!(
+        "{}\n\nThe session output ends with:\n{}",
+        failure.message.trim_end(),
+        printed.join("\n")
+    );
+    failure
+}
+
+/// Says so when the game a runtime call is waiting on is one the debugger launched.
+///
+/// A game stopped at a breakpoint answers nothing: the whole process is halted, so `runtime.input`
+/// spends its deadline and comes back `The game did not answer in time`. That sentence reads as a
+/// fault, and a live turn read it as one — eight timeouts in a row against a game stopped at a
+/// breakpoint the same turn had set, three attempts to run it again on top of those, and the answer
+/// waiting at the breakpoint never collected.
+///
+/// The flag says the debugger launched this game, not that it is halted this instant, and the
+/// sentence says exactly that much: it names the call that lets a stopped game run on and leaves
+/// the reader to look. Nothing here can be wrong about a game the debugger never started.
+fn the_debugger_holds_the_game() -> Option<String> {
+    crate::debug::holds_a_game().then(|| {
+        "This game was launched by the debugger, and a game stopped at a breakpoint answers \
+         nothing until it runs on. If one is set, godot_debug continue is what lets this call \
+         through; godot_debug stack_trace says where it is stopped."
+            .to_owned()
+    })
+}
+
+/// Says so when the game cannot possibly answer, because its helper is not in the project any more.
+///
+/// The other three explanations a runtime failure carries all come out of the session output. This
+/// one is not in it: the game boots, runs, and prints nothing wrong — it simply has no
+/// `GoferRuntime` autoload, so nothing inside it ever announces itself. Every runtime call then
+/// waits its full deadline and answers with advice to wait longer, for ever.
+///
+/// See [`crate::addon::runtime_helper_missing`] for what takes the autoload away under a session
+/// that is still running, and why the file rather than the editor is what gets read.
+fn the_helper_is_not_installed() -> Option<String> {
+    let worktree = current_info()?.worktree;
+    if !crate::addon::runtime_helper_missing(std::path::Path::new(&worktree)) {
+        return None;
+    }
+    Some(
+        "The game has no Gofer runtime helper to answer with: project.godot no longer registers \
+         the GoferRuntime autoload, so nothing in the game can reply and waiting will not change \
+         that. Something rewrote project.godot after this session staged it — a branch switch, a \
+         merge, or an edit to the file. Restart the editor with godot_session stop then \
+         godot_session start, which stages it again."
+            .to_owned(),
+    )
+}
+
+/// How many of the session's last errors travel with a runtime failure.
+///
+/// Enough for the two lines an engine prints about one bad script — the parse error and the load
+/// that failed because of it — and few enough that a buffer full of an earlier problem cannot bury
+/// the message it is attached to.
+const CARRIED_ERROR_LINES: usize = 6;
+
+/// The most recent error lines the running session printed, oldest of them first.
+///
+/// Errors only. The `at:` frames and the GDScript backtrace under one are classified as info, and
+/// a failure message is not the place for engine internals — what the model needs is the sentence
+/// naming the script and what is wrong with it. `godot_logs` is still there for the rest.
+///
+/// Read backwards. Paging forward for a tail meant reading at most `MAX_LOG_PAGE` matches out of a
+/// `MAX_LOG_ENTRIES` buffer and taking the end of *those*, which a game erroring once a frame fills
+/// in seconds — after which every failure carried the first six errors of the run and none of the
+/// one that had just ended it.
+fn last_session_errors(wanted: usize) -> Vec<String> {
+    newest_logs(
+        &LogQuery {
+            min_severity: Some(LogSeverity::Error),
+            ..LogQuery::default()
+        },
+        wanted,
+    )
+    .into_iter()
+    .map(|entry| entry.message)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1253,6 +1545,26 @@ mod tests {
     use std::io::{self, Cursor};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
+
+    /// The two declared vocabularies are the words serde really reads and writes.
+    ///
+    /// A list beside a type is only worth having if it is the type's own spelling, so each name is
+    /// run down the wire both ways: deserialize it into the variant, serialize that back, and it
+    /// has to be the same word. A misspelled entry would otherwise sit in the catalogue advertising
+    /// a filter no query can name.
+    #[test]
+    fn the_declared_log_vocabularies_are_the_words_serde_reads() {
+        for name in LOG_SEVERITY_NAMES {
+            let severity: LogSeverity =
+                serde_json::from_value(json!(name)).unwrap_or_else(|_| panic!("{name} is read"));
+            assert_eq!(serde_json::to_value(severity).unwrap(), json!(name));
+        }
+        for name in LOG_SOURCE_NAMES {
+            let source: LogSource =
+                serde_json::from_value(json!(name)).unwrap_or_else(|_| panic!("{name} is read"));
+            assert_eq!(serde_json::to_value(source).unwrap(), json!(name));
+        }
+    }
 
     struct FakeSpawner {
         version_output: String,
@@ -1952,5 +2264,409 @@ mod tests {
         .expect("read tail");
         assert_eq!(last.entries[0].message.chars().count(), MAX_LOG_LINE_CHARS);
         clear_logs();
+    }
+
+    /// Serializes the tests that share the one session log buffer.
+    ///
+    /// A poisoned lock is taken anyway. The buffer is seeded from scratch by every test that holds
+    /// this, so there is no state a panicking test could have left half-written — and refusing the
+    /// lock would turn one honest assertion failure into three tests reporting `PoisonError`
+    /// instead of what they actually found.
+    fn session_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Seeds the session log buffer with the output one editor produced, and nothing else.
+    fn given_the_session_printed(lines: &[(LogSource, &str)]) {
+        clear_logs();
+        for (source, line) in lines {
+            append_log(*source, &format!("{line}\n"));
+        }
+    }
+
+    /// The failure the addon answers a runtime call with, before this module has touched it.
+    fn addon_failure(code: &str, message: &str) -> ToolFailure {
+        ToolFailure {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retryable: true,
+            details: json!({}),
+        }
+    }
+
+    /*
+     * A game whose helper is not in the project is told so, rather than told to wait.
+     *
+     * `runtime_slow_start` was written for a helper that is late, and it says the right thing to a
+     * caller whose game is still starting: read `get_state`, do not stop it. A helper that is not
+     * installed reads the same and never resolves — `get_state` answers
+     * `running: true, runtimeReady: false` for ever, `wait` answers `runtime_not_running` about a
+     * game that is plainly running, and the advice is to keep asking. A live turn spent seventeen
+     * calls in that loop and produced nothing.
+     *
+     * The session output cannot explain it, because there is no error: the game boots and runs
+     * perfectly, with nothing inside it that can answer.
+     */
+    #[test]
+    fn a_game_with_no_runtime_helper_is_told_that_and_not_to_wait() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(LogSource::Editor, "GOFER_ADDON_READY:2")]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            "config_version=5\n\n[application]\n\nconfig/name=\"Fixture\"\n",
+        )
+        .expect("a project with no autoload section");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet.",
+        ));
+
+        bind(None);
+        assert_eq!(carried.code, "runtime_slow_start");
+        assert!(
+            carried.message.contains("GoferRuntime"),
+            "the failure named nothing to fix: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("godot_session start"),
+            "the failure offered no way out: {}",
+            carried.message
+        );
+    }
+
+    /*
+     * And a staged project keeps the failure it already had.
+     *
+     * The sentence above is a diagnosis, so it must not be attached to a game whose helper is
+     * simply late — which is every ordinary `runtime_slow_start` and the reason that code exists.
+     */
+    #[test]
+    fn a_staged_project_is_not_accused_of_losing_its_helper() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(LogSource::Editor, "GOFER_ADDON_READY:2")]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            format!(
+                "config_version=5\n\n[autoload]\n\n{}=\"{}\"\n",
+                crate::addon::AUTOLOAD_NAME,
+                crate::addon::AUTOLOAD_TARGET
+            ),
+        )
+        .expect("a staged project");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet.",
+        ));
+
+        bind(None);
+        assert!(
+            !carried.message.contains("GoferRuntime"),
+            "a staged project was accused of losing its helper: {}",
+            carried.message
+        );
+    }
+
+    /**
+     * A crashed game reaches the model with the error that crashed it.
+     *
+     * Observed in a live run against a blank project: the game stopped on a parse error, the model
+     * was told to "read the error in the session output", and the next `godot_runtime run` answered
+     * "The game stopped before it could answer". Two failures, no cause, while both lines that
+     * explained it sat in the buffer this reads.
+     */
+    #[test]
+    fn a_dead_game_answers_with_the_error_that_killed_it() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (LogSource::Editor, "GOFER_ADDON_READY:2"),
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: Failed to load script \"res://scripts/generate_assets.gd\" with error \
+                 \"Parse error\".",
+            ),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game stopped before it could answer",
+        ));
+
+        // The code is the addon's and stays the addon's; only what the model can act on is added.
+        assert_eq!(carried.code, "runtime_not_running");
+        assert!(
+            carried
+                .message
+                .contains("The game stopped before it could answer"),
+            "the failure lost what it already said: {}",
+            carried.message
+        );
+        assert!(
+            carried
+                .message
+                .contains("Parse Error: Expected expression after \"else\""),
+            "the failure named no cause: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("scripts/generate_assets.gd"),
+            "the failure named no file to go and fix: {}",
+            carried.message
+        );
+    }
+
+    /// When the editor itself dies, the failure says so instead of describing a game.
+    ///
+    /// Godot 4.7.2 segfaults on being asked to play a project whose script will not parse. Watched
+    /// three times in one night, and what reached the model was `session_closed: The RPC session
+    /// closed` — true, and no help at all: two of those three runs spent their whole budget
+    /// retrying a call that could never work.
+    ///
+    /// The crash line arrives on the editor's stderr and is not classified as an error, which is
+    /// why the reader that carries error lines never saw it and why this one reads without a floor.
+    #[test]
+    fn an_editor_that_crashed_is_named_as_the_thing_that_broke() {
+        let _guard = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Function \"add_child_node()\" not found in base self.",
+            ),
+            (
+                LogSource::EditorError,
+                "handle_crash: Program crashed with signal 11",
+            ),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "session_closed",
+            "The RPC session closed",
+        ));
+
+        assert_eq!(carried.code, "session_closed");
+        assert!(
+            carried.message.contains("The RPC session closed"),
+            "the failure lost what it already said: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("Program crashed with signal 11"),
+            "the crash has to be in it: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("godot_session start"),
+            "and the one thing worth doing about it: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("retrying it will not help"),
+            "a crash is not something to retry: {}",
+            carried.message
+        );
+    }
+
+    /// A game that crashed is not the editor crashing, however alike the two lines look.
+    ///
+    /// The game the editor launches inherits the editor's pipes, so its `handle_crash:` line lands
+    /// in the very buffer the crash check reads. Unguarded, one segfaulting game told the model for
+    /// the rest of the session that the engine had died and there was no point retrying — while the
+    /// editor sat there ready — and dropped the parse error that had actually ended the game.
+    #[test]
+    fn a_game_that_crashed_does_not_get_reported_as_a_dead_editor() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Invalid access to property or key 'velocity' on a base object of \
+                 type 'Node2D'.",
+            ),
+            (
+                LogSource::EditorError,
+                "handle_crash: Program crashed with signal 11",
+            ),
+        ]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            format!(
+                "config_version=5\n\n[autoload]\n\n{}=\"{}\"\n",
+                crate::addon::AUTOLOAD_NAME,
+                crate::addon::AUTOLOAD_TARGET
+            ),
+        )
+        .expect("a staged project");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_broke",
+            "The game stopped at an error while starting",
+        ));
+
+        bind(None);
+        assert!(
+            !carried.message.contains("The Godot editor itself died"),
+            "a live editor was accused of dying: {}",
+            carried.message
+        );
+        assert!(
+            carried
+                .message
+                .contains("Invalid access to property or key 'velocity'"),
+            "and the error that did end the game was thrown away with it: {}",
+            carried.message
+        );
+    }
+
+    /// The carried errors are the session's last ones, not its first ones.
+    ///
+    /// The reader pages forward: it answers with the first matches after its cursor and stops at
+    /// `MAX_LOG_PAGE`, which is a quarter of the buffer. A game erroring once per `_process` frame
+    /// fills that page in seconds, and every failure after it carried six lines from the start of
+    /// the run while the one that ended the game sat further down.
+    #[test]
+    fn a_buffer_full_of_earlier_errors_still_carries_the_last_one() {
+        let _test = session_test_lock();
+        clear_logs();
+        for index in 0..(MAX_LOG_PAGE + 10) {
+            append_log(
+                LogSource::EditorError,
+                &format!("SCRIPT ERROR: frame {index} went wrong again\n"),
+            );
+        }
+        append_log(
+            LogSource::EditorError,
+            "SCRIPT ERROR: Parse Error: Expected expression after \"else\".\n",
+        );
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_broke",
+            "The game stopped before it could answer",
+        ));
+
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "the last error is the one it exists to carry: {}",
+            carried.message
+        );
+        assert!(
+            !carried.message.contains("frame 0 went wrong"),
+            "and it carried the start of the run instead: {}",
+            carried.message
+        );
+    }
+
+    /// The `read the error in the session output` pointer is replaced by the error itself.
+    #[test]
+    fn a_broken_game_stops_pointing_at_a_side_channel() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(
+            LogSource::EditorError,
+            "SCRIPT ERROR: Invalid access to property or key 'velocity' on a base object of type \
+             'Node2D'.",
+        )]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_broke",
+            "The game stopped at an error while starting and is paused in the debugger; read the \
+             error in the session output, fix it, and run again",
+        ));
+
+        assert!(
+            carried
+                .message
+                .contains("Invalid access to property or key 'velocity'"),
+            "the failure named no cause: {}",
+            carried.message
+        );
+    }
+
+    /// A timeout against a game the debugger launched says where the game probably is.
+    ///
+    /// `The game did not answer in time` is what a game stopped at a breakpoint answers, because a
+    /// halted process answers nothing. One live turn read that as a fault: eight timeouts in a row
+    /// against a breakpoint it had set itself, three attempts to run the game again on top, and the
+    /// answer waiting at the breakpoint never collected.
+    #[test]
+    fn a_timeout_against_the_debuggers_own_game_names_the_call_that_frees_it() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(LogSource::Editor, "Godot Engine v4.7.2.stable")]);
+
+        crate::debug::pretend_it_holds_a_game(true);
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+        crate::debug::pretend_it_holds_a_game(false);
+        assert!(
+            carried.message.contains("godot_debug continue"),
+            "{}",
+            carried.message
+        );
+
+        // And a game the debugger never started gains nothing from the sentence.
+        let alone = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+        assert_eq!(alone.message, "The game did not answer in time");
+    }
+
+    /// A buffer with nothing wrong in it leaves the failure exactly as the addon wrote it.
+    #[test]
+    fn a_runtime_failure_with_no_error_to_carry_is_left_alone() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(LogSource::Editor, "Godot Engine v4.7.2.stable")]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+
+        assert_eq!(carried.message, "The game did not answer in time");
+    }
+
+    /// A fault in the request is not a fault in the game, and gains nothing from the game's output.
+    #[test]
+    fn a_request_the_game_refused_carries_no_session_output() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(
+            LogSource::EditorError,
+            "SCRIPT ERROR: something unrelated went wrong earlier",
+        )]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "unsupported_value",
+            "A value must be a tagged object with a type and a value",
+        ));
+
+        assert_eq!(
+            carried.message,
+            "A value must be a tagged object with a type and a value"
+        );
     }
 }

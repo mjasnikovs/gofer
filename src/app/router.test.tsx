@@ -7,7 +7,11 @@ import {preloadSettingsPage, preloadWorkspace} from './routes-preload'
 import {immediateScheduler, setScheduler, timerScheduler} from '../services/clock'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 import {flush} from '../test/flush'
+import {installBackend} from '../test/backend'
+import {draftKey} from '../services/ui-state'
+import type {Backend, BackendAnswers, BackendOptions} from '../test/backend'
 import type {HealthReport} from '../models/health'
+import type {Message} from '../models/chat'
 import type {TaskSummary} from '../models/app'
 import type {SendAiMessageRequest} from '../services/desktop'
 
@@ -63,26 +67,56 @@ const tasks: readonly TaskSummary[] = [
     }
 ]
 
-const readyWorkspace: HealthReport = {
-    workspace: '/home/dev/game',
-    workspaceSource: 'configured',
-    isReady: true,
-    checks: []
+/**
+ * The project this suite opens: the two tasks above, a healthy workspace, an empty explorer.
+ *
+ * A render walks the whole shell from here — health gate, model splash, side nav, workspace — and
+ * every task operation below moves the fake's own tasks rather than a canned reply, so what the
+ * sidebar shows afterwards is what the backend did.
+ */
+let server: Backend
+function project(options: BackendOptions = {}) {
+    server = installBackend(tauri, {tasks, files: [], ...options})
+    return server
 }
 
+/** One thing the user said, as a stored conversation holds it. */
+const said = (id: number, text: string): Message => ({id, sender: 'user', text, timestamp: id})
+
+/** Every merge the window asked for. The answer about unsaved work is the user's, so it matters. */
+const mergeCalls = () =>
+    tauri.invoke.mock.calls
+        .filter(call => call[0] === 'merge_task_branch')
+        .map(call => call[1] as {taskId: string; unsavedWork?: string})
+
+/** Which task the backend is working in, which is what a switch is for. */
+const currentTask = () => server.state.tasks.find(task => task.isCurrent)?.id
+
 /**
- * Answers as a desktop build with a healthy workspace, initialized models, and the two tasks above,
- * so a render walks the whole shell: health gate, model splash, side nav, and the workspace.
+ * An answer that does the real thing, but not until the test lets go of it.
+ *
+ * Every task operation stops the Godot editor first — a quit request and a wait of up to ten
+ * seconds — so a held command is what the window looks like for most of a switch.
  */
-function answerAsDesktop(overrides: Record<string, unknown> = {}) {
-    tauri.invoke.mockImplementation(async (command: string) => {
-        if (command in overrides) return overrides[command]
-        if (command === 'check_workspace_health') return readyWorkspace
-        if (command === 'list_project_tasks') return tasks
-        if (command === 'list_workspace_files') return []
-        if (command === 'load_chat') return {messages: [], agentMessages: []}
-        return undefined
+const after = (held: Promise<void>) => async (_: unknown, answer: () => unknown) => {
+    await held
+    return answer()
+}
+
+/** A promise the test resolves by hand, and the release that resolves it. */
+function gate() {
+    let release = (): void => undefined
+    const held = new Promise<void>(resolve => {
+        release = () => {
+            resolve()
+        }
     })
+    return {
+        held,
+        release: () => {
+            release()
+        }
+    }
 }
 
 /**
@@ -108,7 +142,7 @@ beforeEach(() => {
     setScheduler(immediateScheduler)
     window.localStorage.clear()
     installDesktopFake(tauri)
-    answerAsDesktop()
+    project()
 })
 
 afterEach(() => {
@@ -136,7 +170,7 @@ describe('application router', () => {
         await router.load()
 
         expect(router.state.location.pathname).toBe('/tasks/task-1')
-        expect(tauri.invoke).toHaveBeenCalledWith('activate_chat_task', {taskId: 'task-1'})
+        expect(currentTask()).toBe('task-1')
     })
 
     it('activates a task before resolving its route', async () => {
@@ -146,13 +180,13 @@ describe('application router', () => {
         await router.navigate({to: '/tasks/$taskId', params: {taskId: 'task-2'}})
 
         expect(router.state.location.pathname).toBe('/tasks/task-2')
-        expect(tauri.invoke).toHaveBeenCalledWith('activate_chat_task', {taskId: 'task-2'})
+        expect(currentTask(), 'the backend is working in the task the route names').toBe('task-2')
     })
 
     // A project with no tasks yet has nothing to redirect to, so the root route stays where it is
     // rather than failing the load.
     it('stays on the root route when the project has no current task', async () => {
-        answerAsDesktop({list_project_tasks: []})
+        project({tasks: []})
         const router = createAppRouter(createMemoryHistory({initialEntries: ['/']}))
 
         await router.load()
@@ -162,7 +196,7 @@ describe('application router', () => {
     })
 
     it('ignores a task list the backend answered with the wrong shape', async () => {
-        answerAsDesktop({list_project_tasks: [{id: 'task-1'}, 'not a task']})
+        project({answers: {list_project_tasks: () => [{id: 'task-1'}, 'not a task']}})
         const router = createAppRouter(createMemoryHistory({initialEntries: ['/']}))
 
         await router.load()
@@ -204,25 +238,25 @@ describe('the application shell', () => {
     })
 
     it('opens a new task and moves the window to it', async () => {
-        answerAsDesktop({create_chat_task: {taskId: 'task-3'}})
         const router = await openAt('/tasks/task-1')
 
         await createTask()
         await flush()
 
-        expect(tauri.invoke).toHaveBeenCalledWith('create_chat_task', {bringChanges: false})
         expect(router.state.location.pathname).toBe('/tasks/task-3')
+        expect(server.state.tasks, 'the project has the task it made').toHaveLength(3)
+        expect(currentTask()).toBe('task-3')
     })
 
     // A task the backend refuses to create must leave the window where it was rather than route to
     // a task id that does not exist.
     it('stays put when the new task could not be created', async () => {
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command === 'create_chat_task') throw new Error('worktree is locked')
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return tasks
-            if (command === 'list_workspace_files') return []
-            return undefined
+        project({
+            answers: {
+                create_chat_task: () => {
+                    throw coded('task_not_created', 'worktree is locked')
+                }
+            }
         })
         const router = await openAt('/tasks/task-1')
 
@@ -256,19 +290,18 @@ describe('the application shell', () => {
     it('never has two task switches in flight at once', async () => {
         let inFlight = 0
         let mostAtOnce = 0
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return tasks
-            if (command === 'list_workspace_files') return []
-            if (command === 'load_chat') return {messages: [], agentMessages: []}
-            if (command === 'activate_chat_task') {
-                inFlight += 1
-                mostAtOnce = Math.max(mostAtOnce, inFlight)
-                // Stopping the editor is the slow part, and it is why a second click arrives first.
-                await new Promise(resolve => setTimeout(resolve, 40))
-                inFlight -= 1
+        project({
+            answers: {
+                activate_chat_task: async (_, answer) => {
+                    inFlight += 1
+                    mostAtOnce = Math.max(mostAtOnce, inFlight)
+                    // Stopping the editor is the slow part, and it is why a second click arrives
+                    // first.
+                    await new Promise(resolve => setTimeout(resolve, 40))
+                    inFlight -= 1
+                    return answer()
+                }
             }
-            return undefined
         })
         await openAt('/tasks/task-1')
         mostAtOnce = 0
@@ -291,31 +324,21 @@ describe('the application shell', () => {
     })
 
     it('follows the task that took a deleted one’s place', async () => {
-        answerAsDesktop({delete_chat_task: {taskId: 'task-2'}})
         const router = await openAt('/tasks/task-1')
 
         await userEvent.click(screen.getByLabelText('Delete task Player controller'))
         await userEvent.click(screen.getByRole('button', {name: 'Delete task'}))
         await flush()
 
-        expect(tauri.invoke).toHaveBeenCalledWith('delete_chat_task', {taskId: 'task-1'})
         expect(router.state.location.pathname).toBe('/tasks/task-2')
+        expect(screen.queryByText('Player controller'), 'the deleted task is gone').toBeNull()
+        expect(currentTask()).toBe('task-2')
     })
 
     it('returns to the root route when the last task was deleted', async () => {
-        // The list empties as the deletion lands, so the root route this falls back to has no
-        // current task to redirect on to. A fixed list would send the window straight back to one.
-        let projectTasks: readonly TaskSummary[] = tasks
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return projectTasks
-            if (command === 'list_workspace_files') return []
-            if (command === 'delete_chat_task') {
-                projectTasks = []
-                return undefined
-            }
-            return undefined
-        })
+        // The one task the project has, so the deletion empties the list and the root route it
+        // falls back to has no current task to redirect on to.
+        project({tasks: tasks.slice(0, 1)})
         const router = await openAt('/tasks/task-1')
 
         await userEvent.click(screen.getByLabelText('Delete task Player controller'))
@@ -323,6 +346,7 @@ describe('the application shell', () => {
         await flush()
 
         expect(router.state.location.pathname).toBe('/')
+        expect(server.state.tasks).toEqual([])
     })
 
     it('merges the displayed task through the backend and refreshes the list', async () => {
@@ -331,10 +355,9 @@ describe('the application shell', () => {
         await userEvent.click(screen.getByRole('button', {name: 'Merge task'}))
         await flush()
 
-        expect(tauri.invoke).toHaveBeenCalledWith('merge_task_branch', {taskId: 'task-1'})
-        expect(
-            tauri.invoke.mock.calls.filter(call => call[0] === 'list_project_tasks').length
-        ).toBeGreaterThan(1)
+        // The branch is merged, so the control that merges it is not offered a second time — which
+        // is only true if the sidebar re-read the list the merge changed.
+        expect(screen.queryByRole('button', {name: 'Merge task'})).toBeNull()
     })
 
     /**
@@ -346,20 +369,20 @@ describe('the application shell', () => {
      * code and the paths; this is the chain from there to a turn the agent can act on.
      */
     it('offers the conflicting merge to the agent and sends it the files', async () => {
-        answerAsDesktop()
-        const answer = tauri.invoke.getMockImplementation()
-        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
-            if (command === 'merge_task_branch')
-                throw coded(
-                    'task_merge_conflicted',
-                    'This task and the project both changed the same files',
-                    {
-                        conflicts: ['scenes/Game.tscn', 'scripts/game.gd']
-                    }
-                )
-            if (command === 'resolve_task_merge')
-                return {taskId: 'task-1', conflicts: ['scenes/Game.tscn', 'scripts/game.gd']}
-            return answer?.(command, arguments_)
+        project({
+            answers: {
+                merge_task_branch: () => {
+                    throw coded(
+                        'task_merge_conflicted',
+                        'This task and the project both changed the same files',
+                        {conflicts: ['scenes/Game.tscn', 'scripts/game.gd']}
+                    )
+                },
+                resolve_task_merge: ({taskId}) => ({
+                    taskId,
+                    conflicts: ['scenes/Game.tscn', 'scripts/game.gd']
+                })
+            }
         })
         await openAt('/tasks/task-1')
 
@@ -371,7 +394,6 @@ describe('the application shell', () => {
         await userEvent.click(screen.getByRole('button', {name: 'Let Gofer resolve it'}))
         await flush()
 
-        expect(tauri.invoke).toHaveBeenCalledWith('resolve_task_merge', {taskId: 'task-1'})
         const sent = tauri.invoke.mock.calls.find(call => call[0] === 'send_ai_message')
         const request = (sent?.[1] as {request?: SendAiMessageRequest} | undefined)?.request
         const prompt = JSON.stringify(request?.messages.at(-1) ?? {})
@@ -389,17 +411,21 @@ describe('the application shell', () => {
      * there to the editor writing them and the merge going through.
      */
     it('asks about work the editor is holding and saves it before merging', async () => {
-        answerAsDesktop()
-        const answer = tauri.invoke.getMockImplementation()
+        // Refused once, the way the backend refuses a merge that would throw unsaved scenes away;
+        // the answer the user gives is carried on the retry, and the fake merges for real then.
         let asked = false
-        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
-            if (command === 'merge_task_branch' && !asked) {
-                asked = true
-                throw coded('godot_unsaved_scenes', 'The Godot editor is still holding changes', {
-                    scenes: ['res://levels/forest.tscn']
-                })
+        project({
+            answers: {
+                merge_task_branch: (_, answer) => {
+                    if (asked) return answer()
+                    asked = true
+                    throw coded(
+                        'godot_unsaved_scenes',
+                        'The Godot editor is still holding changes',
+                        {scenes: ['res://levels/forest.tscn']}
+                    )
+                }
             }
-            return answer?.(command, arguments_)
         })
         await openAt('/tasks/task-1')
 
@@ -411,25 +437,30 @@ describe('the application shell', () => {
         await userEvent.click(screen.getByRole('button', {name: 'Save and merge'}))
         await flush()
 
-        expect(tauri.invoke).toHaveBeenCalledWith('merge_task_branch', {
-            taskId: 'task-1',
-            unsavedWork: 'save'
-        })
+        expect(mergeCalls().at(-1)).toEqual({taskId: 'task-1', unsavedWork: 'save'})
+        expect(
+            screen.queryByRole('button', {name: 'Merge task'}),
+            'the merge went through'
+        ).toBeNull()
     })
 
     /** The other answer, which is the one that loses the work — so it has to be the user's. */
     it('merges without saving when that is what the user chose', async () => {
-        answerAsDesktop()
-        const answer = tauri.invoke.getMockImplementation()
+        // Refused once, the way the backend refuses a merge that would throw unsaved scenes away;
+        // the answer the user gives is carried on the retry, and the fake merges for real then.
         let asked = false
-        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
-            if (command === 'merge_task_branch' && !asked) {
-                asked = true
-                throw coded('godot_unsaved_scenes', 'The Godot editor is still holding changes', {
-                    scenes: ['res://levels/forest.tscn']
-                })
+        project({
+            answers: {
+                merge_task_branch: (_, answer) => {
+                    if (asked) return answer()
+                    asked = true
+                    throw coded(
+                        'godot_unsaved_scenes',
+                        'The Godot editor is still holding changes',
+                        {scenes: ['res://levels/forest.tscn']}
+                    )
+                }
             }
-            return answer?.(command, arguments_)
         })
         await openAt('/tasks/task-1')
 
@@ -438,20 +469,21 @@ describe('the application shell', () => {
         await userEvent.click(screen.getByRole('button', {name: 'Merge without saving'}))
         await flush()
 
-        expect(tauri.invoke).toHaveBeenCalledWith('merge_task_branch', {
-            taskId: 'task-1',
-            unsavedWork: 'discard'
-        })
+        expect(mergeCalls().at(-1)).toEqual({taskId: 'task-1', unsavedWork: 'discard'})
+        expect(
+            screen.queryByRole('button', {name: 'Merge task'}),
+            'the merge went through'
+        ).toBeNull()
     })
 
     /** A failure that is not a conflict has nothing to offer, so nothing is offered. */
     it('offers nothing when the merge failed for a reason the agent cannot fix', async () => {
-        answerAsDesktop()
-        const answer = tauri.invoke.getMockImplementation()
-        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
-            if (command === 'merge_task_branch')
-                throw coded('task_not_merged', 'The project is not a Git repository')
-            return answer?.(command, arguments_)
+        project({
+            answers: {
+                merge_task_branch: () => {
+                    throw coded('task_not_merged', 'The project is not a Git repository')
+                }
+            }
         })
         await openAt('/tasks/task-1')
 
@@ -470,17 +502,17 @@ describe('the application shell', () => {
      * something anyone fixes by pressing Merge again. Without this the only way out was a terminal.
      */
     it('offers to discard a resolution the agent left half-finished', async () => {
-        answerAsDesktop()
-        const answer = tauri.invoke.getMockImplementation()
-        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
-            if (command === 'merge_task_branch')
-                throw coded(
-                    'task_merge_unfinished',
-                    'This task is part-way through a merge and these files still hold both versions',
-                    {conflicts: ['scenes/Game.tscn']}
-                )
-            if (command === 'abandon_task_merge') return null
-            return answer?.(command, arguments_)
+        project({
+            answers: {
+                merge_task_branch: () => {
+                    throw coded(
+                        'task_merge_unfinished',
+                        'This task is part-way through a merge and these files still hold both '
+                            + 'versions',
+                        {conflicts: ['scenes/Game.tscn']}
+                    )
+                }
+            }
         })
         await openAt('/tasks/task-1')
 
@@ -497,24 +529,6 @@ describe('the application shell', () => {
     })
 
     it('opens the settings page from the sidebar and comes back to the current task', async () => {
-        answerAsDesktop({
-            load_settings: {
-                settings: {
-                    version: 1,
-                    ai: {
-                        connectionType: 'openai-compatible',
-                        name: 'Local AI',
-                        baseUrl: 'http://127.0.0.1:8080/v1',
-                        model: 'local-model',
-                        api: 'openai-completions'
-                    }
-                },
-                hasApiKey: true
-            },
-            read_agent_prompt: {prompt: 'You are Gofer.', defaultPrompt: 'You are Gofer.'},
-            get_rag_cache_status: {path: '/tmp/gofer-rag', sizeBytes: 42, state: 'installed'},
-            list_ai_models: []
-        })
         const router = await openAt('/tasks/task-1')
 
         await userEvent.click(screen.getByText('Settings'))
@@ -540,24 +554,6 @@ describe('the application shell', () => {
      * `load_chat` runs once per workspace mount, so counting it is counting mounts.
      */
     it('leaves the workspace mounted while settings is open', async () => {
-        answerAsDesktop({
-            load_settings: {
-                settings: {
-                    version: 1,
-                    ai: {
-                        connectionType: 'openai-compatible',
-                        name: 'Local AI',
-                        baseUrl: 'http://127.0.0.1:8080/v1',
-                        model: 'local-model',
-                        api: 'openai-completions'
-                    }
-                },
-                hasApiKey: true
-            },
-            read_agent_prompt: {prompt: 'You are Gofer.', defaultPrompt: 'You are Gofer.'},
-            get_rag_cache_status: {path: '/tmp/gofer-rag', sizeBytes: 42, state: 'installed'},
-            list_ai_models: []
-        })
         await openAt('/tasks/task-1')
         const chatLoads = () =>
             tauri.invoke.mock.calls.filter(call => call[0] === 'load_chat').length
@@ -578,25 +574,7 @@ describe('the application shell', () => {
     // Closing settings in a project with no current task has nowhere to return to but the root,
     // which then decides where the window lands.
     it('closes settings to the root route when no task is current', async () => {
-        answerAsDesktop({
-            list_project_tasks: [],
-            load_settings: {
-                settings: {
-                    version: 1,
-                    ai: {
-                        connectionType: 'openai-compatible',
-                        name: 'Local AI',
-                        baseUrl: 'http://127.0.0.1:8080/v1',
-                        model: 'local-model',
-                        api: 'openai-completions'
-                    }
-                },
-                hasApiKey: false
-            },
-            read_agent_prompt: {prompt: 'You are Gofer.', defaultPrompt: 'You are Gofer.'},
-            get_rag_cache_status: {path: '/tmp/gofer-rag', sizeBytes: 0, state: 'not-installed'},
-            list_ai_models: []
-        })
+        project({tasks: []})
         const router = await openAt('/settings')
 
         await userEvent.click(screen.getByRole('button', {name: 'Close'}))
@@ -611,27 +589,12 @@ describe('the application shell', () => {
      * so the project remembers it the way it remembers which panel was open and how wide it was.
      */
     it('reopens the project with the sidebar the user left closed', async () => {
-        const stored = new Map<string, string>()
-        tauri.invoke.mockImplementation(async (command: string, args?: unknown) => {
-            const state = args as {key?: string; value?: string} | undefined
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return tasks
-            if (command === 'list_workspace_files') return []
-            if (command === 'read_project_state') return stored.get(state?.key ?? '') ?? null
-            if (command === 'write_project_state') {
-                if (state?.key !== undefined && state.value !== undefined) {
-                    stored.set(state.key, state.value)
-                }
-            }
-            return undefined
-        })
-
         await openAt('/tasks/task-1')
         await userEvent.click(screen.getByRole('button', {name: 'Collapse sidebar'}))
         await flush()
 
         expect(screen.getByRole('button', {name: 'Expand sidebar'})).toBeInTheDocument()
-        expect(stored.get('ui.sideNav')).toBe(JSON.stringify({isCollapsed: true, width: 280}))
+        expect(server.state.stored['ui.sideNav']).toEqual({isCollapsed: true, width: 280})
 
         // The window closing and opening again, against the same stored project state.
         cleanup()
@@ -644,8 +607,8 @@ describe('the application shell', () => {
     })
 
     it('holds the workspace behind the health gate while the project is unusable', async () => {
-        answerAsDesktop({
-            check_workspace_health: {
+        project({
+            health: {
                 workspace: '/home/dev/game',
                 workspaceSource: 'working-directory',
                 isReady: false,
@@ -677,26 +640,15 @@ describe('the application shell', () => {
  * start another is offered, and the sidebar says why it is not.
  */
 describe('while a task operation is running', () => {
-    /** Holds one backend command open, so the window can be read mid-operation. */
-    function holdOpen(command: string, answer?: unknown) {
-        // Replaced by the executor below, which `Promise` runs before this returns.
-        let release = (): void => undefined
-        const held = new Promise<void>(resolve => {
-            release = () => {
-                resolve()
-            }
-        })
-        tauri.invoke.mockImplementation(async (name: string) => {
-            if (name === command) {
-                await held
-                return answer
-            }
-            if (name === 'check_workspace_health') return readyWorkspace
-            if (name === 'list_project_tasks') return tasks
-            if (name === 'list_workspace_files') return []
-            if (name === 'load_chat') return {messages: [], agentMessages: []}
-            return undefined
-        })
+    /**
+     * Holds one backend command open, so the window can be read mid-operation.
+     *
+     * The command still does the real thing when it is let go of. What is held is the wait a switch
+     * really has: stopping the Godot editor is a quit request and up to ten seconds.
+     */
+    function holdOpen(held: (waiting: Promise<void>) => BackendAnswers) {
+        const {held: waiting, release} = gate()
+        project({answers: held(waiting)})
         return release
     }
 
@@ -732,7 +684,7 @@ describe('while a task operation is running', () => {
 
     it('locks every task control while a switch is running', async () => {
         await openAt('/tasks/task-1')
-        const release = holdOpen('activate_chat_task')
+        const release = holdOpen(waiting => ({activate_chat_task: after(waiting)}))
 
         await userEvent.click(within(sideNav()).getByText('Inventory UI'))
         await flush()
@@ -745,7 +697,7 @@ describe('while a task operation is running', () => {
     // that lands on a locked row must not reach the backend at all.
     it('ignores a second switch clicked while the first is running', async () => {
         await openAt('/tasks/task-1')
-        const release = holdOpen('activate_chat_task')
+        const release = holdOpen(waiting => ({activate_chat_task: after(waiting)}))
         // Opening the window activated a task of its own; only the clicks are being counted.
         const switchesSoFar = () =>
             tauri.invoke.mock.calls.filter(call => call[0] === 'activate_chat_task').length
@@ -764,7 +716,7 @@ describe('while a task operation is running', () => {
 
     it('gives every task control back once the switch settles', async () => {
         await openAt('/tasks/task-1')
-        const release = holdOpen('activate_chat_task')
+        const release = holdOpen(waiting => ({activate_chat_task: after(waiting)}))
         await userEvent.click(within(sideNav()).getByText('Inventory UI'))
         await flush()
 
@@ -785,11 +737,7 @@ describe('while a task operation is running', () => {
     // switch started in the middle of that is the same collision as two switches.
     it('locks every task control while a merge is running', async () => {
         await openAt('/tasks/task-1')
-        const release = holdOpen('merge_task_branch', {
-            taskId: 'task-1',
-            headCommit: 'aaaa',
-            mergedCommit: 'bbbb'
-        })
+        const release = holdOpen(waiting => ({merge_task_branch: after(waiting)}))
 
         await userEvent.click(screen.getByRole('button', {name: 'Merge task'}))
         await flush()
@@ -805,7 +753,7 @@ describe('while a task operation is running', () => {
 
     it('locks every task control while a task is being created', async () => {
         await openAt('/tasks/task-1')
-        const release = holdOpen('create_chat_task', {taskId: 'task-3'})
+        const release = holdOpen(waiting => ({create_chat_task: after(waiting)}))
 
         await createTask()
         await flush()
@@ -816,7 +764,7 @@ describe('while a task operation is running', () => {
 
     it('locks every task control while a task is being deleted', async () => {
         await openAt('/tasks/task-1')
-        const release = holdOpen('delete_chat_task', {taskId: 'task-2'})
+        const release = holdOpen(waiting => ({delete_chat_task: after(waiting)}))
 
         await userEvent.click(screen.getByLabelText('Delete task Player controller'))
         await userEvent.click(screen.getByRole('button', {name: 'Delete task'}))
@@ -850,67 +798,26 @@ describe('while a switch is still running', () => {
      * with the switch onto `heldTask` stopped until the returned release is called.
      */
     function answerWithChatsPerTask(heldTask: string) {
-        let activeTaskId = 'task-1'
-        let list: readonly TaskSummary[] = tasks
-        let release = (): void => undefined
-        const held = new Promise<void>(resolve => {
-            release = () => {
-                resolve()
-            }
-        })
-        const chats: Record<string, readonly unknown[]> = {
-            'task-1': [{id: 1, sender: 'user', text: openChat, timestamp: 1}],
-            'task-2': [{id: 2, sender: 'user', text: 'Inventory grid', timestamp: 2}],
-            'task-3': []
-        }
-        tauri.invoke.mockImplementation(async (command: string, payload?: unknown) => {
-            const arguments_ = (payload ?? {}) as Record<string, string>
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return list
-            if (command === 'list_workspace_files') return []
-            if (command === 'load_chat')
-                return {
-                    taskId: activeTaskId,
-                    messages: chats[activeTaskId] ?? [],
+        const {held, release} = gate()
+        const holding = project({
+            chats: {
+                'task-1': {taskId: 'task-1', messages: [said(1, openChat)], agentMessages: []},
+                'task-2': {
+                    taskId: 'task-2',
+                    messages: [said(2, 'Inventory grid')],
                     agentMessages: []
                 }
-            if (command === 'save_chat') {
-                const chat = arguments_ as unknown as {
-                    chat: {taskId?: string; messages: readonly unknown[]}
+            },
+            answers: {
+                activate_chat_task: async ({taskId}, answer) => {
+                    if (taskId === heldTask) await held
+                    return answer()
                 }
-                chats[chat.chat.taskId ?? activeTaskId] = chat.chat.messages
-                return undefined
             }
-            if (command === 'create_chat_task') {
-                // The backend records the new task and calls it current before it moves the
-                // checkout, so the list the window refreshes next already names it.
-                activeTaskId = 'task-3'
-                list = [
-                    ...tasks.map(task => ({...task, isCurrent: false})),
-                    {
-                        id: 'task-3',
-                        title: 'New task',
-                        status: 'active' as const,
-                        isCurrent: true,
-                        createdAt: 12,
-                        updatedAt: 12
-                    }
-                ]
-                return {taskId: 'task-3'}
-            }
-            if (command === 'activate_chat_task') {
-                if (arguments_['taskId'] === heldTask) await held
-                activeTaskId = arguments_['taskId'] ?? activeTaskId
-                list = list.map(task => ({...task, isCurrent: task.id === activeTaskId}))
-                return undefined
-            }
-            return undefined
         })
         return {
-            release: () => {
-                release()
-            },
-            chatOf: (taskId: string) => chats[taskId] ?? []
+            release,
+            chatOf: (taskId: string) => holding.state.chats.get(taskId)?.messages ?? []
         }
     }
 
@@ -977,26 +884,25 @@ describe('when the backend refuses to open a task', () => {
         'Wait for the current answer to finish before opening another task'
     )
 
+    /** The conversation the window opens on, which a refused switch must not take with it. */
+    const openConversation = {
+        'task-1': {
+            taskId: 'task-1',
+            messages: [said(1, 'The open conversation')],
+            agentMessages: []
+        }
+    }
+
     /** Refuses every switch away from the task the window opens on. */
     function answerWithRefusedSwitch() {
-        tauri.invoke.mockImplementation(async (command: string, payload?: unknown) => {
-            const arguments_ = (payload ?? {}) as Record<string, string>
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return tasks
-            if (command === 'list_workspace_files') return []
-            if (command === 'load_chat')
-                return {
-                    taskId: 'task-1',
-                    messages: [
-                        {id: 1, sender: 'user', text: 'The open conversation', timestamp: 1}
-                    ],
-                    agentMessages: []
+        project({
+            chats: openConversation,
+            answers: {
+                activate_chat_task: ({taskId}, answer) => {
+                    if (taskId !== 'task-1') throw refusal
+                    return answer()
                 }
-            if (command === 'activate_chat_task') {
-                if (arguments_['taskId'] === 'task-1') return undefined
-                throw refusal
             }
-            return undefined
         })
     }
 
@@ -1020,20 +926,13 @@ describe('when the backend refuses to open a task', () => {
     // A task created while a turn runs used to be made, checked out, and then refused by the very
     // next step. The backend refuses the creation itself now, so the window has nothing to follow.
     it('stays put when the new task was refused', async () => {
-        tauri.invoke.mockImplementation(async (command: string) => {
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return tasks
-            if (command === 'list_workspace_files') return []
-            if (command === 'load_chat')
-                return {
-                    taskId: 'task-1',
-                    messages: [
-                        {id: 1, sender: 'user', text: 'The open conversation', timestamp: 1}
-                    ],
-                    agentMessages: []
+        project({
+            chats: openConversation,
+            answers: {
+                create_chat_task: () => {
+                    throw refusal
                 }
-            if (command === 'create_chat_task') throw refusal
-            return undefined
+            }
         })
         const router = await openAt('/tasks/task-1')
 
@@ -1061,20 +960,9 @@ describe('while the agent is answering', () => {
 
     /** Holds one turn open, so the window can be read while the agent is still working. */
     function holdTurnOpen() {
-        let end = (): void => undefined
-        const turn = new Promise<void>(resolve => {
-            end = () => {
-                resolve()
-            }
-        })
-        const answer = tauri.invoke.getMockImplementation()
-        tauri.invoke.mockImplementation(async (command: string, arguments_?: unknown) => {
-            if (command === 'send_ai_message') return turn
-            return answer?.(command, arguments_)
-        })
-        return () => {
-            end()
-        }
+        const {held, release} = gate()
+        project({answers: {send_ai_message: () => held}})
+        return release
     }
 
     async function startAnswering() {
@@ -1142,35 +1030,38 @@ describe('opening a task the window has already opened once', () => {
 
     /** A backend that answers `load_chat` about the task it is asked for, as the real one does. */
     function answerPerTask() {
-        let activeTaskId = 'task-1'
         const order: string[] = []
-        const chats: Record<string, readonly unknown[]> = {
-            'task-1': [{id: 1, sender: 'user', text: 'The player chat', timestamp: 1}],
-            'task-2': [{id: 2, sender: 'user', text: 'The inventory chat', timestamp: 2}]
-        }
         let hold: Promise<void> | undefined
         let release = (): void => undefined
-        tauri.invoke.mockImplementation(async (command: string, payload?: unknown) => {
-            const arguments_ = (payload ?? {}) as Record<string, string | undefined>
-            if (command === 'check_workspace_health') return readyWorkspace
-            if (command === 'list_project_tasks') return tasks
-            if (command === 'list_workspace_files') return []
-            if (command === 'load_chat') {
-                const asked = arguments_['taskId'] ?? activeTaskId
-                order.push(`load(${asked})`)
-                return {taskId: asked, messages: chats[asked] ?? [], agentMessages: []}
+        project({
+            chats: {
+                'task-1': {
+                    taskId: 'task-1',
+                    messages: [said(1, 'The player chat')],
+                    agentMessages: []
+                },
+                'task-2': {
+                    taskId: 'task-2',
+                    messages: [said(2, 'The inventory chat')],
+                    agentMessages: []
+                }
+            },
+            answers: {
+                load_chat: ({taskId}, answer) => {
+                    order.push(`load(${taskId ?? currentTask() ?? ''})`)
+                    return answer()
+                },
+                activate_chat_task: async ({taskId}, answer) => {
+                    if (hold) await hold
+                    // A real switch stops the editor and moves the checkout. Never instant, so
+                    // never instant here either: an activation that resolved in the same microtask
+                    // as the click would hide the very ordering these tests are about.
+                    for (let hop = 0; hop < 5; hop += 1) await Promise.resolve()
+                    const chat = answer()
+                    order.push(`activated(${taskId})`)
+                    return chat
+                }
             }
-            if (command === 'activate_chat_task') {
-                if (hold) await hold
-                // A real switch stops the editor and moves the checkout. Never instant, so never
-                // instant here either: an activation that resolved in the same microtask as the
-                // click would hide the very ordering these tests are about.
-                for (let hop = 0; hop < 5; hop += 1) await Promise.resolve()
-                activeTaskId = arguments_['taskId'] ?? activeTaskId
-                order.push(`activated(${activeTaskId})`)
-                return undefined
-            }
-            return undefined
         })
         return {
             order,
@@ -1233,5 +1124,91 @@ describe('opening a task the window has already opened once', () => {
 
         expect(screen.getByText('The player chat')).toBeInTheDocument()
         expect(backend.order.slice(-2)).toEqual(['activated(task-1)', 'load(task-1)'])
+    })
+})
+
+/*
+ * One task's whole life, which nothing could drive before.
+ *
+ * A task is three things the Ledger keeps together: the row the sidebar lists, the conversation
+ * stored against it, and the unsent message under `ui.draft.<taskId>`. The fake answered each of
+ * those with one canned value, so a test could see that `create_chat_task` had been called and
+ * never that the project now had two tasks, that the second opened on its own conversation, or
+ * that deleting it took the draft with it — the `DELETE FROM project_state` beside the row in
+ * `Tasks::delete`.
+ */
+describe('a task from made to deleted', () => {
+    const sideNav = () => screen.getByRole('navigation', {name: 'Side navigation'})
+    const composer = () => screen.getByRole('combobox', {name: 'Message input'})
+    /** The task rows the sidebar is listing. By route, because two tasks can share a title. */
+    const taskRows = () =>
+        within(sideNav())
+            .getAllByRole('link')
+            .filter(row => row.getAttribute('href')?.startsWith('#/tasks/'))
+    const rowFor = (taskId: string) =>
+        taskRows().find(row => row.getAttribute('href') === `#/tasks/${taskId}`)
+    const open = async (taskId: string) => {
+        const row = rowFor(taskId)
+        if (!row) throw new Error(`The sidebar is not listing ${taskId}`)
+        await userEvent.click(row)
+        await flush()
+        await flush()
+    }
+
+    it('opens on its own chat, keeps its own draft, and takes the draft with it', async () => {
+        // One task to start with, so the second one is the one this makes.
+        project({
+            tasks: tasks.slice(0, 1),
+            chats: {
+                'task-1': {
+                    taskId: 'task-1',
+                    messages: [said(1, 'The player chat')],
+                    agentMessages: []
+                }
+            }
+        })
+        const router = await openAt('/tasks/task-1')
+        expect(taskRows()).toHaveLength(1)
+        expect(screen.getByText('The player chat')).toBeInTheDocument()
+
+        await createTask()
+        await flush()
+
+        // Two tasks, and the window is on the one it just made — holding that task's conversation
+        // rather than the one it came from.
+        expect(taskRows()).toHaveLength(2)
+        expect(router.state.location.pathname).toBe('/tasks/task-2')
+        expect(currentTask()).toBe('task-2')
+        expect(
+            screen.queryByText('The player chat'),
+            'a new task opens on an empty chat'
+        ).toBeNull()
+
+        // An unsent message belongs to the conversation it was written in.
+        await userEvent.type(composer(), 'half a thought about the inventory')
+        await flush()
+
+        expect(server.state.stored[draftKey('task-2')]).toBe('half a thought about the inventory')
+
+        await open('task-1')
+
+        expect(screen.getByText('The player chat')).toBeInTheDocument()
+        expect(composer(), 'the draft stayed with its own task').not.toHaveTextContent('inventory')
+
+        await open('task-2')
+
+        expect(composer()).toHaveTextContent('half a thought about the inventory')
+
+        await userEvent.click(screen.getByLabelText('Delete task New task'))
+        await userEvent.click(screen.getByRole('button', {name: 'Delete task'}))
+        await flush()
+
+        // The task that took its place, and nothing of the deleted one left anywhere.
+        expect(router.state.location.pathname).toBe('/tasks/task-1')
+        expect(server.state.tasks.map(task => task.id)).toEqual(['task-1'])
+        expect(
+            draftKey('task-2') in server.state.stored,
+            'the unsent message went with the task'
+        ).toBe(false)
     })
 })

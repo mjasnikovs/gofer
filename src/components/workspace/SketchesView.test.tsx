@@ -5,6 +5,7 @@ import {SketchesView} from './SketchesView'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush, flushUntil} from '../../test/flush'
+import {CommandFailure, SKETCH_HTML, installBackend} from '../../test/backend'
 import type {ProjectSketch, SketchHtml} from '../../models/sketch'
 
 const tauri = createDesktopFake()
@@ -46,23 +47,11 @@ const REJECTED = sketch({
 })
 
 /** The markup as the backend keeps it: what the user looked at, and what a builder can use. */
-const BOTH: SketchHtml = {
-    shown: '<p>data:image/png;base64,AAAA</p>',
-    source: '<p>res://ui/panel.png</p>'
-}
-
-function backend(rows: readonly ProjectSketch[] = [sketch(), REJECTED], html: SketchHtml = BOTH) {
-    const read: string[] = []
-    tauri.invoke.mockImplementation((command, arguments_) => {
-        if (command === 'list_project_sketches') return Promise.resolve(rows)
-        if (command === 'read_project_sketch') {
-            const {id} = arguments_ as {id: string}
-            read.push(id)
-            return Promise.resolve(html)
-        }
-        throw new Error(`No fake for ${command}`)
-    })
-    return {read}
+function backend(
+    rows: readonly ProjectSketch[] = [sketch(), REJECTED],
+    html: SketchHtml = SKETCH_HTML
+) {
+    return installBackend(tauri, {sketches: rows, sketchHtml: html})
 }
 
 async function open(paste: (text: string) => void = vi.fn()) {
@@ -115,7 +104,7 @@ describe('the sketches panel', () => {
      * Closing a row and opening it again is a gesture, not a request to fetch that twice.
      */
     it('reads a layout when it is opened, and only the first time', async () => {
-        const {read} = backend()
+        const {log} = backend()
         await open()
 
         await userEvent.click(screen.getByText('Centered overlay'))
@@ -125,7 +114,7 @@ describe('the sketches panel', () => {
         await userEvent.click(screen.getByText('Centered overlay'))
         await flush()
 
-        expect(read).toEqual(['question-1-run', 'question-2-run'])
+        expect(log.sketchReads).toEqual(['question-1-run', 'question-2-run'])
     })
 
     /**
@@ -136,7 +125,7 @@ describe('the sketches panel', () => {
      * draws round one under round three's label — and Send to chat pastes round one's markup.
      */
     it('forgets what it read when the list is refreshed', async () => {
-        const {read} = backend()
+        const {log} = backend()
         await open()
 
         await userEvent.click(screen.getByText('Centered overlay'))
@@ -146,7 +135,7 @@ describe('the sketches panel', () => {
         await userEvent.click(screen.getByText('Centered overlay'))
         await flush()
 
-        expect(read).toEqual(['question-1-run', 'question-1-run'])
+        expect(log.sketchReads).toEqual(['question-1-run', 'question-1-run'])
     })
 
     /**
@@ -188,11 +177,13 @@ describe('the sketches panel', () => {
 
     /** A read that failed is drawn as what it was, not as a row with nothing in it. */
     it('reports a layout it could not read', async () => {
-        tauri.invoke.mockImplementation(command => {
-            if (command === 'list_project_sketches') return Promise.resolve([sketch()])
-            return Promise.reject(
-                Object.assign(new Error('There is no sketch'), {code: 'sketch_not_found'})
-            )
+        installBackend(tauri, {
+            sketches: [sketch()],
+            answers: {
+                read_project_sketch: () => {
+                    throw new CommandFailure('sketch_not_found', 'There is no sketch')
+                }
+            }
         })
         await open()
 

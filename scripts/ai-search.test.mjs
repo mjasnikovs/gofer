@@ -412,7 +412,7 @@ test('results are numbered markdown the model can act on', () => {
 })
 
 test('an oversized result set is cut at a whole result', () => {
-    // ai-host.mjs caps only the results it builds itself, so a tool that assembles its own text is
+    // tool-result.mjs caps only the results it builds itself, so a tool that assembles its own text is
     // capped by nothing at all.
     const many = Array.from({length: 20}, (_unused, index) => ({
         title: `Result ${String(index)}`,

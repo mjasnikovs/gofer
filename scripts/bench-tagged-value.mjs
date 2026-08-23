@@ -19,7 +19,7 @@
  *     node scripts/bench-tagged-value.mjs 15
  */
 import {readFile} from 'node:fs/promises'
-import {createGodotTools} from './ai-host.mjs'
+import {createGodotTools} from './godot-tools.mjs'
 
 const ENDPOINT = process.env.GOFER_BENCH_ENDPOINT ?? 'http://127.0.0.1:8080/v1/chat/completions'
 const named = variable => {

@@ -15,12 +15,12 @@
  * count rather than trusted with a rule. See `REACHING_CHILD_TOOLS` in `ai-subagent.mjs`.
  */
 
+import {modelReadsImages} from './agent-runtime.mjs'
 import {
     boundsFrom,
     cannedModels,
     DESIGN_TOOL_NAMES,
     PROBE_PROMPT,
-    readsImages,
     runSubagent,
     toolProgress,
     usageFooter
@@ -215,7 +215,7 @@ function notAgreed({rounds, approved}) {
  * for a different reason would look exactly like the first.
  */
 function blindTo(images, model) {
-    if (images.length === 0 || readsImages(model)) return ''
+    if (images.length === 0 || modelReadsImages(model)) return ''
     return (
         `\n\nThe ${String(images.length)} picture${images.length === 1 ? '' : 's'} attached to the `
         + `ask never reached the design loop: ${model.name || model.id} cannot read one. This `
