@@ -104,6 +104,20 @@ func _test_codec(failures: Array[String]) -> void:
         elif str(refused["message"]).is_empty():
             failures.append("The codec refused %s without saying why" % what)
 
+    # A colour may be named or written as hex, because Godot reads both and
+    # `resource.create_texture` takes both. A `color` value that refused them made the same tool
+    # spell a colour two ways, and one live turn wrote "red" here and was told a colour is four
+    # numbers.
+    for spelling in ["red", "skyblue", "#8b5a2b", "8b5a2b"]:
+        var named: Dictionary = protocol.call("decode", {"type": "color", "value": spelling})
+        if not named["ok"] or typeof(named["value"]) != TYPE_COLOR:
+            failures.append("The codec refused the colour %s" % spelling)
+    if protocol.call("decode", {"type": "color", "value": "red"})["value"] != Color.RED:
+        failures.append("A named colour must decode to that colour")
+    var unnamed: Dictionary = protocol.call("decode", {"type": "color", "value": "notacolour"})
+    if unnamed["ok"] or not str(unnamed["message"]).contains("skyblue"):
+        failures.append("A colour nobody can write must be refused with the spellings there are")
+
     _test_declared_types(protocol, failures)
 
 ## The wire has one array tag, so which packed array a value becomes is decided by the type the
@@ -134,6 +148,17 @@ func _test_declared_types(protocol: GDScript, failures: Array[String]) -> void:
     var negative: Dictionary = protocol.call("fit_to_declared_type", -3.0, TYPE_INT)
     if not negative["ok"] or negative["value"] != -3:
         failures.append("A negative whole float must fit an int")
+    # And one that is a hair off it. `int()` cuts toward zero rather than to the nearest, so
+    # -2.9999999999999996 — which is how a serialiser writes -3 — passed the whole-number check and
+    # was written as -2: the silent loss the check is here to stop, on the number it was meant to
+    # let through. The mirror is refused rather than lost: floor(-3.0000000000000004) is -4, which
+    # is nothing like it, so the whole-number check said no to a whole number.
+    var under: Dictionary = protocol.call("fit_to_declared_type", -2.9999999999999996, TYPE_INT)
+    if not under["ok"] or under["value"] != -3:
+        failures.append("A float a hair under a negative whole number must fit that number")
+    var over: Dictionary = protocol.call("fit_to_declared_type", -3.0000000000000004, TYPE_INT)
+    if not over["ok"] or over["value"] != -3:
+        failures.append("A float a hair past a negative whole number must fit that number")
     # And a fraction must not: dropping it is a silent loss, and a caller that meant 1.5 is better
     # told than quietly given 1.
     var fractional: Dictionary = protocol.call("fit_to_declared_type", 1.5, TYPE_INT)

@@ -261,8 +261,10 @@ pub const CATALOG: &[ToolDomain] = &[
                  {\"type\": \"float\", \"value\": 1.5}, {\"type\": \"string\", \"value\": \"hi\"}. \
                  A property that holds a resource — a CollisionShape2D's `shape`, a Sprite2D's \
                  `texture` — takes {\"type\": \"resource\", \"value\": {\"path\": \"res://…\"}}, \
-                 never a string: a path written as a string is refused. The other tags are null, \
-                 bool, int, color, rect2 and rect2i (four numbers each), vector2i, vector3, \
+                 never a string: a path written as a string is refused. A color takes four \
+                 numbers, or a name like \"skyblue\", or a hex string like \"#8b5a2b\". The other \
+                 tags are null, \
+                 bool, int, rect2 and rect2i (four numbers each), vector2i, vector3, \
                  vector3i, vector4, vector4i, quaternion, plane, transform2d, basis, transform3d, \
                  array (of tagged values) and dictionary (of key and value pairs of them).",
             ),
@@ -407,6 +409,19 @@ pub const CATALOG: &[ToolDomain] = &[
                  one opens as a resource with no tiles in it.",
             ),
             operation(
+                "create_texture",
+                "Draws a PNG and imports it, which is how a project with no art gets some. `path` \
+                 is the .png to write and `size` is one number or two — 16 or [16, 24]. `rects` are \
+                 filled rectangles painted over `background` in the order they are named, and \
+                 without a `background` the image starts transparent, which is what a sprite \
+                 wants. A colour is a name or a hex string — \"skyblue\", \"#8b5a2b\". An atlas is \
+                 one texture with a rectangle per tile, laid out on the grid create_tileset then \
+                 cuts: two 16x16 tiles side by side is a 32x16 image. The texture is imported by \
+                 the time this answers, so it needs no rescan and create_tileset can name it \
+                 straight away. Draw art with this rather than through bash: an image library is \
+                 not something every machine has.",
+            ),
+            operation(
                 "create_shape",
                 "Saves a 2D collision shape as a resource. `path` is the .tres to write. `shapeType` is one of \
                  RectangleShape2D (size as [width, height]), CircleShape2D (radius), \
@@ -508,8 +523,18 @@ pub const CATALOG: &[ToolDomain] = &[
             ),
             operation("document_symbols", "Symbols of one document."),
             operation("workspace_symbols", "Symbols across the worktree."),
-            operation("prepare_rename", "Checks whether a symbol can be renamed."),
-            operation("rename", "Plans a rename without writing."),
+            operation(
+                "prepare_rename",
+                "Checks whether a symbol can be renamed. Answers `renameable`: false is the \
+                 language server declining this position, and rename will decline it too.",
+            ),
+            operation(
+                "rename",
+                "Plans a rename without writing, and refuses when the server plans nothing — every \
+                 real rename touches at least the declaration, so an empty plan is the server \
+                 declining rather than a rename that reached no files. Pass what it answers to \
+                 apply_rename unchanged.",
+            ),
             operation(
                 "apply_rename",
                 "Applies a planned rename in one transaction. `files` is the list \
@@ -1639,6 +1664,7 @@ fn run_one<R: Runtime>(
 
     match answers {
         crate::tool_params::Answers::Addon(command) => {
+            a_path_that_climbs_out(&params)?;
             let answered = rpc(app, command, params);
             if domain.name == "godot_runtime" {
                 // A game that broke does not die, so a runtime call that failed has to carry the
@@ -1755,14 +1781,40 @@ fn forget_a_vanished_file<R: Runtime>(app: &AppHandle<R>, path: &str, failure: &
 /// `res://` and stray slashes are taken off, because a model that has been reading scene paths all
 /// turn writes `res://assets` as readily as `assets`, and both mean the same folder.
 ///
+/// The root is no directory at all, and that is what `None` says. `res://`, `/` and `.` all come
+/// out of the trimming with nothing left, and nothing was matched as a prefix against every
+/// worktree-relative path — so `godot_resource list` and `godot_script list` answered
+/// `{"files": []}` about a worktree full of files. `res://` is the spelling a model reaching for
+/// the whole project writes, precisely because this helper accepts it everywhere else.
+///
 /// The `params.get("under")` that feeds this stays written out in each arm that takes it:
 /// `tool_drift` reads those arms' own source to hold them to the catalogue, and a lookup moved
 /// behind a helper is a parameter that check can no longer see.
-fn named_directory(named: &str) -> String {
-    named
+fn named_directory(named: &str) -> Option<String> {
+    let trimmed = named
+        .trim()
         .trim_start_matches("res://")
         .trim_matches('/')
-        .to_owned()
+        .trim();
+    (!trimmed.is_empty() && trimmed != ".").then(|| trimmed.to_owned())
+}
+
+/// Whether a path is Gofer's own staged addon rather than anything in the project.
+///
+/// `addons/gofer` is not the user's code and Gofer says so itself: it stages the directory into the
+/// worktree on session start and writes `addons/gofer/` into the checkout's Git exclude file, under
+/// the marker "the managed Godot addon is never part of the project". Listing it contradicts that,
+/// and it is the *first* thing most turns read — ten of the sixteen entries in a bare fixture's
+/// listing are it.
+///
+/// The cost is not the bytes. A live turn stuck on a runtime call that would not answer stopped
+/// working on the game and spent four subagent calls reading `addons/gofer/runtime.gd` to work out
+/// why — debugging Gofer instead of the thing it was asked to build, down a road it only knew about
+/// because the listing named it. A file nobody may usefully change does not belong in the answer to
+/// "what is in this project".
+fn is_goferns_own(path: &str) -> bool {
+    path == crate::addon::ADDON_DIRECTORY
+        || path.starts_with(&format!("{}/", crate::addon::ADDON_DIRECTORY))
 }
 
 /// Whether one worktree-relative path sits inside that directory. No directory means every path.
@@ -1795,9 +1847,10 @@ fn resource_domain<R: Runtime>(
             let under = params
                 .get("under")
                 .and_then(Value::as_str)
-                .map(named_directory);
+                .and_then(named_directory);
             let files: Vec<Value> = files::scan(workspace.root())
                 .into_iter()
+                .filter(|(path, _)| !is_goferns_own(path))
                 .filter(|(path, _)| is_under(path, under.as_deref()))
                 .map(|(path, stamp)| {
                     let hash = if with_hashes {
@@ -1925,6 +1978,68 @@ fn accept_resource_paths(mut params: Value) -> Value {
         }
     }
     params
+}
+
+/// Refuses a call carrying a path that climbs out of the project, before it reaches the addon.
+///
+/// The editor names files `res://…`, and `res://../` is a real path: Godot resolves it out of the
+/// project and follows it. Measured against the pinned 4.7.2 editor — `Image.save_png` wrote
+/// `res://../escaped.png` and `ResourceSaver.save` wrote `res://../escaped.tres`, both one
+/// directory above the project, both answering OK.
+///
+/// The file and script tools have their own confinement and this is not it. Everything routed by
+/// [`crate::tool_params::Answers::Addon`] is forwarded to the addon verbatim, so the writers that
+/// live there — `resource.create_texture`, `create_shape`, `create_tileset` — had no gate on the
+/// way at all, under a catalogue that describes their domain as one where "nothing outside the
+/// task worktree can be named at all".
+///
+/// A `..` inside a *path* is what is refused, not a `..` inside a value: a Label's `text` may say
+/// anything, so a string counts as a path only when it carries the scheme or a separator.
+fn a_path_that_climbs_out(params: &Value) -> Result<(), ToolFailure> {
+    fn climbing<'a>(under: &str, value: &'a Value) -> Option<&'a str> {
+        match value {
+            Value::String(text) => climbs(under, text).then_some(text.as_str()),
+            Value::Array(items) => items.iter().find_map(|item| climbing(under, item)),
+            Value::Object(fields) => fields.iter().find_map(|(key, held)| climbing(key, held)),
+            _ => None,
+        }
+    }
+    match climbing("", params) {
+        None => Ok(()),
+        Some(text) => Err(ToolFailure::new(
+            "outside_workspace",
+            format!(
+                "{text} climbs out of the project. Every path here names a file inside the task \
+                 worktree, spelled the way the project spells it — assets/tiles.png, or \
+                 res://assets/tiles.png — and a `..` segment is refused wherever it appears."
+            ),
+        )),
+    }
+}
+
+/// The keys whose value is a file, so that a `..` in one is a path climbing and not prose.
+///
+/// A node's `text` may say anything, `../docs/readme` included, and refusing that would be this
+/// gate inventing a rule nobody has. A string that carries the scheme is a path wherever it sits,
+/// and everything else has to be named here. `path` covers the nested one a resource value holds:
+/// `{"type": "resource", "value": {"path": "res://…"}}` arrives under that key like any other.
+const A_KEY_THAT_NAMES_A_FILE: [&str; 8] = [
+    "path", "paths", "texture", "scene", "file", "files", "from", "to",
+];
+
+/// Whether a string is a path, and climbs.
+fn climbs(under: &str, text: &str) -> bool {
+    let (path, schemed) = match text
+        .strip_prefix("res://")
+        .or_else(|| text.strip_prefix("user://"))
+    {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    };
+    if !schemed && !A_KEY_THAT_NAMES_A_FILE.contains(&under) {
+        return false;
+    }
+    path.split('/').any(|segment| segment == "..") || (!schemed && path == "..")
 }
 
 fn require_script_path(params: &Value) -> Result<(), ToolFailure> {
@@ -2070,10 +2185,11 @@ fn script_domain<R: Runtime>(
             let under = params
                 .get("under")
                 .and_then(Value::as_str)
-                .map(named_directory);
+                .and_then(named_directory);
             let files: Vec<Value> = files::scan(workspace.root())
                 .into_iter()
                 .filter(|(path, _)| path.ends_with(".gd"))
+                .filter(|(path, _)| !is_goferns_own(path))
                 .filter(|(path, _)| is_under(path, under.as_deref()))
                 .map(|(path, stamp)| json!({"path": path, "bytes": stamp.bytes}))
                 .collect();
@@ -2397,6 +2513,11 @@ fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -> ToolFailu
         failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
         return failure;
     }
+    if failure.code.starts_with("runtime_")
+        && let Some(held) = the_debugger_holds_the_game()
+    {
+        failure.message = format!("{}\n\n{held}", failure.message.trim_end());
+    }
     let printed = last_session_errors(CARRIED_ERROR_LINES);
     if printed.is_empty() {
         return failure;
@@ -2407,6 +2528,26 @@ fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -> ToolFailu
         printed.join("\n")
     );
     failure
+}
+
+/// Says so when the game a runtime call is waiting on is one the debugger launched.
+///
+/// A game stopped at a breakpoint answers nothing: the whole process is halted, so `runtime.input`
+/// spends its deadline and comes back `The game did not answer in time`. That sentence reads as a
+/// fault, and a live turn read it as one — eight timeouts in a row against a game stopped at a
+/// breakpoint the same turn had set, three attempts to run it again on top of those, and the answer
+/// waiting at the breakpoint never collected.
+///
+/// The flag says the debugger launched this game, not that it is halted this instant, and the
+/// sentence says exactly that much: it names the call that lets a stopped game run on and leaves
+/// the reader to look. Nothing here can be wrong about a game the debugger never started.
+fn the_debugger_holds_the_game() -> Option<String> {
+    crate::debug::holds_a_game().then(|| {
+        "This game was launched by the debugger, and a game stopped at a breakpoint answers \
+         nothing until it runs on. If one is set, godot_debug continue is what lets this call \
+         through; godot_debug stack_trace says where it is stopped."
+            .to_owned()
+    })
 }
 
 /// Says so when the game cannot possibly answer, because its helper is not in the project any more.
@@ -2937,6 +3078,42 @@ mod tests {
             accept_resource_paths(json!({"path": "res://../secrets.gd"}))["path"],
             "../secrets.gd"
         );
+        // An operation the addon answers never meets that confinement — it is forwarded verbatim.
+        // Measured against the pinned editor: `Image.save_png("res://../escaped.png")` and
+        // `ResourceSaver.save(shape, "res://../escaped.tres")` both wrote one directory above the
+        // project and both answered OK, under a catalogue that says nothing outside the task
+        // worktree can be named at all.
+        for climbing in [
+            json!({"path": "res://../escaped.png"}),
+            json!({"path": "../escaped.png"}),
+            json!({"path": "assets/../../escaped.png"}),
+            json!({"path": "user://../escaped.png"}),
+            json!({"texture": "res://a.png", "tiles": ["res://../x.png"]}),
+            json!({"properties": [{"value": {"type": "resource", "value": {"path": "res://../x.tres"}}}]}),
+        ] {
+            let refused = a_path_that_climbs_out(&climbing).expect_err("a climbing path");
+            assert_eq!(refused.code, "outside_workspace", "{climbing}");
+        }
+        // And a `..` that is not a path is a value like any other. A node's `text` may say
+        // anything, `../docs/readme` included, and refusing that would be this gate inventing a
+        // rule nobody has — so a bare string is only read as a path under a key that names a file.
+        for ordinary in [
+            json!({"path": "res://assets/tiles.png"}),
+            json!({"value": {"type": "string", "value": "Loading.."}}),
+            json!({"properties": [{"property": "text", "value": {"type": "string", "value": "see ../docs/readme"}}]}),
+            json!({"name": "a..b"}),
+            json!({"query": "physics/2d/default_gravity"}),
+        ] {
+            assert!(a_path_that_climbs_out(&ordinary).is_ok(), "{ordinary}");
+        }
+        // The scheme makes it a path wherever it sits, key or no key.
+        assert!(
+            a_path_that_climbs_out(&json!({
+                "properties": [{"value": {"type": "string", "value": "res://../secrets"}}]
+            }))
+            .is_err(),
+        );
+
         let directory = tempfile::TempDir::new().expect("temporary directory");
         let workspace = crate::files::Workspace::open(directory.path()).expect("open workspace");
         assert!(
@@ -4013,7 +4190,7 @@ mod tests {
     #[test]
     fn a_listing_narrowed_to_a_directory_holds_only_what_is_under_it() {
         for spelling in ["assets", "res://assets", "/assets/", "res://assets/"] {
-            let under = Some(super::named_directory(spelling));
+            let under = super::named_directory(spelling);
             assert!(
                 super::is_under("assets/tiles.png", under.as_deref()),
                 "{spelling}"
@@ -4037,6 +4214,32 @@ mod tests {
         assert!(
             super::is_under("anything/at/all.png", None),
             "no directory named is every file"
+        );
+    }
+
+    /// The project root, however it is spelled, narrows nothing.
+    ///
+    /// `res://` is the spelling a model reaching for "the whole project" writes, and it is one
+    /// `named_directory` deliberately accepts — it took the scheme off and was left with nothing,
+    /// and nothing matched nothing. `godot_resource list` and `godot_script list` both answered
+    /// `{"files": []}` about a worktree full of files, which reads as an empty project rather than
+    /// as a listing that narrowed itself away.
+    #[test]
+    fn the_project_root_is_not_a_directory_to_narrow_by() {
+        for spelling in ["res://", "/", "//", ".", "res:///", "  "] {
+            assert_eq!(super::named_directory(spelling), None, "{spelling}");
+        }
+        for spelling in ["assets", "res://assets"] {
+            assert_eq!(
+                super::named_directory(spelling),
+                Some("assets".to_owned()),
+                "{spelling}"
+            );
+        }
+        let root = super::named_directory("res://");
+        assert!(
+            super::is_under("scripts/main.gd", root.as_deref()),
+            "the root holds every file the worktree holds"
         );
     }
 
@@ -4883,6 +5086,40 @@ mod tests {
             "the failure named no cause: {}",
             carried.message
         );
+    }
+
+    /// A timeout against a game the debugger launched says where the game probably is.
+    ///
+    /// `The game did not answer in time` is what a game stopped at a breakpoint answers, because a
+    /// halted process answers nothing. One live turn read that as a fault: eight timeouts in a row
+    /// against a breakpoint it had set itself, three attempts to run the game again on top, and the
+    /// answer waiting at the breakpoint never collected.
+    #[test]
+    fn a_timeout_against_the_debuggers_own_game_names_the_call_that_frees_it() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(
+            godot_session::LogSource::Editor,
+            "Godot Engine v4.7.2.stable",
+        )]);
+
+        crate::debug::pretend_it_holds_a_game(true);
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+        crate::debug::pretend_it_holds_a_game(false);
+        assert!(
+            carried.message.contains("godot_debug continue"),
+            "{}",
+            carried.message
+        );
+
+        // And a game the debugger never started gains nothing from the sentence.
+        let alone = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+        assert_eq!(alone.message, "The game did not answer in time");
     }
 
     /// A buffer with nothing wrong in it leaves the failure exactly as the addon wrote it.

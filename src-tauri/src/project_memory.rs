@@ -366,6 +366,45 @@ pub(crate) struct MemoryEdit {
     pub content: String,
 }
 
+/// Moves a list of memories to one state, and answers with them checked.
+///
+/// Triage, not editing. A sweep leaves eighty rows carrying a verdict and the only thing worth
+/// doing about `broken` in bulk is to stop retrieval reading it — one press, having read the
+/// reasons, rather than eighty trips through the editor.
+///
+/// It does not re-embed. `save_memory` does, because a person changing the text changes what the
+/// row should be found by; here the content is untouched, `upsert` keeps the vector precisely
+/// because it can see that, and re-embedding eighty unchanged sentences would be paying the model
+/// worker for a result it already stored.
+///
+/// A row that has been deleted since the list was drawn is skipped rather than failing the batch.
+/// The caller gets back what it moved and can see what did not come.
+pub(crate) fn set_memory_states(
+    storage: &ProjectStorage,
+    ids: &[String],
+    state: &str,
+    workspace: Option<&Snapshot>,
+) -> Result<Vec<CheckedMemory>, CommandError> {
+    let index = workspace.map(basename_index);
+    let mut moved = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(existing) = storage.memory().get(id)? else {
+            continue;
+        };
+        let record = storage.memory().upsert(&UpsertMemoryRequest {
+            id: Some(existing.id.clone()),
+            task_id: existing.task_id.clone(),
+            kind: existing.kind.clone(),
+            state: state.to_owned(),
+            content: existing.content.clone(),
+            provenance: edited_by_user(Some(&existing.provenance)),
+            superseded_by: existing.superseded_by.clone(),
+        })?;
+        moved.push(check_memory(record, workspace, index.as_ref()));
+    }
+    Ok(moved)
+}
+
 /// Stores one memory a person wrote or corrected, and answers with it checked.
 ///
 /// The re-embedding is attempted and its failure is swallowed, which is the opposite of what
@@ -544,7 +583,7 @@ mod tests {
     use super::{
         MemoryCheck, backfill_memory_embeddings, basename_index, check_memory,
         list_checked_memories, record_judgement, remember_completed_turn, retrieve_memory_context,
-        save_memory,
+        save_memory, set_memory_states,
     };
     use crate::files::Snapshot;
     use crate::storage::{MemoryRecord, ProjectStorage, UpsertMemoryRequest};
@@ -924,5 +963,100 @@ mod tests {
             storage.memory().delete(&stored.id).unwrap_err().code,
             "memory_not_found"
         );
+    }
+
+    /*
+     * Triage moves the state and touches nothing else.
+     *
+     * A verdict changes nothing on its own — a row the model called broken is still `confirmed`,
+     * and still one of the six a turn is given. What the press has to do is stop retrieval reading
+     * it while keeping every reason someone would later want: the words, the verdict, and what the
+     * model said about it. Deleting would have thrown all three away.
+     */
+    #[test]
+    fn holding_memories_back_keeps_their_words_and_their_verdict() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let stored = storage
+            .memory()
+            .upsert(&UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "summary".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "Built the pause menu in scripts/pause.gd.".to_owned(),
+                provenance: serde_json::json!({"source": "completed-ai-turn"}),
+                superseded_by: None,
+            })
+            .expect("store a memory");
+        record_judgement(
+            &storage,
+            &stored.id,
+            "broken",
+            "it is a settings screen now",
+            "qwen3",
+        )
+        .expect("file a verdict");
+
+        let moved = set_memory_states(
+            &storage,
+            std::slice::from_ref(&stored.id),
+            "candidate",
+            None,
+        )
+        .expect("hold it back");
+
+        assert_eq!(moved.len(), 1);
+        let held = &moved[0];
+        assert_eq!(held.memory.state, "candidate");
+        assert_eq!(
+            held.memory.content,
+            "Built the pause menu in scripts/pause.gd."
+        );
+        let verdict = held.judgement.as_ref().expect("the verdict survived");
+        assert_eq!(verdict.reason, "it is a settings screen now");
+        // The row came out of a turn and still says so. The upsert overwrites provenance with
+        // whatever it is handed, so carrying it across is the difference between a held-back memory
+        // and one cut loose from the work that wrote it.
+        assert_eq!(
+            held.memory.provenance.get("source"),
+            Some(&serde_json::json!("completed-ai-turn"))
+        );
+    }
+
+    /*
+     * A row that went away between the list being drawn and the button being pressed.
+     *
+     * The panel is showing what it read a minute ago, and a sweep of eighty memories is an hour in
+     * which one of them can be forgotten from its own editor. Failing the batch on it would leave
+     * the other seventy-nine confirmed, which is the opposite of what was asked for.
+     */
+    #[test]
+    fn holding_back_skips_a_memory_that_is_no_longer_stored() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let stored = storage
+            .memory()
+            .upsert(&UpsertMemoryRequest {
+                id: None,
+                task_id: None,
+                kind: "summary".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "Added an audio autoload.".to_owned(),
+                provenance: serde_json::json!({}),
+                superseded_by: None,
+            })
+            .expect("store a memory");
+
+        let moved = set_memory_states(
+            &storage,
+            &["gone".to_owned(), stored.id.clone()],
+            "candidate",
+            None,
+        )
+        .expect("hold back what is there");
+
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].memory.id, stored.id);
     }
 }

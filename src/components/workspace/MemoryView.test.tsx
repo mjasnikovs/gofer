@@ -4,7 +4,13 @@ import userEvent from '@testing-library/user-event'
 import {MemoryView} from './MemoryView'
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush, flushUntil} from '../../test/flush'
-import type {MemoryEdit, MemoryJudgeEvent, ProjectMemory} from '../../models/memory'
+import type {
+    MemoryEdit,
+    MemoryJudgeEvent,
+    MemoryState,
+    MemorySweepEvent,
+    ProjectMemory
+} from '../../models/memory'
 
 const tauri = createDesktopFake()
 
@@ -36,8 +42,12 @@ function backend(rows: readonly ProjectMemory[] = [memory({}), STALE]) {
     const forgotten: string[] = []
     const judged: {memoryId: string; requestId: number}[] = []
     const stopped: number[] = []
+    const swept: {memoryIds: readonly string[]; requestId: number}[] = []
+    const held: {ids: string[]; state: MemoryState}[] = []
     /** Resolves the running judgement, the way the backend answers once its verdict is filed. */
     let settle: ((memory: ProjectMemory) => void) | undefined
+    /** Ends the running sweep, which is how the backend answers whether it finished or was stopped. */
+    let endSweep: (() => void) | undefined
     let listed = [...rows]
     tauri.invoke.mockImplementation((command, arguments_) => {
         if (command === 'judge_project_memory') {
@@ -74,15 +84,51 @@ function backend(rows: readonly ProjectMemory[] = [memory({}), STALE]) {
             listed = listed.filter(row => row.id !== id)
             return Promise.resolve()
         }
+        if (command === 'sweep_project_memory') {
+            const {request} = arguments_ as {
+                request: {memoryIds: readonly string[]; requestId: number}
+            }
+            swept.push(request)
+            return new Promise<readonly ProjectMemory[]>(resolve => {
+                endSweep = () => {
+                    resolve(listed)
+                }
+            })
+        }
+        if (command === 'set_memory_states') {
+            const {ids, state} = arguments_ as {ids: readonly string[]; state: MemoryState}
+            held.push({ids: [...ids], state})
+            const moved = listed.filter(row => ids.includes(row.id)).map(row => ({...row, state}))
+            listed = listed.map(row => moved.find(one => one.id === row.id) ?? row)
+            return Promise.resolve(moved)
+        }
         throw new Error(`No fake for ${command}`)
     })
-    return {saved, forgotten, judged, stopped, settle: (row: ProjectMemory) => settle?.(row)}
+    return {
+        saved,
+        forgotten,
+        judged,
+        stopped,
+        swept,
+        held,
+        settle: (row: ProjectMemory) => settle?.(row),
+        endSweep: () => endSweep?.(),
+        /** What the panel would read now, so a test can assert against the same rows it does. */
+        listed: () => listed
+    }
 }
 
 /** The window event a running judgement rides, delivered the way the backend emits it. */
 function emitJudge(event: MemoryJudgeEvent) {
     for (const [name, handler] of tauri.listen.mock.calls)
         if (name === 'ai-memory-judge')
+            (handler as (e: {payload: unknown}) => void)({payload: event})
+}
+
+/** The window event a running sweep rides. Separate from the judge's, as the backend keeps it. */
+function emitSweep(event: MemorySweepEvent) {
+    for (const [name, handler] of tauri.listen.mock.calls)
+        if (name === 'ai-memory-sweep')
             (handler as (e: {payload: unknown}) => void)({payload: event})
 }
 
@@ -382,4 +428,203 @@ it('leaves the other memories alone when one judgement fails', async () => {
     await flush()
 
     expect(screen.queryByText(/it used all of its steps/u)).not.toBeInTheDocument()
+})
+
+/**
+ * Checking the whole list, and what a person does with what it finds.
+ *
+ * The path check decides nothing about a memory that names no file, and on a real project that was
+ * 32 of 87 rows — so the panel's own review filter can read zero while most of the list has never
+ * been checked against anything. The sweep is the only thing that can settle those, and it is an
+ * hour of the app's one provider connection, which is why it says so on the button and why every
+ * verdict is worth showing the moment it lands.
+ */
+describe('sweeping the whole list', () => {
+    const JUDGED = memory({
+        id: 'three',
+        content: 'User request: pool the audio\nOutcome: added an autoload.',
+        judgement: {
+            verdict: 'holds',
+            reason: 'the autoload is registered',
+            at: 1_700_000_100_000,
+            model: 'qwen3-coder',
+            isCurrent: true
+        }
+    })
+
+    /** One turn for the list, and only the rows nobody has paid for a verdict on. */
+    it('asks about every memory without a current verdict, as a single turn', async () => {
+        const log = backend([memory({}), STALE, JUDGED])
+        await open()
+        const user = userEvent.setup()
+
+        await user.click(screen.getByRole('button', {name: 'Ask the model about 2'}))
+        await flush()
+
+        expect(log.swept).toHaveLength(1)
+        expect(log.swept[0]?.memoryIds).toEqual(['one', 'two'])
+    })
+
+    /**
+     * Stop reaches the run, not whichever memory is in flight.
+     *
+     * That is the whole reason a sweep is one turn rather than eighty. Eighty turns is eighty gaps
+     * a chat message can win the provider connection in, and a Stop that lands in one of them ends
+     * a judgement while the sweep goes on to the next.
+     */
+    it('stops the whole run through the one turn it holds', async () => {
+        const log = backend([memory({}), STALE])
+        await open()
+        const user = userEvent.setup()
+
+        await user.click(screen.getByRole('button', {name: 'Ask the model about 2'}))
+        await flush()
+        emitSweep({type: 'sweep-progress', memoryId: 'one', done: 0, total: 2})
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Stop'}))
+        await flush()
+
+        expect(log.stopped).toEqual([log.swept[0]?.requestId])
+    })
+
+    /**
+     * An hour is too long to look at a list that does not move.
+     *
+     * The verdict is not patched in from the event — it is filed on the Rust side before the event
+     * leaves it, so the panel reads the list again and draws what was stored. Same rule the rest of
+     * this screen keeps: nothing on it is drawn from what was reported.
+     */
+    it('re-reads the list as each verdict lands rather than at the end', async () => {
+        backend([memory({}), STALE])
+        await open()
+        const user = userEvent.setup()
+        const readsBefore = tauri.invoke.mock.calls.filter(
+            ([command]) => command === 'list_project_memory'
+        ).length
+
+        await user.click(screen.getByRole('button', {name: 'Ask the model about 2'}))
+        await flush()
+        emitJudge({type: 'judge-verdict', memoryId: 'one', verdict: 'broken'})
+        await flush()
+
+        const readsAfter = tauri.invoke.mock.calls.filter(
+            ([command]) => command === 'list_project_memory'
+        ).length
+        expect(readsAfter).toBeGreaterThan(readsBefore)
+    })
+
+    /**
+     * One row failing does not stop the rest of the run showing which row it is on.
+     *
+     * The per-row spinner was only ever moved onto the next memory when there was already one to
+     * move, and a failure cleared it. So the first `judge-failed` in an eighty-four row sweep took
+     * the spinner away for the remaining hour: the run went on, the header counted up, and no row
+     * ever said it was the one being asked about.
+     */
+    it('shows which row it is on after an earlier one failed', async () => {
+        backend([memory({}), STALE])
+        await open()
+        const user = userEvent.setup()
+
+        // The row the sweep will reach second, open, so its spinner is on screen to look for.
+        await user.click(screen.getByText('delete GRAYZONE.md → deleted it.'))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Ask the model about 2'}))
+        await flush()
+        emitSweep({type: 'sweep-progress', memoryId: 'one', done: 0, total: 2})
+        await flush()
+        emitJudge({type: 'judge-failed', memoryId: 'one', reason: 'it used all of its steps'})
+        await flush()
+        emitSweep({type: 'sweep-progress', memoryId: 'two', done: 1, total: 2})
+        await flush()
+
+        expect(screen.getByText('starting the sub-agent…')).toBeInTheDocument()
+    })
+
+    /** The count on screen is the run's own, so nobody is reading the panel's arithmetic. */
+    it('says how far through the list it is, and that chat is waiting', async () => {
+        backend([memory({}), STALE])
+        await open()
+        const user = userEvent.setup()
+
+        await user.click(screen.getByRole('button', {name: 'Ask the model about 2'}))
+        await flush()
+        emitSweep({type: 'sweep-progress', memoryId: 'two', done: 1, total: 2})
+        await flush()
+
+        expect(
+            screen.getByText(/Asking the model about 2 of 2\. Chat waits for this\./u)
+        ).toBeInTheDocument()
+    })
+
+    /** Nothing to buy, nothing to sell: every row already carries a verdict about its own words. */
+    it('offers nothing to sweep when every memory has a current verdict', async () => {
+        backend([JUDGED])
+        await open()
+
+        expect(screen.getByRole('button', {name: 'Every memory has a verdict'})).toBeDisabled()
+    })
+})
+
+/**
+ * What a sweep leaves worth doing.
+ *
+ * A verdict changes nothing on its own: a row the model called broken is still `confirmed`, and
+ * still one of the six a turn is given. Triage is the press that makes the verdict mean something.
+ */
+describe('acting on what the model found', () => {
+    const BROKEN = memory({
+        id: 'four',
+        content: 'User request: add a pause menu\nOutcome: built it in `scripts/pause.gd`.',
+        judgement: {
+            verdict: 'broken',
+            reason: 'scripts/pause.gd holds a settings screen now',
+            at: 1_700_000_100_000,
+            model: 'qwen3-coder',
+            isCurrent: true
+        }
+    })
+
+    /**
+     * Only a verdict about the words stored now.
+     *
+     * A verdict made before the memory was edited is kept and shown, because the reason is still
+     * worth reading — but it is about a sentence that is no longer there, so it is not something to
+     * act on without looking.
+     */
+    it('counts only the rows judged broken against their current text', async () => {
+        backend([
+            memory({}),
+            BROKEN,
+            memory({
+                id: 'five',
+                judgement: {
+                    verdict: 'broken',
+                    reason: 'about an older version',
+                    at: 1_700_000_100_000,
+                    model: 'qwen3-coder',
+                    isCurrent: false
+                }
+            })
+        ])
+        await open()
+
+        expect(screen.getByRole('radio', {name: 'Model says broken 1'})).toBeInTheDocument()
+    })
+
+    /** Held back, not forgotten: the row keeps its words, its verdict, and the reason. */
+    it('stops retrieval reading every broken row in one press', async () => {
+        const log = backend([memory({}), BROKEN])
+        await open()
+        const user = userEvent.setup()
+
+        await user.click(screen.getByRole('radio', {name: 'Model says broken 1'}))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Hold back all 1'}))
+        await flush()
+
+        expect(log.held).toEqual([{ids: ['four'], state: 'candidate'}])
+        expect(log.forgotten).toEqual([])
+        expect(log.listed().find(row => row.id === 'four')?.content).toBe(BROKEN.content)
+    })
 })

@@ -383,6 +383,30 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
             .starts_with("unsupported_value"),
         "an unknown key must be refused by the helper, not injected"
     );
+    // The five named buttons are a closed set, so a refusal that does not carry them is one the
+    // caller cannot act on. A live turn clicking a menu sent the *string* "1" — the number is
+    // accepted and its spelling is not — and was told only that "1" is unknown.
+    // A monitor that is not one names the monitors there are. Every other closed vocabulary in that
+    // file says what it holds; this one only said what it does not.
+    let no_monitor = session.error(
+        "runtime.get_monitors",
+        json!({"monitors": ["frames_per_second"]}),
+        None,
+    );
+    assert!(
+        no_monitor.contains("The monitors are") && no_monitor.contains("fps"),
+        "the refusal has to name the monitors there are: {no_monitor}"
+    );
+
+    let unnamed = session.error(
+        "runtime.input",
+        json!({"events": [{"kind": "mouse_button", "button": "1", "position": [4, 4]}]}),
+        None,
+    );
+    assert!(
+        unnamed.contains("left") && unnamed.contains("wheel_up") && unnamed.contains("as a number"),
+        "the refusal has to name the buttons there are: {unnamed}"
+    );
     // The five kinds are the whole vocabulary and a caller that got one wrong has nowhere else to
     // read them. A live turn building a playable game sent an event with no kind at all and was
     // answered `Input event kind '' is not supported` twenty-two times running. The parameter

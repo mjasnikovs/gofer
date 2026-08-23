@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from 'react'
+import {useCallback, useEffect, useRef, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {Collapsible, CollapsibleGroup} from '@astryxdesign/core/Collapsible'
 import {Divider} from '@astryxdesign/core/Divider'
@@ -15,14 +15,19 @@ import {
     judgeProjectMemory,
     listProjectMemory,
     saveProjectMemory,
+    setMemoryStates,
     stopMemoryJudge,
+    sweepProjectMemory,
     toMemoryError,
-    watchMemoryJudge
+    watchMemoryJudge,
+    watchMemorySweep
 } from '../../services/project-memory'
 import {
     MEMORY_KINDS,
     checkSummary,
+    isBroken,
     isRetrievable,
+    isUnjudged,
     missingAnchors,
     verdictSummary
 } from '../../models/memory'
@@ -40,8 +45,8 @@ import {PanelState} from './PanelState'
 /** How much of a memory the closed row shows. Two of these rows measured over 2,000 characters. */
 const PREVIEW_LENGTH = 110
 
-/** Which rows the list is showing. `review` is the reason the screen exists. */
-type MemoryFilter = 'all' | 'review'
+/** Which rows the list is showing. `review` and `broken` are the reason the screen exists. */
+type MemoryFilter = 'all' | 'review' | 'broken'
 
 const DOT: Readonly<Record<MemoryCheck, 'success' | 'warning' | 'neutral'>> = {
     intact: 'success',
@@ -61,6 +66,13 @@ type Judging = Readonly<{
     memoryId: string
     requestId: number
     line: string
+}>
+
+/** A sweep in flight: the turn Stop reaches, and how far through the list it is. */
+type Sweeping = Readonly<{
+    requestId: number
+    done: number
+    total: number
 }>
 
 function preview(content: string): string {
@@ -90,9 +102,13 @@ function draftOf(memory: ProjectMemory): MemoryEdit {
  * way to see which six, and no way to correct one that had stopped being true — a memory written by
  * a turn a month ago was as authoritative as one written this morning, and it was invisible.
  *
- * The check runs with the read rather than behind a button. It reports where files are and nothing
- * more: a row is marked as naming a file the workspace does not have, never as being wrong, because
- * a memory whose whole subject is a deletion names a file that is correctly gone.
+ * There are two checks and they cost different things. The path check runs with the read rather
+ * than behind a button, because it is a directory walk: it reports where files are and nothing
+ * more, and a row is marked as naming a file the workspace does not have, never as being wrong,
+ * because a memory whose whole subject is a deletion names a file that is correctly gone. The model
+ * check is a minute a row and is asked for — one row from its own editor, or the whole list from
+ * the sweep. What a sweep leaves behind is triage: `broken` rows to read, and one press to stop
+ * retrieval reading them.
  */
 export function MemoryView() {
     const [memories, setMemories] = useState<readonly ProjectMemory[]>()
@@ -103,6 +119,10 @@ export function MemoryView() {
     const [draft, setDraft] = useState<MemoryEdit>()
     const [isSaving, setIsSaving] = useState(false)
     const [judging, setJudging] = useState<Judging>()
+    const [sweeping, setSweeping] = useState<Sweeping>()
+    // The running sweep's own id, held where the event listener can read it. The listener is
+    // registered once, so the state it would otherwise close over is the state at registration.
+    const sweepRequest = useRef<number>(undefined)
     // Which memory the failure was about, not only what it said. One string for the whole panel
     // was drawn for whichever row happened to be open, so a judgement that failed on one memory
     // reported itself against another that was never judged at all.
@@ -152,6 +172,12 @@ export function MemoryView() {
                         {...current, line: event.line ?? current.line}
                     :   current
                 )
+            // A verdict is filed on the Rust side before this event leaves it, so the list can be
+            // read again and the row will carry it. That is done rather than patching the row from
+            // the event for the reason nothing else here is drawn from one: the panel would be
+            // showing what was reported, not what was stored. It matters for a sweep, where the
+            // alternative is an hour of a list that does not move.
+            if (event.type === 'judge-verdict') setReads(count => count + 1)
             // Both endings clear the row, and only one of them has anything to say. The event is
             // the first ending to arrive — the call behind it rejects afterwards — and the first
             // ending is the one kept, because it is the one that names what actually happened.
@@ -167,6 +193,39 @@ export function MemoryView() {
                     )
                 setJudging(current => (current?.memoryId === event.memoryId ? undefined : current))
             }
+        }).then(unlisten => {
+            if (cancelled) unlisten()
+            else stop = unlisten
+        })
+        return () => {
+            cancelled = true
+            stop?.()
+        }
+    }, [])
+
+    // A sweep's own count, and which row it has reached. The per-row spinner is still the judge's
+    // event: this is what turns the header into "31 of 84" and hands the next row to the editor.
+    useEffect(() => {
+        let stop: (() => void) | undefined
+        let cancelled = false
+        void watchMemorySweep(event => {
+            setSweeping(current =>
+                current === undefined ? current : {...current, done: event.done, total: event.total}
+            )
+            if (event.type !== 'sweep-progress') return
+            const memoryId = event.memoryId
+            if (memoryId === undefined) return
+            setJudgeFailure(undefined)
+            // Armed from the sweep, not from whatever row was being drawn a moment ago. A failure
+            // clears `judging`, and this only ever moved a spinner that was already there — so the
+            // first `judge-failed` in an eighty-four row sweep took the spinner away for the rest
+            // of the hour, while the run went on and the header counted up.
+            setJudging(current => {
+                const requestId = current?.requestId ?? sweepRequest.current
+                return requestId === undefined ? current : (
+                        {memoryId, requestId, line: 'starting the sub-agent…'}
+                    )
+            })
         }).then(unlisten => {
             if (cancelled) unlisten()
             else stop = unlisten
@@ -200,8 +259,11 @@ export function MemoryView() {
     }, [])
 
     const stopJudging = useCallback(() => {
-        if (judging) void stopMemoryJudge(judging.requestId)
-    }, [judging])
+        // One id whether a row or the whole list is running, because there is one turn either way.
+        // Stopping from an open row during a sweep ends the sweep, which is the truth of it.
+        const requestId = judging?.requestId ?? sweeping?.requestId
+        if (requestId !== undefined) void stopMemoryJudge(requestId)
+    }, [judging, sweeping])
 
     const open = useCallback(
         (value: string | string[]) => {
@@ -249,8 +311,61 @@ export function MemoryView() {
 
     const all = memories ?? []
     const needingReview = all.filter(memory => memory.check === 'stale')
-    const shown = filter === 'review' ? needingReview : all
+    const broken = all.filter(isBroken)
+    const unjudged = all.filter(isUnjudged)
+    const shown =
+        filter === 'review' ? needingReview
+        : filter === 'broken' ? broken
+        : all
     const given = all.filter(isRetrievable).length
+
+    const sweep = useCallback(() => {
+        const memoryIds = unjudged.map(memory => memory.id)
+        if (memoryIds.length === 0) return
+        const requestId = Date.now()
+        setJudgeFailure(undefined)
+        sweepRequest.current = requestId
+        setSweeping({requestId, done: 0, total: memoryIds.length})
+        const first = memoryIds[0]
+        if (first !== undefined)
+            setJudging({memoryId: first, requestId, line: 'starting the sub-agent…'})
+        void sweepProjectMemory({requestId, memoryIds})
+            .then(() => {
+                setError(undefined)
+            })
+            .catch((failure: unknown) => {
+                setError(toMemoryError(failure))
+            })
+            .finally(() => {
+                sweepRequest.current = undefined
+                setSweeping(undefined)
+                setJudging(current => (current?.requestId === requestId ? undefined : current))
+                // The rows the sweep answers with are the same rows a read gives, and the read is
+                // the one path that also recomputes the path check. One way in, one shape out.
+                setReads(count => count + 1)
+            })
+    }, [unjudged])
+
+    // Held back, not forgotten. `candidate` stops retrieval reading the row and keeps every word of
+    // it, along with the verdict and the reason — which is what someone wondering later why the
+    // model stopped being told this will want, and what deleting would have thrown away.
+    const holdBackBroken = useCallback(() => {
+        const ids = broken.map(memory => memory.id)
+        if (ids.length === 0) return
+        setIsSaving(true)
+        void setMemoryStates(ids, 'candidate')
+            .then(moved => {
+                const byId = new Map(moved.map(row => [row.id, row]))
+                setMemories(rows => (rows ?? []).map(row => byId.get(row.id) ?? row))
+                setError(undefined)
+            })
+            .catch((failure: unknown) => {
+                setError(toMemoryError(failure))
+            })
+            .finally(() => {
+                setIsSaving(false)
+            })
+    }, [broken])
 
     return (
         <VStack
@@ -278,6 +393,10 @@ export function MemoryView() {
                         value='review'
                         label={`Needs review ${String(needingReview.length)}`}
                     />
+                    <SegmentedControlItem
+                        value='broken'
+                        label={`Model says broken ${String(broken.length)}`}
+                    />
                 </SegmentedControl>
                 <StackItem size='fill'>
                     <Text
@@ -287,13 +406,74 @@ export function MemoryView() {
                         {`${String(given)} of these reach the model. A turn is given six.`}
                     </Text>
                 </StackItem>
-                <Button
-                    label='Recheck'
-                    size='sm'
-                    isDisabled={isLoading}
-                    clickAction={recheck}
-                />
+                {sweeping ?
+                    <>
+                        <HStack
+                            gap={2}
+                            align='center'
+                            role='status'
+                        >
+                            <Spinner size='sm' />
+                            <Text
+                                type='supporting'
+                                color='secondary'
+                            >
+                                {`Asking the model about ${String(sweeping.done + 1)} of ${String(sweeping.total)}. Chat waits for this.`}
+                            </Text>
+                        </HStack>
+                        <Button
+                            label='Stop'
+                            size='sm'
+                            clickAction={stopJudging}
+                        />
+                    </>
+                :   <>
+                        <Button
+                            label='Recheck'
+                            size='sm'
+                            isDisabled={isLoading}
+                            clickAction={recheck}
+                        />
+                        <Button
+                            label={
+                                unjudged.length === 0 ?
+                                    'Every memory has a verdict'
+                                :   `Ask the model about ${String(unjudged.length)}`
+                            }
+                            size='sm'
+                            variant='primary'
+                            isDisabled={isLoading || unjudged.length === 0 || Boolean(judging)}
+                            clickAction={sweep}
+                        />
+                    </>
+                }
             </HStack>
+            {filter === 'broken' && broken.length > 0 && (
+                <>
+                    <Divider />
+                    <HStack
+                        gap={3}
+                        padding={3}
+                        align='center'
+                    >
+                        <StackItem size='fill'>
+                            <Text
+                                type='supporting'
+                                color='secondary'
+                            >
+                                Holding one back stops retrieval reading it. Its words and the
+                                model&apos;s reason are kept.
+                            </Text>
+                        </StackItem>
+                        <Button
+                            label={`Hold back all ${String(broken.length)}`}
+                            size='sm'
+                            isDisabled={isSaving || Boolean(sweeping)}
+                            clickAction={holdBackBroken}
+                        />
+                    </HStack>
+                </>
+            )}
             <Divider />
             <StackItem
                 size='fill'
@@ -305,12 +485,18 @@ export function MemoryView() {
                     error={error}
                     isEmpty={shown.length === 0}
                     emptyTitle={
-                        filter === 'review' ? 'Nothing to review' : 'This project remembers nothing'
+                        filter === 'review' ? 'Nothing to review'
+                        : filter === 'broken' ?
+                            'The model has not called anything broken'
+                        :   'This project remembers nothing'
                     }
                     emptyDescription={
                         filter === 'review' ?
                             'Every memory names files the workspace still has, or names none at all.'
+                        : filter === 'broken' ?
+                            'A row lands here once a sub-agent has read the code and said it no longer holds.'
                         :   'A memory is written when a turn finishes. Six are read back into every prompt.'
+
                     }
                 >
                     <CollapsibleGroup
@@ -374,6 +560,7 @@ export function MemoryView() {
                                         memory={memory}
                                         draft={draft}
                                         isSaving={isSaving}
+                                        isSweeping={Boolean(sweeping)}
                                         {...(judging?.memoryId === memory.id && {judging})}
                                         {...(judgeFailure?.memoryId === memory.id && {
                                             judgeFailure: judgeFailure.reason
@@ -402,6 +589,8 @@ type MemoryEditorProps = Readonly<{
     memory: ProjectMemory
     draft: MemoryEdit
     isSaving: boolean
+    /** Whether the whole list is being judged, which is one turn this row cannot start beside. */
+    isSweeping: boolean
     /** Present only while this memory is the one being judged. */
     judging?: Judging | undefined
     judgeFailure?: string | undefined
@@ -423,6 +612,7 @@ function MemoryEditor({
     memory,
     draft,
     isSaving,
+    isSweeping,
     judging,
     judgeFailure,
     onChange,
@@ -436,6 +626,7 @@ function MemoryEditor({
         draft.content === memory.content
         && draft.kind === memory.kind
         && draft.state === memory.state
+    const isBusy = isSaving || Boolean(judging) || isSweeping
 
     return (
         <VStack
@@ -547,21 +738,21 @@ function MemoryEditor({
                         :   <Button
                                 label={memory.judgement ? 'Ask again' : 'Ask the model'}
                                 size='sm'
-                                isDisabled={isSaving}
+                                isDisabled={isBusy}
                                 clickAction={onJudge}
                             />
                         }
                         <Button
                             label='Forget'
                             size='sm'
-                            isDisabled={isSaving || Boolean(judging)}
+                            isDisabled={isBusy}
                             clickAction={onForget}
                         />
                         <Button
                             label='Save'
                             size='sm'
                             variant='primary'
-                            isDisabled={isSaving || isUnchanged || Boolean(judging)}
+                            isDisabled={isBusy || isUnchanged}
                             clickAction={onSave}
                         />
                     </HStack>

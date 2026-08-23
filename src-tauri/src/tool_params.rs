@@ -239,7 +239,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 /// and repeating it here would be a second one. An operation absent from this table is not checked
 /// — absence means unchecked, never "takes nothing" — which is why a new operation that wants
 /// checking has to be added rather than merely written.
-// GENERATED-BEGIN op-params sha256:a80309e80c5c3353
+// GENERATED-BEGIN op-params sha256:b50c0866b6ae1b13
 pub const TABLE: &[OpParams] = &[
     op("godot_session", "status", Answers::Rust, &[]),
     op("godot_session", "start", Answers::Rust, &[]),
@@ -580,8 +580,8 @@ pub const TABLE: &[OpParams] = &[
                     opt("width", Int),
                     opt("height", Int),
                     noted(
-                        need("atlas", List),
-                        "A [column, row] pair, naming the tile in the atlas.",
+                        opt("atlas", List),
+                        "A [column, row] pair, naming the tile in the atlas. An entry without one erases the cells it covers.",
                     ),
                     opt("source", Int),
                 ],
@@ -746,6 +746,38 @@ pub const TABLE: &[OpParams] = &[
             noted(
                 opt("solid", Kind::Either(&[List, Kind::Choice(&["all"])])),
                 "A list of [column, row] pairs, or the word \"all\".",
+            ),
+        ],
+    ),
+    op(
+        "godot_resource",
+        "create_texture",
+        Answers::Addon("resource.create_texture"),
+        &[
+            need("path", Text),
+            noted(
+                need("size", Kind::Either(&[Number, List])),
+                "One number or two: 16 or [16, 24].",
+            ),
+            noted(
+                opt("background", Text),
+                "A colour name or a hex string, like \"skyblue\" or \"#8b5a2b\". Transparent without one.",
+            ),
+            noted(
+                shaped(
+                    opt("rects", List),
+                    &[
+                        need("x", Int),
+                        need("y", Int),
+                        need("width", Int),
+                        need("height", Int),
+                        noted(
+                            need("color", Text),
+                            "A colour name or a hex string, spelled as `background` is.",
+                        ),
+                    ],
+                ),
+                "Filled rectangles, painted over the background in order.",
             ),
         ],
     ),
@@ -1703,13 +1735,68 @@ fn check_set(
         {
             continue;
         }
+        // A tear that took the value with it. Naming the key back is the right answer when the
+        // key still holds the value — that is the 15-of-15 line below — and the wrong one when it
+        // holds nothing: the sentence then describes the caller's own wreckage instead of what to
+        // write, and puts that wreckage back into the conversation. One live turn sent
+        // `{"name": "Enemy", "op": "instantiate", "parent\": ": ", "}`, was told thirteen times
+        // running that the operation "has no `parent\": ` parameter", and resent it unchanged
+        // thirteen times; it then abandoned the operation and hand-wrote the resource with the
+        // file tools. What is missing is the part a caller can act on, so that is what it hears,
+        // with the tear named and never quoted.
+        if tore_away_the_value(key, object.get(key))
+            && let Some(head) = spec
+                .iter()
+                .find(|param| !param.hidden && param.name == the_name_at_the_head(key))
+        {
+            let intact: serde_json::Map<String, Value> = object
+                .iter()
+                .filter(|(name, _)| could_be_a_name(name))
+                .map(|(name, held)| (name.clone(), held.clone()))
+                .collect();
+            // A required parameter still missing is the thing to lead with. When nothing required
+            // is missing the call is short of an optional one, and dropping it quietly would build
+            // a node under a name nobody asked for — so it is still a refusal, and it still never
+            // quotes the key.
+            let missing = spec
+                .iter()
+                .find(|param| param.required && !object.contains_key(param.name));
+            let (opening, named) = match missing {
+                Some(param) => (format!("{call}{at} requires `{}`.", param.name), param),
+                None => (
+                    format!(
+                        "{call}{at} lost `{}` to a torn key, and it is optional here.",
+                        head.name
+                    ),
+                    head,
+                ),
+            };
+            return Err(failure(
+                if missing.is_some() {
+                    "missing_param"
+                } else {
+                    "torn_param"
+                },
+                join(
+                    format!(
+                        "{opening} {takes_shape}{} One key arrived torn, carrying no value, so \
+                         what went wrong is the object you wrote rather than a word you chose: \
+                         write the whole call again.",
+                        what_it_carries(&intact)
+                    ),
+                    named.note,
+                ),
+                json!({"op": op, "param": path(where_, named.name), "takes": shape}),
+            ));
+        }
         let hint = nearest(key, spec)
             .map(|name| format!(" Did you mean `{name}`?"))
             .unwrap_or_default();
         return Err(failure(
             "unknown_param",
             format!(
-                "{call}{at} has no `{key}` {noun}. {takes_shape}{hint}{}",
+                "{call}{at} has no `{}` {noun}. {takes_shape}{hint}{}",
+                as_much_of_the_key_as_is_evidence(key),
                 torn_object(key, object.get(key))
             ),
             json!({"op": op, "param": path(where_, key), "takes": shape}),
@@ -1737,6 +1824,22 @@ fn check_set(
         }
     }
     Ok(())
+}
+
+/// The head of a key, which is where the evidence is. A torn key can be arbitrarily long.
+///
+/// The same reasoning [`torn_object`] applies to the value: the shape is the evidence, not the
+/// length of it. And it matters more here, because what makes a key long is the wreckage. One live
+/// turn sent `size=[32, 64]}]'</parameter>]</parameter>></function></tool_call></parameter>   Let
+/// me fix the syntax. <tool_call>1;0;0}{` — its own harness's closing tags, in its own JSON — three
+/// times running, and the refusal read every one of them back into the conversation. The head says
+/// what tore; the tail is the thing not to repeat.
+fn as_much_of_the_key_as_is_evidence(key: &str) -> String {
+    const LONGEST: usize = 40;
+    if key.chars().count() <= LONGEST {
+        return key.to_owned();
+    }
+    format!("{}…", key.chars().take(LONGEST).collect::<String>())
 }
 
 /// The keys an object did arrive with, so a missing one is a difference rather than an absence.
@@ -1929,7 +2032,7 @@ const TAGS: &[(&str, Payload)] = &[
     ("vector4", Payload::Numbers(4)),
     ("vector4i", Payload::Numbers(4)),
     ("quaternion", Payload::Numbers(4)),
-    ("color", Payload::Numbers(4)),
+    ("color", Payload::Colour),
     ("rect2", Payload::Numbers(4)),
     ("rect2i", Payload::Numbers(4)),
     ("plane", Payload::Numbers(4)),
@@ -1944,6 +2047,11 @@ const TAGS: &[(&str, Payload)] = &[
 #[derive(Clone, Copy, PartialEq)]
 enum Payload {
     Anything,
+    /// Four numbers, or a name or hex string the engine reads as one. `Color.from_string` takes
+    /// "skyblue" and "#8b5a2b" alike, `resource.create_texture` takes them, and a `color` value
+    /// that refused them was the one place in the tool where a colour had to be spelled another
+    /// way — one live turn wrote "red" here and was told a colour is four numbers.
+    Colour,
     Boolean,
     Numeric,
     Str,
@@ -1951,6 +2059,18 @@ enum Payload {
     Items,
     Pairs,
     ResourcePath,
+}
+
+/// How many numbers a payload is written as, where it is written as numbers at all.
+///
+/// A colour is four of them and also a name, so the repairs that put `{r, g, b, a}` back into an
+/// array have to know both — the shape is the same however the value may also be spelled.
+fn how_many_numbers(payload: &Payload) -> Option<usize> {
+    match payload {
+        Payload::Numbers(count) => Some(*count),
+        Payload::Colour => Some(4),
+        _ => None,
+    }
 }
 
 fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<(), ToolFailure> {
@@ -2001,17 +2121,33 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
                 .is_some_and(|items| items.len() == *count && items.iter().all(Value::is_number));
             (!numbers).then(|| format!("an array of {count} numbers"))
         }
+        Payload::Colour => {
+            let four = inner
+                .as_array()
+                .is_some_and(|items| items.len() == 4 && items.iter().all(Value::is_number));
+            // The engine reads the name; this only refuses what is neither shape. A name it does
+            // not know is refused on the wire, where the table that knows the names lives.
+            let named = inner.as_str().is_some_and(|text| !text.trim().is_empty());
+            (!four && !named).then(|| {
+                "four numbers, or a name like skyblue, or a hex string like #8b5a2b".to_owned()
+            })
+        }
         Payload::Items => (!inner.is_array()).then(|| "an array of tagged values".to_owned()),
         Payload::Pairs => {
             (!inner.is_array()).then(|| "an array of {key, value} tagged pairs".to_owned())
         }
         Payload::ResourcePath => {
-            let named = inner
-                .as_object()
-                .and_then(|held| held.get("path"))
-                .and_then(Value::as_str)
-                .is_some_and(|path| !path.is_empty());
-            (!named).then(|| "an object carrying a path".to_owned())
+            let held = inner.as_object().and_then(|object| object.get("path"));
+            match held.and_then(Value::as_str) {
+                Some(path) if !path.trim().is_empty() => None,
+                // The wrapper is right and the path inside it is not. Saying "takes an object
+                // carrying a path, and this one was an object holding path" is a sentence that
+                // contradicts itself and never names the mistake — one live turn wrote
+                // `{"path": ""}` for a material it had not made yet and read exactly that.
+                Some(_) => Some("a path, and this one's is empty".to_owned()),
+                None if held.is_some() => Some("a path written as a string".to_owned()),
+                None => Some("an object carrying a path".to_owned()),
+            }
         }
     };
     let Some(expected) = wrong else {
@@ -2027,23 +2163,28 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
             let path = inner.as_str().unwrap_or("res://…");
             format!(" Send {{\"type\": \"resource\", \"value\": {{\"path\": \"{path}\"}}}}.")
         }
-        Payload::Numbers(count) => {
-            numbers_under_names(inner, *count).map_or_else(String::new, |numbers| {
+        Payload::Numbers(_) | Payload::Colour => how_many_numbers(payload)
+            .and_then(|count| numbers_under_names(inner, count))
+            .map_or_else(String::new, |numbers| {
                 let written: Vec<String> = numbers.iter().map(ToString::to_string).collect();
                 format!(
                     " Send {{\"type\": \"{tag}\", \"value\": [{}]}}.",
                     written.join(", ")
                 )
-            })
-        }
+            }),
         _ => String::new(),
     };
     Err(failure(
         "invalid_param",
         join(
             format!(
-                "{call} `{here}`: a {tag} value takes {expected}, and this one was {}.{fix}",
-                describe(inner)
+                "{call} `{here}`: a {tag} value takes {expected}{}.{fix}",
+                // A sentence that has already named what arrived does not name it twice.
+                if expected.starts_with("a path") {
+                    String::new()
+                } else {
+                    format!(", and this one was {}", describe(inner))
+                }
             ),
             param.note,
         ),
@@ -2091,6 +2232,7 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     // have meant exactly one, and only when that parameter is not already there. Anything else is
     // left where it is for `check` to refuse by name, with the hint still saying what to try.
     put_the_pair_back(spec, object);
+    drop_the_wreckage_of_a_pair_that_survived(spec, object);
     let wanted: Vec<(String, &'static str)> = object
         .keys()
         .filter(|key| {
@@ -2118,6 +2260,7 @@ fn repair_set(spec: &[Param], params: &mut Value) {
         let Some(held) = object.get_mut(param.name) else {
             continue;
         };
+        trim_a_name(param, held);
         unbox_the_one(param.kind, held);
         match param.kind {
             Kind::Tagged => repair_tagged(held),
@@ -2131,6 +2274,38 @@ fn repair_set(spec: &[Param], params: &mut Value) {
             Kind::Object if !param.entry.is_empty() => repair_set(param.entry, held),
             _ => {}
         }
+    }
+}
+
+/// The parameters whose text is content, where the whitespace round it is part of what was written.
+///
+/// Everything else a `text` or `choice` parameter carries is a name: a node path, a property, a
+/// class, a setting, a group, a signal, a file. None of those has meaningful whitespace at either
+/// end, and a model that slips puts it there — the padded *key* has been repaired for a while, and
+/// one live turn showed the padded *value* going through untouched twelve times in a row.
+const TEXT_THAT_IS_CONTENT: [&str; 5] =
+    ["text", "oldText", "newText", "originalText", "updatedText"];
+
+/// Trims the whitespace round a name, which is never part of one.
+///
+/// Watched live: `{"parent ": "/Level3D ", "type ": "DirectionalLight3D"}`. The key came back as
+/// `parent`, the value stayed `/Level3D `, and the refusal read `Node /Level3D  was not found …
+/// the scene's own root is /Level3D` — two strings that look identical on screen. The addon trims
+/// node paths now as well; this is the door before it, and it reaches property names, class names,
+/// group names and settings paths too.
+fn trim_a_name(param: &Param, held: &mut Value) {
+    if TEXT_THAT_IS_CONTENT.contains(&param.name) {
+        return;
+    }
+    if !matches!(param.kind, Kind::Text | Kind::Choice(_) | Kind::Hash) {
+        return;
+    }
+    let Some(text) = held.as_str() else {
+        return;
+    };
+    let trimmed = text.trim();
+    if trimmed.len() != text.len() {
+        *held = Value::String(trimmed.to_owned());
     }
 }
 
@@ -2214,7 +2389,8 @@ fn repair_tagged(held: &mut Value) {
         return;
     };
     let repaired = match payload {
-        Payload::Numbers(count) => numbers_under_names(inner, *count)
+        Payload::Numbers(_) | Payload::Colour => how_many_numbers(payload)
+            .and_then(|count| numbers_under_names(inner, count))
             .map(|numbers| Value::Array(numbers.into_iter().cloned().map(Value::Number).collect())),
         Payload::Numeric => sole_entry(inner).filter(|one| one.is_number()).cloned(),
         Payload::Str => sole_entry(inner).filter(|one| one.is_string()).cloned(),
@@ -2315,12 +2491,52 @@ fn torn_object(key: &str, value: Option<&Value>) -> String {
     )
 }
 
-/// Puts back a parameter whose whole `'name': 'value',` fragment tore into the key.
+/// Takes away a torn key that is a second copy of a pair the object already holds intact.
+///
+/// Watched live, seventeen times in one turn, the same call every time:
+///
+/// ```text
+/// {"expression": "velocity", "expression}: ": ", ", "frameId': 0}, {": 0, "op": "evaluate"}
+/// ```
+///
+/// `expression` is there and correct. `expression}: ` is the same pair a second time, torn, with a
+/// comma for a value — it names nothing the call has not already said, and the call is complete and
+/// right without it. Every refusal it earned was about a key the caller could not see, and the
+/// caller resent the identical call seventeen times.
+///
+/// Only that shape: the key holds its name and punctuation and nothing else, the value beside it
+/// holds nothing, and the name is a parameter this object already carries. A torn key over a
+/// parameter that is *absent* is left alone, because there the caller does have something to write
+/// and `check` says so.
+fn drop_the_wreckage_of_a_pair_that_survived(
+    spec: &[Param],
+    object: &mut serde_json::Map<String, Value>,
+) {
+    let wreckage: Vec<String> = object
+        .iter()
+        .filter(|(key, held)| tore_away_the_value(key, Some(held)))
+        .filter(|(key, _)| {
+            let head: String = key
+                .chars()
+                .take_while(|one| one.is_ascii_alphanumeric() || *one == '_')
+                .collect();
+            spec.iter().any(|param| param.name == head) && object.contains_key(&head)
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in wreckage {
+        object.remove(&key);
+    }
+}
+
+/// Puts back a parameter whose whole `name: value,` fragment tore into the key.
 ///
 /// [`only_one_meaning`] renames a torn key only when the *value beside it* carries a letter or a
 /// digit, because `"name': ": ", "` would otherwise register an autoload called `, `. That rule is
 /// right and this is the case it cannot reach: the value is not beside the key, it is **inside**
-/// it.
+/// it. Quoted either way and bare numbers both, because both were watched live — a model that
+/// rendered a Python dictionary into its JSON wrote single quotes, and a debugger turn tore
+/// `frameId': 0}, {` twice.
 ///
 /// ```text
 /// "node': '/GameLevel/Ground', ": ", "
@@ -2336,16 +2552,15 @@ fn torn_object(key: &str, value: Option<&Value>) -> String {
 /// parameter takes a string, it is not already there, and no second torn key names it too. Anything
 /// else is left for the refusal, which already prints the whole fragment.
 fn put_the_pair_back(spec: &[Param], object: &mut serde_json::Map<String, Value>) {
-    let found: Vec<(String, &'static str, String)> = object
+    let found: Vec<(String, &'static str, Value)> = object
         .keys()
         .filter(|key| !spec.iter().any(|param| param.name == key.as_str()))
         .filter_map(|key| {
-            let (name, value) = a_quoted_pair(key)?;
+            let (name, value) = a_torn_pair(key)?;
             let param = spec
                 .iter()
                 .find(|param| !param.hidden && param.name == name)?;
-            fits(param.kind, &Value::String(value.to_owned()))
-                .then(|| (key.clone(), param.name, value.to_owned()))
+            fits(param.kind, &value).then(|| (key.clone(), param.name, value))
         })
         .filter(|(_, name, _)| !object.contains_key(*name))
         .collect();
@@ -2354,24 +2569,55 @@ fn put_the_pair_back(spec: &[Param], object: &mut serde_json::Map<String, Value>
             continue;
         }
         object.remove(torn.as_str());
-        object.insert((*name).to_owned(), Value::String(value.clone()));
+        object.insert((*name).to_owned(), value.clone());
     }
 }
 
-/// A key that is a whole `name': 'value',` fragment, read back as the two it was.
+/// A key that is a whole `name: value,` fragment, read back as the two it was.
 ///
-/// Deliberately strict. The quotes have to be there — `name': null, ` and `parent**: false, ` carry
-/// no value to recover and stay refused — and nothing may follow the closing quote but a comma and
-/// whitespace.
-fn a_quoted_pair(key: &str) -> Option<(&str, &str)> {
-    let (name, rest) = key.split_once('\'')?;
+/// Deliberately strict, in three places. A name-shaped start; nothing but punctuation between it
+/// and the colon; and nothing but punctuation after the value, which is the brace and comma the
+/// object lost. That last rule is what keeps `size": [32, 32]}]edits` out — the tail carries
+/// another call's word, so half of it is not a value to put back.
+///
+/// The value is a quoted string or a bare number. Both were watched live: `node': '/GameLevel/
+/// Ground', ` thirteen times in one turn, and `frameId': 0}, {` twice in another, that one under a
+/// value made entirely of the harness's own closing tags.
+fn a_torn_pair(key: &str) -> Option<(&str, Value)> {
+    let split = key.find(|one: char| !(one.is_ascii_alphanumeric() || one == '_'))?;
+    let (name, rest) = key.split_at(split);
     if !could_be_a_name(name) {
         return None;
     }
-    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
-    let (value, tail) = rest.strip_prefix('\'')?.split_once('\'')?;
-    let tail = tail.trim();
-    (tail.is_empty() || tail == ",").then_some((name, value))
+    let colon = rest.find(':')?;
+    if rest[..colon].chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    let (value, tail) = a_leading_scalar(rest[colon + 1..].trim_start())?;
+    (!tail.chars().any(char::is_alphanumeric)).then_some((name, value))
+}
+
+/// The scalar a fragment opens with, and whatever followed it.
+///
+/// Quoted either way, because a model that rendered a Python dictionary into its JSON wrote single
+/// quotes. Numbers bare. Nothing else: `true`, `false` and `null` are words, and a word here is far
+/// more likely to be the wreckage of the next key than a value anybody meant.
+fn a_leading_scalar(text: &str) -> Option<(Value, &str)> {
+    for quote in ['\'', '"'] {
+        if let Some(rest) = text.strip_prefix(quote)
+            && let Some((held, tail)) = rest.split_once(quote)
+        {
+            return Some((Value::String(held.to_owned()), tail));
+        }
+    }
+    let digits = text
+        .find(|one: char| !(one.is_ascii_digit() || one == '-' || one == '+' || one == '.'))
+        .unwrap_or(text.len());
+    let (number, tail) = text.split_at(digits);
+    serde_json::from_str::<Value>(number)
+        .ok()
+        .filter(Value::is_number)
+        .map(|held| (held, tail))
 }
 
 /// The one parameter a key could have been meant as, or nothing when it could have been two.
@@ -2396,7 +2642,77 @@ fn only_one_meaning(key: &str, value: Option<&Value>, spec: &[Param]) -> Option<
         .iter()
         .filter(|param| !param.hidden && reads_as(key, param));
     let first = fitting.next()?;
-    fitting.next().is_none().then_some(first.name)
+    fitting.next().is_none().then_some(())?;
+    // A key that is not shaped like a name at all did not arrive by choosing the wrong word — it
+    // arrived torn. Two things have to hold before it is renamed anyway, and both were watched in
+    // live turns failing.
+    //
+    // The value has to be one this parameter could take. One turn wrote `"size)": false` where
+    // `"size": [32, 32]` was meant, was told ``\`size\` takes an array, and this one was false`` —
+    // about a key it had never written — resent the identical call, and then abandoned the
+    // operation and hand-wrote the `.tres` with the file tools.
+    //
+    // And the key has to hold nothing past the name but punctuation. `path:` is a stray colon and
+    // renaming it is right. `size": [32, 32]}]edits` is two tool calls that ran into each other:
+    // the name reads as `size`, the value that came with it was a list of *edits*, and a list is
+    // what `size` takes — so the rename fired, `check` passed, and the addon answered "A
+    // RectangleShape2D takes size as two numbers" three times running about a call whose real
+    // `size` was sitting inside the key.
+    //
+    // When either fails the key stays for `check` to name, and that refusal quotes the mangled key
+    // and what it held — the sentence a live turn recovered from in one call.
+    if !could_be_a_name(key)
+        && !(only_punctuation_past_the_name(key)
+            && value.is_some_and(|held| could_become(first.kind, held)))
+    {
+        return None;
+    }
+    Some(first.name)
+}
+
+/// Whether a value is of a kind, or is one of the shapes the repairs below turn into that kind.
+fn could_become(kind: Kind, value: &Value) -> bool {
+    if fits(kind, value) {
+        return true;
+    }
+    let mut probe = value.clone();
+    unbox_the_one(kind, &mut probe);
+    fits(kind, &probe)
+}
+
+/// Whether a torn key took the value with it, leaving nothing worth handing back.
+///
+/// `method": "_on_coin_collected", ` still holds the value the line lost, and naming it back is
+/// what tells a model where its value went: 0 of 15 recoveries without that line, 15 of 15 with
+/// it. `parent": ` holds the parameter's own name, some punctuation, and nothing else. Naming that
+/// back is handing a caller its own wreckage, and the same measurement runs the other way — one
+/// live turn resent the identical call thirteen times against it.
+///
+/// So: nothing alphanumeric past the name-shaped start of the key, and nothing in the value either.
+fn tore_away_the_value(key: &str, value: Option<&Value>) -> bool {
+    !could_be_a_name(key) && !carries_a_value(value) && only_punctuation_past_the_name(key)
+}
+
+/// The name-shaped start of a key, which is the parameter a torn one reads as.
+fn the_name_at_the_head(key: &str) -> &str {
+    let leading = key
+        .chars()
+        .take_while(|one| one.is_ascii_alphanumeric() || *one == '_')
+        .count();
+    &key[..leading]
+}
+
+/// Whether a torn key holds nothing past its name-shaped start but punctuation.
+///
+/// `path:` and `parent": ` do. `size": [32, 32]}]edits` does not — what follows the name is another
+/// call's worth of JSON, and neither the value beside such a key nor the value inside it is the one
+/// the caller meant.
+fn only_punctuation_past_the_name(key: &str) -> bool {
+    let leading = key
+        .chars()
+        .take_while(|one| one.is_ascii_alphanumeric() || *one == '_')
+        .count();
+    !key[leading..].chars().any(char::is_alphanumeric)
 }
 
 /// Whether what arrived is a value at all, rather than punctuation left over from a torn object.
@@ -2477,6 +2793,324 @@ mod tests {
             .message
     }
 
+    /// A colour may be written the way Godot writes one, and the way it always could.
+    ///
+    /// `resource.create_texture` takes "skyblue" and "#8b5a2b" because `Color.from_string` does,
+    /// and a `color` value refusing them made the same tool spell a colour two ways. One live turn
+    /// wrote "red" for a `modulate` and was told a colour is four numbers.
+    #[test]
+    fn a_colour_may_be_named_as_well_as_counted() {
+        for value in [
+            json!({"type": "color", "value": "red"}),
+            json!({"type": "color", "value": "#8b5a2b"}),
+            json!({"type": "color", "value": [1, 0.5, 0.25, 1]}),
+        ] {
+            check_ok(
+                "godot_node",
+                "set_property",
+                json!({"node": "/Main/Player", "property": "modulate", "value": value}),
+            );
+        }
+
+        // Neither shape is neither. The name itself is read on the wire, where the engine's own
+        // table of names lives, so an unknown one is refused there rather than guessed at here.
+        let neither = message(
+            "godot_node",
+            "set_property",
+            json!({
+                "node": "/Main/Player",
+                "property": "modulate",
+                "value": {"type": "color", "value": 7}
+            }),
+        );
+        assert!(neither.contains("name like skyblue"), "{neither}");
+    }
+
+    /// A resource wrapper that is right with a path that is empty says so, rather than contradicting
+    /// itself.
+    ///
+    /// Observed live: `{"type": "resource", "value": {"path": ""}}` for a material the turn had not
+    /// made yet, answered `a resource value takes an object carrying a path, and this one was an
+    /// object holding path` — a sentence that says the shape is wrong when the shape is right, and
+    /// never names the empty string that is.
+    #[test]
+    fn an_empty_resource_path_is_named_as_one() {
+        let empty = message(
+            "godot_node",
+            "set_property",
+            json!({
+                "node": "/Game/Ground",
+                "property": "material",
+                "value": {"type": "resource", "value": {"path": ""}}
+            }),
+        );
+        assert!(
+            empty.contains("this one's is empty") && !empty.contains("an object holding path"),
+            "{empty}"
+        );
+
+        // A wrapper with no path at all is still the wrapper being wrong.
+        let shapeless = message(
+            "godot_node",
+            "set_property",
+            json!({
+                "node": "/Game/Ground",
+                "property": "material",
+                "value": {"type": "resource", "value": {"res": "a.tres"}}
+            }),
+        );
+        assert!(
+            shapeless.contains("an object carrying a path"),
+            "{shapeless}"
+        );
+    }
+
+    /// The whitespace round a name is trimmed off it; the whitespace inside content is not.
+    ///
+    /// Observed live, twelve times running: `{"parent ": "/Level3D ", "type ":
+    /// "DirectionalLight3D"}`. The padded *key* has been repaired for a while, and the padded
+    /// *value* went through untouched — so the refusal read `Node /Level3D  was not found … the
+    /// scene's own root is /Level3D`, two strings that look identical on screen.
+    #[test]
+    fn the_whitespace_round_a_name_is_not_part_of_it() {
+        let mut padded = json!({"type ": "DirectionalLight3D", "name": " Light "});
+        padded["parent "] = json!("/Level3D ");
+        repair("godot_node", "create", &mut padded);
+        assert_eq!(padded["parent"], json!("/Level3D"), "{padded}");
+        assert_eq!(padded["type"], json!("DirectionalLight3D"), "{padded}");
+        assert_eq!(padded["name"], json!("Light"), "{padded}");
+        check_ok("godot_node", "create", padded);
+
+        // A choice reads as one too, so a padded shape name is the shape.
+        let mut shape = json!({"path": " a.tres ", "shapeType": "CircleShape2D ", "radius": 4});
+        repair("godot_resource", "create_shape", &mut shape);
+        assert_eq!(shape["shapeType"], json!("CircleShape2D"), "{shape}");
+        assert_eq!(shape["path"], json!("a.tres"), "{shape}");
+        check_ok("godot_resource", "create_shape", shape);
+
+        // And a script's own text is content: what is round it is part of what was written.
+        let mut written = json!({"path": "a.gd", "text": "extends Node\n\n\n"});
+        repair("godot_script", "save", &mut written);
+        assert_eq!(written["text"], json!("extends Node\n\n\n"), "{written}");
+        let mut edited = json!({
+            "files": [{"path": "a.gd", "edits": [{"oldText": "  x = 1\n", "newText": "  x = 2\n"}]}]
+        });
+        repair("godot_script", "edit", &mut edited);
+        assert_eq!(
+            edited["files"][0]["edits"][0]["oldText"],
+            json!("  x = 1\n"),
+            "{edited}"
+        );
+    }
+
+    /// A torn second copy of a pair the object already holds is thrown away, not refused.
+    ///
+    /// Observed live, seventeen times in one turn — the same `godot_debug evaluate` call each time,
+    /// with `expression` present and correct beside a torn `expression}: ` carrying a comma. Every
+    /// refusal was about a key the caller could not see in what it thought it had written, and it
+    /// resent the identical call seventeen times.
+    #[test]
+    fn a_torn_second_copy_of_a_pair_that_survived_is_thrown_away() {
+        let mut doubled = json!({"expression": "velocity"});
+        doubled["expression}: "] = json!(", ");
+        doubled["frameId': 0}, {"] = json!(0);
+        repair("godot_debug", "evaluate", &mut doubled);
+        assert_eq!(doubled["expression"], json!("velocity"), "{doubled}");
+        assert_eq!(doubled["frameId"], json!(0), "{doubled}");
+        assert!(doubled.get("expression}: ").is_none(), "{doubled}");
+        check_ok("godot_debug", "evaluate", doubled);
+
+        // The parameter is absent, so there is something for the caller to write and the refusal
+        // says so rather than the key quietly going away.
+        let mut absent = json!({"frameId": 0});
+        absent["expression}: "] = json!(", ");
+        repair("godot_debug", "evaluate", &mut absent);
+        assert!(absent.get("expression}: ").is_some(), "{absent}");
+        let refused = message("godot_debug", "evaluate", absent);
+        assert!(refused.contains("requires `expression`"), "{refused}");
+
+        // And the parameter that tore away is an optional one, so nothing required is missing and
+        // the call would go through without it — under a name nobody asked for. Observed live:
+        // `godot_node instantiate` with `parent` and `path` intact and `name": ` over a comma.
+        // Still a refusal, still without quoting the key.
+        let mut optional = json!({"parent": "/Game", "path": "res://enemy.tscn"});
+        optional["name\": "] = json!(", ");
+        let torn = check("godot_node", "instantiate", &optional).expect_err("refused");
+        assert_eq!(torn.code, "torn_param", "{}", torn.message);
+        assert!(
+            torn.message.contains("lost `name` to a torn key")
+                && !torn.message.contains("name\": "),
+            "{}",
+            torn.message
+        );
+    }
+
+    /// A refusal does not read a torn key's wreckage back into the conversation.
+    ///
+    /// Observed live, three times running: the key opened `size=[32, 64]}]` and went on for
+    /// another eighty characters of the model's own harness tags — closing `parameter`, `function`
+    /// and `tool_call` markers, inside its own JSON, followed by a sentence about fixing the
+    /// syntax and a fresh opening tag. The refusal quoted every one of them back.
+    /// The head is what says a key tore; the tail is the part not to repeat.
+    #[test]
+    fn a_refusal_quotes_the_head_of_a_torn_key_and_not_its_wreckage() {
+        let mut wrecked = json!({"path": "a.tres", "shapeType": "RectangleShape2D"});
+        let key = "size=[32, 64]}]'</parameter>]</parameter>></function></tool_call></parameter>   \
+                   Let me fix the syntax. <tool_call>1;0;0}{";
+        wrecked[key] = json!(1);
+        let refused = message("godot_resource", "create_shape", wrecked);
+        assert!(
+            refused.contains("size=[32, 64]"),
+            "the head is the evidence: {refused}"
+        );
+        assert!(
+            !refused.contains("</function>"),
+            "and the tail is not: {refused}"
+        );
+        assert!(refused.contains('…'), "{refused}");
+    }
+
+    /// Two calls that ran into each other are refused, not renamed onto a parameter that fits.
+    ///
+    /// Observed live, three times running: `{"op": "create_shape", "path": …, "shapeType":
+    /// "RectangleShape2D", "size\": [32, 32]}]edits": [ …a scene's worth of edits… ]}`. The key
+    /// reads as `size`, and what came with it was a list — which is exactly what `size` takes — so
+    /// the rename fired, the gate passed it, and the addon answered "A RectangleShape2D takes size
+    /// as two numbers" about a call whose real `[32, 32]` was sitting inside the key. The turn gave
+    /// up and hand-wrote the `.tres` with the file tools, twice, getting the syntax wrong the first
+    /// time and running the game into a parse error.
+    #[test]
+    fn two_calls_that_ran_into_each_other_are_refused_rather_than_renamed() {
+        let mut merged = json!({
+            "path": "assets/player_shape.tres",
+            "shapeType": "RectangleShape2D"
+        });
+        merged["size\": [32, 32]}]edits"] = json!([{"newText": "[gd_scene load_steps=5]"}]);
+        repair("godot_resource", "create_shape", &mut merged);
+        assert!(
+            merged.get("size").is_none(),
+            "another call's list must not be renamed onto `size`: {merged}"
+        );
+        let refused = check("godot_resource", "create_shape", &merged).expect_err("refused");
+        assert_eq!(refused.code, "unknown_param", "{}", refused.message);
+        assert!(
+            refused.message.contains("Did you mean `size`?"),
+            "the hint still names what it read as: {}",
+            refused.message
+        );
+        // And what arrived under the key, which is the line that tells a model its object tore
+        // rather than that it picked a wrong word. Measured: 0 of 15 recoveries without it,
+        // 15 of 15 with it.
+        assert!(
+            refused.message.contains("It arrived carrying"),
+            "the refusal quotes the scrap that arrived: {}",
+            refused.message
+        );
+
+        // A stray colon still is a stray colon: the key holds nothing past the name but punctuation
+        // and the value is intact, so the rename is still the right answer.
+        let mut colon = json!({"shapeType": "RectangleShape2D"});
+        colon["path:"] = json!("assets/player_shape.tres");
+        repair("godot_resource", "create_shape", &mut colon);
+        assert_eq!(colon["path"], json!("assets/player_shape.tres"), "{colon}");
+    }
+
+    /// A tear that took the value with it is answered with what is missing, not with the wreckage.
+    ///
+    /// Observed live, thirteen times running in one turn: `{"name": "Enemy", "op": "instantiate",
+    /// "parent": ": ", "}` — the key holding the parameter's own name and a quote and a colon, the
+    /// value holding a comma. The refusal named that key back, and the model, which had written no
+    /// such key it could see, resent the identical call thirteen times before abandoning the
+    /// operation and hand-writing the resource with the file tools.
+    ///
+    /// The counter-case is the one right above it and is not changed: a key that still carries the
+    /// value the line lost is named back, because that is what tells a model where its value went.
+    #[test]
+    fn a_tear_that_took_the_value_is_answered_with_what_is_missing() {
+        let mut torn = json!({"name": "Enemy"});
+        torn["parent\": "] = json!(", ");
+        let refused = message("godot_node", "instantiate", torn);
+        assert!(
+            refused.contains("requires `parent`") && refused.contains("One key arrived torn"),
+            "the refusal has to lead with what the call needs: {refused}"
+        );
+        assert!(
+            !refused.contains("parent\": "),
+            "and must not hand the wreckage back: {refused}"
+        );
+        assert!(
+            refused.contains("This one carries name."),
+            "the keys that did survive are still named: {refused}"
+        );
+    }
+
+    /// A key that tore is renamed only when the value beside it survived the tear.
+    ///
+    /// Observed live, twice in one turn and then a third time: `{"op": "create_shape", "path": …,
+    /// "shapeType": "RectangleShape2D", "size)": false}`. `size)` reads as `size`, so the rename
+    /// fired and the refusal became ``\`size\` takes an array, and this one was false`` — about a
+    /// key the model had never written. It resent the identical call, then gave up on the operation
+    /// and hand-wrote the `.tres` with the file tools, which is the door this one exists to close.
+    ///
+    /// A torn key whose value did survive is still renamed: that is the whole point of the rule,
+    /// and `nameSettings` for `name` is the case it was built for.
+    #[test]
+    fn a_key_that_tore_is_renamed_only_when_its_value_survived() {
+        let mut torn = json!({
+            "path": "scenes/enemy_shape.tres",
+            "shapeType": "RectangleShape2D",
+            "size)": false
+        });
+        repair("godot_resource", "create_shape", &mut torn);
+        assert!(
+            torn.get("size).").is_none() && torn.get("size").is_none(),
+            "a torn key over a value that cannot be a size must not be renamed onto it: {torn}"
+        );
+        let refused = message("godot_resource", "create_shape", torn);
+        assert!(
+            refused.contains("`size)`") && refused.contains("write the whole call again"),
+            "the refusal has to name the key that arrived: {refused}"
+        );
+
+        // The value survived the tear, so the rename is still the right answer.
+        let mut readable = json!({
+            "path": "scenes/enemy_shape.tres",
+            "shapeType": "RectangleShape2D",
+            "size)": [32, 32]
+        });
+        repair("godot_resource", "create_shape", &mut readable);
+        assert_eq!(readable["size"], json!([32, 32]), "{readable}");
+    }
+
+    /// The erase entry `set_cells` documents is one the gate lets through.
+    ///
+    /// An entry with no `atlas` erases the cells it covers — the catalogue says so, the addon's own
+    /// refusal sentence says so, and `the_addon_authors_a_whole_subtree_in_one_call`'s sibling in
+    /// `godot_addon_acceptance` drives it against a real editor. None of those is the door a model
+    /// comes through. This table had `atlas` required, so the one call that digs the gap Mario falls
+    /// down was refused before it reached the socket, and the addon test passed the whole time
+    /// because it speaks to the addon directly.
+    #[test]
+    fn an_entry_that_erases_carries_no_atlas_and_is_accepted() {
+        check_ok(
+            "godot_node",
+            "set_cells",
+            json!({
+                "node": "/level/Terrain",
+                "cells": [{"x": 10, "y": 12, "width": 2, "height": 2}]
+            }),
+        );
+        // The pair itself is still a pair: an `atlas` that is present has to be one.
+        assert!(
+            message(
+                "godot_node",
+                "set_cells",
+                json!({"node": "/level/Terrain", "cells": [{"x": 0, "y": 0, "atlas": 3}]}),
+            )
+            .contains("atlas"),
+        );
+    }
+
     /// A key that could only have meant one parameter is put onto it, and one that could have
     /// meant two is not.
     ///
@@ -2514,12 +3148,12 @@ mod tests {
         assert_eq!(two["parent"], json!("/GameLevel"), "{two}");
         check_ok("godot_node", "create", two);
 
-        // Nothing to recover: these carry no quoted value and stay refused, which is the rule
-        // `only_one_meaning` already gets right.
+        // Nothing to recover: no value inside the key, so these stay refused — which is the rule
+        // `only_one_meaning` already gets right. `null` and `false` are words rather than values
+        // here, and a word inside a torn key is far more likely to be the next key's wreckage.
         for (op, key) in [
             ("set_cells", "node': null, "),
             ("create", "parent**: false, "),
-            ("create", "parent: '/A'"),
         ] {
             let mut hopeless = json!({key.to_owned(): ", "});
             repair("godot_node", op, &mut hopeless);
@@ -2634,26 +3268,28 @@ mod tests {
         assert_eq!(colon["path"], json!("scripts/main.gd"), "{colon}");
         check_ok("godot_debug", "breakpoint_locations", colon);
 
-        // A key that is not shaped like a name is left where it is, however well it reads as one.
-        // This is what a model writes when its JSON comes apart: the key carries the quote and the
-        // comma from the line it lost, and its value is the wreckage. Five of these in the
-        // recordings, and renaming would put `", "` into `method` and call it a well-formed call.
+        // The same tear with double quotes, which is what a model writes when its JSON comes apart:
+        // the key carries the quote and the comma from the line it lost, and its value is the
+        // wreckage. Five of these in the recordings. What must never happen is the *key* being
+        // renamed onto `method`, which would register `", "` as the method and call it a
+        // well-formed call; the value inside the key is the one the caller meant, and it is put
+        // back with the wreckage discarded.
         let mut torn = json!({"signal": "coin_collected", "binds": []});
         torn["method\": \"_on_coin_collected\", "] = json!(", ");
         repair("godot_node", "connect_signal", &mut torn);
-        assert!(torn.get("method").is_none(), "{torn}");
-        let refused = message("godot_node", "connect_signal", torn);
+        assert_eq!(torn["method"], json!("_on_coin_collected"), "{torn}");
         assert!(
-            refused.contains("_on_coin_collected"),
-            "the refusal names the broken key rather than a parameter it was folded onto: {refused}"
+            torn.get("method\": \"_on_coin_collected\", ").is_none(),
+            "{torn}"
         );
-        // And says what arrived under it, which is what tells a model its object tore rather than
-        // that it picked a wrong word. Measured: 0 of 15 recoveries without this line, 15 of 15
-        // with it.
-        assert!(
-            refused.contains(r#"It arrived carrying ", ""#),
-            "the refusal quotes the scrap that arrived: {refused}"
-        );
+
+        // A number tears the same way and is put back the same way. Watched live twice in one turn,
+        // under a value made entirely of the harness's own closing tags.
+        let mut numeric = json!({"expression": "velocity"});
+        numeric["frameId': 0}, {"] = json!(": 0}]}]'</parameter></function>");
+        repair("godot_debug", "evaluate", &mut numeric);
+        assert_eq!(numeric["frameId"], json!(0), "{numeric}");
+        check_ok("godot_debug", "evaluate", numeric);
 
         // An ordinary typo is a word, and there the near-miss hint is the right answer on its own.
         let typo = json!({"nameSettings": "A", "path": "res://a.gd", "name": "Taken"});

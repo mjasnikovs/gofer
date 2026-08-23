@@ -55,12 +55,59 @@ fn live_worktree(directory: &TempDir) -> PathBuf {
         Err(_) => godot_editor_harness::fixture_worktree(directory),
         Ok(named) => {
             let worktree = directory.path().join("worktree");
-            godot_editor_harness::copy_tree(&PathBuf::from(named), &worktree);
+            godot_editor_harness::copy_tree(&named_fixture(&named), &worktree);
             crate::paths::canonical(&worktree).expect("canonical worktree")
         }
     };
     make_it_a_repository(&worktree);
     worktree
+}
+
+/// Answers the approval prompts a turn raises, because nothing else here can.
+///
+/// `godot_resource delete` and `move`, addon and plugin changes, and machine-wide editor settings
+/// all stop and wait for the user — and there is no user in a live turn. `APPROVAL_TIMEOUT` is 300
+/// seconds, so every one of them costs five minutes and comes back refused. One turn stopped dead
+/// at its 384th call on a single `delete` and spent the whole five minutes there, which is not the
+/// agent being slow and reads exactly like it in the timings.
+///
+/// Allowed, not refused: the point of a live turn is to watch the agent work, and the worktree it
+/// works in is a temporary directory this file made. `GOFER_LIVE_APPROVE=refuse` answers no
+/// instead, for a run about what the agent does when it is told no.
+fn answer_the_prompts_nobody_is_watching(finished: Arc<std::sync::atomic::AtomicBool>) {
+    let allow = std::env::var("GOFER_LIVE_APPROVE").as_deref() != Ok("refuse");
+    std::thread::spawn(move || {
+        while !finished.load(std::sync::atomic::Ordering::Relaxed) {
+            for asked in crate::approvals::pending_approvals() {
+                let _ = crate::approvals::respond(&asked, allow);
+                println!("live approval {asked} -> {allow}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+}
+
+/// The fixture `GOFER_LIVE_FIXTURE` names, resolved the way the repository spells it.
+///
+/// Cargo starts a test binary in the package root, so `fixtures/live-project` — the path this
+/// file's own documentation gives, and the one the project uses everywhere else — lands in
+/// `src-tauri/fixtures`, which does not exist. What came back was `read fixture directory: Os {
+/// code: 2 }` from inside `copy_tree`, naming neither the variable nor the path it had tried. A
+/// relative path is looked for from the repository root as well, and a path that is nowhere says
+/// both places it looked.
+fn named_fixture(named: &str) -> PathBuf {
+    let named = PathBuf::from(named);
+    if named.exists() {
+        return named;
+    }
+    let from_root = PathBuf::from("..").join(&named);
+    assert!(
+        from_root.exists(),
+        "GOFER_LIVE_FIXTURE names {}, which is neither there nor at {} from the package root",
+        named.display(),
+        from_root.display()
+    );
+    from_root
 }
 
 /// Gives the worktree a Git repository, because without one the agent can lock itself out.
@@ -215,6 +262,9 @@ fn live_agent_acceptance() {
     });
     let turn = crate::ai_turn::AiTurn::begin(1, stream).expect("no other AI turn is running");
 
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    answer_the_prompts_nobody_is_watching(Arc::clone(&finished));
+
     let started = std::time::Instant::now();
     let completion = crate::ai_turn::run_ai_worker_with(
         app.handle(),
@@ -251,6 +301,7 @@ fn live_agent_acceptance() {
         &SystemProcessSpawner,
     );
     let seconds = started.elapsed().as_secs_f64();
+    finished.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let held = events.lock().expect("events lock");
     let report = serde_json::json!({

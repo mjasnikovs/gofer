@@ -45,7 +45,7 @@ import {
 } from '@earendil-works/pi-agent-core/node'
 import {createAssistantMessageEventStream, isRetryableAssistantError} from '@earendil-works/pi-ai'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
-import {createGodotTools, withoutPictures} from './ai-host.mjs'
+import {createGodotTools, withoutPictures, withoutRepeatingARefusal} from './ai-host.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
 import {ASK_USER_TOOL_NAME, createAskUserTool} from './ai-ask.mjs'
 import {toolStepLine} from './tool-target.mjs'
@@ -455,6 +455,9 @@ export function createChildTools(
         }))
         // The child's own model, which may not be the parent's and may not have its eyes.
         .map(tool => (readsImages(deps.model) ? tool : withoutPictures(tool)))
+        // A child loops the way a parent does, and its tools are built per call, so the counter is
+        // per child.
+        .map(withoutRepeatingARefusal)
         .map(tool => underCommandClock(tool, {timeoutMs: bounds.commandTimeoutMs, timers}))
     assertChildTools(tools, toolNames)
     return {env, tools}

@@ -96,7 +96,7 @@ pub(crate) struct AiSettings {
     pub(crate) model_name: String,
     #[serde(default = "default_context_window")]
     pub(crate) context_window: u64,
-    #[serde(default = "default_context_window")]
+    #[serde(default = "default_max_tokens")]
     pub(crate) max_tokens: u64,
     #[serde(default)]
     pub(crate) reasoning: bool,
@@ -269,7 +269,7 @@ pub(crate) struct SubagentConnection {
     pub(crate) model_name: String,
     #[serde(default = "default_context_window")]
     pub(crate) context_window: u64,
-    #[serde(default = "default_context_window")]
+    #[serde(default = "default_max_tokens")]
     pub(crate) max_tokens: u64,
     #[serde(default)]
     pub(crate) reasoning: bool,
@@ -443,6 +443,34 @@ fn default_context_window() -> u64 {
     120_064
 }
 
+/// How long one response may be before the server cuts it off.
+///
+/// It used to be the context window, which is the same as no ceiling at all: a model that will not
+/// stop is allowed to fill the whole turn with one answer. Measured over fifteen live turns against
+/// the local Qwen3.6-27B — a collect-the-coin game, a platformer, a tilemap arena, a menu, two
+/// debugger sessions, a broken project, a 195-call arcade game and a 3D scene — the longest real
+/// response any of them produced was **810 tokens**. Two turns ran away instead: one decoded 89,311
+/// tokens in a single answer before the context stopped it, and the next decoded past 48,000 and
+/// was still going. At the speed that machine generates, a runaway costs three quarters of an hour
+/// and leaves no context to recover in.
+///
+/// So: twenty times the longest answer anyone has needed, and a seventh of the window. A whole
+/// GDScript file of thirteen hundred lines still fits in one `godot_script save`. What changes is
+/// what a degenerate answer costs — the worker already tells the model its response was cut off and
+/// to re-issue the call, and one live turn recovered from exactly that message.
+///
+/// The number is also the one the rest of the worker was already built around.
+/// [`default_compaction_percent`] leaves a reserve of `120_064 - 103_255` = 16,809 tokens above the
+/// compaction line, and that reserve is what the summary request *and* the answer after it have to
+/// fit inside. A ceiling of 16,384 fits; a ceiling of 120,064 is an answer that can eat the reserve
+/// whole, which is what run13 and run15 did.
+///
+/// A user who has stored their own ceiling keeps it: this is the default for a setting nobody has
+/// chosen, not a clamp on one somebody has.
+fn default_max_tokens() -> u64 {
+    16_384
+}
+
 fn default_model_input() -> Vec<String> {
     vec!["text".to_owned(), "image".to_owned()]
 }
@@ -562,7 +590,7 @@ impl Default for AiSettings {
             api: ApiDialect::OpenaiCompletions,
             model_name: "Qwen3.6 27B".to_owned(),
             context_window: default_context_window(),
-            max_tokens: default_context_window(),
+            max_tokens: default_max_tokens(),
             reasoning: false,
             supports_reasoning_effort: false,
             chat_template_thinking: false,
@@ -1957,6 +1985,50 @@ mod tests {
             },
             brave_api_key: ApiKeyUpdate::Keep,
         }
+    }
+
+    /// A response may not be as long as the whole conversation.
+    ///
+    /// The default used to be the context window, which is no ceiling: a model that will not stop
+    /// fills the turn with one answer and leaves nothing to recover in. Measured over fifteen live
+    /// turns against the local Qwen3.6-27B the longest real response was 810 tokens; two runaways
+    /// decoded 89,311 and past 48,000.
+    #[test]
+    fn a_response_may_not_be_as_long_as_the_whole_window() {
+        let shipped = AiSettings::default();
+        assert!(
+            shipped.max_tokens < shipped.context_window / 4,
+            "the output ceiling has to be a ceiling: {} of {}",
+            shipped.max_tokens,
+            shipped.context_window
+        );
+        assert!(
+            shipped.max_tokens >= 8_192,
+            "and still hold a whole file in one write: {}",
+            shipped.max_tokens
+        );
+        // And it fits inside the room compaction leaves above its own line, which is what the
+        // summary request and the answer after it share. An answer that can eat the whole reserve
+        // is the failure this ceiling exists for.
+        let reserve = shipped.context_window
+            - (shipped.context_window * u64::from(default_compaction_percent())) / 100;
+        assert!(
+            shipped.max_tokens <= reserve,
+            "the ceiling has to fit the compaction reserve: {} in {reserve}",
+            shipped.max_tokens
+        );
+
+        // A stored ceiling is the user's, and reading their settings never replaces it.
+        let chosen: AiSettings = serde_json::from_value(serde_json::json!({
+            "connectionType": "openai-compatible",
+            "name": "Local AI",
+            "baseUrl": "http://127.0.0.1:8080/v1",
+            "model": "m.gguf",
+            "api": "openai-completions",
+            "maxTokens": 120_064
+        }))
+        .expect("settings");
+        assert_eq!(chosen.max_tokens, 120_064);
     }
 
     #[test]

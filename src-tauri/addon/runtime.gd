@@ -261,6 +261,9 @@ func _op_inspect(params: Dictionary) -> Dictionary:
     var path := str(params.get("path", ""))
     if path.is_empty():
         return _failure("invalid_params", "runtime.inspect_node requires a path")
+    # Trimmed for the reason the editor side trims: outer whitespace on a node path is never
+    # meaningful, and is what a model's JSON leaves behind when it slips.
+    path = path.strip_edges()
     var node := get_tree().root.get_node_or_null(NodePath(path))
     if node == null:
         return _node_not_found("path", path)
@@ -272,7 +275,10 @@ func _op_inspect(params: Dictionary) -> Dictionary:
     for name in requested:
         var property := str(name)
         if not known.has(property):
-            return _failure("property_not_found", "Node '%s' has no property '%s'" % [path, property])
+            return _failure(
+                "property_not_found",
+                "Node '%s' has no property '%s'%s" % [path, property, _nearest_of(node, property)]
+            )
         properties[property] = Protocol.encode(node.get(property))
     return _succeed({
         "path": str(node.get_path()),
@@ -280,6 +286,34 @@ func _op_inspect(params: Dictionary) -> Dictionary:
         "type": node.get_class(),
         "properties": properties,
     })
+
+## The property nearest a name this node does not have, as a clause, or "".
+##
+## The editor side says the same thing for the same reason: one live turn asked the running game for
+## `transform_2d`, which is one edit from `transform`, and was told only that it is absent. Case and
+## underscores are ignored and one has to be a prefix of the other, with four characters at least —
+## `x` would otherwise answer for everything beginning with it.
+func _nearest_of(node: Node, property: String) -> String:
+    var wanted := property.to_lower().replace("_", "")
+    if wanted.is_empty():
+        return ""
+    for entry in node.get_property_list():
+        var name := str(entry.get("name", ""))
+        if name.is_empty() or name.contains("/"):
+            continue
+        # The inspector's own headings are in this list: a Sprite2D's `Transform` sits beside its
+        # `transform`, and a heading is not a property anyone can set.
+        var usage := int(entry.get("usage", 0))
+        if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
+            continue
+        var plain := name.to_lower().replace("_", "")
+        if plain == wanted:
+            return ". Did you mean '%s'?" % name
+        if mini(plain.length(), wanted.length()) < 4:
+            continue
+        if plain.begins_with(wanted) or wanted.begins_with(plain):
+            return ". Did you mean '%s'?" % name
+    return ""
 
 ## Injects input events into the game as if the user produced them, then waits for the input to be
 ## dispatched and the reaction to be rendered, so the answer carries a frame that already shows
@@ -324,7 +358,17 @@ func _op_monitors(params: Dictionary) -> Dictionary:
     for entry in names:
         var monitor := str(entry)
         if not MONITORS.has(monitor):
-            return _failure("unknown_monitor", "Performance monitor '%s' is not supported" % monitor)
+            # The names, because the set is closed and short. Every other closed vocabulary in this
+            # file says what it holds; this one only said what it does not.
+            var offered: Array = MONITORS.keys()
+            offered.sort()
+            return _failure(
+                "unknown_monitor",
+                (
+                    "Performance monitor '%s' is not supported. The monitors are %s"
+                    % [monitor, ", ".join(offered)]
+                )
+            )
         values[monitor] = Performance.get_monitor(MONITORS[monitor])
     return _succeed({"monitors": values})
 
@@ -369,7 +413,18 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 var button_index := MOUSE_BUTTON_LEFT
                 if typeof(button_name) == TYPE_STRING:
                     if not MOUSE_BUTTONS.has(button_name):
-                        return _decode_failed("Unknown mouse button '%s'" % button_name)
+                        # The names, because the set is five long and a refusal that does not carry
+                        # it is a refusal a caller cannot act on. One live turn sent the string
+                        # "1" — the number is accepted, the string spelling of it is not — and was
+                        # told only that "1" is unknown.
+                        var offered: Array = MOUSE_BUTTONS.keys()
+                        offered.sort()
+                        return _decode_failed(
+                            (
+                                "Unknown mouse button '%s'. The named buttons are %s, "
+                                + "or a button index as a number"
+                            ) % [button_name, ", ".join(offered)]
+                        )
                     button_index = MOUSE_BUTTONS[button_name]
                 else:
                     button_index = int(button_name)

@@ -700,8 +700,8 @@
                         {
                             "name": "atlas",
                             "kind": "list",
-                            "required": true,
-                            "note": "A [column, row] pair, naming the tile in the atlas."
+                            "required": false,
+                            "note": "A [column, row] pair, naming the tile in the atlas. An entry without one erases the cells it covers."
                         },
                         {"name": "source", "kind": "int", "required": false}
                     ]
@@ -1058,6 +1058,45 @@
                 }
             ],
             "command": "resource.create_tileset"
+        },
+        {
+            "tool": "godot_resource",
+            "op": "create_texture",
+            "params": [
+                {"name": "path", "kind": "text", "required": true},
+                {
+                    "name": "size",
+                    "kind": "either",
+                    "of": [{"kind": "number"}, {"kind": "list"}],
+                    "required": true,
+                    "note": "One number or two: 16 or [16, 24]."
+                },
+                {
+                    "name": "background",
+                    "kind": "text",
+                    "required": false,
+                    "note": "A colour name or a hex string, like \"skyblue\" or \"#8b5a2b\". Transparent without one."
+                },
+                {
+                    "name": "rects",
+                    "kind": "list",
+                    "required": false,
+                    "entry": [
+                        {"name": "x", "kind": "int", "required": true},
+                        {"name": "y", "kind": "int", "required": true},
+                        {"name": "width", "kind": "int", "required": true},
+                        {"name": "height", "kind": "int", "required": true},
+                        {
+                            "name": "color",
+                            "kind": "text",
+                            "required": true,
+                            "note": "A colour name or a hex string, spelled as `background` is."
+                        }
+                    ],
+                    "note": "Filled rectangles, painted over the background in order."
+                }
+            ],
+            "command": "resource.create_texture"
         },
         {
             "tool": "godot_resource",

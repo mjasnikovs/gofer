@@ -266,8 +266,21 @@ static func decode(value: Variant) -> Dictionary:
             var quaternion := numbers(payload, 4)
             return decode_failed("A quaternion value requires four numbers") if quaternion.is_empty() else decoded(Quaternion(quaternion[0], quaternion[1], quaternion[2], quaternion[3]))
         "color":
+            # A name or a hex string as well as four numbers. Godot reads both — `Color.from_string`
+            # takes "skyblue" and "#8b5a2b" alike — and `resource.create_texture` takes them, so a
+            # `color` value that refused them was the one place in the tool where a colour had to be
+            # spelled another way. One live turn wrote "red" here and was told a colour is four
+            # numbers.
+            if typeof(payload) == TYPE_STRING or typeof(payload) == TYPE_STRING_NAME:
+                var unreadable := Color(-1.0, -2.0, -3.0, -4.0)
+                var named := Color.from_string(str(payload).strip_edges(), unreadable)
+                if named == unreadable:
+                    return decode_failed(
+                        "%s is not a colour. Write a name like skyblue, a hex string like #8b5a2b, or four numbers" % str(payload)
+                    )
+                return decoded(named)
             var rgba := numbers(payload, 4)
-            return decode_failed("A color value requires four numbers") if rgba.is_empty() else decoded(Color(rgba[0], rgba[1], rgba[2], rgba[3]))
+            return decode_failed("A color value requires four numbers, a name like skyblue, or a hex string like #8b5a2b") if rgba.is_empty() else decoded(Color(rgba[0], rgba[1], rgba[2], rgba[3]))
         "rect2":
             var r2 := numbers(payload, 4)
             return decode_failed("A rect2 value requires four numbers") if r2.is_empty() else decoded(Rect2(r2[0], r2[1], r2[2], r2[3]))
@@ -348,10 +361,16 @@ static func fit_to_declared_type(value: Variant, declared: int) -> Dictionary:
     #
     # Only a whole one. A fraction dropped on the way into an `int` is a silent loss, and a caller
     # that meant 1.5 is better told than quietly given 1.
+    #
+    # Measured against the nearest whole number rather than the floor, and rounded rather than cut.
+    # `int()` cuts toward zero, so -2.9999999999999996 — which is how a serialiser writes -3 —
+    # passed the floor check and was written as -2: the silent loss this check exists to stop, on
+    # the number it was meant to let through. And -3.0000000000000004 floors to -4, which is
+    # nothing like it, so a whole number was refused for not being one.
     if declared == TYPE_INT and typeof(value) == TYPE_FLOAT:
         var number: float = value
-        if is_finite(number) and is_equal_approx(number, floor(number)):
-            return decoded(int(number))
+        if is_finite(number) and is_equal_approx(number, round(number)):
+            return decoded(roundi(number))
         return decode_failed(
             "expected int, received %s, which is not a whole number" % str(number)
         )

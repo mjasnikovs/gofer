@@ -449,6 +449,21 @@ fn delete_project_memory(app: AppHandle, id: String) -> Result<(), CommandError>
     project_storage(&app)?.memory().delete(&id)
 }
 
+/// Moves several memories to one state at once, which is what a sweep leaves worth doing.
+///
+/// The state is the whole point: retrieval reads `confirmed` and nothing else, so holding a row
+/// back is the one bulk correction that changes what the model is told without throwing away what
+/// the row says or why it was doubted.
+#[tauri::command(async)]
+fn set_memory_states(
+    app: AppHandle,
+    ids: Vec<String>,
+    state: String,
+) -> Result<Vec<project_memory::CheckedMemory>, CommandError> {
+    let storage = project_storage(&app)?;
+    project_memory::set_memory_states(&storage, &ids, &state, workspace_snapshot(&app).as_ref())
+}
+
 /// The files the active task's worktree holds, or nothing when there is no worktree to read.
 fn workspace_snapshot(app: &AppHandle) -> Option<files::Snapshot> {
     active_workspace(app)
@@ -923,6 +938,20 @@ async fn judge_project_memory(
     ai_turn::run_judge(app, request, stream).await
 }
 
+/// Puts a list of memories to the same sub-agent, one after another, as one turn.
+///
+/// The list is the window's choice, not this side's — see [`ai_turn::SweepRequest`]. What one turn
+/// buys is an ending: Stop reaches the run rather than whichever memory is in flight, and nothing
+/// can take the provider connection in the gap between two of them.
+#[tauri::command]
+async fn sweep_project_memory(
+    app: AppHandle,
+    request: ai_turn::SweepRequest,
+    stream: tauri::ipc::Channel<ai_turn::AiStreamPayload>,
+) -> Result<Vec<project_memory::CheckedMemory>, CommandError> {
+    ai_turn::run_sweep(app, request, stream).await
+}
+
 /// A task's brief as far as it got, or nothing when it never had one.
 #[tauri::command]
 async fn read_task_brief(
@@ -1191,6 +1220,8 @@ pub fn run() {
         initialize_rag,
         list_ai_models,
         judge_project_memory,
+        set_memory_states,
+        sweep_project_memory,
         list_project_memory,
         list_project_sketches,
         list_project_tasks,

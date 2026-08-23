@@ -294,14 +294,21 @@ function nameTheOperation(operations, entry) {
  * `bool` beside it in the same call went through. Every tag the protocol carries is lowercase and
  * no two of them differ only in case, so the comparison folds case and the unwrapped value keeps
  * the lowercase spelling whichever side wrote it.
+ *
+ * A tag written once is folded the same way, because it is the same mistake with one wrapper
+ * instead of two. The router looks a tag up case-sensitively, so `{type: "String", value:
+ * "Resume"}` was refused with "`String` is not a value type" while the double-wrapped form beside
+ * it in the same call was repaired.
  */
 function unwrapDoubleTag(value) {
     if (!isObject(value) || typeof value.type !== 'string') return value
+    const folded =
+        value.type === value.type.toLowerCase() ? value : {...value, type: value.type.toLowerCase()}
     const inner = value.value
-    if (!isObject(inner) || typeof inner.type !== 'string') return value
-    if (inner.type.toLowerCase() !== value.type.toLowerCase()) return value
+    if (!isObject(inner) || typeof inner.type !== 'string') return folded
+    if (inner.type.toLowerCase() !== value.type.toLowerCase()) return folded
     const keys = Object.keys(inner)
-    if (keys.length !== 2 || !keys.includes('type') || !keys.includes('value')) return value
+    if (keys.length !== 2 || !keys.includes('type') || !keys.includes('value')) return folded
     return unwrapDoubleTag({type: value.type.toLowerCase(), value: inner.value})
 }
 
@@ -706,6 +713,85 @@ export function withoutPictures(tool) {
     }
 }
 
+/**
+ * How many times the same call may be refused with the same words before the words change.
+ *
+ * Two, so a caller hears the real refusal twice — once to read and once to act on — before it hears
+ * anything else. The loops this exists for ran far past that: twelve, thirteen, seventeen and
+ * twenty-four identical calls in four separate live turns, each answered identically every time.
+ */
+const REFUSALS_BEFORE_SAYING_SO = 2
+
+/**
+ * One value as a string, with every object's keys in the same order however they arrived.
+ *
+ * The loops this is for wrote byte-identical calls, but a model that reorders two keys between
+ * attempts is sending the same call and would otherwise start the count again.
+ */
+function sameWhateverTheOrder(value) {
+    return (
+        JSON.stringify(value, (_, held) =>
+            held && typeof held === 'object' && !Array.isArray(held) ?
+                Object.fromEntries(
+                    Object.keys(held)
+                        .sort()
+                        .map(key => [key, held[key]])
+                )
+            :   held
+        ) ?? ''
+    )
+}
+
+/**
+ * Says so when a caller sends the same call again and gets the same refusal again.
+ *
+ * Four live turns went into loops that no wording escaped. The worst sent
+ * `{"expression": "velocity", "expression}: ": ", ", …}` seventeen times running, and the refusal it
+ * met was already the best one available — it named the parameter that was missing, listed the keys
+ * that had survived, and said the object rather than the word was what went wrong. The model could
+ * not see the key it had written, so it wrote it again.
+ *
+ * The lever left is not a better sentence, it is a *different* one. Both the arguments and the
+ * answer have to match for a call to count as the same: a `runtime.wait` that times out twice is a
+ * caller waiting, not a caller stuck, and its answer carries different output each time.
+ *
+ * It says nothing about *why* the call is refused, because it does not know. The first wording did
+ * — "an object coming apart as it is written" — and a live turn met it on a
+ * `method_not_found: /Pickup has no method _on_body_entered`, which is a well-formed call about a
+ * method that is genuinely not there. A guard that guesses the cause is worse than one that names
+ * only what it can see: this call, this answer, this many times.
+ *
+ * Unmeasured. The loops are reproduced and this is not yet shown to break one; what it does
+ * guarantee is that the identical string stops going back a third time.
+ */
+export function withoutRepeatingARefusal(tool) {
+    const heard = new Map()
+    return {
+        ...tool,
+        execute: async (id, params, signal, onUpdate, context) => {
+            try {
+                return await tool.execute(id, params, signal, onUpdate, context)
+            } catch (error) {
+                // A cancelled call is not a refused one. The turn was stopped; the caller wrote
+                // nothing wrong and must not be told it did.
+                if (signal?.aborted || error?.name === 'AbortError') throw error
+                const said = error instanceof Error ? error.message : String(error)
+                const key = `${sameWhateverTheOrder(params)}\u0000${said}`
+                const seen = (heard.get(key) ?? 0) + 1
+                heard.set(key, seen)
+                if (seen <= REFUSALS_BEFORE_SAYING_SO) throw error
+                throw new Error(
+                    `${tool.name} has now refused this exact call ${String(seen)} times, with the `
+                        + 'same answer every time, and nothing about the project changed between '
+                        + 'them. A further one will be refused identically. Whatever is wrong is '
+                        + 'in the call itself: build it again from nothing rather than sending the '
+                        + 'one you have, or reach the same result another way.'
+                )
+            }
+        }
+    }
+}
+
 /** One string, cut, saying how long it was. */
 function cutString(text, keep) {
     return `${text.slice(0, Math.max(0, keep))}… [truncated, ${String(text.length)} characters]`
@@ -888,7 +974,15 @@ function withLongestListsShortened(value, budget) {
             if (fits) low = middle
             else high = middle - 1
         }
-        shaped = replaceAt(shaped, path, cutList(items, low))
+        const cut = replaceAt(shaped, path, cutList(items, low))
+        // Only if it actually helped. `… [truncated, N more entries]` is 32 characters, and a list
+        // shorter than that costs more to shorten than to keep — an encoded `vector2` is twelve.
+        // Every list was cut whether it helped or not, so four hundred vector2 properties went from
+        // 31,833 characters to 33,143 with every pair replaced by the marker, and were sliced
+        // anyway: the unparseable rubble this was written to stop the string capping making, now
+        // with the values gone as well.
+        if (JSON.stringify(cut ?? null).length >= JSON.stringify(shaped ?? null).length) continue
+        shaped = cut
         if (JSON.stringify(shaped ?? null).length <= budget) return shaped
     }
     return shaped

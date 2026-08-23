@@ -459,9 +459,91 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         "a res:// path names a scene, not a node in one, and the answer must say so: \
          {a_scene_path}"
     );
+    // A signal the node does not emit. The third refusal of this shape — `node_not_found` and
+    // `property_not_found` were the first two — and the same reasoning: naming the absence repairs
+    // nothing. A live turn asked to connect `/Main/ScoreLabel` to `score_changed`, which belongs to
+    // an autoload rather than to a Label, and was told only that the Label has no such signal.
+    let no_signal = session.error(
+        "node.connect_signal",
+        json!({
+            "node": "/refusals/Sprite",
+            "signal": "score_changed",
+            "method": "_on_anything"
+        }),
+        Some(current),
+    );
+    assert!(
+        no_signal.starts_with("signal_not_found") && no_signal.contains("It emits "),
+        "the refusal has to name the signals it does emit: {no_signal}"
+    );
+    let near_signal = session.error(
+        "node.connect_signal",
+        json!({
+            "node": "/refusals/Sprite",
+            "signal": "treeentered",
+            "method": "_on_anything"
+        }),
+        Some(current),
+    );
+    assert!(
+        near_signal.contains("Did you mean tree_entered?"),
+        "and the near one when there is one: {near_signal}"
+    );
+
+    // A node path with whitespace round it is the same path. One live turn sent
+    // `{"parent ": "/Level3D ", "type ": "DirectionalLight3D"}` — the router puts the padded keys
+    // back onto their parameters, and the padded value went through untouched. `Node /Level3D  was
+    // not found … the scene's own root is /Level3D` came back twelve times, naming two strings that
+    // look identical on screen. `_as_resource_path` has trimmed a file path since it was written.
+    let padded = session.call(
+        "node.inspect",
+        json!({"scene": scene, "node": "  /refusals/Sprite  "}),
+    );
+    assert_eq!(padded["path"], "/refusals/Sprite", "{padded}");
+
+    // A property the node does not have. Four live turns in four separate runs were told only that
+    // it is absent — about `transform_2d`, which is one edit from a property the node really has,
+    // and about `spacing` on a VBoxContainer, which is a theme override no near miss reaches.
+    let no_property = |property: &str| {
+        session.error(
+            "node.set_property",
+            json!({
+                "scene": scene,
+                "node": "/refusals/Sprite",
+                "property": property,
+                "value": {"type": "int", "value": 1}
+            }),
+            Some(current),
+        )
+    };
+    let near = no_property("transform_2d");
+    assert!(
+        near.contains("Did you mean transform?"),
+        "a property one edit away has to be named: {near}"
+    );
+    let nowhere_near = no_property("spacing");
+    assert!(
+        nowhere_near.contains("node.inspect"),
+        "and with nothing near it, the call that lists them all: {nowhere_near}"
+    );
+
+    // A path under a root this scene does not have. Two live turns in a row wrote `/Arena/...`
+    // into `create_nodes` against a scene still rooted at `ProtocolFixture`, and the refusal —
+    // "Node /Arena was not found in the edited scene" — repeated the one thing they already knew.
+    // The root's name is the whole repair: every node path in this tree begins with it.
+    let a_root_this_scene_has_not = refused("/Arena/Ground");
+    assert!(
+        a_root_this_scene_has_not.contains("/refusals"),
+        "a path under a root this scene does not have must be answered with the root it does: \
+         {a_root_this_scene_has_not}"
+    );
     assert!(
         refused("/refusals/Missing").starts_with("node_not_found"),
         "an ordinary missing node still gets the plain refusal"
+    );
+    assert!(
+        !refused("/refusals/Missing").contains("starts at the scene"),
+        "a path already under the right root is not told where the root is"
     );
 
     // Nothing above may have changed the scene.
@@ -1277,16 +1359,23 @@ fn the_addon_refuses_wiring_that_would_never_fire() {
     );
     // `Object.connect` takes a method the target does not have and says so only when the signal
     // first fires — in the running game, as an error with no author.
-    assert!(
-        session
-            .error(
-                "node.connect_signal",
-                json!({"node": coin, "signal": "body_entered", "method": "_on_nothing"}),
-                Some(current)
-            )
-            .starts_with("method_not_found"),
-        "a method the target does not have must be refused"
+    // The root carries the script, so the refusal names what that script really declares. Two live
+    // turns were told only `\/Pickup has no method _on_body_entered to receive body_entered`, twice
+    // each, which is true and repairs nothing.
+    let absent = session.error(
+        "node.connect_signal",
+        json!({"node": coin, "signal": "body_entered", "method": "_on_nothing"}),
+        Some(current),
     );
+    assert!(
+        absent.starts_with("method_not_found"),
+        "a method the target does not have must be refused: {absent}"
+    );
+    assert!(
+        absent.contains("_on_coin_body_entered") && absent.contains("target"),
+        "and the refusal names what the script does declare, and where a method may live: {absent}"
+    );
+
     assert!(
         session
             .error(
@@ -1306,6 +1395,25 @@ fn the_addon_refuses_wiring_that_would_never_fire() {
             )
             .starts_with("group_not_found"),
         "removing a group the node is not in must be refused"
+    );
+    // A target with no script at all is the commonest reason there is no method, and says so.
+    session.mutate(
+        "node.create",
+        json!({"parent": "/refused_wiring", "name": "Bare", "type": "Node2D"}),
+    );
+    let scriptless = session.error(
+        "node.connect_signal",
+        json!({
+            "node": coin,
+            "signal": "body_entered",
+            "method": "_on_nothing",
+            "target": "/refused_wiring/Bare"
+        }),
+        Some(session.revision()),
+    );
+    assert!(
+        scriptless.contains("No script is attached"),
+        "a target with no script has no methods of its own, and the refusal says so: {scriptless}"
     );
 
     session.mutate(
@@ -1374,6 +1482,47 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         assert!(
             search["totalMatches"].as_u64().expect("totalMatches")
                 >= search["settings"].as_array().expect("settings").len() as u64
+        );
+
+        // A settings name is slashes and underscores and never a space, so a query matched as one
+        // substring makes every natural way of asking a guaranteed miss. One live turn asked for
+        // "line numbers", "split mode", "grid step", "filesystem split", "2d snap" and eight more,
+        // got nothing every time, and concluded two of the three things it wanted were not
+        // settings at all. Every word, in any order, is what a person means.
+        // A setting that does not exist points at the search that finds one. Two live turns met
+        // `setting_not_found` and had nothing to do with it but guess again.
+        let absent = session.error(
+            "project.get_setting",
+            json!({"name": "physics/3d/.gravity"}),
+            None,
+        );
+        assert!(
+            absent.contains("project.search_settings"),
+            "the refusal has to name the call that finds the real name: {absent}"
+        );
+
+        let spoken = session.call("project.search_settings", json!({"query": "text speech"}));
+        assert!(
+            find_named(&spoken, "settings", "audio/general/text_to_speech")["name"]
+                == "audio/general/text_to_speech",
+            "a two-word query has to reach a name that holds both: {spoken}"
+        );
+        // One word is still the substring match it always was, and order does not matter.
+        let backwards = session.call(
+            "project.search_settings",
+            json!({"query": "speech general"}),
+        );
+        assert_eq!(
+            backwards["totalMatches"], spoken["totalMatches"],
+            "the order of the words is not part of the question"
+        );
+        let missing = session.call(
+            "project.search_settings",
+            json!({"query": "text nosuchword"}),
+        );
+        assert_eq!(
+            missing["totalMatches"], 0,
+            "every word has to be there: {missing}"
         );
 
         // Set persists to project.godot immediately; reading it back proves the round trip.

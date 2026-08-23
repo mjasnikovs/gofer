@@ -19,7 +19,13 @@ import type {
     UserQuestionSettled
 } from '../models/brief'
 import type {HealthRemedyRequest, HealthReport} from '../models/health'
-import type {MemoryEdit, MemoryJudgeEvent, ProjectMemory} from '../models/memory'
+import type {
+    MemoryEdit,
+    MemoryJudgeEvent,
+    MemoryState,
+    MemorySweepEvent,
+    ProjectMemory
+} from '../models/memory'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
 import type {UnsavedWork} from '../models/unsaved-work'
 import type {
@@ -110,6 +116,17 @@ type BackupResult = Readonly<{path: string}>
 type JudgeMemoryRequest = Readonly<{
     requestId: number
     memoryId: string
+}>
+
+/**
+ * Putting a list of memories to the same sub-agent as one turn.
+ *
+ * The ids come from the panel rather than being chosen in Rust, because a judgement is a minute
+ * each and only the person pressing the button can see whether that is worth paying for.
+ */
+type SweepMemoryRequest = Readonly<{
+    requestId: number
+    memoryIds: readonly string[]
 }>
 
 type ToolApprovalRequest = Readonly<{
@@ -257,11 +274,24 @@ export type DesktopCommandMap = Readonly<{
         {request: SendAiMessageRequest; stream: Channel<AiStreamPayload>},
         void
     >
+    // Bulk triage, and only the state: the rows keep their words, their verdict and the reason it
+    // was given, and stop reaching the prompt. It re-embeds nothing, because nothing was rewritten.
+    set_memory_states: CommandSpec<
+        {ids: readonly string[]; state: MemoryState},
+        readonly ProjectMemory[]
+    >
     start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionSummary>
     stop_godot_session: CommandSpec<undefined, void>
     subscribe_godot_events: CommandSpec<{events: Channel<GodotSessionEvent>}, void>
     // Published diagnostics arrive on this channel until the renderer unsubscribes.
     subscribe_script_diagnostics: CommandSpec<{diagnostics: Channel<ScriptDiagnosticsEvent>}, void>
+    // One turn for the whole list, which is what makes Stop reach the run rather than whichever
+    // memory is in flight. The count rides `ai-memory-sweep`; each row's spinner still rides the
+    // judge's own event.
+    sweep_project_memory: CommandSpec<
+        {request: SweepMemoryRequest; stream: Channel<AiStreamPayload>},
+        readonly ProjectMemory[]
+    >
     test_ai_connection: CommandSpec<{request: SettingsRequest}, ConnectionTestResult>
     unsubscribe_godot_events: CommandSpec<undefined, void>
     unsubscribe_script_diagnostics: CommandSpec<undefined, void>
@@ -286,6 +316,8 @@ type DesktopEventMap = Readonly<{
     'ai-question-settled': UserQuestionSettled
     /** How judging one memory is going, and how it ended. Not the chat's, so not the channel's. */
     'ai-memory-judge': MemoryJudgeEvent
+    /** How far through the list a sweep is, and how it ended. One event for the run, not the row. */
+    'ai-memory-sweep': MemorySweepEvent
     /**
      * A design loop's two edges. Between them the question card holds itself open, because the
      * rounds are one layout being revised rather than a queue of unrelated questions.

@@ -478,17 +478,160 @@ pub(crate) struct JudgeRequest {
     pub memory_id: String,
 }
 
+/// What sweeping needs: the turn, and the rows the window decided are worth paying for.
+///
+/// The list comes from the window rather than being computed here, because which rows are worth a
+/// minute each is a policy the person pressing the button can see and this side cannot. The panel
+/// sends what it is showing, minus anything already carrying a current verdict.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SweepRequest {
+    pub request_id: u64,
+    pub memory_ids: Vec<String>,
+}
+
+/// Everything a judgement needs that does not change between one memory and the next.
+///
+/// Built once and reused, which is the whole reason a sweep is not a loop of `run_judge`: settings,
+/// credentials and the worktree scan are the same for every row, and the scan in particular is a
+/// full directory walk that would otherwise be repeated once a minute for an hour.
+struct JudgeContext {
+    settings: crate::settings::GoferSettings,
+    api_key: Option<String>,
+    oauth_credential: Option<serde_json::Value>,
+    storage: crate::storage::ProjectStorage,
+    workspace_path: String,
+    snapshot: crate::files::Snapshot,
+}
+
+impl JudgeContext {
+    fn read(app: &AppHandle) -> Result<Self, String> {
+        let settings = crate::settings::read_settings(app)?;
+        let api_key = crate::settings::ai_worker_api_key()?;
+        let oauth_credential = crate::settings::stored_chatgpt_credential()?;
+        let storage = crate::workspace::project_storage(app)?;
+        let workspace_path = storage
+            .tasks()
+            .agent_workspace()
+            .map_err(|failure| failure.message)?
+            .display()
+            .to_string();
+        let snapshot = crate::files::scan(std::path::Path::new(&workspace_path));
+        Ok(Self {
+            settings,
+            api_key,
+            oauth_credential,
+            storage,
+            workspace_path,
+            snapshot,
+        })
+    }
+}
+
+/// Judges one memory inside a turn that has already begun, and says exactly one ending about it.
+///
+/// The ending is said here rather than left to the worker because a worker that broke before its
+/// own handler ran emits nothing, and a row left spinning is the failure the brief's ending
+/// contract was written for. Every path out of this function has said one of `judge-verdict`,
+/// `judge-failed` or `judge-stopped` about this memory — the first two from the worker, the third
+/// and any duplicate from here.
+///
+/// The verdict itself is not returned. It crosses on `judge-verdict` and is filed by
+/// The ending event one judgement earned, or none where it produced a verdict.
+///
+/// A judgement has exactly one ending, and a verdict is one of them. Stop and a finished worker can
+/// land in the same instant, and the row was then sent `judge-stopped` *and* pushed into the
+/// sweep's answer: the panel drew it as stopped while the list it was handed carried its verdict.
+/// What the model was paid for is what is reported, and only a judgement with no verdict has an
+/// ending of its own to send.
+fn judgement_ending(
+    memory_id: &str,
+    failure: Option<&str>,
+    cancelled: bool,
+) -> Option<serde_json::Value> {
+    let reason = failure?;
+    Some(if cancelled {
+        serde_json::json!({"type": "judge-stopped", "memoryId": memory_id})
+    } else {
+        serde_json::json!({"type": "judge-failed", "memoryId": memory_id, "reason": reason})
+    })
+}
+
+/// [`handle_judge_event`], which is the only side that survives the worker being killed, so what
+/// comes back is the row read afterwards: what was stored, not what was reported.
+fn judge_one(
+    app: &AppHandle,
+    turn: &AiTurn,
+    context: &JudgeContext,
+    memory_id: &str,
+) -> Result<crate::project_memory::CheckedMemory, String> {
+    // Read here rather than in the worker, which holds no database. It is also what refuses a
+    // memory deleted between the click and the spawn, before a model is paid for.
+    let record = context
+        .storage
+        .memory()
+        .get(memory_id)
+        .map_err(|failure| failure.message)?
+        .ok_or_else(|| "That memory is no longer stored".to_owned())?;
+    let index = crate::project_memory::basename_index(&context.snapshot);
+    let checked =
+        crate::project_memory::check_memory(record, Some(&context.snapshot), Some(&index));
+
+    let outcome = run_ai_worker(
+        app,
+        turn,
+        AiWorkerRequest {
+            settings: context.settings.ai.clone(),
+            api_key: context.api_key.clone(),
+            // The child holds `read` and `bash`. Neither reaches the web, so a search key it
+            // cannot use is a key with no reason to be in the request.
+            brave_api_key: None,
+            oauth_credential: context.oauth_credential.clone(),
+            // No cache key. A judgement is one question about one row, so there is no prefix a
+            // later ask would reuse, and keying it per memory would fragment the cache the
+            // conversation depends on.
+            session_id: None,
+            workspace_path: context.workspace_path.clone(),
+            tools: crate::ai_tools::CATALOG,
+            job: WorkerJob::Judge {
+                memory_id: memory_id.to_owned(),
+                memory: JudgedMemory {
+                    id: checked.memory.id.clone(),
+                    content: checked.memory.content.clone(),
+                    anchors: checked.anchors,
+                },
+            },
+        },
+    );
+
+    if let Some(ending) = judgement_ending(
+        memory_id,
+        outcome.as_ref().err().map(String::as_str),
+        turn.is_cancelled(),
+    ) {
+        let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, ending);
+    }
+    outcome?;
+
+    let record = context
+        .storage
+        .memory()
+        .get(memory_id)
+        .map_err(|failure| failure.message)?
+        .ok_or_else(|| "That memory is no longer stored".to_owned())?;
+    Ok(crate::project_memory::check_memory(
+        record,
+        Some(&context.snapshot),
+        Some(&index),
+    ))
+}
+
 /// Puts one stored memory to a read-only child and files what it says.
 ///
 /// It begins an `AiTurn` for the same two reasons a brief does, and neither is a convenience. The
 /// turn is what Stop can reach, because cancelling kills whatever `register_child` registered; and
 /// it is what holds the single provider operation, so a judgement cannot run beside a chat turn on
 /// the one connection or have the shared checkout switched out from under the child reading it.
-///
-/// The verdict is not returned by the worker to here — it crosses on `judge-verdict` and is filed
-/// by [`handle_judge_event`], which is the only side that survives the worker being killed. What
-/// this answers with is the memory read back afterwards, so the window draws what was stored rather
-/// than what was reported.
 pub(crate) async fn run_judge(
     app: AppHandle,
     request: JudgeRequest,
@@ -497,85 +640,102 @@ pub(crate) async fn run_judge(
     let turn = AiTurn::begin(request.request_id, stream)?;
     tauri::async_runtime::spawn_blocking(move || {
         let turn = turn;
-        let settings = crate::settings::read_settings(&app)?;
-        let api_key = crate::settings::ai_worker_api_key()?;
-        let oauth_credential = crate::settings::stored_chatgpt_credential()?;
-        let storage = crate::workspace::project_storage(&app)?;
-        let workspace_path = storage
-            .tasks()
-            .agent_workspace()
-            .map_err(|failure| failure.message)?
-            .display()
-            .to_string();
-        // Read here rather than in the worker, which holds no database. It is also what refuses a
-        // memory deleted between the click and the spawn, before a model is paid for.
-        let record = storage
-            .memory()
-            .get(&request.memory_id)
-            .map_err(|failure| failure.message)?
-            .ok_or_else(|| "That memory is no longer stored".to_owned())?;
-        let snapshot = crate::files::scan(std::path::Path::new(&workspace_path));
-        let index = crate::project_memory::basename_index(&snapshot);
-        let checked = crate::project_memory::check_memory(record, Some(&snapshot), Some(&index));
-
-        let outcome = run_ai_worker(
-            &app,
-            &turn,
-            AiWorkerRequest {
-                settings: settings.ai,
-                api_key,
-                // The child holds `read` and `bash`. Neither reaches the web, so a search key it
-                // cannot use is a key with no reason to be in the request.
-                brave_api_key: None,
-                oauth_credential,
-                // No cache key. A judgement is one question about one row, so there is no prefix a
-                // later ask would reuse, and keying it per memory would fragment the cache the
-                // conversation depends on.
-                session_id: None,
-                workspace_path,
-                tools: crate::ai_tools::CATALOG,
-                job: WorkerJob::Judge {
-                    memory_id: request.memory_id.clone(),
-                    memory: JudgedMemory {
-                        id: checked.memory.id.clone(),
-                        content: checked.memory.content.clone(),
-                        anchors: checked.anchors,
-                    },
-                },
-            },
-        );
-
-        // A worker that broke before its own handler ran emits nothing, and a row left spinning is
-        // the failure the brief's ending contract was written for. Said here so every ending is
-        // said once, whether or not the worker lived long enough to say it.
-        if outcome.is_err() || turn.is_cancelled() {
-            let ending = if turn.is_cancelled() {
-                serde_json::json!({"type": "judge-stopped", "memoryId": request.memory_id})
-            } else {
-                serde_json::json!({
-                    "type": "judge-failed",
-                    "memoryId": request.memory_id,
-                    "reason": outcome.as_ref().err().map_or("", String::as_str),
-                })
-            };
-            let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, ending);
-        }
-        outcome?;
-
-        let record = storage
-            .memory()
-            .get(&request.memory_id)
-            .map_err(|failure| failure.message)?
-            .ok_or_else(|| "That memory is no longer stored".to_owned())?;
-        Ok(crate::project_memory::check_memory(
-            record,
-            Some(&snapshot),
-            Some(&index),
-        ))
+        let context = JudgeContext::read(&app)?;
+        judge_one(&app, &turn, &context, &request.memory_id)
     })
     .await
     .map_err(|error| format!("The memory judgement failed: {error}"))?
     .map_err(CommandError::coded("memory_judge_failed"))
+}
+
+/// The window event a sweep's own progress reaches the renderer on.
+///
+/// Separate from `JUDGE_EVENT`, which stays per-memory: a panel drawing a spinner on one row and a
+/// panel drawing "31 of 84" are asking different questions, and folding both onto one event would
+/// make every row listener re-derive which of the two it was looking at.
+const SWEEP_EVENT: &str = "ai-memory-sweep";
+
+/// Judges a list of memories, one after another, inside a single turn.
+///
+/// One turn for the whole list rather than one per memory, and that is the point. A judgement is a
+/// model request and about a minute; eighty of them is over an hour, and eighty turns is eighty
+/// chances for a chat message to win the provider operation in a gap and leave the sweep half done
+/// with no way to say so. Holding the turn for the run means Stop reaches the sweep rather than
+/// whichever memory happened to be in flight, and the person watching is told a real total.
+///
+/// It answers with every row it judged, read back from the database. A row that failed or was
+/// deleted mid-run is left out rather than reported as unjudged — the panel has the ids it sent and
+/// can see what did not come back.
+pub(crate) async fn run_sweep(
+    app: AppHandle,
+    request: SweepRequest,
+    stream: tauri::ipc::Channel<AiStreamPayload>,
+) -> Result<Vec<crate::project_memory::CheckedMemory>, CommandError> {
+    if request.memory_ids.is_empty() {
+        return Err(CommandError::new(
+            "sweep_without_memories",
+            "There is nothing to check.",
+        ));
+    }
+    let turn = AiTurn::begin(request.request_id, stream)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let turn = turn;
+        let context = JudgeContext::read(&app)?;
+        let total = request.memory_ids.len();
+        let mut judged = Vec::with_capacity(total);
+        let mut stopped = false;
+
+        for (done, memory_id) in request.memory_ids.iter().enumerate() {
+            if turn.is_cancelled() {
+                stopped = true;
+                break;
+            }
+            // The previous worker's exit closed both gates on its way out, and `AiTurn` only opens
+            // them when a turn begins. A sweep is one turn holding many workers, so the gates are
+            // raised again here — without this the second memory's child would have every approval
+            // and every question refused the moment it asked.
+            crate::approvals::open();
+            crate::ask::open_user_prompts();
+            let _ = app.emit_to(
+                crate::ask::MAIN_WINDOW,
+                SWEEP_EVENT,
+                serde_json::json!({
+                    "type": "sweep-progress",
+                    "memoryId": memory_id,
+                    "done": done,
+                    "total": total,
+                }),
+            );
+            // A row that could not be judged does not end the sweep. Its own `judge-failed` has
+            // already gone out, the panel draws it against that row, and the remaining seventy
+            // memories are still worth the minutes they were going to cost.
+            match judge_one(&app, &turn, &context, memory_id) {
+                Ok(memory) => judged.push(memory),
+                Err(reason) => {
+                    eprintln!("Judging memory {memory_id} failed, the sweep continues: {reason}");
+                }
+            }
+        }
+
+        let ending = if stopped || turn.is_cancelled() {
+            "sweep-stopped"
+        } else {
+            "sweep-finished"
+        };
+        let _ = app.emit_to(
+            crate::ask::MAIN_WINDOW,
+            SWEEP_EVENT,
+            serde_json::json!({
+                "type": ending,
+                "done": judged.len(),
+                "total": total,
+            }),
+        );
+        Ok(judged)
+    })
+    .await
+    .map_err(|error| format!("The memory sweep failed: {error}"))?
+    .map_err(CommandError::coded("memory_sweep_failed"))
 }
 
 /// Runs the four phases that produce a task's brief.
@@ -1495,6 +1655,33 @@ mod tests {
 
     /// The turn's statics are process-wide, so the tests that move them take turns.
     static AI_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// A judgement has exactly one ending, and a verdict is one of them.
+    ///
+    /// Stop and a finished judgement can land in the same instant: the worker answered, the turn
+    /// was cancelled, and the row was sent `judge-stopped` *and* pushed into the sweep's answer.
+    /// The panel drew it as stopped while the list it was handed carried its verdict.
+    #[test]
+    fn a_judgement_that_produced_a_verdict_reports_no_ending() {
+        assert_eq!(super::judgement_ending("m1", None, false), None);
+        assert_eq!(
+            super::judgement_ending("m1", None, true),
+            None,
+            "cancelled the instant it finished is still finished"
+        );
+        assert_eq!(
+            super::judgement_ending("m1", Some("it used all of its steps"), false),
+            Some(serde_json::json!({
+                "type": "judge-failed",
+                "memoryId": "m1",
+                "reason": "it used all of its steps",
+            }))
+        );
+        assert_eq!(
+            super::judgement_ending("m1", Some("the turn was stopped"), true),
+            Some(serde_json::json!({"type": "judge-stopped", "memoryId": "m1"}))
+        );
+    }
 
     fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
         let app = tauri::test::mock_builder()

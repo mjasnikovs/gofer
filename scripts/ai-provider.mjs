@@ -21,7 +21,7 @@ import {frozenPathsIn} from './frozen-paths.mjs'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
-import {createGodotTools, withoutPictures} from './ai-host.mjs'
+import {createGodotTools, withoutPictures, withoutRepeatingARefusal} from './ai-host.mjs'
 import {createCredentialStore} from './ai-credentials.mjs'
 import {probeTools} from './ai-reachability.mjs'
 import {createAskUserTool} from './ai-ask.mjs'
@@ -407,7 +407,14 @@ export function createAgentTools(workspacePath, domains, host, extra = [], model
         .map(tool => confineTool(tool, workspacePath, frozen))
         .map(tool => bindTool(tool, context))
     const tools = [...confined, ...(host ? createGodotTools(domains, host) : []), ...extra]
-    return {env, tools: tools.map(tool => (canSeePictures(model) ? tool : withoutPictures(tool)))}
+    return {
+        env,
+        tools: tools
+            .map(tool => (canSeePictures(model) ? tool : withoutPictures(tool)))
+            // The counter is per turn because these tools are: the provider is not made until a
+            // turn starts, so a call refused in one turn is not remembered into the next.
+            .map(withoutRepeatingARefusal)
+    }
 }
 
 /** Whether this model was declared as taking images. Absent means text, which is the safe answer. */

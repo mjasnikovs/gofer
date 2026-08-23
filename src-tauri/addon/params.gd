@@ -94,7 +94,8 @@ static func build_shape(shape_type: String, params: Dictionary) -> Dictionary:
             var size := Protocol.numbers(params.get("size", null), 2)
             if size.is_empty():
                 return error(
-                    "invalid_params", "A RectangleShape2D takes size as two numbers"
+                    "invalid_params",
+                    "A RectangleShape2D takes size as two numbers: \"size\": [32, 32]"
                 )
             var rectangle := RectangleShape2D.new()
             rectangle.size = Vector2(size[0], size[1])
@@ -102,7 +103,10 @@ static func build_shape(shape_type: String, params: Dictionary) -> Dictionary:
         "CircleShape2D":
             var radius: Variant = params.get("radius", null)
             if not typeof(radius) in [TYPE_INT, TYPE_FLOAT]:
-                return error("invalid_params", "A CircleShape2D takes radius as a number")
+                return error(
+                    "invalid_params",
+                    "A CircleShape2D takes radius as a number: \"radius\": 8"
+                )
             var circle := CircleShape2D.new()
             circle.radius = float(radius)
             return {"value": circle}
@@ -112,7 +116,8 @@ static func build_shape(shape_type: String, params: Dictionary) -> Dictionary:
             if not typeof(radius) in [TYPE_INT, TYPE_FLOAT] \
                     or not typeof(height) in [TYPE_INT, TYPE_FLOAT]:
                 return error(
-                    "invalid_params", "A CapsuleShape2D takes radius and height as numbers"
+                    "invalid_params",
+                    "A CapsuleShape2D takes radius and height as numbers: \"radius\": 8, \"height\": 32"
                 )
             var capsule := CapsuleShape2D.new()
             capsule.radius = float(radius)
@@ -123,7 +128,7 @@ static func build_shape(shape_type: String, params: Dictionary) -> Dictionary:
             if points.is_empty():
                 return error(
                     "invalid_params",
-                    "A SegmentShape2D takes points as four numbers: ax, ay, bx, by"
+                    "A SegmentShape2D takes points as four numbers — ax, ay, bx, by: \"points\": [0, 0, 64, 0]"
                 )
             var segment := SegmentShape2D.new()
             segment.a = Vector2(points[0], points[1])

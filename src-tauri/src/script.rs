@@ -245,6 +245,9 @@ pub enum ScriptResponse {
         range: Option<Range>,
         #[serde(skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
+        /// Whether the server will rename this position at all. False is the server answering
+        /// nothing, which is its way of saying no.
+        renameable: bool,
     },
     Rename {
         files: Vec<PlannedFile>,
@@ -925,9 +928,12 @@ pub fn call(request: ScriptRequest) -> Result<ScriptResponse, LspError> {
         } => {
             let uri = godot_lsp::file_uri(&workspace, &path)?;
             let edit = client.rename(&uri, position, &new_name)?;
-            Ok(ScriptResponse::Rename {
-                files: godot_lsp::plan_workspace_edit(&workspace, &edit)?,
-            })
+            a_plan_with_something_in_it(
+                godot_lsp::plan_workspace_edit(&workspace, &edit)?,
+                &new_name,
+                &path,
+                position,
+            )
         }
         ScriptRequest::WorkspaceSymbols { query } => Ok(ScriptResponse::WorkspaceSymbols {
             symbols: client.workspace_symbols(&workspace, &query)?,
@@ -1085,26 +1091,64 @@ fn request_rescan(path: &str) {
     let _ = rpc.call(CallRequest::new("resource.rescan", json!({"path": path})));
 }
 
+/// A rename plan, or the refusal an empty one has to be.
+///
+/// Every real rename touches at least the declaration, so a plan of nothing is the language server
+/// declining rather than a rename that happened to reach no files. Answered as a success the two
+/// are the same sentence: a live turn asked for `speed` to become `walk_speed` across the project,
+/// was answered `{"files": []}`, and only learned nothing had happened by going and looking.
+fn a_plan_with_something_in_it(
+    files: Vec<PlannedFile>,
+    new_name: &str,
+    path: &str,
+    position: Position,
+) -> Result<ScriptResponse, LspError> {
+    if files.is_empty() {
+        return Err(LspError::new(
+            "rename_planned_nothing",
+            format!(
+                "The language server planned no edits for renaming to {new_name} at line {} \
+                 character {} of {path}. Every rename touches at least the declaration, so this is \
+                 the server declining rather than a rename with nothing in it — the position may \
+                 not be on a symbol it renames. godot_script edit changes the text directly and \
+                 always works.",
+                position.line, position.character
+            ),
+        ));
+    }
+    Ok(ScriptResponse::Rename { files })
+}
+
 fn prepare_rename_response(response: Option<PrepareRenameResponse>) -> ScriptResponse {
     match response {
         Some(PrepareRenameResponse::Range(range)) => ScriptResponse::PrepareRename {
             range: Some(range),
             placeholder: None,
+            renameable: true,
         },
         Some(PrepareRenameResponse::RangeWithPlaceholder { range, placeholder }) => {
             ScriptResponse::PrepareRename {
                 range: Some(range),
                 placeholder: Some(placeholder),
+                renameable: true,
             }
         }
         // `defaultBehavior` leaves the renamed span to the client; Monaco falls back to the word
         // at the cursor, which is exactly what an absent range asks it to do.
-        Some(PrepareRenameResponse::DefaultBehavior { .. }) | None => {
-            ScriptResponse::PrepareRename {
-                range: None,
-                placeholder: None,
-            }
-        }
+        Some(PrepareRenameResponse::DefaultBehavior { .. }) => ScriptResponse::PrepareRename {
+            range: None,
+            placeholder: None,
+            renameable: true,
+        },
+        // Nothing at all is the server saying this position cannot be renamed, and it used to be
+        // folded into the answer above — so `prepare_rename`, whose whole job is to say whether a
+        // symbol can be renamed, answered `{}` either way. A live turn read that `{}` and learned
+        // nothing from it.
+        None => ScriptResponse::PrepareRename {
+            range: None,
+            placeholder: None,
+            renameable: false,
+        },
     }
 }
 
@@ -1704,6 +1748,7 @@ mod tests {
             ScriptResponse::PrepareRename {
                 range: Some(range(1)),
                 placeholder: Some("speed".to_owned()),
+                renameable: true,
             }
         );
         assert_eq!(
@@ -1711,12 +1756,72 @@ mod tests {
             ScriptResponse::PrepareRename {
                 range: Some(range(2)),
                 placeholder: None,
+                renameable: true,
             }
         );
     }
 
+    /// A rename that plans nothing is a refusal, not a rename that reached no files.
+    ///
+    /// Observed live: a turn asked for `speed` to become `walk_speed` across every script that
+    /// touches it, and `godot_script rename` answered `{"files": [], "op": "rename"}` — a success
+    /// that says the same thing as "renamed, and it happened to touch nothing". It only learned
+    /// otherwise by opening the file and looking.
     #[test]
-    fn default_rename_behavior_leaves_the_span_to_monaco() {
+    fn a_rename_that_plans_nothing_is_refused() {
+        let refused = a_plan_with_something_in_it(
+            Vec::new(),
+            "walk_speed",
+            "scripts/player.gd",
+            Position {
+                line: 2,
+                character: 12,
+            },
+        )
+        .expect_err("an empty plan is not a plan");
+        assert_eq!(refused.code, "rename_planned_nothing");
+        assert!(
+            refused.message.contains("walk_speed"),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("scripts/player.gd") && refused.message.contains("line 2"),
+            "the refusal names the position it asked about: {}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("godot_script edit"),
+            "and the route that always works: {}",
+            refused.message
+        );
+
+        // A plan with a file in it is the plan.
+        let planned = a_plan_with_something_in_it(
+            vec![PlannedFile {
+                path: "scripts/player.gd".to_owned(),
+                original_text: "var speed := 1\n".to_owned(),
+                original_hash: "a".repeat(64),
+                updated_text: "var walk_speed := 1\n".to_owned(),
+            }],
+            "walk_speed",
+            "scripts/player.gd",
+            Position {
+                line: 2,
+                character: 12,
+            },
+        )
+        .expect("a plan with a file in it");
+        assert!(matches!(planned, ScriptResponse::Rename { files } if files.len() == 1));
+    }
+
+    /// `defaultBehavior` and no answer at all both leave the span to the client, and they are not
+    /// the same thing: the first is the server saying yes and letting Monaco pick the word, the
+    /// second is it saying no. They were one answer, so `prepare_rename` — whose whole job is to
+    /// say whether a symbol can be renamed — answered `{}` either way, and a live turn read that
+    /// `{}` and learned nothing from it.
+    #[test]
+    fn default_rename_behavior_leaves_the_span_to_monaco_and_no_answer_is_a_refusal() {
         assert_eq!(
             prepare_rename_response(Some(PrepareRenameResponse::DefaultBehavior {
                 default_behavior: true,
@@ -1724,6 +1829,7 @@ mod tests {
             ScriptResponse::PrepareRename {
                 range: None,
                 placeholder: None,
+                renameable: true,
             }
         );
         assert_eq!(
@@ -1731,6 +1837,7 @@ mod tests {
             ScriptResponse::PrepareRename {
                 range: None,
                 placeholder: None,
+                renameable: false,
             }
         );
     }

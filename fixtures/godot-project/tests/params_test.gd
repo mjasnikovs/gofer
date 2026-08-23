@@ -94,6 +94,20 @@ func _test_shapes(params: GDScript, failures: Array[String]) -> void:
         failures.append("A CircleShape2D with no radius must be refused")
     if _refusal(params.call("build_shape", "RectangleShape2D", {"size": [8]})) != "invalid_params":
         failures.append("A RectangleShape2D with one number must be refused")
+    # And the refusal carries the shape it wanted. `size` is optional in the parameter table because
+    # four of the five shapes do not take one, so the table cannot say a rectangle needs it and this
+    # sentence is the only place a caller hears it. Two live turns sent `create_shape` with a
+    # shapeType and no dimensions at all, twice each, and read "takes size as two numbers" without
+    # writing one.
+    for missing in [
+        ["RectangleShape2D", "\"size\": [32, 32]"],
+        ["CircleShape2D", "\"radius\": 8"],
+        ["CapsuleShape2D", "\"radius\": 8, \"height\": 32"],
+        ["SegmentShape2D", "\"points\": [0, 0, 64, 0]"],
+    ]:
+        var said: String = params.call("build_shape", missing[0], {})["_gofer_error"]["message"]
+        if not said.contains(missing[1]):
+            failures.append("%s must be refused with an example: %s" % [missing[0], said])
     # A world boundary is the infinite floor a level rests on, and takes nothing.
     if not (params.call("build_shape", "WorldBoundaryShape2D", {})["value"] \
             is WorldBoundaryShape2D):

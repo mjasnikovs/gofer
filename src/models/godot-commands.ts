@@ -43,7 +43,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:6d6fd71de1d0c829
+// GENERATED-BEGIN command-names sha256:6feaf4c99fc07744
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -96,6 +96,7 @@ export type GodotCommandName =
     | 'node.inspect'
     | 'resource.rescan'
     | 'resource.create_tileset'
+    | 'resource.create_texture'
     | 'resource.create_shape'
     | 'resource.describe_tileset'
     | 'session.heartbeat'

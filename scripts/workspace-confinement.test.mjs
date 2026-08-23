@@ -298,15 +298,45 @@ test('lets a command divide, which is not a path', async context => {
     ])
         assert.deepEqual(await tool.execute('1', {command}), asRun(command))
 
+    // Observed live, and the same rule one slash later: Python floors with `//`, so `x // 4` put a
+    // second slash where the whitespace was expected and the whole command came back as an
+    // absolute path. A turn asked for a top-down arena wrote a PNG encoder to make its tiles, was
+    // refused twice for arithmetic it had not written a path into, and fell back to writing a
+    // throwaway .py file and running that instead. Whitespace after the run of slashes is what
+    // says arithmetic; `//etc/passwd` has none and is still the root.
+    for (const command of [
+        'python3 -c "print(7 // 2)"',
+        'python3 -c "base = 180 if (x // 4 + y // 4) % 2 == 0 else 195"',
+        'echo $((10 // 2))'
+    ])
+        assert.deepEqual(await tool.execute('3', {command}), asRun(command))
+
     // A slash with something after it is still a path, and a slash at the end of a command is
     // still the root: arithmetic needs a right-hand side and a bare root reference does not.
     for (const command of [
         'ls /',
         'cat /etc/shadow',
         'x=/tmp/a echo hi',
-        'echo hi | cat /etc/hosts'
+        'echo hi | cat /etc/hosts',
+        'cat //etc/passwd'
     ])
         await assert.rejects(tool.execute('2', {command}), /Shell|workspace/iu)
+
+    // And a root with a whole command after it is a root. Whitespace alone was what said
+    // arithmetic, so every one of these read as a division: the turn could walk the whole
+    // filesystem from a rule written to let it divide two numbers. Arithmetic has an operand on
+    // both sides of the slash, on one line, and its left-hand side is neither a flag nor the name
+    // of the command being run.
+    for (const command of [
+        'find / -name "*.pem"',
+        'grep -r secret / ',
+        'ls / | head',
+        'du -sh / ',
+        'cp -r / backup',
+        'rm -rf / --no-preserve-root',
+        'ls /\ncat notes.md'
+    ])
+        await assert.rejects(tool.execute('4', {command}), /Shell|workspace/iu)
 })
 
 test('lets a command throw output away the way every shell does', async context => {

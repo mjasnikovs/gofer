@@ -130,6 +130,59 @@ fn a_swept_scene_reopens_with_every_node_intact() {
     report("come back after a reopen", &lost);
 }
 
+/// A rename onto a name a sibling already has says why the name it got is different.
+///
+/// Godot does not refuse a clash: a node's name is unique among its siblings, so it appends a
+/// number and carries on. The read-back then disagrees with the write, and two live turns in one
+/// run were told only that the write asked for `UI` and Godot holds `UI2` — the mismatch, and not
+/// the reason for it.
+#[test]
+fn a_rename_onto_a_siblings_name_says_that_is_what_happened() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://clash.tscn", "rootType": "Node2D"}),
+    );
+    for name in ["Twin", "Other"] {
+        session.mutate(
+            "node.create",
+            json!({"parent": "/clash", "type": "Node2D", "name": name}),
+        );
+    }
+
+    let clashed = session
+        .try_mutate(
+            "node.rename",
+            json!({"node": "/clash/Other", "name": "Twin"}),
+        )
+        .expect_err("a name a sibling already holds cannot be written");
+    assert!(
+        clashed.contains("A sibling is already called Twin"),
+        "the refusal has to say why the name changed: {clashed}"
+    );
+
+    // And the refusal is true about the scene. Godot renames anyway — it does not refuse a clash —
+    // so before this the node kept a name nobody asked for, and the revision never moved to say so.
+    let after: Vec<String> = session.call("scene.get_tree", json!({}))["root"]["children"]
+        .as_array()
+        .expect("children")
+        .iter()
+        .map(|child| child["name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        after,
+        vec!["Twin".to_owned(), "Other".to_owned()],
+        "{after:?}"
+    );
+
+    // A rename to a name nobody has is not this, and goes through.
+    let renamed = session.mutate(
+        "node.rename",
+        json!({"node": "/clash/Other", "name": "Third"}),
+    );
+    assert_eq!(renamed["node"], "/clash/Third", "{renamed}");
+}
+
 /// A node's properties can be read back.
 ///
 /// `node.inspect` once answered name, type, path, groups, signals and connections and no properties

@@ -70,6 +70,21 @@ export type MemoryJudgeEvent = Readonly<{
     reason?: string | undefined
 }>
 
+/**
+ * What a sweep says about itself, on the window event it rides.
+ *
+ * Separate from [[MemoryJudgeEvent]], which stays per-memory: a row drawing a spinner and a header
+ * drawing "31 of 84" are asking different questions. Every sweep ends on `sweep-finished` or
+ * `sweep-stopped`, and the counts on the ending are the run's own, not the panel's arithmetic.
+ */
+export type MemorySweepEvent = Readonly<{
+    type: 'sweep-progress' | 'sweep-finished' | 'sweep-stopped'
+    /** The memory being judged right now. Absent on either ending — there is none. */
+    memoryId?: string | undefined
+    done: number
+    total: number
+}>
+
 export type ProjectMemory = Readonly<{
     id: string
     taskId?: string | undefined
@@ -137,6 +152,22 @@ export function isRetrievable(memory: ProjectMemory): boolean {
     return memory.state === 'confirmed'
 }
 
+/**
+ * Whether the model has read this row against the code as it stands and said it no longer holds.
+ *
+ * `isCurrent` is half the question. A verdict made before the memory was edited is kept and shown,
+ * because it is still worth reading — but it is not something to act on in bulk, since the sentence
+ * it was about is not the sentence stored now.
+ */
+export function isBroken(memory: ProjectMemory): boolean {
+    return memory.judgement?.verdict === 'broken' && memory.judgement.isCurrent
+}
+
+/** Whether anyone has yet paid for a verdict about the row as it reads now. */
+export function isUnjudged(memory: ProjectMemory): boolean {
+    return memory.judgement?.isCurrent !== true
+}
+
 /** What a judge's verdict is worth saying, in words that keep it a judgement rather than a fact. */
 export function verdictSummary(judgement: MemoryJudgement): string {
     const judged =
@@ -153,6 +184,20 @@ const JUDGE_EVENTS: readonly MemoryJudgeEvent['type'][] = [
     'judge-failed',
     'judge-stopped'
 ]
+
+const SWEEP_EVENTS: readonly MemorySweepEvent['type'][] = [
+    'sweep-progress',
+    'sweep-finished',
+    'sweep-stopped'
+]
+
+/** Whether the backend really sent this, so the header never draws a guess as a count. */
+export function isMemorySweepEvent(value: unknown): value is MemorySweepEvent {
+    if (typeof value !== 'object' || value === null) return false
+    const candidate = value as Partial<MemorySweepEvent>
+    if (typeof candidate.done !== 'number' || typeof candidate.total !== 'number') return false
+    return SWEEP_EVENTS.some(name => name === candidate.type)
+}
 
 /** Whether the backend really sent this, so the panel never draws a guess as a verdict. */
 export function isMemoryJudgeEvent(value: unknown): value is MemoryJudgeEvent {

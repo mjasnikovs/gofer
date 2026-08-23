@@ -72,3 +72,25 @@ li > div:focus-within .gofer-row-action {
 .astryx-tree-list-item > * {
     min-width: 0;
 }
+
+/*
+ * A list row is indented from the panel edge; its divider is not.
+ *
+ * `Collapsible` pads only the block axis, so a `CollapsibleGroup` list drew its text hard against
+ * the panel's left edge while the header above it sat on `padding={3}` — the memory panel's 84 rows
+ * against a header that was indented, which is what made the column look broken rather than dense.
+ *
+ * The padding goes on the trigger and the content rather than on the row's root, because the root
+ * is where the hairline lives: `borderBlockStart` spans the border box, which padding inside it
+ * does not shrink. So the divider still runs edge to edge, which is what Astryx's layout guidance
+ * asks of a dense list, and only the words move.
+ *
+ * `[data-density]` is the group marker. `CollapsibleGroup` resolves a density only when it draws
+ * dividers, so a standalone Collapsible — one placed inside a Card that already has padding — is
+ * left alone rather than indented twice.
+ */
+
+.astryx-collapsible-trigger[data-density],
+.astryx-collapsible-content[data-density] {
+    padding-inline: var(--spacing-3);
+}

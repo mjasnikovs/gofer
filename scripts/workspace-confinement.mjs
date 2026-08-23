@@ -257,14 +257,28 @@ export function validateBashCommand(command) {
         /\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)(?![\w-])/gu,
         'standard-stream'
     )
-    // And a lone `/` with a space after it is a division sign, not a path. `1 / 2` opens an
-    // argument with a slash exactly the way `/etc/passwd` does, and the rule refused both — so
+    // Division is taken out of the command too, for the same reason. `1 / 2` opens an argument
+    // with a slash exactly the way `/etc/passwd` does, and the rule refused both — so
     // `python3 -c "print(math.sin(2 * math.pi * i / 44100))"`, `awk '{print $1 / $2}'` and
     // `echo $((10 / 2))` were all told they named an absolute path. A live turn met it generating
-    // a .wav and never got the file written. A path has something after its slash; arithmetic has
-    // whitespace. `ls /` — a slash at the end of the command — is still the root and still refused,
-    // because arithmetic needs a right-hand side and a bare root reference does not.
-    if (/(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|\/(?!\s))/u.test(probed))
+    // a .wav and never got the file written. Python floors with two slashes, so the whole run of
+    // them goes, not just the first: `x // 4` cost another live turn its PNG encoder twice over.
+    //
+    // What says arithmetic is an operand on *both* sides, on one line. Whitespace after the slash
+    // was the rule for a while and it was not a rule at all — `find / -name "*.pem"`,
+    // `grep -r secret / `, `ls / | head` and a `ls /` with a newline after it were every one of
+    // them read as a division, and the turn could walk the whole filesystem from a rule written to
+    // let it divide two numbers. A right-hand side that is a flag, a pipe, a newline or the end of
+    // the command is not an operand; neither is a left-hand side that is a flag, and neither is
+    // one that is the name of the command being run, because `find` is not a number.
+    const measured = probed.replace(
+        /([^\s|;&]+)([^\S\n]+)\/+([^\S\n]+)(?=[\w$([.])/gu,
+        (whole, left, before, after, at, text) =>
+            left.startsWith('-') || /(?:^|[|;&\n(])\s*$/u.test(text.slice(0, at)) ?
+                whole
+            :   `${left}${before}divided-by${after}`
+    )
+    if (/(?:^|[\s=<>|;&])["']?(?:\.\.(?:[\\/]|$)|~(?:[\\/]|$)|\/)/u.test(measured))
         throw new Error(
             'Shell commands take paths relative to the workspace, and this one names an absolute '
                 + 'path or one that climbs out. The shell already runs in the workspace root, so '

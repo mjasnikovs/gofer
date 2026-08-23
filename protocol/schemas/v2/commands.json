@@ -65,6 +65,7 @@
         {"command": "node.inspect", "handler": "_node_inspect"},
         {"command": "resource.rescan", "handler": "_resource_rescan"},
         {"command": "resource.create_tileset", "handler": "_resource_create_tileset"},
+        {"command": "resource.create_texture", "handler": "_resource_create_texture"},
         {"command": "resource.create_shape", "handler": "_resource_create_shape"},
         {"command": "resource.describe_tileset", "handler": "_resource_describe_tileset"},
         {"command": "session.heartbeat", "handler": "_session_heartbeat"}

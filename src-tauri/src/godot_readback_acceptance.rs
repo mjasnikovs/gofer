@@ -475,6 +475,199 @@ fn cells_and_resources_answer_from_what_they_wrote() {
     );
 }
 
+/// A scene created in a directory the project does not have yet is created, not refused.
+///
+/// `ResourceSaver.save` answers ERR_CANT_OPEN for a folder that is not there, and that number —
+/// 19 — is what reached a live turn, twice running, about `res://scenes/bullet.tscn` in a project
+/// with no `scenes` folder. `create_shape` and `create_tileset` have both made their directory
+/// since they were written; `scene.create` and `scene.save_as` never did.
+#[test]
+fn a_scene_is_created_in_a_directory_the_project_does_not_have_yet() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    let made = session.mutate(
+        "scene.create",
+        json!({
+            "path": "res://scenes/arcade/bullet.tscn",
+            "rootName": "Bullet",
+            "rootType": "Node2D"
+        }),
+    );
+    assert_eq!(made["scene"], "res://scenes/arcade/bullet.tscn", "{made}");
+    assert!(
+        worktree.join("scenes/arcade/bullet.tscn").exists(),
+        "{made}"
+    );
+
+    // And `save_as` into another folder that does not exist either.
+    let elsewhere = session.mutate(
+        "scene.save_as",
+        json!({"path": "res://levels/one/copy.tscn"}),
+    );
+    assert_eq!(
+        elsewhere["scene"], "res://levels/one/copy.tscn",
+        "{elsewhere}"
+    );
+    assert!(
+        worktree.join("levels/one/copy.tscn").exists(),
+        "{elsewhere}"
+    );
+}
+
+/// A texture this tool drew is a texture the project can cut tiles out of, with no rescan between.
+///
+/// The capability is the point, not the pixels. Every 2D task starts with no art, and before this
+/// operation the only way to make some was to leave the tool: three live turns reached for `bash`,
+/// one of them writing a PNG encoder out of `struct` and `zlib` because the machine had no image
+/// library, getting the colour type wrong, and spending six calls on a 16x16 tile. A Windows
+/// install has neither the shell nor the library.
+///
+/// So the test is the whole path a caller takes — draw an atlas of two tiles, cut it, paint with
+/// it — and the read-back is `create_tileset`, which is the one command that cannot be satisfied by
+/// a file that merely exists.
+#[test]
+fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    // Two 16x16 tiles side by side, in a directory the editor has never walked.
+    let drawn = session.call(
+        "resource.create_texture",
+        json!({
+            "path": "res://art/atlas.png",
+            "size": [32, 16],
+            "background": "#3b2a1a",
+            "rects": [
+                {"x": 0, "y": 0, "width": 16, "height": 4, "color": "forestgreen"},
+                {"x": 16, "y": 0, "width": 16, "height": 16, "color": "slategray"}
+            ]
+        }),
+    );
+    assert_eq!(drawn["width"], 32, "{drawn}");
+    assert_eq!(drawn["height"], 16, "{drawn}");
+    assert_eq!(drawn["replaced"], false, "{drawn}");
+    assert!(worktree.join("art/atlas.png").exists(), "{drawn}");
+
+    // No rescan here on purpose: the draw waits for its own import, and a caller that had to
+    // remember a second call would forget it.
+    let built = session.call(
+        "resource.create_tileset",
+        json!({
+            "path": "res://art/atlas.tres",
+            "texture": "res://art/atlas.png",
+            "tileSize": 16,
+            "solid": [[1, 0]]
+        }),
+    );
+    assert_eq!(built["grid"], json!([2, 1]), "{built}");
+
+    // Drawing over it again is a replacement, and says so.
+    let again = session.call(
+        "resource.create_texture",
+        json!({"path": "res://art/atlas.png", "size": [32, 16], "background": "black"}),
+    );
+    assert_eq!(again["replaced"], true, "{again}");
+
+    // A colour nobody can write is refused rather than quietly drawn as black.
+    let refused = session
+        .try_call(
+            "resource.create_texture",
+            json!({"path": "res://art/bad.png", "size": 8, "background": "notacolour"}),
+            None,
+        )
+        .expect_err("an unreadable colour must be refused");
+    assert!(refused.contains("unsupported_color"), "{refused}");
+    assert!(!worktree.join("art/bad.png").exists(), "{refused}");
+}
+
+/// A path that climbs out of the project is refused by the addon, not followed.
+///
+/// `res://../` is a real path to Godot: `globalize_path` resolves it out of the project and every
+/// writer follows it. Measured on the pinned 4.7.2 before this gate existed —
+/// `Image.save_png("res://../escaped.png")` and `ResourceSaver.save(shape, "res://../escaped.tres")`
+/// both landed one directory above the project and both answered OK.
+///
+/// The router refuses this before the socket. This is the wire's own backstop, which is also the
+/// desktop client's, and it is tested here because only a real editor can prove the file is not
+/// there afterwards.
+#[test]
+fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let outside = worktree
+        .parent()
+        .expect("the worktree has a parent")
+        .to_path_buf();
+    let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    for (command, params) in [
+        (
+            "resource.create_texture",
+            json!({"path": "res://../escaped.png", "size": 8, "background": "red"}),
+        ),
+        (
+            "resource.create_shape",
+            json!({
+                "path": "res://../escaped.tres",
+                "shapeType": "RectangleShape2D",
+                "size": [8, 8]
+            }),
+        ),
+        (
+            "resource.create_texture",
+            json!({"path": "assets/../../escaped.png", "size": 8, "background": "red"}),
+        ),
+    ] {
+        let refused = session
+            .try_call(command, params.clone(), None)
+            .expect_err("a path that climbs out must be refused");
+        assert!(
+            refused.starts_with("outside_workspace"),
+            "{command} {params}: {refused}"
+        );
+    }
+    assert!(
+        !outside.join("escaped.png").exists() && !outside.join("escaped.tres").exists(),
+        "nothing may be written above the project"
+    );
+
+    // The gate reads paths, not values: a string that merely holds two dots is untouched.
+    let drawn = session.call(
+        "resource.create_texture",
+        json!({"path": "res://art/dots..png.png", "size": 4, "background": "red"}),
+    );
+    assert_eq!(drawn["width"], 4, "{drawn}");
+
+    // And a node's own text may say anything, `../docs/readme` included. A game that puts a
+    // relative path on screen is not a game reaching out of its worktree.
+    let mut session = session;
+    let root = session.call("scene.get_tree", json!({}))["root"]["path"]
+        .as_str()
+        .expect("a root path")
+        .to_owned();
+    let named = session.mutate(
+        "node.create",
+        json!({"parent": root, "type": "Label", "name": "Note"}),
+    );
+    session.mutate(
+        "node.set_property",
+        json!({
+            "node": named["path"],
+            "property": "text",
+            "value": {"type": "string", "value": "see ../docs/readme"}
+        }),
+    );
+    // `mutate` panics on a refusal, so arriving here is the assertion; and the addon ends every
+    // mutation by reading back what it wrote, so a write it did not make could not have got here
+    // either.
+}
+
 /// An asset written into a directory the editor has never seen is importable after `rescan` names
 /// it.
 ///
@@ -517,6 +710,60 @@ fn a_rescan_imports_an_asset_in_a_directory_made_after_the_editor_started() {
         json!({
             "path": "res://assets/late.tres",
             "texture": "res://assets/late.png",
+            "tileSize": 16
+        }),
+    );
+    assert_eq!(built["grid"], json!([8, 2]), "{built}");
+}
+
+/// An asset whose first import failed is importable again once the file behind it is fixed.
+///
+/// The failed import is not nothing: Godot writes the `.import` sidecar for it anyway, and from
+/// then on the file is one the editor has already looked at. A project walk skips it — which is why
+/// the walk `resource.rescan` falls back to, the branch its own comment calls the last resort,
+/// changed nothing at all. A live turn building a top-down arena hand-rolled a PNG encoder, got the
+/// colour type wrong, rescanned into `import_failed`, fixed the encoder, wrote a genuinely valid
+/// RGBA PNG over the same path — and was told `import_failed` again, about a file `file(1)` reads
+/// as a PNG. It escaped by running `rm -f assets/*.import` in the shell, which is not a door a
+/// Windows install has and not one the tool should need.
+///
+/// The sidecar of an import that produced nothing is what gets taken away before the walk, so the
+/// walk meets a file it has never imported. Everything else about the rescan is unchanged.
+#[test]
+fn a_rescan_imports_an_asset_again_after_its_first_import_failed() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    // A PNG header over bytes that decode to nothing — the shape a hand-written encoder produces,
+    // and the shape Godot's importer takes far enough to write a sidecar and then fails on.
+    std::fs::create_dir_all(worktree.join("assets")).expect("make the assets directory");
+    let mut broken = b"\x89PNG\r\n\x1a\n".to_vec();
+    broken.extend_from_slice(&[0u8; 64]);
+    std::fs::write(worktree.join("assets/fixed.png"), &broken).expect("write the broken image");
+
+    let refused = session.try_call(
+        "resource.rescan",
+        json!({"path": "res://assets/fixed.png"}),
+        None,
+    );
+    assert!(
+        refused.is_err(),
+        "an image that cannot be imported must not answer scanned: {refused:?}"
+    );
+
+    // The same path, now a real atlas. Nothing else about the project changed.
+    std::fs::write(worktree.join("assets/fixed.png"), ATLAS).expect("write the real atlas");
+    let scanned = session.call("resource.rescan", json!({"path": "res://assets/fixed.png"}));
+    assert_eq!(scanned["scanned"], true, "{scanned}");
+
+    // The proof that the import is real: the one command that cannot be faked cuts tiles out of it.
+    let built = session.call(
+        "resource.create_tileset",
+        json!({
+            "path": "res://assets/fixed.tres",
+            "texture": "res://assets/fixed.png",
             "tileSize": 16
         }),
     );

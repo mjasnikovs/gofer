@@ -216,8 +216,9 @@ static CONNECTION: Mutex<Option<Connection>> = Mutex::new(None);
 /// calls trying to launch the project from the shell, every one of them refused by the workspace
 /// rule, before coming back and doing it the way that already worked.
 ///
-/// So the router asks here first. Set when a launch is answered, cleared by terminate, disconnect,
-/// and the supervisor dropping the session — every way the game can go.
+/// So the router asks here first. Set when a launch or a restart is answered, cleared by terminate,
+/// disconnect, the supervisor dropping the session, and any answer that says the debuggee ended on
+/// its own — every way the game can go.
 static DEBUGGER_HOLDS_A_GAME: AtomicBool = AtomicBool::new(false);
 
 /// Whether the debugger has a game of its own running right now.
@@ -225,8 +226,41 @@ pub fn holds_a_game() -> bool {
     DEBUGGER_HOLDS_A_GAME.load(Ordering::Relaxed)
 }
 
-/// Answers one debugger request, connecting to the active session's adapter on first use.
+/// Sets that flag for a test about what the router says when the debugger is holding a game.
+/// Nothing else may write it: every real path goes through a launch, a terminate or a disconnect.
+#[cfg(test)]
+pub fn pretend_it_holds_a_game(holds: bool) {
+    DEBUGGER_HOLDS_A_GAME.store(holds, Ordering::Relaxed);
+}
+
+/// Answers one debugger request, and notices in the answer that the game it was holding is gone.
 pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
+    let answered = answer(request);
+    if answered.as_ref().is_ok_and(answer_says_the_game_ended) {
+        DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
+    }
+    answered
+}
+
+/// Whether an answer says the debuggee this session was holding has ended.
+///
+/// A game that quits, is closed, or crashes goes through no `terminate` and no `disconnect`, and
+/// the flag was only ever lowered by those. From the first `get_tree().quit()` onward every
+/// `godot_debug launch` answered `already_launched` and every `godot_runtime run` answered
+/// `already_running`, both about a game that no longer existed, for the rest of the session.
+///
+/// The adapter's `terminated` and `exited` events are read by exactly two calls — a wait that ends
+/// with no stop, and a step-out that ran out of debuggee — so those two answers are where the news
+/// arrives, and there is nowhere else to look for it.
+fn answer_says_the_game_ended(answer: &DebugResponse) -> bool {
+    match answer {
+        DebugResponse::Stopped { stopped } => stopped.is_none(),
+        DebugResponse::Stepped { outcome } => matches!(outcome, StepOutcome::Terminated),
+        _ => false,
+    }
+}
+
+fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
     let (client, workspace, events) = connection()?;
     match request {
         DebugRequest::Status => Ok(DebugResponse::Status {
@@ -320,16 +354,24 @@ pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
         }
         DebugRequest::Restart => {
             client.restart()?;
+            // A restart is a launch by another name: it leaves a game running, and the refusal the
+            // flag drives is the one that names restart as the way to replace one.
+            DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Terminate => {
-            client.terminate()?;
+            // The flag goes down whatever the adapter answers. Terminate is the way out the
+            // refusal names, and a terminate that errored is not a reason to go on refusing every
+            // launch for the rest of the session.
+            let terminated = client.terminate();
             DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
+            terminated?;
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Disconnect { terminate_debuggee } => {
-            client.disconnect(terminate_debuggee.unwrap_or(true))?;
+            let disconnected = client.disconnect(terminate_debuggee.unwrap_or(true));
             DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
+            disconnected?;
             Ok(DebugResponse::Acknowledged)
         }
     }
@@ -658,6 +700,61 @@ mod tests {
             );
         }
         assert!(super::refuse_a_second_launch(false).is_ok());
+    }
+
+    /// A game that ended on its own puts the flag down, so the next launch is not refused forever.
+    ///
+    /// The flag was raised by a launch and lowered by terminate, disconnect and session stop — and
+    /// a debuggee that quits, is closed, or crashes goes through none of those. From the first
+    /// `get_tree().quit()` onward, every `godot_debug launch` answered `already_launched` and every
+    /// `godot_runtime run` answered `already_running`, both about a game that no longer existed,
+    /// for the rest of the editor session.
+    ///
+    /// The adapter says so in the only two answers that carry it: a wait that ends with no stop,
+    /// and a step-out that ran out of debuggee.
+    #[test]
+    fn an_answer_that_says_the_debuggee_ended_puts_the_flag_down() {
+        let stop = super::StoppedDetails {
+            reason: "breakpoint".to_owned(),
+            thread_id: Some(super::MAIN_THREAD_ID),
+            description: None,
+            text: None,
+            all_threads_stopped: true,
+        };
+
+        for ended in [
+            super::DebugResponse::Stopped { stopped: None },
+            super::DebugResponse::Stepped {
+                outcome: super::StepOutcome::Terminated,
+            },
+        ] {
+            assert!(
+                super::answer_says_the_game_ended(&ended),
+                "{ended:?} says the debuggee is gone"
+            );
+        }
+
+        // And a game that is merely stopped, stepped, or launched is still a game.
+        for alive in [
+            super::DebugResponse::Stopped {
+                stopped: Some(stop.clone()),
+            },
+            super::DebugResponse::Stepped {
+                outcome: super::StepOutcome::SteppedOut { stop: stop.clone() },
+            },
+            super::DebugResponse::Stepped {
+                outcome: super::StepOutcome::Resumed,
+            },
+            super::DebugResponse::Launched {
+                breakpoints: Vec::new(),
+            },
+            super::DebugResponse::Acknowledged,
+        ] {
+            assert!(
+                !super::answer_says_the_game_ended(&alive),
+                "{alive:?} does not say the debuggee is gone"
+            );
+        }
     }
 
     use super::*;

@@ -198,6 +198,14 @@ const MAX_ICON_BASE_DEPTH := 32
 
 ## The atlas a tileset command will cut up, and the cells one paint may write, both capped so a
 ## mistyped tile size or a runaway rectangle cannot spend minutes inside the editor's main loop.
+## A texture no larger than this on a side. A tile is 16 and a sprite sheet is a few hundred; a
+## caller asking for more than this wanted a photograph, and this operation draws rectangles.
+const MAX_TEXTURE_EDGE := 1024
+
+## How many rectangles one texture is painted with. Enough for a sprite sheet drawn a tile at a
+## time; past it the caller wanted an image editor.
+const MAX_TEXTURE_RECTS := 512
+
 const MAX_TILESET_TILES := 4096
 const MAX_PAINTED_CELLS := 20000
 ## How many entries one batching command takes. A batch is a single blocking pass over the editor's
@@ -273,7 +281,7 @@ const MUTATING_COMMANDS: Array[String] = [
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:244a41f4e15da36a
+# GENERATED-BEGIN command-params sha256:c33af5a5603569bc
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.undo": {"required": [], "optional": []},
@@ -321,6 +329,7 @@ const COMMAND_PARAMS: Dictionary = {
     "editor.set_setting": {"required": ["name", "value"], "optional": []},
     "resource.rescan": {"required": [], "optional": ["path"]},
     "resource.create_tileset": {"required": ["path", "texture"], "optional": ["tileSize", "tiles", "solid"]},
+    "resource.create_texture": {"required": ["path", "size"], "optional": ["background", "rects"]},
     "resource.create_shape": {"required": ["path", "shapeType"], "optional": ["size", "radius", "height", "points"]},
     "resource.describe_tileset": {"required": ["path"], "optional": []},
     "runtime.run": {"required": [], "optional": []},
@@ -547,6 +556,21 @@ func _handle_request(envelope: Dictionary) -> void:
     var expected_revision = envelope.get("expectedRevision", null)
     var expected_scene: String = str(envelope.get("expectedScene", ""))
 
+    var climbing := _a_path_that_climbs_out("", params)
+    if not climbing.is_empty():
+        _respond_error(
+            id,
+            "outside_workspace",
+            (
+                "%s climbs out of the project. Every path here names a file inside the task "
+                + "worktree, spelled the way the project spells it, and a .. segment is refused "
+                + "wherever it appears."
+            ) % climbing,
+            false,
+            {"path": climbing}
+        )
+        return
+
     if RUNTIME_COMMANDS.has(command):
         _handle_runtime_request(id, command, params)
         return
@@ -617,7 +641,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
     if declared.has("_gofer_error"):
         return declared
 
-# GENERATED-BEGIN dispatch-table sha256:117f32d8ce50a2b5
+# GENERATED-BEGIN dispatch-table sha256:7975d13daf2bf083
     match command:
         "session.get_state":
             return _session_state()
@@ -721,6 +745,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _resource_rescan(params)
         "resource.create_tileset":
             return _resource_create_tileset(params)
+        "resource.create_texture":
+            return _resource_create_texture(params)
         "resource.create_shape":
             return _resource_create_shape(params)
         "resource.describe_tileset":
@@ -729,6 +755,61 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _session_heartbeat()
     return _unknown_command_error(command)
 # GENERATED-END dispatch-table
+
+## The first path in these parameters that climbs out of the project, or an empty string.
+##
+## Godot resolves `res://../` out of the project and follows it. Measured against the pinned 4.7.2:
+## `Image.save_png("res://../escaped.png")` and `ResourceSaver.save(shape, "res://../escaped.tres")`
+## both wrote one directory above the project, and both answered OK. The router refuses this before
+## the socket; this is the wire's own backstop, which is also the desktop client's.
+##
+## A `..` inside a path, not a `..` inside a value: a Label's text may say anything, so a string
+## counts as a path only when it carries the scheme or a separator.
+func _a_path_that_climbs_out(under: String, value: Variant) -> String:
+    match typeof(value):
+        TYPE_STRING, TYPE_STRING_NAME:
+            if _climbs_out_of_the_project(under, str(value)):
+                return str(value)
+        TYPE_ARRAY:
+            for entry: Variant in value as Array:
+                var found := _a_path_that_climbs_out(under, entry)
+                if not found.is_empty():
+                    return found
+        TYPE_DICTIONARY:
+            var held: Dictionary = value
+            for key: Variant in held:
+                var found := _a_path_that_climbs_out(str(key), held[key])
+                if not found.is_empty():
+                    return found
+    return ""
+
+## The keys whose value is a file, so a `..` in one is a path climbing rather than prose.
+##
+## A node's `text` may say anything, `../docs/readme` included. A string carrying the scheme is a
+## path wherever it sits; everything else has to be named here. `path` covers the nested one a
+## resource value holds.
+const A_KEY_THAT_NAMES_A_FILE: Array[String] = [
+    "path", "paths", "texture", "scene", "file", "files", "from", "to"
+]
+
+## Whether one string is a path, and climbs.
+func _climbs_out_of_the_project(under: String, text: String) -> bool:
+    var path := text
+    var schemed := false
+    if path.begins_with("res://"):
+        path = path.substr(6)
+        schemed = true
+    elif path.begins_with("user://"):
+        path = path.substr(7)
+        schemed = true
+    if not schemed and not A_KEY_THAT_NAMES_A_FILE.has(under):
+        return false
+    if not schemed and path == "..":
+        return true
+    for segment in path.split("/"):
+        if segment == "..":
+            return true
+    return false
 
 ## Answers nothing, on purpose: a heartbeat is a request that proves the pipe is open both ways.
 func _session_heartbeat() -> Dictionary:
@@ -1478,6 +1559,17 @@ func _session_cancel(params: Dictionary) -> Dictionary:
     # A request that already answered is not an error: the caller gave up and the reply crossed it.
     return {"requestId": request_id, "cancelled": cancelled}
 
+## Takes back the action just committed, so a refusal is true about the scene.
+##
+## A read-back mismatch means the engine did not do what the command asked, and the command then
+## answers that it failed. It has to be failed: `node.rename` committed its action, found Godot
+## holding another name, and returned a refusal over a scene that had changed anyway — the node
+## keeping a name nobody asked for and the revision never moving to say so.
+func _take_back_the_last_action() -> void:
+    var history := _scene_history()
+    if history != null and history.has_undo():
+        history.undo()
+
 func _undo() -> Dictionary:
     var history := _scene_history()
     if history == null:
@@ -1641,11 +1733,34 @@ func _readback_error(
                 what,
                 str(wanted),
                 str(found),
-                _instead_of(String(details.get("property", "")), wanted, found)
+                (
+                    _instead_of(String(details.get("property", "")), wanted, found)
+                    + _made_unique(wanted, found)
+                )
             ]
         ),
         described
     )
+
+## Whether a name came back with a number on the end, which is Godot making it unique.
+##
+## A node's name is unique among its siblings and Godot does not refuse a clash — it appends a
+## number and carries on. Two live turns in one run renamed a node to `UI` and to `Player` under
+## parents that already had one, and were told only that the write asked for `UI` and Godot holds
+## `UI2`: the mismatch, and not the reason for it.
+##
+## Only a tail that is entirely digits counts, so `Player` answering `PlayerShip` is not this.
+func _made_unique(wanted: Variant, found: Variant) -> String:
+    var asked := str(wanted)
+    var held := str(found)
+    if asked.is_empty() or held == asked or not held.begins_with(asked):
+        return ""
+    if not held.substr(asked.length()).is_valid_int():
+        return ""
+    return (
+        ". A sibling is already called %s, and Godot makes a node's name unique among its siblings "
+        + "rather than refusing the clash. Rename or remove that one first, or choose another name."
+    ) % asked
 
 ## The properties a caller reaches for that no scene can hold, and the ones that do the same job.
 ##
@@ -1798,7 +1913,7 @@ func _declared_setting_type(name: String) -> int:
     return typeof(ProjectSettings.property_get_revert(name))
 
 func _project_search_settings(params: Dictionary) -> Dictionary:
-    var query := str(params.get("query", "")).to_lower()
+    var wanted := _words_of(str(params.get("query", "")))
     var matches: Array = []
     var total := 0
     for info in ProjectSettings.get_property_list():
@@ -1806,7 +1921,7 @@ func _project_search_settings(params: Dictionary) -> Dictionary:
         # The property list opens with a category header that is not a setting at all.
         if name.is_empty() or not ProjectSettings.has_setting(name):
             continue
-        if not query.is_empty() and not name.to_lower().contains(query):
+        if not _name_holds_every_word(name, wanted):
             continue
         total += 1
         if matches.size() < MAX_SEARCH_RESULTS:
@@ -1825,7 +1940,13 @@ func _project_get_setting(params: Dictionary) -> Dictionary:
         return Params.error("invalid_params", "project.get_setting requires name")
     if not ProjectSettings.has_setting(name):
         return Params.error(
-            "setting_not_found", "Project setting '%s' does not exist" % name, {"name": name}
+            "setting_not_found",
+            (
+                "Project setting '%s' does not exist. project.search_settings takes the words you "
+                + "would say — every one of them has to be in the name, in any order — and answers "
+                + "the names that are really there."
+            ) % name,
+            {"name": name}
         )
     return {
         "name": name,
@@ -1904,7 +2025,13 @@ func _project_reset_setting(params: Dictionary) -> Dictionary:
         return Params.error("invalid_params", "project.reset_setting requires name")
     if not ProjectSettings.has_setting(name):
         return Params.error(
-            "setting_not_found", "Project setting '%s' does not exist" % name, {"name": name}
+            "setting_not_found",
+            (
+                "Project setting '%s' does not exist. project.search_settings takes the words you "
+                + "would say — every one of them has to be in the name, in any order — and answers "
+                + "the names that are really there."
+            ) % name,
+            {"name": name}
         )
     var typed := _reserved_setting_command(name)
     if not typed.is_empty():
@@ -2079,6 +2206,30 @@ func _project_set_input_action(params: Dictionary) -> Dictionary:
         "events": Params.encode_input_events(held_events)
     }
 
+## The words a search query is made of, lowered, with the punctuation between them thrown away.
+##
+## A settings name is `text_editor/appearance/gutters/show_line_numbers` — slashes and underscores
+## and never a space. The search matched the whole query as one substring, so every natural way to
+## ask was a guaranteed miss: one live turn asked for "line numbers", "split mode", "grid step",
+## "filesystem split", "2d snap" and eight more, got nothing every time, and concluded two of the
+## three things it wanted were not settings. `show_line_numbers` was there the whole time.
+func _words_of(query: String) -> PackedStringArray:
+    var words := PackedStringArray()
+    for word in query.to_lower().split(" ", false):
+        var trimmed := str(word).strip_edges()
+        if not trimmed.is_empty():
+            words.append(trimmed)
+    return words
+
+## Whether a setting's name holds every word asked for, in any order. No words matches everything,
+## and one word behaves exactly as the substring match it replaces.
+func _name_holds_every_word(name: String, words: PackedStringArray) -> bool:
+    var lowered := name.to_lower()
+    for word in words:
+        if not lowered.contains(word):
+            return false
+    return true
+
 ## Removes an input action from project.godot. A built-in ui_ action cannot be deleted; its
 ## binding is changed with `project.set_input_action` and given back with
 ## `project.reset_input_action`.
@@ -2191,7 +2342,7 @@ func _project_set_plugin_enabled(params: Dictionary) -> Dictionary:
 ## EditorSettings are machine-wide and shared by every project this editor opens. They persist
 ## when the editor exits normally, so these commands never write them to disk themselves.
 func _editor_search_settings(params: Dictionary) -> Dictionary:
-    var query := str(params.get("query", "")).to_lower()
+    var wanted := _words_of(str(params.get("query", "")))
     var settings := EditorInterface.get_editor_settings()
     var matches: Array = []
     var total := 0
@@ -2199,7 +2350,7 @@ func _editor_search_settings(params: Dictionary) -> Dictionary:
         var name := str(info.get("name", ""))
         if name.is_empty() or not settings.has_setting(name):
             continue
-        if not query.is_empty() and not name.to_lower().contains(query):
+        if not _name_holds_every_word(name, wanted):
             continue
         total += 1
         if matches.size() < MAX_SEARCH_RESULTS:
@@ -2213,7 +2364,13 @@ func _editor_get_setting(params: Dictionary) -> Dictionary:
     var settings := EditorInterface.get_editor_settings()
     if not settings.has_setting(name):
         return Params.error(
-            "setting_not_found", "Editor setting '%s' does not exist" % name, {"name": name}
+            "setting_not_found",
+            (
+                "Editor setting '%s' does not exist. project.search_editor_settings takes the "
+                + "words you would say — every one of them has to be in the name, in any order — "
+                + "and answers the names that are really there."
+            ) % name,
+            {"name": name}
         )
     return {"name": name, "value": Protocol.encode(settings.get_setting(name))}
 
@@ -2224,7 +2381,13 @@ func _editor_set_setting(params: Dictionary) -> Dictionary:
     var settings := EditorInterface.get_editor_settings()
     if not settings.has_setting(name):
         return Params.error(
-            "setting_not_found", "Editor setting '%s' does not exist" % name, {"name": name}
+            "setting_not_found",
+            (
+                "Editor setting '%s' does not exist. project.search_editor_settings takes the "
+                + "words you would say — every one of them has to be in the name, in any order — "
+                + "and answers the names that are really there."
+            ) % name,
+            {"name": name}
         )
     var decoded := Protocol.decode(params["value"])
     if not decoded["ok"]:
@@ -2427,6 +2590,15 @@ func _needs_project_walk(path: String) -> bool:
         return true
     return _has_stale_import(path)
 
+## Takes away the sidecar of an import that produced nothing, so a walk sees a file it has not seen.
+##
+## Only that sidecar. One whose imported file is on disk is a working import and is left alone, so
+## a rescan of an unchanged project still costs nothing and re-imports nothing.
+func _discard_failed_import(path: String) -> void:
+    if not _has_stale_import(path):
+        return
+    DirAccess.remove_absolute(path + ".import")
+
 ## Whether an `.import` beside this file names an imported file that was never produced.
 ##
 ## Godot writes the imported resource's path into the sidecar's `path=` — or into `dest_files` when
@@ -2573,6 +2745,16 @@ func _run_scan_sweep() -> void:
         # Either the caller asked for the whole project, or a named file is past what `update_file`
         # can reach, or the import did not leave it loadable. A walk is the last resort and the
         # only one left: it is the one thing that registers a directory the editor has never seen.
+        #
+        # A sidecar left by an import that produced nothing goes first, or the walk is not a last
+        # resort at all: the editor reads that file as one it has already imported and steps over
+        # it, whatever the bytes underneath have become since. A live turn wrote a malformed PNG,
+        # was answered `import_failed`, wrote a real one over the same path, and was answered
+        # `import_failed` again — about an image `file(1)` reads as a PNG. It got out by running
+        # `rm -f assets/*.import` in the shell, which a Windows install cannot do and this tool
+        # should not need. Taking the sidecar away is the same thing, done where it belongs.
+        for path: String in paths:
+            _discard_failed_import(path)
         filesystem.scan()
         pending["walked"] = true
         pending["scans"] = _scans_completed
@@ -2613,11 +2795,15 @@ func _paths_not_loadable(paths: Array) -> Array[String]:
 ## What a finished rescan answers with. `path` stays for the callers that named one file, so the
 ## single-path answer is the one it always was.
 func _rescan_result(pending: Dictionary) -> Dictionary:
-    return {
+    var answer := {
         "scanned": true,
         "path": pending.get("path", ""),
         "paths": pending.get("paths", []),
     }
+    # A command that wrote the file itself waits on the same scan, and its own answer rides here so
+    # the caller gets one reply rather than a rescan's. `resource.rescan` carries nothing and is
+    # unchanged by this.
+    return answer.merged(pending.get("result", {}), true)
 
 ## Registers a batch of files and imports the ones that need it, in one call, and reports whether
 ## every one of them can be loaded afterwards.
@@ -2917,6 +3103,197 @@ func _resource_create_shape(params: Dictionary) -> Dictionary:
     }
 
 
+## Draws a PNG and hands back a texture the project has already imported.
+##
+## Every 2D task starts with no art, and until this existed the only way to make some was to leave
+## the tool. Three live turns did: two reached for a Python image library through `bash`, and the
+## third — on a machine that had none — hand-rolled a PNG encoder out of `struct` and `zlib`, got
+## the colour type wrong, and spent six calls and a throwaway `.py` file getting a 16x16 tile onto
+## disk. A Windows install has neither the shell nor the library, so this had to be an operation
+## rather than a sentence pointing at one.
+##
+## The engine draws it. `Image` is already here, so this costs no dependency and writes a file the
+## importer accepts by construction. The answer goes back through the same wait `resource.rescan`
+## uses, because a PNG on disk is not a texture until the editor has imported it, and a caller who
+## has to remember a second call to make the first one mean anything will forget — one live turn
+## did, and `create_tileset` told it the texture does not exist.
+func _resource_create_texture(params: Dictionary) -> Dictionary:
+    var path := _as_resource_path(params.get("path", ""))
+    if path.is_empty():
+        return Params.error("invalid_params", "resource.create_texture requires path and size")
+    if not path.ends_with(".png"):
+        return Params.error(
+            "invalid_params",
+            "A texture is saved as a .png, and %s is not one" % path,
+            {"path": path}
+        )
+    var measured := _texture_size(params.get("size", null))
+    if measured.has("_gofer_error"):
+        return measured
+    var size: Vector2i = measured["value"]
+    var ground := _texture_background(params)
+    if ground.has("_gofer_error"):
+        return ground
+
+    var image := Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
+    image.fill(ground["value"])
+    var painted := _paint_texture_rects(image, size, params.get("rects", null))
+    if painted.has("_gofer_error"):
+        return painted
+
+    # A directory that does not exist yet is where a caller would put art, exactly as it is for a
+    # shape or a tileset.
+    var folder := path.get_base_dir()
+    if not DirAccess.dir_exists_absolute(folder):
+        var made := DirAccess.make_dir_recursive_absolute(folder)
+        if made != OK:
+            return Params.error(
+                "save_failed",
+                "Directory %s could not be created: %s" % [folder, error_string(made)],
+                {"path": path}
+            )
+    var replaced := FileAccess.file_exists(path)
+    var error := image.save_png(path)
+    if error != OK:
+        return Params.error(
+            "save_failed",
+            "Texture %s could not be saved: %s" % [path, error_string(error)],
+            {"path": path, "error": error}
+        )
+
+    return {"_gofer_pending_scan": {
+        "paths": [path],
+        "walked": false,
+        "scans": _scans_completed,
+        "settled": 0,
+        "deadline": Time.get_ticks_msec() + RESOURCE_SCAN_TIMEOUT_MS,
+        "path": path,
+        "result": {
+            "path": path,
+            "width": size.x,
+            "height": size.y,
+            "replaced": replaced,
+        },
+    }}
+
+## The pixel size of a texture, written as one number or as two.
+func _texture_size(raw: Variant) -> Dictionary:
+    var width := 0
+    var height := 0
+    if typeof(raw) == TYPE_INT or typeof(raw) == TYPE_FLOAT:
+        width = int(raw)
+        height = width
+    elif (typeof(raw) == TYPE_ARRAY and (raw as Array).size() == 2):
+        width = int((raw as Array)[0])
+        height = int((raw as Array)[1])
+    else:
+        return Params.error(
+            "invalid_params",
+            "resource.create_texture takes size as one number or two, and %s is neither" % str(raw)
+        )
+    if width < 1 or height < 1 or width > MAX_TEXTURE_EDGE or height > MAX_TEXTURE_EDGE:
+        return Params.error(
+            "invalid_params",
+            (
+                "A texture is between 1 and %d pixels on a side, and %dx%d is not"
+                % [MAX_TEXTURE_EDGE, width, height]
+            ),
+            {"limit": MAX_TEXTURE_EDGE}
+        )
+    return {"value": Vector2i(width, height)}
+
+## What the image starts as. Transparent without a `background`, so a sprite has no square round it.
+func _texture_background(params: Dictionary) -> Dictionary:
+    if not params.has("background") or params["background"] == null:
+        return {"value": Color(0.0, 0.0, 0.0, 0.0)}
+    return _as_color(params["background"])
+
+## Fills each named rectangle over the background, in the order they were named.
+func _paint_texture_rects(image: Image, size: Vector2i, raw: Variant) -> Dictionary:
+    if raw == null:
+        return {}
+    if typeof(raw) != TYPE_ARRAY:
+        return Params.error(
+            "invalid_params",
+            "resource.create_texture takes rects as a list, and %s is not one" % str(raw)
+        )
+    var listed: Array = raw
+    if listed.size() > MAX_TEXTURE_RECTS:
+        return Params.error(
+            "too_many_rects",
+            (
+                "One texture is painted with at most %d rects, and this one names %d"
+                % [MAX_TEXTURE_RECTS, listed.size()]
+            ),
+            {"limit": MAX_TEXTURE_RECTS}
+        )
+    var canvas := Rect2i(Vector2i.ZERO, size)
+    for entry: Variant in listed:
+        if typeof(entry) != TYPE_DICTIONARY:
+            return Params.error(
+                "invalid_params",
+                "Each rects entry is an object, and %s is not one" % str(entry)
+            )
+        var rect: Dictionary = entry
+        for key in ["x", "y", "width", "height", "color"]:
+            if not rect.has(key):
+                return Params.error(
+                    "invalid_params",
+                    "Each rects entry requires x, y, width, height and color"
+                )
+        var colour := _as_color(rect["color"])
+        if colour.has("_gofer_error"):
+            return colour
+        var area := Rect2i(
+            int(rect["x"]), int(rect["y"]), int(rect["width"]), int(rect["height"])
+        )
+        if area.size.x < 1 or area.size.y < 1:
+            return Params.error(
+                "invalid_params",
+                (
+                    "A rects entry covers at least one pixel, and %dx%d covers none"
+                    % [area.size.x, area.size.y]
+                )
+            )
+        # A rectangle that hangs over the edge is clipped, which is how anyone draws. One that is
+        # wholly outside drew nothing at all, and answering as though it had is how a caller ends up
+        # looking at a blank image wondering which call did it.
+        var drawn := area.intersection(canvas)
+        if drawn.size.x < 1 or drawn.size.y < 1:
+            return Params.error(
+                "invalid_params",
+                (
+                    "A rects entry at %d,%d %dx%d falls entirely outside a %dx%d texture"
+                    % [area.position.x, area.position.y, area.size.x, area.size.y, size.x, size.y]
+                )
+            )
+        image.fill_rect(drawn, colour["value"])
+    return {}
+
+## One colour, written as a name or as a hex string.
+##
+## `Color.from_string` answers its fallback for anything it cannot read, so the fallback here is a
+## colour nobody can write. Measured against the pinned editor: "red", "skyblue", "8b5a2b",
+## "#8b5a2b" and "#8b5a2bff" all read, "notacolour" and "" do not.
+func _as_color(raw: Variant) -> Dictionary:
+    if typeof(raw) != TYPE_STRING and typeof(raw) != TYPE_STRING_NAME:
+        return Params.error(
+            "invalid_params",
+            "A colour is a name or a hex string, and %s is neither" % str(raw)
+        )
+    var unreadable := Color(-1.0, -2.0, -3.0, -4.0)
+    var parsed := Color.from_string(str(raw).strip_edges(), unreadable)
+    if parsed == unreadable:
+        return Params.error(
+            "unsupported_color",
+            (
+                "%s is not a colour. Write a name like skyblue or a hex string like #8b5a2b"
+                % str(raw)
+            ),
+            {"color": str(raw)}
+        )
+    return {"value": parsed}
+
 ## Reports what a saved TileSet holds, so a caller painting with it can name tiles that exist.
 func _resource_describe_tileset(params: Dictionary) -> Dictionary:
     var path := _as_resource_path(params.get("path", ""))
@@ -3038,12 +3415,33 @@ func _scene_create(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "scene_pack_failed",
-                "message": "Could not pack new scene (error %d)" % pack_error,
+                "message": "Could not pack new scene: %s" % error_string(pack_error),
                 "retryable": false,
                 "readiness": "ready",
                 "details": {}
             }
         }
+    # A directory that does not exist yet is where a caller would put a scene, exactly as it is for
+    # a shape or a tileset, both of which have made theirs since they were written. This one did
+    # not, and `ResourceSaver.save` answers ERR_CANT_OPEN for it — 19, which is what reached the
+    # model, twice running, about `res://scenes/bullet.tscn` in a project with no `scenes` folder.
+    var folder := path.get_base_dir()
+    if not DirAccess.dir_exists_absolute(folder):
+        var made := DirAccess.make_dir_recursive_absolute(folder)
+        if made != OK:
+            _set_readiness("ready")
+            root.queue_free()
+            return {
+                "_gofer_error": {
+                    "code": "scene_save_failed",
+                    "message": (
+                        "Directory %s could not be created: %s" % [folder, error_string(made)]
+                    ),
+                    "retryable": false,
+                    "readiness": "ready",
+                    "details": {"path": path}
+                }
+            }
     var save_error := ResourceSaver.save(scene, path)
     if save_error != OK:
         _set_readiness("ready")
@@ -3051,7 +3449,9 @@ func _scene_create(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "scene_save_failed",
-                "message": "Could not save new scene (error %d)" % save_error,
+                "message": (
+                    "Could not save new scene %s: %s" % [path, error_string(save_error)]
+                ),
                 "retryable": false,
                 "readiness": "ready",
                 "details": {"path": path}
@@ -3149,6 +3549,23 @@ func _scene_save_as(params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
+    # The same folder `scene.create` makes. `save_scene_as` answers nothing, so a missing directory
+    # here does not fail loudly — it fails as a read-back that finds no file.
+    var folder := path.get_base_dir()
+    if not DirAccess.dir_exists_absolute(folder):
+        var made := DirAccess.make_dir_recursive_absolute(folder)
+        if made != OK:
+            return {
+                "_gofer_error": {
+                    "code": "scene_save_failed",
+                    "message": (
+                        "Directory %s could not be created: %s" % [folder, error_string(made)]
+                    ),
+                    "retryable": false,
+                    "readiness": "ready",
+                    "details": {"path": path}
+                }
+            }
     EditorInterface.save_scene_as(path)
     var verified := _saved_scene_holds(path, root)
     if not verified.is_empty():
@@ -3713,16 +4130,40 @@ func _node_rename(params: Dictionary) -> Dictionary:
         return _node_not_found_error(node_path_str)
     var old_name := String(node.name)
 
+    # A sibling with that name already, checked before anything is committed. Godot does not refuse
+    # a clash — a node's name is unique among its siblings, so it appends a number and carries on —
+    # and two live turns in one run renamed onto `UI` and `Player` under parents that already had
+    # one. What came back was the read-back mismatch below, which says the write asked for `UI` and
+    # Godot holds `UI2`: the mismatch, and not the reason for it. Worse, that refusal was a lie
+    # about the scene, which held `UI2` from then on.
+    var parent := node.get_parent()
+    if new_name != old_name and parent != null:
+        var sibling := parent.get_node_or_null(NodePath(new_name))
+        if sibling != null and sibling != node:
+            return Params.error(
+                "name_taken",
+                (
+                    "A sibling is already called %s, and Godot makes a node's name unique among "
+                    + "its siblings rather than refusing the clash. Rename or remove that one "
+                    + "first, or choose another name."
+                ) % new_name,
+                {"node": node_path_str, "name": new_name}
+            )
+
     var undo := _begin_action("Rename %s" % old_name)
     undo.add_do_method(node, "set_name", new_name)
     undo.add_undo_method(node, "set_name", old_name)
     undo.commit_action()
 
     # Read-back: what the node is called now. Godot rewrites a name with a character it will not
-    # take and appends a suffix to one a sibling already has, so the name asked for is not always
-    # the name the caller has to address the node by afterwards.
+    # take, so the name asked for is not always the name the caller has to address the node by
+    # afterwards.
     var named := String(node.name)
     if named != new_name:
+        # And the refusal has to be true about the scene. The action is already committed, so it is
+        # taken back before answering: a caller told the write did not land must not find the node
+        # under a name it never asked for.
+        _take_back_the_last_action()
         return _readback_error("node.rename", new_name, named, {"node": node_path_str})
 
     _bump_revision()
@@ -3855,15 +4296,7 @@ func _node_set_property(params: Dictionary) -> Dictionary:
     if node == null:
         return _node_not_found_error(node_path_str)
     if not (property in node):
-        return {
-            "_gofer_error": {
-                "code": "property_not_found",
-                "message": "Node %s has no property %s" % [node_path_str, property],
-                "retryable": false,
-                "readiness": "ready",
-                "details": {"property": property}
-            }
-        }
+        return _property_not_found_error(node, node_path_str, property)
 
     var decoded := Protocol.decode(value)
     if not decoded["ok"]:
@@ -3965,11 +4398,7 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
         if node == null:
             return _node_not_found_error(node_path_str)
         if not (property in node):
-            return Params.error(
-                "property_not_found",
-                "Node %s has no property %s" % [node_path_str, property],
-                {"property": property}
-            )
+            return _property_not_found_error(node, node_path_str, property)
         var decoded := Protocol.decode(spec.get("value", null))
         if not decoded["ok"]:
             return Params.error("unsupported_value", decoded["message"], {"property": property})
@@ -4379,7 +4808,10 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "method_not_found",
-                "message": "%s has no method %s to receive %s" % [_node_path(target), method, signal_name],
+                "message": (
+                    "%s has no method %s to receive %s%s"
+                    % [_node_path(target), method, signal_name, _where_a_method_would_be(target)]
+                ),
                 "retryable": false,
                 "readiness": "ready",
                 "details": {"target": _node_path(target), "method": method}
@@ -4526,7 +4958,10 @@ func _connection_target(params: Dictionary, command: String) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "signal_not_found",
-                "message": "Node %s has no signal %s" % [node_path_str, signal_name],
+                "message": (
+                    "Node %s has no signal %s%s"
+                    % [node_path_str, signal_name, _the_signals_it_does_have(node, signal_name)]
+                ),
                 "retryable": false,
                 "readiness": "ready",
                 "details": {"signal": signal_name}
@@ -4721,6 +5156,124 @@ func _undo_reparent(node: Node, old_parent: Node, owner: Node, old_index: int) -
 
 ## A node the edited scene does not hold, and the spelling that would have found it.
 ##
+## The signals a node really emits, said to a caller that named one it does not.
+##
+## The third of these — `node_not_found` and `property_not_found` were the first two — and the same
+## reasoning: naming the absence repairs nothing. A live turn asked to connect `/Main/ScoreLabel` to
+## `score_changed`, which is an autoload's signal rather than a Label's, and was told only that the
+## Label has no such signal.
+##
+## The near one first when there is one, and otherwise the list, because a node's signals are a
+## short closed set — a Label has about a dozen — unlike its properties.
+func _the_signals_it_does_have(node: Node, wanted: String) -> String:
+    var named: Array[String] = []
+    for entry in node.get_signal_list():
+        var name := str(entry.get("name", ""))
+        if not name.is_empty():
+            named.append(name)
+    if named.is_empty():
+        return ""
+    named.sort()
+    var plain := wanted.to_lower().replace("_", "")
+    for name in named:
+        var candidate := name.to_lower().replace("_", "")
+        if candidate == plain or (mini(candidate.length(), plain.length()) >= 4 \
+                and (candidate.begins_with(plain) or plain.begins_with(candidate))):
+            return ". Did you mean %s?" % name
+    if named.size() > 14:
+        named = named.slice(0, 14)
+    return ". It emits %s." % ", ".join(named)
+
+## Where a method the caller named would have to live, said to a caller that has not put one there.
+##
+## `\/Pickup has no method _on_body_entered to receive body_entered` is the whole of what two live
+## turns were told, twice each. It is true and it repairs nothing: the method belongs to whatever
+## script is on the *target*, which defaults to the scene root rather than to the node emitting the
+## signal, and the commonest reason there is no method is that there is no script on that node yet.
+func _where_a_method_would_be(target: Node) -> String:
+    var script: Variant = target.get_script()
+    if script == null:
+        return (
+            ". No script is attached to it, so it has no methods of its own — write one with "
+            + "godot_script save and set the node's script property to it first. `target` is the "
+            + "node carrying the method and defaults to the scene root, so name it if the method "
+            + "lives elsewhere."
+        )
+    var named: Array[String] = []
+    # `get_script_method_list` belongs to Script, not to Object: `node.get_script_method_list()`
+    # is a runtime error, and a runtime error inside a message builder is a message that never
+    # arrives. Measured against the pinned editor — `Node2D.has_method("get_script_method_list")`
+    # is false, and the same call on the script it carries answers the methods.
+    for entry in (script as Script).get_script_method_list():
+        var name := str(entry.get("name", ""))
+        if not name.is_empty() and not name.begins_with("@"):
+            named.append(name)
+    if named.is_empty():
+        return (
+            ". Its script declares no methods yet. `target` is the node carrying the method and "
+            + "defaults to the scene root, so name it if the method lives elsewhere."
+        )
+    named.sort()
+    if named.size() > 12:
+        named = named.slice(0, 12)
+    return (
+        ". Its script declares %s. `target` is the node carrying the method and defaults to the "
+        + "scene root, so name it if the method lives elsewhere."
+    ) % ", ".join(named)
+
+## Refuses a property this node does not have, and says which one it could have meant.
+##
+## `Node /Arena has no property type` was the whole of what four live turns were told, in four
+## separate runs, about `type`, `spacing` and `transform_2d`. `transform_2d` is one edit from a
+## property the node really has; `spacing` on a VBoxContainer is a theme override, which is a name
+## no near miss reaches; `type` is not a property at all. So: the near one when there is one, and
+## otherwise the call that lists them all with what they hold.
+func _property_not_found_error(node: Node, path: String, property: String) -> Dictionary:
+    var message := "Node %s has no property %s" % [path, property]
+    var near := _nearest_property(node, property)
+    if near.is_empty():
+        message += (
+            ". node.inspect lists every property this node has with its current value, including "
+            + "the theme_override_* ones a Control keeps"
+        )
+    else:
+        message += ". Did you mean %s?" % near
+    return {
+        "_gofer_error": {
+            "code": "property_not_found",
+            "message": message,
+            "retryable": false,
+            "readiness": "ready",
+            "details": {"property": property}
+        }
+    }
+
+## The property nearest a name the node does not have, by the rule the router uses for parameters:
+## case and underscores ignored, and one a prefix of the other. Four characters at least, or `x`
+## would answer for anything beginning with it.
+func _nearest_property(node: Node, property: String) -> String:
+    var wanted := property.to_lower().replace("_", "")
+    if wanted.is_empty():
+        return ""
+    for entry in node.get_property_list():
+        var name := str(entry.get("name", ""))
+        if name.is_empty() or name.contains("/"):
+            continue
+        # The list carries the inspector's own headings — a Sprite2D's `Transform` sits in it beside
+        # its `transform` — and answering `Did you mean Transform?` sends a caller to a name that is
+        # not a property at all.
+        var usage := int(entry.get("usage", 0))
+        if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
+            continue
+        var plain := name.to_lower().replace("_", "")
+        if plain == wanted:
+            return name
+        if mini(plain.length(), wanted.length()) < 4:
+            continue
+        if plain.begins_with(wanted) or wanted.begins_with(plain):
+            return name
+    return ""
+
 ## The mirror of `runtime.gd`'s funnel, for the mistake made the other way round. `godot_runtime`
 ## names the running game's tree, whose every path starts at `/root`; this names the scene the
 ## editor has open, whose paths start at the scene's own root. Two trees, two processes, one node
@@ -4733,7 +5286,9 @@ func _undo_reparent(node: Node, old_parent: Node, owner: Node, old_index: int) -
 ## node inside it was meant. Repeating either back says only that it is absent, which is the one
 ## thing the caller already knew. Both are answered with the name the root actually has, because
 ## that is the fact that repairs them — every node path in the edited scene begins with it.
-func _node_not_found_error(path: String) -> Dictionary:
+func _node_not_found_error(raw: String) -> Dictionary:
+    # Trimmed like the lookup itself, or the sentence names a string nobody can see the end of.
+    var path := raw.strip_edges()
     var message := "Node %s was not found in the edited scene" % path
     var root := _edited_root()
     var root_path: String = "/" + String(root.name) if root != null else ""
@@ -4752,6 +5307,18 @@ func _node_not_found_error(path: String) -> Dictionary:
             "%s. That names a scene file, not a node inside one: this scene's root is %s, and"
             + " every node path here starts there."
         ) % [message, root_path]
+    elif (
+        not root_path.is_empty()
+        and path != root_path
+        and not path.begins_with(root_path + "/")
+    ):
+        # A path under a root this scene does not have. Two live turns in a row wrote /Arena/...
+        # into create_nodes against a scene still rooted at ProtocolFixture, having named the root
+        # they were about to make rather than the one that is there. Repeating the path back said
+        # only that it is absent. The root's name is the whole repair, and it costs one clause.
+        message = (
+            "%s. Every node path here starts at the scene's own root, which is %s."
+        ) % [message, root_path]
     return {
         "_gofer_error": {
             "code": "node_not_found",
@@ -4765,10 +5332,17 @@ func _node_not_found_error(path: String) -> Dictionary:
 func _edited_root() -> Node:
     return EditorInterface.get_edited_scene_root()
 
-func _find_node(path: String) -> Node:
+func _find_node(raw: String) -> Node:
     var root := _edited_root()
     if root == null:
         return null
+    # Trimmed the way `_as_resource_path` already trims a file path, and for the same reason: outer
+    # whitespace on a node path is never meaningful and is exactly what a model's JSON leaves behind
+    # when it slips. One live turn sent `{"parent ": "/Level3D ", "type ": "DirectionalLight3D"}` —
+    # the router puts the padded *keys* back onto their parameters, and the padded value went
+    # through untouched. `Node /Level3D  was not found … the scene's own root is /Level3D` came
+    # back twelve times, naming two strings that look identical on screen.
+    var path := raw.strip_edges()
     if path == root.name or path == "/" + root.name or path == "":
         return root
     var relative := path

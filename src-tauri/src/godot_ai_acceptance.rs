@@ -674,6 +674,18 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         "{}",
         quote("a listing must not put a hash in front of the model")
     );
+    // Gofer's own staged addon is not in the project, and Gofer says so itself by writing
+    // `addons/gofer/` into the checkout's Git exclude file. Ten of the sixteen entries a bare
+    // fixture used to list were it, and a turn stuck on a runtime call read `addons/gofer/
+    // runtime.gd` through four subagents rather than working on the game.
+    assert!(
+        listed.iter().all(|file| !file["path"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("addons/")),
+        "{}",
+        quote("the staged addon must not be listed as part of the project")
+    );
     assert_eq!(
         crate::read_ledger::recall(
             // The ledger is keyed by the workspace's own root, which is canonical.

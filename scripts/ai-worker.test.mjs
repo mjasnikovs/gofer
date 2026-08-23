@@ -15,7 +15,8 @@ import {
     createToolHost,
     normalizeToolCalls,
     toolResult,
-    withoutPictures
+    withoutPictures,
+    withoutRepeatingARefusal
 } from './ai-host.mjs'
 import Ajv from 'ajv'
 
@@ -1347,6 +1348,33 @@ test('a tagged value wrapped twice is unwrapped rather than refused', () => {
             }
         )
 
+    // And one wrapper written the same way. The model that knew both words wrote Godot's spelling
+    // in the tag it wrote once as readily as in the tag it wrote twice, and the router looks the
+    // tag up case-sensitively — so `{type: "String", value: "Resume"}` was refused with "`String`
+    // is not a value type" while the double-wrapped form beside it was repaired.
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/Resume',
+                    property: 'text',
+                    value: {type: 'String', value: 'Resume'}
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/Resume',
+                    property: 'text',
+                    value: {type: 'string', value: 'Resume'}
+                }
+            ]
+        }
+    )
+
     // Two tags that are genuinely different are still left for the router, which says what it got.
     assert.deepEqual(
         normalizeToolCalls(node, {
@@ -1585,6 +1613,37 @@ test('captured frames become image content and large results are bounded', () =>
         'and the ones that survive are untouched, names and all'
     )
     assert.match(inspected.properties.at(-1), /^… \[truncated, \d+ more entries\]$/u)
+
+    // A short list is left whole, because cutting one makes the answer bigger.
+    //
+    // `… [truncated, N more entries]` is 32 characters and `[12.5,34.25]` is 12, so an encoded
+    // vector2 costs more to shorten than to keep — and every list was shortened whether it helped
+    // or not. Measured on four hundred vector2 properties keyed by name: 31,833 characters in,
+    // 24,031 out, every pair replaced by the marker, and the result sliced anyway and unparseable.
+    // The same rubble the list-shortening was written to stop the string capping making.
+    const paired = toolResult({
+        ops: [
+            {
+                op: 'inspect',
+                result: {
+                    path: '/Main/Panel',
+                    type: 'PanelContainer',
+                    properties: Object.fromEntries(
+                        Array.from({length: 400}, (_, i) => [
+                            `theme_override_constants/margin_${String(i)}`,
+                            {type: 'vector2', value: [12.5 + i, 34.25 + i]}
+                        ])
+                    )
+                }
+            }
+        ]
+    })
+    assert.doesNotMatch(
+        paired.content[0].text,
+        /more entries/u,
+        'a two-entry list costs more to shorten than to keep, so it is kept'
+    )
+    assert.match(paired.content[0].text, /\[12\.5,34\.25\]/u, 'and its values are still there')
 
     // Nothing long enough to cut, no list to shorten, and still too big: the slice is the answer of
     // last resort, and it is the behaviour every oversized answer used to get.
@@ -3268,6 +3327,76 @@ test('a tool answering with an image is stripped for a model that cannot see', a
         await withoutPictures({name: 'read', execute: () => plain}).execute('id', {}),
         plain
     )
+})
+
+test('says so when the same call keeps meeting the same refusal', async () => {
+    // Four live turns went into loops no wording escaped — twelve, thirteen, seventeen and
+    // twenty-four identical calls, each answered identically. The lever left is a different
+    // sentence rather than a better one.
+    const refusing = {
+        name: 'godot_node',
+        execute: () => Promise.reject(new Error('missing_param: requires `parent`'))
+    }
+    const guarded = withoutRepeatingARefusal(refusing)
+    const said = []
+    for (let attempt = 0; attempt < 4; attempt += 1)
+        await guarded
+            .execute('id', {ops: [{op: 'create'}]})
+            .catch(error => said.push(error.message))
+    assert.equal(said[0], 'missing_param: requires `parent`')
+    assert.equal(said[1], 'missing_param: requires `parent`')
+    assert.match(said[2], /refused this exact call 3 times/u)
+    assert.match(said[3], /refused this exact call 4 times/u)
+    // And it does not guess why. The first wording said "an object coming apart as it is written",
+    // and a live turn met it on a `method_not_found` about a method that was genuinely not there.
+    assert.doesNotMatch(said[2], /coming apart/u)
+
+    // A different call is a different count, and a different answer to the same call is a caller
+    // waiting rather than a caller stuck: `runtime.wait` timing out twice carries different output.
+    let answer = 'first'
+    const varying = {
+        name: 'godot_runtime',
+        execute: () => Promise.reject(new Error(answer))
+    }
+    const patient = withoutRepeatingARefusal(varying)
+    const heard = []
+    for (const next of ['first', 'second', 'third', 'fourth']) {
+        answer = next
+        await patient.execute('id', {ops: [{op: 'wait'}]}).catch(error => heard.push(error.message))
+    }
+    assert.deepEqual(heard, ['first', 'second', 'third', 'fourth'])
+
+    // The same call with its keys in another order is the same call, not a new one.
+    const reordered = withoutRepeatingARefusal({
+        name: 'godot_node',
+        execute: () => Promise.reject(new Error('missing_param: requires `parent`'))
+    })
+    const shuffled = []
+    for (const params of [
+        {a: 1, b: 2},
+        {b: 2, a: 1},
+        {a: 1, b: 2}
+    ])
+        await reordered.execute('id', params).catch(error => shuffled.push(error.message))
+    assert.match(shuffled[2], /refused this exact call 3 times/u)
+
+    // A cancelled call is not a refused one: the turn was stopped, and the caller wrote nothing.
+    const stopped = new AbortController()
+    stopped.abort()
+    const cancelled = withoutRepeatingARefusal({
+        name: 'bash',
+        execute: () => Promise.reject(new Error('aborted'))
+    })
+    const stops = []
+    for (let attempt = 0; attempt < 3; attempt += 1)
+        await cancelled
+            .execute('id', {command: 'ls'}, stopped.signal)
+            .catch(error => stops.push(error.message))
+    assert.deepEqual(stops, ['aborted', 'aborted', 'aborted'])
+
+    // And a call that succeeds is not counted at all.
+    const working = {name: 'read', execute: () => Promise.resolve({content: []})}
+    assert.deepEqual(await withoutRepeatingARefusal(working).execute('id', {}), {content: []})
 })
 
 /**
