@@ -3809,6 +3809,28 @@ mod tests {
             })
             .is_err()
         );
+
+        // OpenRouter's slot is a second copy of the same three-way read, and a copy is exactly the
+        // thing that drifts. It is held to the same three answers rather than trusted to match.
+        assert_eq!(resolve_openrouter_api_key(&ApiKeyUpdate::Clear), Ok(None));
+        assert_eq!(
+            resolve_openrouter_api_key(&ApiKeyUpdate::Set {
+                value: "  sk-or-v1-key  ".to_owned()
+            }),
+            Ok(Some("sk-or-v1-key".to_owned()))
+        );
+        assert!(
+            resolve_openrouter_api_key(&ApiKeyUpdate::Set {
+                value: " ".to_owned()
+            })
+            .is_err()
+        );
+        assert!(
+            resolve_openrouter_api_key(&ApiKeyUpdate::Set {
+                value: "x".repeat(MAX_API_KEY_BYTES + 1)
+            })
+            .is_err()
+        );
     }
 }
 
