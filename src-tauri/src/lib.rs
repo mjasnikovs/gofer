@@ -94,9 +94,10 @@ use process::SystemProcessSpawner;
 use settings::{
     AI_HEALTH_TIMEOUT, AI_REQUEST_TIMEOUT, AiModelOption, ApiKeyUpdate, ConnectionTestResult,
     ConnectionTestStatus, GodotSettings, SettingsRequest, SettingsResponse, apply_api_key_update,
-    apply_brave_key_update, clear_chatgpt_credential, list_ai_models_with, read_settings,
-    restore_api_key, run_connection_test, save_godot_settings as store_godot_settings,
-    settings_response, stored_api_key, validate_settings, write_settings,
+    apply_brave_key_update, apply_openrouter_key_update, clear_chatgpt_credential,
+    list_ai_models_with, read_settings, restore_api_key, run_connection_test,
+    save_godot_settings as store_godot_settings, settings_response, stored_api_key,
+    validate_settings, write_settings,
 };
 use storage::{
     BackupResult, MaintenanceResult, MergeTaskResult, ResolveTaskResult, StorageSlot, StoredChat,
@@ -127,6 +128,9 @@ async fn save_settings(
         // separate credentials, and a failed settings write must not put back a Brave key the user
         // had just cleared.
         apply_brave_key_update(&request.brave_api_key)?;
+        // Outside the rollback window for the same reason, and it needs its own: OpenRouter's key
+        // lives in its own keyring slot, so the AI key's restore below cannot put it back.
+        apply_openrouter_key_update(&request.openrouter_api_key)?;
         if matches!(&request.api_key, ApiKeyUpdate::Keep) {
             write_settings(&app, &settings)?;
             return Ok(announce_settings(&app, settings_response(settings)));
@@ -1123,6 +1127,7 @@ async fn ai_health(app: &AppHandle) -> health::AiHealth {
             settings,
             api_key: ApiKeyUpdate::Keep,
             brave_api_key: ApiKeyUpdate::Keep,
+            openrouter_api_key: ApiKeyUpdate::Keep,
         },
         AI_HEALTH_TIMEOUT,
     )

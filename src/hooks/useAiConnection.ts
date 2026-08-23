@@ -31,7 +31,12 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
 
     const listModels = useCallback(async (of: GoferSettings) => {
         const available = await invoke('list_ai_models', {
-            request: {settings: of, apiKey: {action: 'keep'}, braveApiKey: {action: 'keep'}}
+            request: {
+                settings: of,
+                apiKey: {action: 'keep'},
+                braveApiKey: {action: 'keep'},
+                openrouterApiKey: {action: 'keep'}
+            }
         })
         listedFor.current = catalogueOf(of.ai)
         setModels(available)
@@ -46,7 +51,8 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
                     request: {
                         settings: nextSettings,
                         apiKey: {action: 'keep'},
-                        braveApiKey: {action: 'keep'}
+                        braveApiKey: {action: 'keep'},
+                        openrouterApiKey: {action: 'keep'}
                     }
                 })
                 onConnected()

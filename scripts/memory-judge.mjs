@@ -137,6 +137,7 @@ export const LIVE_WORLD = {createModelContext, createChildTools, probeTools, run
 export async function runMemoryJudge({
     settings,
     apiKey,
+    openrouterApiKey,
     oauthCredential,
     sessionId,
     workspacePath,
@@ -154,6 +155,7 @@ export async function runMemoryJudge({
     const {models, model, subagent, streamOptions} = world.createModelContext({
         settings,
         apiKey,
+        openrouterApiKey,
         oauthCredential,
         credentialHost,
         sessionId,

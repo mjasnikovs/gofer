@@ -34,6 +34,14 @@ import {confineTool} from './workspace-confinement.mjs'
 import {piThinkingLevel, piThinkingLevelMap} from './thinking-level.mjs'
 
 const PROVIDER_ID = 'local'
+/**
+ * OpenRouter's own provider id, so both key-based connections can be registered at once.
+ *
+ * Required, not tidiness: a `Models` is keyed by provider id, and a parent on a local server with
+ * a sub-agent on OpenRouter needs two live registrations with two different addresses and two
+ * different credentials.
+ */
+const OPENROUTER_PROVIDER_ID = 'openrouter'
 const DEFAULT_CONTEXT_WINDOW = 120_064
 /**
  * How full the context may get before the old part of it is summarised away.
@@ -309,7 +317,10 @@ function modelFor(settings, providerId = PROVIDER_ID) {
             // local endpoint never sees one, so the session travels as headers instead: anything
             // holding a KV cache per session — a proxy, a second worker — can route the ask back to
             // the machine that already has this task's prefix rather than recomputing it.
-            sendSessionAffinityHeaders: true
+            //
+            // Off for OpenRouter. The header exists to reach a machine that already holds this
+            // prefix, and behind that address there is no such machine to reach.
+            sendSessionAffinityHeaders: isLocal
         }
     }
 }
@@ -325,7 +336,9 @@ function modelFor(settings, providerId = PROVIDER_ID) {
  */
 function connectionProfile(settings, connectionType) {
     if (parentDriver(settings) === connectionType) return settings
-    return connectionType === 'openai-codex' ? settings.chatgpt : settings.local
+    if (connectionType === 'openai-codex') return settings.chatgpt
+    if (connectionType === 'openrouter') return settings.openrouter
+    return settings.local
 }
 
 /**
@@ -336,7 +349,9 @@ function connectionProfile(settings, connectionType) {
  * the field has to keep meaning what it has always meant.
  */
 function parentDriver(settings) {
-    return settings.connectionType === 'openai-codex' ? 'openai-codex' : 'openai-compatible'
+    if (settings.connectionType === 'openai-codex') return 'openai-codex'
+    if (settings.connectionType === 'openrouter') return 'openrouter'
+    return 'openai-compatible'
 }
 
 /**
@@ -357,26 +372,33 @@ function subagentModelFor(settings, models, parent) {
             throw new Error(`The sub-agent's model '${chosen.model}' is unavailable on ChatGPT`)
         return {model, thinkingLevel}
     }
-    const profile = connectionProfile(settings, 'openai-compatible')
-    if (!profile)
+    const openrouter = chosen.connectionType === 'openrouter'
+    const driver = openrouter ? 'openrouter' : 'openai-compatible'
+    const profile = connectionProfile(settings, driver)
+    if (!profile) {
+        const named = openrouter ? 'OpenRouter' : 'local'
         throw new Error(
-            'The sub-agent is set to the local connection, but no local connection is configured'
+            `The sub-agent is set to the ${named} connection, but no ${named} connection is configured`
         )
+    }
     // The address, the dialect and the name are the connection's. Everything the model carries with
     // it — the id, its window, what it accepts — is the child's own.
     return {
-        model: modelFor({
-            ...profile,
-            model: chosen.model,
-            modelName: chosen.modelName,
-            contextWindow: chosen.contextWindow,
-            maxTokens: chosen.maxTokens,
-            reasoning: chosen.reasoning,
-            supportsReasoningEffort: chosen.supportsReasoningEffort,
-            input: chosen.input
-            // `chatTemplateThinking` is deliberately not overridden: it is the connection's, not
-            // the model's, and the connection is the one being spread above.
-        }),
+        model: modelFor(
+            {
+                ...profile,
+                model: chosen.model,
+                modelName: chosen.modelName,
+                contextWindow: chosen.contextWindow,
+                maxTokens: chosen.maxTokens,
+                reasoning: chosen.reasoning,
+                supportsReasoningEffort: chosen.supportsReasoningEffort,
+                input: chosen.input
+                // `chatTemplateThinking` is deliberately not overridden: it is the connection's,
+                // not the model's, and the connection is the one being spread above.
+            },
+            openrouter ? OPENROUTER_PROVIDER_ID : PROVIDER_ID
+        ),
         thinkingLevel
     }
 }
@@ -541,6 +563,7 @@ function retryEntry(messages, prompt) {
 export function createModelContext({
     settings,
     apiKey,
+    openrouterApiKey,
     oauthCredential,
     credentialHost,
     sessionId,
@@ -589,7 +612,33 @@ export function createModelContext({
             })
         )
     }
-    const model = isChatGpt ? models.getModel('openai-codex', settings.model) : modelFor(settings)
+    // Registered on the same `Models` and under its own id, so a parent on a local server and a
+    // child on OpenRouter each reach their own address with their own key. The two credentials are
+    // never interchangeable: `apiKey` is the local server's and never leaves this machine.
+    const openrouterProfile = connectionProfile(settings, 'openrouter')
+    if (drivers.has('openrouter') && openrouterProfile) {
+        models.setProvider(
+            createProvider({
+                id: OPENROUTER_PROVIDER_ID,
+                name: openrouterProfile.name,
+                baseUrl: openrouterProfile.baseUrl,
+                auth: {
+                    apiKey: {
+                        name: openrouterProfile.name,
+                        // No `|| 'local'` fallback. OpenRouter refuses an unknown key by name,
+                        // which is a better failure than a turn that looks configured and is not.
+                        resolve: async () => ({auth: {apiKey: openrouterApiKey ?? ''}})
+                    }
+                },
+                models: [modelFor(openrouterProfile, OPENROUTER_PROVIDER_ID)],
+                api: openAICompletionsApi()
+            })
+        )
+    }
+    const model =
+        isChatGpt ? models.getModel('openai-codex', settings.model)
+        : settings.connectionType === 'openrouter' ? modelFor(settings, OPENROUTER_PROVIDER_ID)
+        : modelFor(settings)
     if (!model) throw new Error(`The selected model '${settings.model}' is unavailable`)
     const subagent = subagentModelFor(settings, models, model)
     // Shared by the caller's own requests and by the sub-agent's, so a child never waits on a
@@ -610,6 +659,7 @@ export async function runAgent({
     settings,
     systemPrompt = '',
     apiKey,
+    openrouterApiKey,
     braveApiKey,
     oauthCredential,
     messages,
@@ -628,6 +678,7 @@ export async function runAgent({
     const {isChatGpt, models, model, subagent, streamOptions} = createModelContext({
         settings,
         apiKey,
+        openrouterApiKey,
         oauthCredential,
         credentialHost,
         sessionId,

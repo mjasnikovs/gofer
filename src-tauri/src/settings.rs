@@ -21,6 +21,12 @@ use crate::model_server::ServedModel;
 
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 const API_KEY_USERNAME: &str = "ai-default";
+/// OpenRouter's key, under its own username. Sharing `ai-default` with the local driver would mean
+/// configuring one wipes the other, and would send a key meant for openrouter.ai as bearer to
+/// whatever is listening on the user's own machine.
+const OPENROUTER_KEY_USERNAME: &str = "ai-openrouter";
+/// OpenRouter's address, which the user never types. Mirrors `OPENROUTER_BASE_URL` in settings.ts.
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const CHATGPT_CREDENTIAL_USERNAME: &str = "ai-openai-codex";
 /// A second username under the one service, which is how this keyring holds more than one secret.
 const BRAVE_KEY_USERNAME: &str = "web-brave-search";
@@ -39,6 +45,13 @@ const EFFORT_THINKING_LEVELS: &[&str] =
 const ALL_THINKING_LEVELS: &[&str] = &[
     "off", "on", "minimal", "low", "medium", "high", "xhigh", "max",
 ];
+
+/// Every word that names an effort, which is `ALL_THINKING_LEVELS` without the two that do not.
+///
+/// `off` is the absence of an effort and `on` belongs to a template with none to name, so neither
+/// can arrive from a catalogue. The same list, in the same order, is `KNOWN_EFFORTS` in
+/// `model_server.rs` and in `thinking-level.mjs`.
+const NAMED_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 
 const MAX_API_KEY_BYTES: usize = 16 * 1024;
 
@@ -137,6 +150,12 @@ pub(crate) struct AiSettings {
     /// Always present, so the renderer never has to know what a ChatGPT connection looks like.
     #[serde(default = "default_chatgpt_profile")]
     pub(crate) chatgpt: AiConnectionProfile,
+    /// Always present, for a reason the local profile does not share: a driver with no profile is
+    /// not offered in the picker, and a driver that is not offered can never be selected in order
+    /// to be configured. OpenRouter's address and dialect are constants, so there is nothing to
+    /// wait for.
+    #[serde(default = "default_openrouter_profile")]
+    pub(crate) openrouter: AiConnectionProfile,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -294,6 +313,7 @@ pub(crate) struct SubagentConnection {
 pub(crate) enum AiConnectionType {
     OpenaiCompatible,
     OpenaiCodex,
+    Openrouter,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -310,6 +330,7 @@ pub(crate) struct SettingsResponse {
     has_api_key: bool,
     has_chat_gpt_credential: bool,
     has_brave_api_key: bool,
+    has_openrouter_api_key: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential_store_error: Option<String>,
 }
@@ -323,6 +344,9 @@ pub(crate) struct SettingsRequest {
     /// shows a stored secret cannot send one back, so "leave it alone" has to be sayable.
     #[serde(default)]
     pub(crate) brave_api_key: ApiKeyUpdate,
+    /// OpenRouter's key, by the same three-way rule, into its own keyring slot.
+    #[serde(default)]
+    pub(crate) openrouter_api_key: ApiKeyUpdate,
 }
 
 #[derive(Default, Deserialize)]
@@ -386,6 +410,50 @@ struct Model {
 struct ModelMeta {
     #[serde(default)]
     n_ctx: Option<u64>,
+}
+
+/// One model as OpenRouter's catalogue describes it.
+///
+/// Deliberately not the `Model` struct above. That one is llama.cpp's shape — an id and an
+/// `n_ctx` — and every field here is one llama.cpp has never heard of.
+#[derive(Deserialize)]
+struct OpenrouterModel {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context_length: Option<u64>,
+    #[serde(default)]
+    architecture: Option<OpenrouterArchitecture>,
+    #[serde(default)]
+    top_provider: Option<OpenrouterTopProvider>,
+    #[serde(default)]
+    supported_parameters: Vec<String>,
+    #[serde(default)]
+    reasoning: Option<OpenrouterReasoning>,
+}
+
+#[derive(Deserialize)]
+struct OpenrouterArchitecture {
+    #[serde(default)]
+    input_modalities: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenrouterTopProvider {
+    #[serde(default)]
+    max_completion_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct OpenrouterReasoning {
+    #[serde(default)]
+    supported_efforts: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenrouterModelsResponse {
+    data: Vec<OpenrouterModel>,
 }
 
 #[derive(Deserialize)]
@@ -604,6 +672,7 @@ impl Default for AiSettings {
             web: WebSettings::default(),
             local: None,
             chatgpt: default_chatgpt_profile(),
+            openrouter: default_openrouter_profile(),
         }
     }
 }
@@ -633,6 +702,58 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
     }
 }
 
+/// The connection a driver runs on, or nothing when that driver has never been configured.
+///
+/// The active driver is read from the flat fields, not from its slot: the flat fields are what the
+/// settings page validated, and the slot is the copy it mirrored. Reading the mirror for the driver
+/// that is switched on would be trusting a copy over the original. Mirrors `connectionProfile` in
+/// settings.ts, which draws the same line for the same reason.
+fn driver_profile(settings: &AiSettings, driver: AiConnectionType) -> Option<AiConnectionProfile> {
+    if settings.connection_type == driver {
+        return Some(profile_of(settings));
+    }
+    match driver {
+        AiConnectionType::OpenaiCompatible => settings.local.clone(),
+        AiConnectionType::OpenaiCodex => Some(settings.chatgpt.clone()),
+        AiConnectionType::Openrouter => Some(settings.openrouter.clone()),
+    }
+}
+
+/// The word a driver is written down as, on the wire and in the settings file.
+///
+/// Never the display label: a file holding `OpenRouter` matches no driver this build knows.
+fn driver_id(driver: AiConnectionType) -> &'static str {
+    match driver {
+        AiConnectionType::OpenaiCompatible => "openai-compatible",
+        AiConnectionType::OpenaiCodex => "openai-codex",
+        AiConnectionType::Openrouter => "openrouter",
+    }
+}
+
+/// OpenRouter, as it looks before the user has chosen anything.
+///
+/// The address is fixed and the dialect is the ordinary chat-completions one — measured, not
+/// assumed: a real turn ran through this exact address and dialect and called a tool. The model is
+/// a starting point, not a promise; the catalogue is read on every open and reconciles it.
+fn default_openrouter_profile() -> AiConnectionProfile {
+    AiConnectionProfile {
+        name: "OpenRouter".to_owned(),
+        base_url: OPENROUTER_BASE_URL.to_owned(),
+        model: "nvidia/nemotron-3.5-lightning:free".to_owned(),
+        api: ApiDialect::OpenaiCompletions,
+        model_name: "NVIDIA: Nemotron 3.5 Lightning".to_owned(),
+        context_window: 1_000_000,
+        max_tokens: 1_000_000,
+        reasoning: false,
+        supports_reasoning_effort: false,
+        // A chat template is a llama.cpp mechanism. There is no `/props` behind this address.
+        chat_template_thinking: false,
+        thinking_levels: Vec::new(),
+        input: vec!["text".to_owned()],
+        thinking_level: "off".to_owned(),
+    }
+}
+
 /// The connection the documentation search's own model calls should go to.
 ///
 /// It follows the sub-agent exactly — same connection, same model, same reasoning level — because
@@ -649,35 +770,32 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
 pub(crate) fn docs_expansion_connection(
     settings: &AiSettings,
     api_key: Option<String>,
+    openrouter_api_key: Option<String>,
     oauth_credential: Option<serde_json::Value>,
 ) -> Option<crate::rag::RetrieveConnection> {
     let chosen = settings.subagent.connection.as_ref();
     let driver = chosen.map_or(settings.connection_type, |c| c.connection_type);
     // The address, the dialect and the credential are the connection's; the model and the level it
     // is asked at are the child's own. Exactly how `subagentModelFor` splits them in the worker.
-    let profile = match driver {
-        AiConnectionType::OpenaiCodex => settings.chatgpt.clone(),
-        AiConnectionType::OpenaiCompatible => match settings.connection_type {
-            AiConnectionType::OpenaiCompatible => profile_of(settings),
-            AiConnectionType::OpenaiCodex => settings.local.clone()?,
-        },
-    };
+    let profile = driver_profile(settings, driver)?;
     let codex = driver == AiConnectionType::OpenaiCodex;
     if codex && oauth_credential.is_none() {
         return None;
     }
     Some(crate::rag::RetrieveConnection {
-        connection_type: if codex {
-            "openai-codex".to_owned()
-        } else {
-            "openai-compatible".to_owned()
-        },
+        connection_type: driver_id(driver).to_owned(),
         oauth_credential: if codex { oauth_credential } else { None },
         base_url: profile.base_url.clone(),
         model: chosen.map_or_else(|| profile.model.clone(), |c| c.model.clone()),
         model_name: chosen.map_or_else(|| profile.model_name.clone(), |c| c.model_name.clone()),
-        // Only a local server takes one. ChatGPT authenticates with the credential above.
-        api_key: if codex { None } else { api_key },
+        // ChatGPT authenticates with the credential above and takes no key. The other two each
+        // take their own, from their own keyring slot — a key sent to the wrong address is a key
+        // handed to a machine that was never meant to see it.
+        api_key: match driver {
+            AiConnectionType::OpenaiCodex => None,
+            AiConnectionType::OpenaiCompatible => api_key,
+            AiConnectionType::Openrouter => openrouter_api_key,
+        },
         thinking_level: chosen.map_or_else(
             || settings.thinking_level.clone(),
             |c| c.thinking_level.clone(),
@@ -1003,17 +1121,26 @@ pub(crate) const AI_HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 async fn prepare_models_request(
     request: SettingsRequest,
     timeout: Duration,
+    path: &str,
 ) -> Result<ModelsRequest, String> {
     let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
         let settings = validate_settings(request.settings)?;
-        let api_key = resolve_api_key(&request.api_key)?;
+        // The driver decides which credential is sent, because each has its own keyring slot. The
+        // local driver's key must never reach openrouter.ai, and OpenRouter's must never reach a
+        // server on this machine.
+        let api_key = match settings.ai.connection_type {
+            AiConnectionType::Openrouter => {
+                resolve_openrouter_api_key(&request.openrouter_api_key)?
+            }
+            _ => resolve_api_key(&request.api_key)?,
+        };
         Ok::<_, String>((settings, api_key))
     })
     .await
     .map_err(|error| format!("AI settings validation task failed: {error}"))??;
     let base_url = format!("{}/", settings.ai.base_url.trim_end_matches('/'));
     let models_url = reqwest::Url::parse(&base_url)
-        .and_then(|url| url.join("models"))
+        .and_then(|url| url.join(path))
         .map_err(|error| format!("Could not construct the models endpoint: {error}"))?;
     let client = reqwest::Client::builder()
         .timeout(timeout)
@@ -1060,7 +1187,16 @@ pub(crate) async fn run_connection_test(
         .await
         .map_err(|error| format!("ChatGPT connection test failed: {error}"))?;
     }
-    let ModelsRequest { settings, builder } = prepare_models_request(request, timeout).await?;
+    // OpenRouter is asked `/key`, not `/models`. Its catalogue is public — it answers HTTP 200
+    // with no credential at all — so a test through `/models` reports a healthy connection for a
+    // key that does not exist. `/key` is the only cheap endpoint that refuses a bad one.
+    let openrouter = matches!(
+        request.settings.ai.connection_type,
+        AiConnectionType::Openrouter
+    );
+    let path = if openrouter { "key" } else { "models" };
+    let ModelsRequest { settings, builder } =
+        prepare_models_request(request, timeout, path).await?;
 
     let response = match builder.send().await {
         Ok(response) => response,
@@ -1090,6 +1226,12 @@ pub(crate) async fn run_connection_test(
         });
     }
 
+    // The key is good. Whether the chosen model is still in the catalogue is a second question,
+    // and a public endpoint answers it without spending the credential again.
+    if openrouter {
+        return Ok(openrouter_model_available(&settings.ai.model, timeout).await);
+    }
+
     let models = response.json::<ModelsResponse>().await.map_err(|error| {
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
@@ -1113,6 +1255,39 @@ pub(crate) async fn run_connection_test(
     })
 }
 
+/// Whether OpenRouter still lists the chosen model, asked of the public catalogue.
+///
+/// A second request rather than a reuse of the first: `/key` answers about the credential and says
+/// nothing about models. Anything that goes wrong here is reported as connected rather than as a
+/// failure — the credential has already been proven, and a catalogue that could not be read is not
+/// a reason to tell the user their key is bad.
+async fn openrouter_model_available(model: &str, timeout: Duration) -> ConnectionTestResult {
+    let connected = ConnectionTestResult {
+        status: ConnectionTestStatus::Connected,
+        message: format!("Connected to OpenRouter. Model '{model}' is available."),
+    };
+    let Ok(client) = reqwest::Client::builder().timeout(timeout).build() else {
+        return connected;
+    };
+    let url = format!("{OPENROUTER_BASE_URL}/models");
+    let Ok(response) = client.get(url).send().await else {
+        return connected;
+    };
+    let Ok(catalog) = response.json::<OpenrouterModelsResponse>().await else {
+        return connected;
+    };
+    let options = openrouter_model_options(catalog.data);
+    if options.iter().any(|option| option.id == model) {
+        return connected;
+    }
+    ConnectionTestResult {
+        status: ConnectionTestStatus::ModelUnavailable,
+        message: format!(
+            "Connected to OpenRouter, but model '{model}' is not one it offers with tool support."
+        ),
+    }
+}
+
 pub(crate) async fn list_ai_models_with(
     request: SettingsRequest,
 ) -> Result<Vec<AiModelOption>, String> {
@@ -1125,8 +1300,12 @@ pub(crate) async fn list_ai_models_with(
             .await
             .map_err(|error| format!("ChatGPT model listing failed: {error}"))?;
     }
+    let openrouter = matches!(
+        request.settings.ai.connection_type,
+        AiConnectionType::Openrouter
+    );
     let ModelsRequest { settings, builder } =
-        prepare_models_request(request, AI_REQUEST_TIMEOUT).await?;
+        prepare_models_request(request, AI_REQUEST_TIMEOUT, "models").await?;
     let response = builder
         .send()
         .await
@@ -1136,6 +1315,13 @@ pub(crate) async fn list_ai_models_with(
             "The server returned HTTP {} from its models endpoint.",
             response.status()
         ));
+    }
+    if openrouter {
+        let catalog = response
+            .json::<OpenrouterModelsResponse>()
+            .await
+            .map_err(|error| format!("OpenRouter returned an invalid models response: {error}"))?;
+        return Ok(openrouter_model_options(catalog.data));
     }
     let models = response.json::<ModelsResponse>().await.map_err(|error| {
         format!("The server returned an invalid OpenAI models response: {error}")
@@ -1205,6 +1391,78 @@ fn local_model_options(
                     .and_then(|model| model.input.clone())
                     .or_else(|| known.map(|model| model.input.clone()))
                     .unwrap_or_else(|| ai.input.clone()),
+            }
+        })
+        .collect()
+}
+
+/// What OpenRouter's catalogue means, model by model.
+///
+/// Every rule here was read off a live response rather than assumed, and each one has a reason it
+/// cannot be simplified away:
+///
+/// * Models without `tools` are dropped. 70 of 422 have no tool support, and a model that cannot
+///   call a tool cannot run Gofer at all — offering it is offering a broken choice.
+/// * `max_completion_tokens` is null on 52 models, so the context window stands in. The same
+///   fallback `local_model_options` makes, for the same reason: a zero there fails validation.
+/// * Efforts are kept only if `NAMED_EFFORTS` knows them, rather than dropping the one word that
+///   is known not to be an effort. `supported_efforts` carries `none` today, which is OpenRouter's
+///   word for "thinking can be switched off" — `thinking_levels_for` prepends `off` on its own, so
+///   it is redundant as well as unknown. An allowlist also holds for whatever the catalogue names
+///   next: an effort Gofer has no word for reaches the reasoning picker, and choosing it makes
+///   `validate_settings` refuse the save with "Reasoning level is invalid" and no field named.
+/// * Input modalities are narrowed to text and image. Pi types a model's input as exactly those
+///   two, so `video`, `audio` and `file` have nowhere to go.
+fn openrouter_model_options(remote: Vec<OpenrouterModel>) -> Vec<AiModelOption> {
+    remote
+        .into_iter()
+        .filter(|model| model.supported_parameters.iter().any(|p| p == "tools"))
+        .map(|model| {
+            let context_window = model.context_length.unwrap_or_else(default_context_window);
+            let thinking_levels: Vec<String> = model
+                .reasoning
+                .as_ref()
+                .map(|reasoning| {
+                    reasoning
+                        .supported_efforts
+                        .iter()
+                        .filter(|effort| NAMED_EFFORTS.contains(&effort.as_str()))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let input: Vec<String> = model
+                .architecture
+                .as_ref()
+                .map(|architecture| {
+                    architecture
+                        .input_modalities
+                        .iter()
+                        .filter(|modality| matches!(modality.as_str(), "text" | "image"))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            AiModelOption {
+                name: model.name.unwrap_or_else(|| model.id.clone()),
+                id: model.id,
+                context_window,
+                max_tokens: model
+                    .top_provider
+                    .and_then(|provider| provider.max_completion_tokens)
+                    .unwrap_or(context_window),
+                reasoning: model.reasoning.is_some(),
+                // Named efforts are the only evidence that an effort field will be read. A model
+                // that reasons without naming any takes no effort, which is the `on`/`off` case.
+                supports_reasoning_effort: !thinking_levels.is_empty(),
+                thinking_levels,
+                // Never empty: `validate_settings` refuses an empty input list, and every model in
+                // the catalogue takes text.
+                input: if input.is_empty() {
+                    vec!["text".to_owned()]
+                } else {
+                    input
+                },
             }
         })
         .collect()
@@ -1471,6 +1729,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
             web: WebSettings::default(),
             local: None,
             chatgpt: default_chatgpt_profile(),
+            openrouter: default_openrouter_profile(),
         },
         godot: GodotSettings::default(),
     })
@@ -1572,6 +1831,15 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
         settings.ai.supports_reasoning_effort,
         &settings.ai.thinking_levels,
     );
+    // OpenRouter's address and dialect are not the user's to set, so they are corrected rather
+    // than validated. A settings file hand-edited to point this driver somewhere else would send
+    // the OpenRouter key to that address, and the catalogue parser to a server that answers a
+    // different shape.
+    if matches!(settings.ai.connection_type, AiConnectionType::Openrouter) {
+        settings.ai.base_url = OPENROUTER_BASE_URL.to_owned();
+        settings.ai.api = ApiDialect::OpenaiCompletions;
+        settings.ai.chat_template_thinking = false;
+    }
     settings.ai.base_url = settings.ai.base_url.trim().trim_end_matches('/').to_owned();
     let url = reqwest::Url::parse(&settings.ai.base_url)
         .map_err(|error| format!("Base URL must be a valid absolute URL: {error}"))?;
@@ -1607,6 +1875,7 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     match settings.ai.connection_type {
         AiConnectionType::OpenaiCompatible => settings.ai.local = Some(active_profile),
         AiConnectionType::OpenaiCodex => settings.ai.chatgpt = active_profile,
+        AiConnectionType::Openrouter => settings.ai.openrouter = active_profile,
     }
     Ok(settings)
 }
@@ -1677,12 +1946,46 @@ fn required_value(name: &str, value: String) -> Result<String, String> {
 }
 
 fn credential_entry(username: &str) -> Result<Entry, String> {
+    entry_in_a_store(username)?.ok_or_else(|| NO_CREDENTIAL_STORE.to_owned())
+}
+
+/// What a machine with no credential store at all is reported as: `Ok(None)`.
+///
+/// A GitHub runner has no Secret Service, so `Entry::new` fails before any entry is looked at —
+/// the keyring crate registers no default store and says so. Every reader turned that into an
+/// error, and a turn reads three credentials, so on such a machine *every* AI turn ended as "The
+/// AI response could not be completed." even with a local model that needs no key at all. The
+/// packaged journey has failed on exactly this since it started running.
+///
+/// No store is not a failed read: it is a machine where nothing was ever saved, which is what
+/// `None` already means everywhere below. A store that exists and refuses — locked, denied, an
+/// entry that will not decode — still errors, because that is a key the user did save and cannot
+/// get back.
+fn entry_in_a_store(username: &str) -> Result<Option<Entry>, String> {
     let _initialization = KEYRING_INITIALIZATION
         .lock()
         .map_err(|_| "The credential-store initialization lock is poisoned".to_owned())?;
-    Entry::new(API_KEY_SERVICE, username)
-        .map_err(|error| format!("Could not access the operating system credential store: {error}"))
+    match Entry::new(API_KEY_SERVICE, username) {
+        Ok(entry) => Ok(Some(entry)),
+        // The keyring crate builds the platform store on the first `Entry::new` of the process and
+        // never tries again, so the first failure carries the platform's own words and the second
+        // call says what was left behind: `NoDefaultStore` means nothing was, and there is nowhere
+        // on this machine to keep a credential. A store that did register and refused this entry —
+        // locked, prompted, denied — fails the same way twice and stays an error.
+        Err(first) => match Entry::new(API_KEY_SERVICE, username) {
+            Ok(entry) => Ok(Some(entry)),
+            Err(KeyringError::NoDefaultStore) => Ok(None),
+            Err(_) => Err(format!(
+                "Could not access the operating system credential store: {first}"
+            )),
+        },
+    }
 }
+
+/// What saving says when there is nowhere to save to. Reading answers `None` instead.
+const NO_CREDENTIAL_STORE: &str = "This machine has no credential store, so Gofer cannot keep a key on it. On Linux that is a \
+     Secret Service provider — GNOME Keyring or KWallet — and Gofer needs one running to hold a \
+     key.";
 
 trait CredentialStore {
     fn clear(&self) -> Result<(), String>;
@@ -1701,7 +2004,10 @@ impl CredentialStore for SystemCredentialStore {
     }
 
     fn load(&self) -> Result<Option<String>, String> {
-        match credential_entry(API_KEY_USERNAME)?.get_password() {
+        let Some(entry) = entry_in_a_store(API_KEY_USERNAME)? else {
+            return Ok(None);
+        };
+        match entry.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(KeyringError::NoEntry) => Ok(None),
             Err(error) => Err(format!(
@@ -1729,6 +2035,38 @@ pub(crate) fn ai_worker_api_key() -> Result<Option<String>, String> {
     stored_api_key()
 }
 
+/// OpenRouter's key, or nothing when the user has not set one.
+///
+/// Its own slot, not `ai-default`. Two key-based drivers sharing one entry means configuring the
+/// second wipes the first, and — worse — a key meant for openrouter.ai being sent as bearer to
+/// whatever `http://127.0.0.1:8080` happens to be.
+pub(crate) fn stored_openrouter_api_key() -> Result<Option<String>, String> {
+    let Some(entry) = entry_in_a_store(OPENROUTER_KEY_USERNAME)? else {
+        return Ok(None);
+    };
+    match entry.get_password() {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(format!("Could not read the OpenRouter API key: {error}")),
+    }
+}
+
+/// Stores OpenRouter's key, or removes it when the text is blank. The same rule as the Brave key:
+/// an empty entry left behind reads as a configured key that every request is then rejected for.
+pub(crate) fn store_openrouter_api_key(key: &str) -> Result<(), String> {
+    let entry = credential_entry(OPENROUTER_KEY_USERNAME)?;
+    if key.trim().is_empty() {
+        return match entry.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(error) => Err(format!("Could not remove the OpenRouter API key: {error}")),
+        };
+    }
+    entry
+        .set_password(key)
+        .map_err(|error| format!("Could not store the OpenRouter API key: {error}"))
+}
+
 /// The Brave Search key, or nothing when the user has not set one.
 ///
 /// In the keyring rather than in `settings.json`, on the same reasoning as the AI key: the settings
@@ -1736,7 +2074,10 @@ pub(crate) fn ai_worker_api_key() -> Result<Option<String>, String> {
 /// credential. Nothing is an ordinary state, not a fault — the two other engines need no key, and
 /// `web_search` says so itself when Brave is chosen without one.
 pub(crate) fn stored_brave_api_key() -> Result<Option<String>, String> {
-    match credential_entry(BRAVE_KEY_USERNAME)?.get_password() {
+    let Some(entry) = entry_in_a_store(BRAVE_KEY_USERNAME)? else {
+        return Ok(None);
+    };
+    match entry.get_password() {
         Ok(value) if value.trim().is_empty() => Ok(None),
         Ok(value) => Ok(Some(value)),
         Err(KeyringError::NoEntry) => Ok(None),
@@ -1763,7 +2104,10 @@ pub(crate) fn store_brave_api_key(key: &str) -> Result<(), String> {
 }
 
 pub(crate) fn stored_chatgpt_credential() -> Result<Option<serde_json::Value>, String> {
-    let value = match credential_entry(CHATGPT_CREDENTIAL_USERNAME)?.get_password() {
+    let Some(entry) = entry_in_a_store(CHATGPT_CREDENTIAL_USERNAME)? else {
+        return Ok(None);
+    };
+    let value = match entry.get_password() {
         Ok(value) => value,
         Err(KeyringError::NoEntry) => return Ok(None),
         Err(error) => return Err(format!("Could not read the ChatGPT credential: {error}")),
@@ -1818,6 +2162,7 @@ pub(crate) fn settings_response(settings: GoferSettings) -> SettingsResponse {
             has_api_key: false,
             has_chat_gpt_credential: false,
             has_brave_api_key: false,
+            has_openrouter_api_key: false,
             credential_store_error: None,
         };
     }
@@ -1834,6 +2179,7 @@ fn settings_response_with(
             has_api_key: api_key.is_some(),
             has_chat_gpt_credential: stored_chatgpt_credential().ok().flatten().is_some(),
             has_brave_api_key: stored_brave_api_key().ok().flatten().is_some(),
+            has_openrouter_api_key: stored_openrouter_api_key().ok().flatten().is_some(),
             credential_store_error: None,
         },
         Err(error) => SettingsResponse {
@@ -1841,6 +2187,7 @@ fn settings_response_with(
             has_api_key: false,
             has_chat_gpt_credential: false,
             has_brave_api_key: false,
+            has_openrouter_api_key: false,
             credential_store_error: Some(error),
         },
     }
@@ -1865,6 +2212,20 @@ pub(crate) fn apply_brave_key_update(update: &ApiKeyUpdate) -> Result<(), String
             store_brave_api_key(value)
         }
         ApiKeyUpdate::Clear => store_brave_api_key(""),
+    }
+}
+
+/// The same three-way rule again, against the OpenRouter entry. Blank clears, as with Brave.
+pub(crate) fn apply_openrouter_key_update(update: &ApiKeyUpdate) -> Result<(), String> {
+    match update {
+        ApiKeyUpdate::Keep => Ok(()),
+        ApiKeyUpdate::Set { value } => {
+            if value.len() > MAX_API_KEY_BYTES {
+                return Err("API keys cannot exceed 16 KiB".to_owned());
+            }
+            store_openrouter_api_key(value)
+        }
+        ApiKeyUpdate::Clear => store_openrouter_api_key(""),
     }
 }
 
@@ -1899,6 +2260,25 @@ fn restore_api_key_with(store: &impl CredentialStore, value: Option<&str>) -> Re
             .store(value)
             .map_err(|error| format!("Could not restore the previous AI API key: {error}")),
         None => store.clear(),
+    }
+}
+
+/// The same three-way read against OpenRouter's slot. Separate from `resolve_api_key` because the
+/// stored value it falls back to is a different credential in a different keyring entry.
+fn resolve_openrouter_api_key(update: &ApiKeyUpdate) -> Result<Option<String>, String> {
+    match update {
+        ApiKeyUpdate::Keep => Ok(stored_openrouter_api_key().unwrap_or(None)),
+        ApiKeyUpdate::Set { value } => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err("API key cannot be empty when testing a credential".to_owned());
+            }
+            if value.len() > MAX_API_KEY_BYTES {
+                return Err("API keys cannot exceed 16 KiB".to_owned());
+            }
+            Ok(Some(value.to_owned()))
+        }
+        ApiKeyUpdate::Clear => Ok(None),
     }
 }
 
@@ -1984,6 +2364,7 @@ mod tests {
                 value: " secret-token ".to_owned(),
             },
             brave_api_key: ApiKeyUpdate::Keep,
+            openrouter_api_key: ApiKeyUpdate::Keep,
         }
     }
 
@@ -2253,7 +2634,7 @@ mod tests {
     #[test]
     fn the_docs_expansion_connection_follows_the_subagent() {
         let borrowed =
-            docs_expansion_connection(&AiSettings::default(), Some("k".to_owned()), None)
+            docs_expansion_connection(&AiSettings::default(), Some("k".to_owned()), None, None)
                 .expect("a local parent with no sub-agent connection lends its own");
         assert_eq!(borrowed.connection_type, "openai-compatible");
         assert_eq!(borrowed.base_url, AiSettings::default().base_url);
@@ -2275,8 +2656,8 @@ mod tests {
         };
         let mut own = AiSettings::default();
         own.subagent.connection = Some(local_child.clone());
-        let child =
-            docs_expansion_connection(&own, None, None).expect("a local sub-agent is reachable");
+        let child = docs_expansion_connection(&own, None, None, None)
+            .expect("a local sub-agent is reachable");
         // The address stays the connection's; the model and its level are the child's own.
         assert_eq!(child.base_url, AiSettings::default().base_url);
         assert_eq!(child.model, "small.gguf");
@@ -2290,9 +2671,13 @@ mod tests {
             ..local_child
         });
         let credential = serde_json::json!({"type": "oauth", "refresh": "r"});
-        let followed =
-            docs_expansion_connection(&chatgpt, Some("k".to_owned()), Some(credential.clone()))
-                .expect("a ChatGPT sub-agent is followed to ChatGPT");
+        let followed = docs_expansion_connection(
+            &chatgpt,
+            Some("k".to_owned()),
+            None,
+            Some(credential.clone()),
+        )
+        .expect("a ChatGPT sub-agent is followed to ChatGPT");
         assert_eq!(followed.connection_type, "openai-codex");
         assert_eq!(followed.model, "gpt-5.6-luna");
         assert_eq!(followed.base_url, default_chatgpt_profile().base_url);
@@ -2301,7 +2686,7 @@ mod tests {
         assert_eq!(followed.api_key, None);
 
         assert_eq!(
-            docs_expansion_connection(&chatgpt, None, None),
+            docs_expansion_connection(&chatgpt, None, None, None),
             None,
             "a ChatGPT sub-agent with no stored credential has nothing to authenticate with"
         );
@@ -2312,7 +2697,7 @@ mod tests {
             ..AiSettings::default()
         };
         assert_eq!(
-            docs_expansion_connection(&codex_only, None, None),
+            docs_expansion_connection(&codex_only, None, None, None),
             None,
             "a ChatGPT-only install with no credential has no model to reach"
         );
@@ -2595,6 +2980,173 @@ mod tests {
                 .unwrap_err()
                 .contains("query")
         );
+    }
+
+    /// Every rule in `openrouter_model_options`, against the shapes the live catalogue really has.
+    ///
+    /// The fixture is trimmed from a real response. Each model in it is one of the cases that was
+    /// measured across all 422: a plain one, a null `max_completion_tokens` (52 of them), a
+    /// mandatory reasoner whose efforts never include `none` (90), one that lists `none` because
+    /// its thinking can be switched off, one with no `tools` (70), and one that takes video.
+    #[test]
+    fn the_openrouter_catalog_is_read_as_gofer_states_a_model() {
+        let catalog: OpenrouterModelsResponse = serde_json::from_str(
+            r#"{"data": [
+                {
+                    "id": "nvidia/nemotron-3.5-lightning:free",
+                    "name": "NVIDIA: Nemotron 3.5 Lightning",
+                    "context_length": 1000000,
+                    "architecture": {"input_modalities": ["text"]},
+                    "top_provider": {"max_completion_tokens": 131072},
+                    "supported_parameters": ["tools", "max_tokens"]
+                },
+                {
+                    "id": "no-ceiling/model",
+                    "name": "No Ceiling",
+                    "context_length": 256000,
+                    "architecture": {"input_modalities": ["text", "image"]},
+                    "top_provider": {"max_completion_tokens": null},
+                    "supported_parameters": ["tools"]
+                },
+                {
+                    "id": "always/thinks",
+                    "name": "Always Thinks",
+                    "context_length": 200000,
+                    "architecture": {"input_modalities": ["text"]},
+                    "top_provider": {"max_completion_tokens": 64000},
+                    "supported_parameters": ["tools", "reasoning", "reasoning_effort"],
+                    "reasoning": {
+                        "mandatory": true,
+                        "supported_efforts": ["xhigh", "high", "medium", "low", "minimal"],
+                        "default_effort": "medium"
+                    }
+                },
+                {
+                    "id": "can/stop-thinking",
+                    "name": "Can Stop Thinking",
+                    "context_length": 262144,
+                    "architecture": {"input_modalities": ["text", "video", "file"]},
+                    "top_provider": {"max_completion_tokens": 32000},
+                    "supported_parameters": ["tools", "reasoning", "reasoning_effort"],
+                    "reasoning": {
+                        "mandatory": false,
+                        "supported_efforts": ["max", "high", "low", "none"],
+                        "default_effort": "high"
+                    }
+                },
+                {
+                    "id": "cannot/call-tools",
+                    "name": "Cannot Call Tools",
+                    "context_length": 128000,
+                    "architecture": {"input_modalities": ["text"]},
+                    "top_provider": {"max_completion_tokens": 4096},
+                    "supported_parameters": ["max_tokens", "temperature"]
+                }
+            ]}"#,
+        )
+        .expect("the catalogue fixture parses");
+
+        let options = openrouter_model_options(catalog.data);
+        let ids: Vec<&str> = options.iter().map(|o| o.id.as_str()).collect();
+        // The model with no `tools` is gone. It could never have run a turn.
+        assert_eq!(
+            ids,
+            [
+                "nvidia/nemotron-3.5-lightning:free",
+                "no-ceiling/model",
+                "always/thinks",
+                "can/stop-thinking"
+            ]
+        );
+
+        let plain = &options[0];
+        assert_eq!(plain.name, "NVIDIA: Nemotron 3.5 Lightning");
+        assert_eq!(plain.context_window, 1_000_000);
+        assert_eq!(plain.max_tokens, 131_072);
+        assert!(!plain.reasoning);
+        assert!(!plain.supports_reasoning_effort);
+        assert!(plain.thinking_levels.is_empty());
+        assert_eq!(plain.input, ["text"]);
+
+        // A null ceiling falls back to the window rather than to zero, which would fail validation.
+        assert_eq!(options[1].max_tokens, 256_000);
+        assert_eq!(options[1].input, ["text", "image"]);
+
+        // A mandatory reasoner names its efforts and never names `none`.
+        let mandatory = &options[2];
+        assert!(mandatory.reasoning);
+        assert!(mandatory.supports_reasoning_effort);
+        assert_eq!(
+            mandatory.thinking_levels,
+            ["xhigh", "high", "medium", "low", "minimal"]
+        );
+
+        // `none` is OpenRouter's word for "can be switched off", not an effort. `off` is prepended
+        // by the menu itself, and passing `none` through would put a level in the settings file
+        // that `ALL_THINKING_LEVELS` does not contain.
+        let optional = &options[3];
+        assert_eq!(optional.thinking_levels, ["max", "high", "low"]);
+        // Pi types a model's input as text or image and nothing else. Video and file have nowhere
+        // to go, and an empty list would fail validation.
+        assert_eq!(optional.input, ["text"]);
+    }
+
+    /// OpenRouter's address is corrected, not trusted, and saving it leaves the others alone.
+    #[test]
+    fn an_openrouter_connection_is_pinned_and_kept_beside_the_others() {
+        let mut settings = GoferSettings::default();
+        settings.ai.connection_type = AiConnectionType::Openrouter;
+        settings.ai.name = "OpenRouter".to_owned();
+        settings.ai.model = "nvidia/nemotron-3.5-lightning:free".to_owned();
+        // A hand-edited file pointing this driver at somebody else's server would send the
+        // OpenRouter key there. It is put back rather than refused.
+        settings.ai.base_url = "https://not-openrouter.example/v1".to_owned();
+        settings.ai.api = ApiDialect::OpenaiCodexResponses;
+        settings.ai.chat_template_thinking = true;
+
+        let saved = validate_settings(settings).expect("an OpenRouter connection is valid");
+        assert_eq!(saved.ai.base_url, OPENROUTER_BASE_URL);
+        assert_eq!(saved.ai.api, ApiDialect::OpenaiCompletions);
+        assert!(!saved.ai.chat_template_thinking);
+        // Mirrored into its own slot, and the local one is untouched.
+        assert_eq!(
+            saved.ai.openrouter.model,
+            "nvidia/nemotron-3.5-lightning:free"
+        );
+        assert_eq!(saved.ai.local, None);
+        assert_eq!(saved.ai.chatgpt.model, default_chatgpt_profile().model);
+    }
+
+    /// The sub-agent may run on OpenRouter, and it takes OpenRouter's key rather than the AI one.
+    #[test]
+    fn a_subagent_on_openrouter_is_reached_with_its_own_key() {
+        let mut settings = AiSettings::default();
+        settings.subagent.connection = Some(SubagentConnection {
+            connection_type: AiConnectionType::Openrouter,
+            model: "z-ai/glm-5.2:free".to_owned(),
+            model_name: "GLM 5.2".to_owned(),
+            context_window: 256_000,
+            max_tokens: 8_000,
+            reasoning: true,
+            supports_reasoning_effort: true,
+            thinking_levels: vec!["xhigh".to_owned(), "high".to_owned()],
+            input: vec!["text".to_owned()],
+            thinking_level: "high".to_owned(),
+        });
+
+        let connection = docs_expansion_connection(
+            &settings,
+            Some("local-key".to_owned()),
+            Some("openrouter-key".to_owned()),
+            None,
+        )
+        .expect("an OpenRouter child is reachable");
+
+        assert_eq!(connection.connection_type, "openrouter");
+        assert_eq!(connection.base_url, OPENROUTER_BASE_URL);
+        assert_eq!(connection.model, "z-ai/glm-5.2:free");
+        // The local server's key must never reach openrouter.ai, and this is where they cross.
+        assert_eq!(connection.api_key.as_deref(), Some("openrouter-key"));
     }
 
     #[test]

@@ -89,6 +89,11 @@ export type SettingsDraft = Readonly<{
     /** The Brave Search key, held exactly like the AI key: never read back, only written. */
     braveKey: string
     braveKeyIntent: ApiKeyIntent
+    /** Whether an OpenRouter key is already in the keyring. Its own slot, so its own flag. */
+    hasOpenrouterApiKey: boolean
+    /** OpenRouter's key, held the same way again. */
+    openrouterKey: string
+    openrouterKeyIntent: ApiKeyIntent
     /** Which tab is on screen. Here rather than in React so the page stays one value. */
     tab: SettingsTab
     cache?: CacheStatus | undefined
@@ -152,6 +157,8 @@ export type SettingsAction =
     | Readonly<{type: 'api-key-removal-toggled'}>
     | Readonly<{type: 'brave-key-typed'; value: string}>
     | Readonly<{type: 'brave-key-removal-toggled'}>
+    | Readonly<{type: 'openrouter-key-typed'; value: string}>
+    | Readonly<{type: 'openrouter-key-removal-toggled'}>
     | Readonly<{type: 'chatgpt-auth-changed'; isAuthenticated: boolean}>
     | Readonly<{type: 'saved'; response: SettingsResponse}>
     | Readonly<{type: 'prompt-typed'; value: string}>
@@ -189,6 +196,9 @@ export const INITIAL_SETTINGS_DRAFT: SettingsDraft = {
     apiKeyIntent: 'keep',
     braveKey: '',
     braveKeyIntent: 'keep',
+    hasOpenrouterApiKey: false,
+    openrouterKey: '',
+    openrouterKeyIntent: 'keep',
     tab: 'ai',
     notices: {},
     isLoading: true,
@@ -232,7 +242,8 @@ export function settingsRequest(state: SettingsDraft): SettingsRequest | undefin
     return {
         settings: state.settings,
         apiKey: apiKeyUpdate(state.apiKeyIntent, state.apiKey),
-        braveApiKey: apiKeyUpdate(state.braveKeyIntent, state.braveKey)
+        braveApiKey: apiKeyUpdate(state.braveKeyIntent, state.braveKey),
+        openrouterApiKey: apiKeyUpdate(state.openrouterKeyIntent, state.openrouterKey)
     }
 }
 
@@ -286,6 +297,7 @@ export function reduce(
                 hasApiKey: action.response.hasApiKey,
                 hasChatGptCredential: action.response.hasChatGptCredential ?? false,
                 hasBraveApiKey: action.response.hasBraveApiKey ?? false,
+                hasOpenrouterApiKey: action.response.hasOpenrouterApiKey ?? false,
                 cache: action.cache,
                 agentPrompt: action.prompt.prompt,
                 savedAgentPrompt: action.prompt.prompt,
@@ -462,6 +474,21 @@ export function reduce(
                 braveKeyIntent: state.braveKeyIntent === 'clear' ? 'keep' : 'clear'
             }
 
+        // And again for OpenRouter, whose key lives in a third keyring slot of its own.
+        case 'openrouter-key-typed':
+            return {
+                ...state,
+                openrouterKey: action.value,
+                openrouterKeyIntent: action.value.trim() ? 'set' : 'keep'
+            }
+
+        case 'openrouter-key-removal-toggled':
+            return {
+                ...state,
+                openrouterKey: '',
+                openrouterKeyIntent: state.openrouterKeyIntent === 'clear' ? 'keep' : 'clear'
+            }
+
         case 'chatgpt-auth-changed':
             return {...state, hasChatGptCredential: action.isAuthenticated}
 
@@ -476,6 +503,7 @@ export function reduce(
                 hasApiKey: action.response.hasApiKey,
                 hasChatGptCredential: action.response.hasChatGptCredential ?? false,
                 hasBraveApiKey: action.response.hasBraveApiKey ?? false,
+                hasOpenrouterApiKey: action.response.hasOpenrouterApiKey ?? false,
                 apiKey: '',
                 apiKeyIntent: 'keep',
                 busy: busyWith(state.busy, 'saving', false),

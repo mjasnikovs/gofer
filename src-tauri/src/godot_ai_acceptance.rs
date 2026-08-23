@@ -459,6 +459,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
                 ..AiSettings::default()
             },
             api_key: None,
+            openrouter_api_key: None,
             brave_api_key: None,
             oauth_credential: None,
             session_id: Some("godot-ai-acceptance".to_owned()),

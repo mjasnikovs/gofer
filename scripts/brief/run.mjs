@@ -163,6 +163,7 @@ export const LIVE_WORLD = {createModelContext, createChildTools, probeTools, run
 export async function runBrief({
     settings,
     apiKey,
+    openrouterApiKey,
     braveApiKey,
     oauthCredential,
     sessionId,
@@ -187,6 +188,7 @@ export async function runBrief({
     const {models, model, subagent, streamOptions} = world.createModelContext({
         settings,
         apiKey,
+        openrouterApiKey,
         oauthCredential,
         credentialHost,
         sessionId,

@@ -116,6 +116,9 @@ pub(crate) struct ChatRequest {
 pub(crate) struct AiWorkerRequest {
     pub(crate) settings: AiSettings,
     pub(crate) api_key: Option<String>,
+    /// OpenRouter's key, from its own keyring slot. Both keys travel because the parent and the
+    /// sub-agent can be on different key-based drivers in the same turn.
+    pub(crate) openrouter_api_key: Option<String>,
     /// The Brave Search key, when the user has set one. Absent is ordinary: the two other engines
     /// need no key, and `web_search` says so itself when Brave is chosen without one.
     pub(crate) brave_api_key: Option<String>,
@@ -400,6 +403,7 @@ pub(crate) async fn run_turn(
             .unwrap_or_default();
         let settings = crate::settings::read_settings(&app)?;
         let api_key = crate::settings::ai_worker_api_key()?;
+        let openrouter_api_key = crate::settings::stored_openrouter_api_key()?;
         let oauth_credential = crate::settings::stored_chatgpt_credential()?;
         let brave_api_key = crate::settings::stored_brave_api_key()?;
         let storage = crate::workspace::project_storage(&app)?;
@@ -419,6 +423,7 @@ pub(crate) async fn run_turn(
             AiWorkerRequest {
                 settings: settings.ai,
                 api_key,
+                openrouter_api_key,
                 brave_api_key,
                 oauth_credential,
                 session_id: task_id.clone(),
@@ -498,6 +503,7 @@ pub(crate) struct SweepRequest {
 struct JudgeContext {
     settings: crate::settings::GoferSettings,
     api_key: Option<String>,
+    openrouter_api_key: Option<String>,
     oauth_credential: Option<serde_json::Value>,
     storage: crate::storage::ProjectStorage,
     workspace_path: String,
@@ -508,6 +514,7 @@ impl JudgeContext {
     fn read(app: &AppHandle) -> Result<Self, String> {
         let settings = crate::settings::read_settings(app)?;
         let api_key = crate::settings::ai_worker_api_key()?;
+        let openrouter_api_key = crate::settings::stored_openrouter_api_key()?;
         let oauth_credential = crate::settings::stored_chatgpt_credential()?;
         let storage = crate::workspace::project_storage(app)?;
         let workspace_path = storage
@@ -520,6 +527,7 @@ impl JudgeContext {
         Ok(Self {
             settings,
             api_key,
+            openrouter_api_key,
             oauth_credential,
             storage,
             workspace_path,
@@ -583,6 +591,7 @@ fn judge_one(
         AiWorkerRequest {
             settings: context.settings.ai.clone(),
             api_key: context.api_key.clone(),
+            openrouter_api_key: context.openrouter_api_key.clone(),
             // The child holds `read` and `bash`. Neither reaches the web, so a search key it
             // cannot use is a key with no reason to be in the request.
             brave_api_key: None,
@@ -769,6 +778,7 @@ pub(crate) async fn run_brief(
         let turn = turn;
         let settings = crate::settings::read_settings(&app)?;
         let api_key = crate::settings::ai_worker_api_key()?;
+        let openrouter_api_key = crate::settings::stored_openrouter_api_key()?;
         let oauth_credential = crate::settings::stored_chatgpt_credential()?;
         let brave_api_key = crate::settings::stored_brave_api_key()?;
         let storage = crate::workspace::project_storage(&app)?;
@@ -799,6 +809,7 @@ pub(crate) async fn run_brief(
             AiWorkerRequest {
                 settings: settings.ai,
                 api_key,
+                openrouter_api_key,
                 brave_api_key,
                 oauth_credential,
                 session_id: Some(request.task_id.clone()),
@@ -2073,6 +2084,7 @@ mod tests {
         AiWorkerRequest {
             settings: AiSettings::default(),
             api_key: None,
+            openrouter_api_key: None,
             brave_api_key: None,
             oauth_credential: None,
             session_id: Some("task-1".to_owned()),

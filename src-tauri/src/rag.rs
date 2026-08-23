@@ -589,8 +589,9 @@ struct RetrieveWorkerResponse {
 pub fn expansion_connection<R: Runtime>(app: &AppHandle<R>) -> Option<RetrieveConnection> {
     let settings = crate::settings::read_settings(app).ok()?;
     let key = crate::settings::ai_worker_api_key().ok().flatten();
+    let openrouter_key = crate::settings::stored_openrouter_api_key().ok().flatten();
     let credential = crate::settings::stored_chatgpt_credential().ok().flatten();
-    crate::settings::docs_expansion_connection(&settings.ai, key, credential)
+    crate::settings::docs_expansion_connection(&settings.ai, key, openrouter_key, credential)
 }
 
 pub fn retrieve_query(

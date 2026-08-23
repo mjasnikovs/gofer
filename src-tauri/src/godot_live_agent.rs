@@ -277,6 +277,7 @@ fn live_agent_acceptance() {
                 ..AiSettings::default()
             },
             api_key: None,
+            openrouter_api_key: None,
             brave_api_key: None,
             oauth_credential: None,
             session_id: Some("godot-live-agent".to_owned()),

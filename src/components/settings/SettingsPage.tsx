@@ -50,6 +50,7 @@ import {
     charactersLabel,
     compactionLabel,
     connectionNotice,
+    driverOptions,
     formatBytes,
     minutesLabel,
     progressLabel,
@@ -121,6 +122,8 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         availableModels,
         braveKey,
         braveKeyIntent,
+        openrouterKey,
+        openrouterKeyIntent,
         busy,
         cache,
         notices,
@@ -532,17 +535,8 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                             <Selector
                                 label='AI driver'
                                 value={draft.ai.connectionType}
-                                description='Choose whether Gofer uses your local server or ChatGPT subscription.'
-                                // A driver with no saved profile is not offered: switching to it
-                                // would need an address and a dialect this page does not own.
-                                options={[
-                                    ...(draft.ai.local ?
-                                        [{value: 'openai-compatible', label: 'Local model'}]
-                                    :   []),
-                                    ...(draft.ai.chatgpt ?
-                                        [{value: 'openai-codex', label: 'ChatGPT subscription'}]
-                                    :   [])
-                                ]}
+                                description='Your own server, a ChatGPT subscription, or OpenRouter. Only a driver that has somewhere to run is offered.'
+                                options={driverOptions(draft.ai)}
                                 onChange={connectionType => {
                                     modelsFor.current = undefined
                                     dispatch({
@@ -612,6 +606,74 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         onChange={maxTokens => {
                                             updateAi({maxTokens: Number(maxTokens)})
                                         }}
+                                    />
+                                </>
+                            : draft.ai.connectionType === 'openrouter' ?
+                                <>
+                                    <TextInput
+                                        label='API key'
+                                        type='password'
+                                        value={openrouterKey}
+                                        isRequired
+                                        startIcon={KeyIcon}
+                                        placeholder={
+                                            state.hasOpenrouterApiKey ? 'Stored securely' : (
+                                                'sk-or-v1-…'
+                                            )
+                                        }
+                                        description={
+                                            openrouterKeyIntent === 'clear' ?
+                                                'The stored key will be removed when you save.'
+                                            : state.hasOpenrouterApiKey ?
+                                                'Leave blank to keep the key stored in the operating system credential store.'
+                                            :   'Create one at openrouter.ai under Keys.'
+                                        }
+                                        onChange={enteredKey => {
+                                            dispatch({
+                                                type: 'openrouter-key-typed',
+                                                value: enteredKey
+                                            })
+                                        }}
+                                    />
+                                    <Selector
+                                        label='Model'
+                                        value={draft.ai.model}
+                                        hasSearch
+                                        searchPlaceholder='Filter by name or id'
+                                        isDisabled={availableModels.length === 0}
+                                        disabledMessage='OpenRouter has not answered with its catalogue yet.'
+                                        description='Only models that can call tools are listed. The rest cannot run Gofer.'
+                                        options={availableModels.map(model => ({
+                                            value: model.id,
+                                            label: model.name
+                                        }))}
+                                        onChange={modelId => {
+                                            const model = availableModels.find(
+                                                option => option.id === modelId
+                                            )
+                                            if (model) selectModel(model)
+                                        }}
+                                    />
+                                    <TextInput
+                                        label='Context window'
+                                        value={draft.ai.contextWindow.toLocaleString()}
+                                        isDisabled
+                                        disabledMessage="OpenRouter's catalogue answers this, so there is nothing to type."
+                                        onChange={() => undefined}
+                                    />
+                                    <TextInput
+                                        label='Maximum output tokens'
+                                        value={draft.ai.maxTokens.toLocaleString()}
+                                        isDisabled
+                                        disabledMessage="OpenRouter's catalogue answers this, so there is nothing to type."
+                                        onChange={() => undefined}
+                                    />
+                                    <TextInput
+                                        label='Accepts'
+                                        value={draft.ai.input.join(', ')}
+                                        isDisabled
+                                        disabledMessage='What this model takes as input, as OpenRouter describes it.'
+                                        onChange={() => undefined}
                                     />
                                 </>
                             :   <>
@@ -787,6 +849,20 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 />
                             )}
                         </FormLayout>
+                        {draft.ai.connectionType === 'openrouter'
+                            && (state.hasOpenrouterApiKey || openrouterKeyIntent === 'clear') && (
+                                <Button
+                                    label={
+                                        openrouterKeyIntent === 'clear' ? 'Keep stored API key' : (
+                                            'Remove stored API key'
+                                        )
+                                    }
+                                    variant='ghost'
+                                    clickAction={() => {
+                                        dispatch({type: 'openrouter-key-removal-toggled'})
+                                    }}
+                                />
+                            )}
                         {draft.ai.connectionType === 'openai-compatible'
                             && (state.hasApiKey || apiKeyIntent === 'clear') && (
                                 <Button
@@ -852,12 +928,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                         value: SUBAGENT_INHERITS,
                                         label: 'Same as the main agent'
                                     },
-                                    ...(draft.ai.local ?
-                                        [{value: 'openai-compatible', label: 'Local model'}]
-                                    :   []),
-                                    ...(draft.ai.chatgpt ?
-                                        [{value: 'openai-codex', label: 'ChatGPT subscription'}]
-                                    :   [])
+                                    ...driverOptions(draft.ai)
                                 ]}
                                 onChange={connectionType => {
                                     subagentModelsFor.current = undefined

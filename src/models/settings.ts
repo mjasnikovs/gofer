@@ -38,9 +38,10 @@ export type AiSettings = Readonly<{
     compactionPercent: number
     subagent: SubagentSettings
     web: WebSettings
-    /** Saved independently so changing drivers never destroys the other driver's selection. */
+    /** Saved independently so changing drivers never destroys another driver's selection. */
     local?: AiConnectionProfile | undefined
     chatgpt?: AiConnectionProfile | undefined
+    openrouter?: AiConnectionProfile | undefined
 }>
 
 /**
@@ -76,8 +77,29 @@ export const SEARCH_PROVIDERS_NEEDING_KEY: readonly SearchProvider[] = ['brave']
 /** The shipped engine. Keyless, so a fresh install can search the moment it is opened. */
 export const DEFAULT_WEB_SETTINGS: WebSettings = {searchProvider: 'exa'}
 
-export type AiConnectionType = 'openai-compatible' | 'openai-codex'
+export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openrouter'
 export type AiApiDialect = 'openai-completions' | 'openai-codex-responses'
+
+/**
+ * Which field of `AiSettings` holds each driver's saved connection.
+ *
+ * One map rather than a branch at every reader. Every one of the five places that used to ask
+ * "local or ChatGPT?" was a two-armed ternary, and a third driver would have meant finding all five
+ * and getting all five right.
+ */
+const PROFILE_SLOTS: Readonly<Record<AiConnectionType, 'local' | 'chatgpt' | 'openrouter'>> = {
+    'openai-compatible': 'local',
+    'openai-codex': 'chatgpt',
+    openrouter: 'openrouter'
+}
+
+/**
+ * OpenRouter's address, which the user never types.
+ *
+ * The whole point of the driver: a fixed host whose catalogue answers every question the local
+ * driver has to ask the user by hand.
+ */
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 
 export type AiConnectionProfile = Readonly<{
     name: string
@@ -222,6 +244,7 @@ export type SettingsResponse = Readonly<{
     hasApiKey: boolean
     hasChatGptCredential?: boolean | undefined
     hasBraveApiKey?: boolean | undefined
+    hasOpenrouterApiKey?: boolean | undefined
     credentialStoreError?: string
 }>
 
@@ -250,6 +273,7 @@ export type SettingsRequest = Readonly<{
     settings: GoferSettings
     apiKey: ApiKeyUpdate
     braveApiKey: ApiKeyUpdate
+    openrouterApiKey: ApiKeyUpdate
 }>
 
 export type CacheStatus = Readonly<{
@@ -449,25 +473,23 @@ export function normalizeSettings(settings: GoferSettings): GoferSettings {
             ...normalizedAi,
             // Never invented here. What a ChatGPT connection is belongs to the backend, which sends
             // it with every settings response; a driver with no profile is a driver Gofer cannot
-            // offer, and the settings page draws it that way rather than guessing an address.
-            local:
-                normalizedAi.local
-                ?? (normalizedAi.connectionType === 'openai-compatible' ? active : undefined),
-            chatgpt:
-                normalizedAi.chatgpt
-                ?? (normalizedAi.connectionType === 'openai-codex' ? active : undefined)
+            // offer, and the settings page draws it that way rather than guessing an address. Only
+            // the active driver's slot is filled, and only when the file did not already carry it.
+            [PROFILE_SLOTS[normalizedAi.connectionType]]:
+                normalizedAi[PROFILE_SLOTS[normalizedAi.connectionType]] ?? active
         }
     }
 }
 
 export function selectAiDriver(ai: AiSettings, connectionType: AiConnectionType): AiSettings {
     if (ai.connectionType === connectionType) return ai
-    const current = profileOf(ai)
-    const local = ai.connectionType === 'openai-compatible' ? current : ai.local
-    const chatgpt = ai.connectionType === 'openai-codex' ? current : ai.chatgpt
-    const selected = connectionType === 'openai-compatible' ? local : chatgpt
+    // The driver being left is written back to its own slot first. Without that, its flat fields —
+    // which are the only copy the user has been editing — are overwritten by the driver being
+    // switched to and never reach the pair.
+    const saved = withProfile(ai)
+    const selected = connectionProfile(saved, connectionType)
     if (!selected) return ai
-    return {...ai, ...selected, connectionType, local, chatgpt}
+    return {...saved, ...selected, connectionType}
 }
 
 /**
@@ -524,14 +546,9 @@ export function adoptModelReasoning(ai: AiSettings, model: AiModelOption): AiSet
     })
 }
 
-/** Mirrors the flat fields back into the driver's half of the saved pair. See `normalizeSettings`. */
+/** Mirrors the flat fields back into the active driver's slot. See `normalizeSettings`. */
 function withProfile(ai: AiSettings): AiSettings {
-    const profile = profileOf(ai)
-    return {
-        ...ai,
-        local: ai.connectionType === 'openai-compatible' ? profile : ai.local,
-        chatgpt: ai.connectionType === 'openai-codex' ? profile : ai.chatgpt
-    }
+    return {...ai, [PROFILE_SLOTS[ai.connectionType]]: profileOf(ai)}
 }
 
 /**
@@ -545,7 +562,38 @@ export function connectionProfile(
     ai: AiSettings,
     connectionType: AiConnectionType
 ): AiConnectionProfile | undefined {
-    return connectionType === 'openai-compatible' ? ai.local : ai.chatgpt
+    return ai[PROFILE_SLOTS[connectionType]]
+}
+
+/**
+ * What each driver is called on screen. Separate from the stored id, and one-directional: a label
+ * must never be written to the settings file. Same rule as `SEARCH_PROVIDER_LABELS`.
+ */
+export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = {
+    'openai-compatible': 'Local model',
+    'openai-codex': 'ChatGPT subscription',
+    openrouter: 'OpenRouter'
+}
+
+/** Every driver a build knows, in the order the pickers offer them. */
+export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [
+    'openai-compatible',
+    'openai-codex',
+    'openrouter'
+]
+
+/**
+ * The drivers a picker may offer, which is the drivers that have somewhere to run.
+ *
+ * A driver with no saved profile is not offered: switching to it would need an address and a
+ * dialect the settings page does not own. Both pickers ask this rather than each building the list
+ * from the profiles itself — two hand-written lists of the same thing can disagree, and the one
+ * that is wrong is whichever was not touched when a driver was added.
+ */
+export function driverOptions(ai: AiSettings): {value: AiConnectionType; label: string}[] {
+    return AI_CONNECTION_TYPES.filter(
+        connectionType => connectionProfile(ai, connectionType) !== undefined
+    ).map(connectionType => ({value: connectionType, label: AI_CONNECTION_LABELS[connectionType]}))
 }
 
 /**

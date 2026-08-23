@@ -13,6 +13,8 @@ import {
     normalizeSettings,
     progressLabel,
     progressValue,
+    OPENROUTER_BASE_URL,
+    driverOptions,
     selectAiDriver,
     startSubagentConnection
 } from './settings'
@@ -410,6 +412,63 @@ describe('selectAiDriver', () => {
         expect(backToLocal.model).toBe('local-model')
         expect(backToChatgpt.model).toBe('gpt-5.5')
         expect(backToChatgpt.modelName).toBe('GPT-5.5')
+    })
+})
+
+describe('selectAiDriver across three drivers', () => {
+    it('keeps every driver its own model while moving between all of them', () => {
+        const openrouterProfile = {
+            ...chatgptProfile,
+            chatTemplateThinking: false,
+            name: 'OpenRouter',
+            baseUrl: OPENROUTER_BASE_URL,
+            model: 'nvidia/nemotron-3.5-lightning:free',
+            modelName: 'Nemotron 3.5 Lightning',
+            api: 'openai-completions'
+        } as const
+        const start = {...normalizeSettings(stored).ai, openrouter: openrouterProfile}
+
+        const onOpenrouter = selectAiDriver(start, 'openrouter')
+        const onChatgpt = selectAiDriver(onOpenrouter, 'openai-codex')
+        const backToLocal = selectAiDriver(onChatgpt, 'openai-compatible')
+        const backToOpenrouter = selectAiDriver(backToLocal, 'openrouter')
+
+        expect(onOpenrouter.model).toBe('nvidia/nemotron-3.5-lightning:free')
+        expect(onOpenrouter.baseUrl).toBe(OPENROUTER_BASE_URL)
+        expect(backToLocal.model).toBe('local-model')
+        expect(backToOpenrouter.model).toBe('nvidia/nemotron-3.5-lightning:free')
+        // The two it passed through on the way are still there to go back to.
+        expect(backToOpenrouter.local?.model).toBe('local-model')
+        expect(backToOpenrouter.chatgpt?.model).toBe(chatgptProfile.model)
+    })
+
+    it('offers a configured OpenRouter connection in the picker', () => {
+        const ai = {
+            ...normalizeSettings(stored).ai,
+            openrouter: {...chatgptProfile, chatTemplateThinking: false}
+        }
+        expect(driverOptions(ai).map(option => option.value)).toEqual([
+            'openai-compatible',
+            'openai-codex',
+            'openrouter'
+        ])
+    })
+})
+
+describe('driverOptions', () => {
+    it('offers only the drivers that have somewhere to run', () => {
+        const both = normalizeSettings(stored).ai
+        expect(driverOptions(both)).toEqual([
+            {value: 'openai-compatible', label: 'Local model'},
+            {value: 'openai-codex', label: 'ChatGPT subscription'}
+        ])
+    })
+
+    it('leaves out a driver nobody has configured', () => {
+        const localOnly = {...normalizeSettings(stored).ai, chatgpt: undefined}
+        expect(driverOptions(localOnly)).toEqual([
+            {value: 'openai-compatible', label: 'Local model'}
+        ])
     })
 })
 
