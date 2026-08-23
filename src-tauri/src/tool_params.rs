@@ -2283,8 +2283,18 @@ fn repair_set(spec: &[Param], params: &mut Value) {
 /// class, a setting, a group, a signal, a file. None of those has meaningful whitespace at either
 /// end, and a model that slips puts it there — the padded *key* has been repaired for a while, and
 /// one live turn showed the padded *value* going through untouched twelve times in a row.
-const TEXT_THAT_IS_CONTENT: [&str; 5] =
-    ["text", "oldText", "newText", "originalText", "updatedText"];
+///
+/// `source` is a whole script buffer, and the trailing newline is the part that mattered: gdformat
+/// always ends its output with one, so a trimmed buffer came back differing from what was sent and
+/// `godot_script format` answered `changed: true` about a buffer it had not changed.
+const TEXT_THAT_IS_CONTENT: [&str; 6] = [
+    "text",
+    "oldText",
+    "newText",
+    "originalText",
+    "updatedText",
+    "source",
+];
 
 /// Trims the whitespace round a name, which is never part of one.
 ///
@@ -2901,6 +2911,19 @@ mod tests {
             json!("  x = 1\n"),
             "{edited}"
         );
+
+        // So is the buffer handed to the formatter. Trimmed, gdformat put the trailing newline
+        // back and every already-formatted buffer came back `changed: true` — the one answer that
+        // tells the caller to write the file again.
+        let mut formatting =
+            json!({"source": "extends Node\n\n\nfunc value() -> int:\n\treturn 1\n"});
+        repair("godot_script", "format", &mut formatting);
+        assert_eq!(
+            formatting["source"],
+            json!("extends Node\n\n\nfunc value() -> int:\n\treturn 1\n"),
+            "{formatting}"
+        );
+        check_ok("godot_script", "format", formatting);
     }
 
     /// A torn second copy of a pair the object already holds is thrown away, not refused.
