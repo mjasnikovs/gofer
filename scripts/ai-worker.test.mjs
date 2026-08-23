@@ -1906,6 +1906,8 @@ function startScriptedServer(turns) {
                             function: {name: call.name, arguments: JSON.stringify(call.args)}
                         }))
                     }
+                : script.reasoning !== undefined ?
+                    {role: 'assistant', reasoning: script.reasoning, content: script.text ?? ''}
                 :   {role: 'assistant', content: script.text ?? 'Done'}
             const frame = choices => ({
                 id: `chatcmpl-${String(turn)}`,
@@ -2953,6 +2955,76 @@ test('a failure that will not fix itself is not waited on', async context => {
 
     assert.equal(mock.bodies.length, 1)
     assert.ok(!events.some(event => event.type === 'retry-scheduled'))
+})
+
+test('a turn that stops without saying anything is asked again', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    // What a gateway does when the model behind it dies mid-request: HTTP 200, `finish_reason:
+    // "stop"`, and nothing in the message. Measured against OpenRouter, which reports the upstream
+    // failure only in `native_finish_reason` — a field the completions dialect does not carry.
+    const mock = startScriptedServer([{text: ''}, {text: 'Back with an answer'}])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    const completion = await runAgent({
+        settings: {...settings, ...impatient, baseUrl: url},
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    assert.equal(completion.text, 'Back with an answer')
+    assert.equal(events.filter(event => event.type === 'retry-scheduled').length, 1)
+    // The blank answer is not left in front of the model as its own last word.
+    assert.equal(JSON.stringify(mock.bodies.at(-1).messages).split('Build the level').length - 1, 1)
+})
+
+test('a turn that only thought and never answered is asked again', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    // The same gateway failure, against a reasoning model: the reasoning block arrives, the answer
+    // never does, and `finish_reason` still says the turn ended normally. Thinking is not something
+    // the user was told, so a turn holding only thinking has not answered.
+    const mock = startScriptedServer([
+        {reasoning: 'Let me work out what they want.'},
+        {text: 'Back with an answer'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+
+    const completion = await runAgent({
+        settings: {...settings, ...impatient, baseUrl: url, reasoning: true},
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        emit: event => events.push(event)
+    })
+
+    assert.equal(completion.text, 'Back with an answer')
+    assert.equal(events.filter(event => event.type === 'retry-scheduled').length, 1)
+})
+
+test('a turn that only ever stops without saying anything gives up loudly', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{text: ''}])
+    const url = await baseUrl(context, mock.server)
+
+    await assert.rejects(
+        runAgent({
+            settings: {...settings, ...impatient, baseUrl: url, retryAttempts: 2},
+            messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+            agentMessages: [],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        }),
+        /empty/iu
+    )
+
+    // The first ask, then two retries. An empty answer is never returned as the answer.
+    assert.equal(mock.bodies.length, 3)
 })
 
 test('an ordinary turn keeps the transcript it was given', async context => {

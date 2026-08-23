@@ -46,8 +46,8 @@
     "dependencies": {
         "@astryxdesign/core": "0.2.0",
         "@astryxdesign/theme-neutral": "0.2.0",
-        "@earendil-works/pi-agent-core": "0.83.0",
-        "@earendil-works/pi-ai": "0.83.0",
+        "@earendil-works/pi-agent-core": "0.84.2",
+        "@earendil-works/pi-ai": "0.84.2",
         "@heroicons/react": "2.2.0",
         "@huggingface/transformers": "4.2.0",
         "@mjasnikovs/gofer-rag": "^0.2.0",

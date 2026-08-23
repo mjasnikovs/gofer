@@ -1,8 +1,6 @@
 import {
     Agent,
-    InMemorySessionStorage,
     NodeExecutionEnv,
-    Session,
     calculateContextTokens,
     compact,
     convertToLlm,
@@ -89,13 +87,48 @@ function sleep(ms, signal) {
 }
 
 /**
+ * What a turn that stopped without saying anything is reported as.
+ *
+ * The wording is the marker: `isTransientFailure` matches this exact string to decide the turn is
+ * worth asking again, because Pi's classifier reads provider error text and this failure has none.
+ */
+const EMPTY_ANSWER = 'The model ended its turn empty: no answer, no tool call.'
+
+/**
+ * Whether a finished turn actually said anything.
+ *
+ * A gateway whose upstream dies mid-request answers HTTP 200, `finish_reason: "stop"`, and an empty
+ * message — measured against OpenRouter, which reports the real cause in `native_finish_reason`, a
+ * field the completions dialect does not carry. Every layer above then records a complete assistant
+ * turn whose text is nothing at all, and the user gets a blank bubble with no way to ask again.
+ *
+ * Only `stop` is judged. An aborted turn is empty too — Pi builds its own failure message with a
+ * single empty text part — and that one is already an ending the loop knows how to end.
+ *
+ * Thinking does not count. A reasoning model whose gateway dies after the reasoning block and
+ * before any answer comes back holding thinking and nothing else, and thinking is not something the
+ * user was told: counting it leaves exactly the blank bubble this check exists to prevent.
+ */
+function answeredNothing(message) {
+    if (message.stopReason !== 'stop') return false
+    return !message.content.some(
+        part => (part.type === 'text' && part.text.trim() !== '') || part.type === 'toolCall'
+    )
+}
+
+/**
  * Why a turn did not produce an answer, in the one shape both endings can be judged by.
  *
- * A turn fails two ways: the model answered with an error, or it never answered at all and the
- * agent recorded why. Only the first carries a message the classifier can read, so the second is
- * given the same shape rather than a separate branch at every call site.
+ * A turn fails three ways: the model answered with an error, it reported success and said nothing,
+ * or it never answered at all and the agent recorded why. Only the first carries a message the
+ * classifier can read, so the other two are given the same shape rather than a separate branch at
+ * every call site. The empty turn is restated as an error on the way through, because it arrives
+ * claiming to have stopped normally and every reader below here would believe it.
  */
 function turnFailure(finalMessage, agent) {
+    if (finalMessage && answeredNothing(finalMessage)) {
+        return {...finalMessage, stopReason: 'error', errorMessage: EMPTY_ANSWER}
+    }
     if (finalMessage) {
         return {
             ...finalMessage,
@@ -118,6 +151,10 @@ function turnFailure(finalMessage, agent) {
  */
 function isTransientFailure(failure, model) {
     if (isContextOverflow(failure, model.contextWindow)) return false
+    // Ours, and asked before Pi's list, because an empty turn carries no provider wording for that
+    // list to recognise. Pi is deliberate about this: its classifier only reads turns that stopped
+    // with an error, and it states that the retry policy belongs to the caller. This is the caller.
+    if (failure.errorMessage === EMPTY_ANSWER) return true
     return isRetryableAssistantError(failure)
 }
 
@@ -175,17 +212,32 @@ function compactionSettings(percent, contextWindow) {
  * A summary an earlier compaction left behind goes back in as the compaction entry it came from
  * rather than as a message. That is what lets the next compaction update it — summarise only what
  * happened since — instead of summarising the summary along with everything after it.
+ *
+ * Built by hand rather than through a `Session`. An entry is a plain object and `prepareCompaction`
+ * takes an array of them, so the storage, the ids and the write-back were all paid for and thrown
+ * away. The session API this used to go through was removed under it; a shape it only reads is not
+ * something a release can take away.
  */
-async function compactionSession(messages) {
-    const session = new Session(new InMemorySessionStorage())
-    for (const message of messages) {
-        if (message.role === 'compactionSummary') {
-            await session.appendCompaction(message.summary, undefined, message.tokensBefore ?? 0)
-            continue
+function compactionEntries(messages) {
+    return messages.map((message, index) => {
+        const base = {
+            id: String(index),
+            seq: index,
+            parentId: index === 0 ? null : String(index - 1),
+            timestamp: message.timestamp ?? index
         }
-        await session.appendMessage(message)
-    }
-    return session
+        if (message.role === 'compactionSummary') {
+            return {
+                ...base,
+                type: 'compaction',
+                summary: message.summary,
+                // Empty, because what this compaction retained is the entries that follow it here.
+                retainedTail: [],
+                tokensBefore: message.tokensBefore ?? 0
+            }
+        }
+        return {...base, type: 'message', message}
+    })
 }
 
 /**
@@ -196,8 +248,7 @@ async function compactionSession(messages) {
  * cut is one that never leaves a tool result without the assistant message that asked for it.
  */
 async function compactMessages(messages, models, model, settings, thinkingLevel, signal) {
-    const session = await compactionSession(messages)
-    const preparation = prepareCompaction(await session.getBranch(), settings)
+    const preparation = prepareCompaction(compactionEntries(messages), settings)
     if (!preparation.ok) throw new Error(`Compaction failed: ${preparation.error.message}`)
     if (!preparation.value) return messages
     const result = await compact(preparation.value, models, model, undefined, signal, thinkingLevel)
@@ -212,13 +263,15 @@ async function compactMessages(messages, models, model, settings, thinkingLevel,
     ]
 }
 
-function modelFor(settings) {
+function modelFor(settings, providerId = PROVIDER_ID) {
     const thinkingLevelMap = piThinkingLevelMap(settings.thinkingLevels)
+    // Only a local server holds a KV cache a session header could route back to. See the field.
+    const isLocal = providerId === PROVIDER_ID
     return {
         id: settings.model,
         name: settings.modelName || settings.model,
         api: 'openai-completions',
-        provider: PROVIDER_ID,
+        provider: providerId,
         baseUrl: settings.baseUrl,
         reasoning: settings.reasoning ?? false,
         input: settings.input ?? ['text'],
@@ -891,7 +944,11 @@ export async function runAgent({
                 finalMessage = undefined
                 await agent.continue()
             }
-            if (finalMessage && finalMessage.stopReason !== 'error') {
+            if (
+                finalMessage
+                && finalMessage.stopReason !== 'error'
+                && !answeredNothing(finalMessage)
+            ) {
                 // The turn is over as far as the model is concerned, and this is the last moment
                 // before `done` says so out loud. Running the points here rather than after the
                 // loop is what makes them a gate: the executor is already rooted in the worktree,
@@ -909,6 +966,26 @@ export async function runAgent({
                 resume = () => agent.prompt(contextMessage({sender: 'user', text: report}, model))
                 finalMessage = undefined
                 continue
+            }
+            // A stopped turn is the user's decision, not a failure, and it is read from the signal
+            // rather than from the message. Pi reports the two cancellations differently: a stop
+            // during the request comes back as `aborted`, and a stop while a tool call is in flight
+            // comes back as an ordinary error carrying the runtime's own wording. Only the signal
+            // knows both are the same event, so it is asked before anything is classified, retried,
+            // or thrown — a turn the user stopped must never wait five seconds and ask again.
+            if (signal?.aborted) {
+                // Every field the `done` event is built from is defaulted, because a turn can be
+                // stopped before the model produced a message at all. `isAiStreamEvent` rejects a
+                // completion whose usage or model is missing, and a rejected completion is dropped
+                // in silence — the stopped turn would then never be recorded as having ended.
+                finalMessage = {
+                    content: [],
+                    usage: zeroUsage(),
+                    model: model.id,
+                    ...finalMessage,
+                    stopReason: 'aborted'
+                }
+                break
             }
             const failure = turnFailure(finalMessage, agent)
             if (attempt >= retry.attempts || !isTransientFailure(failure, model)) {
