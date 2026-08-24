@@ -48,3 +48,25 @@
 .astryx-card.gofer-ask-surface {
     background-color: var(--color-background-popover);
 }
+
+/*
+ * A collapsible's trigger label may give way to its row.
+ *
+ * `Collapsible` lays its trigger out as `display: flex` and puts the label in a bare `<span>` beside
+ * the chevron. A flex item's automatic minimum size is its content, so that span never shrank below
+ * the whole sentence in it — an answered question's summary is a paragraph the model wrote, and the
+ * span measured 1006px inside a 912px row. Nothing below it could help: the block's own `Text` is
+ * clamped to one line and its `StackItem` fills, but neither is ever handed a width to be too wide
+ * for while the span above them is still sizing itself off the words.
+ *
+ * Measured on a real transcript: the conversation's scroll width was 1047px in a 960px column, which
+ * is the horizontal scrollbar that ran under every message in the task.
+ *
+ * The span carries no themeable name of its own, so this matches by descent from the trigger, the
+ * same way the rules above match inside `chat-message`. It only permits shrinking — a label that
+ * already fits is drawn exactly as before.
+ */
+
+.astryx-collapsible-trigger > span {
+    min-width: 0;
+}

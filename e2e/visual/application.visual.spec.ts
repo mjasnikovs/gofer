@@ -448,6 +448,30 @@ async function installDesktop(page: Page, state: VisualState) {
                             isError: false,
                             endedAt: 1_800_000_003_000
                         },
+                        /*
+                         * A question the turn asked and the user has answered, whose summary is a
+                         * sentence the model wrote rather than a label anyone chose.
+                         *
+                         * It is here for the width, not the words. `Collapsible` draws its trigger
+                         * as a flex row and gives the label a bare span, which sizes itself off
+                         * that whole sentence and cannot be shrunk from inside — so one answered
+                         * question put a horizontal scrollbar under every message in the task.
+                         * `src/theme/chat.css` frees the span; this is the row that proves it.
+                         */
+                        {
+                            type: 'tool-start',
+                            id: 'tool-4',
+                            name: 'ask_user',
+                            target: 'Should I build the proposed grouped-block HUD: one 36px stat bar at top-left and one 64px objective panel at top-right, leaving the squad bench unchanged?',
+                            startedAt: 1_800_000_003_000
+                        },
+                        {
+                            type: 'tool-end',
+                            id: 'tool-4',
+                            output: 'Yes, and keep the bench where it is.',
+                            isError: false,
+                            endedAt: 1_800_000_004_000
+                        },
                         {type: 'text-delta', delta: 'Finished the requested change.'},
                         {
                             type: 'done',
@@ -620,6 +644,23 @@ test('streaming conversation with tool activity', async ({page}) => {
     })
     expect(overflow.scroll, 'the conversation scrolls sideways').toBeLessThanOrEqual(
         overflow.client
+    )
+
+    /*
+     * The answered question gives ground rather than growing the column. Its summary is one line
+     * the model wrote, so the row it sits in has to end at the column's edge and the sentence has
+     * to be the part that is cut.
+     */
+    const summary = page.locator('.astryx-collapsible-trigger .astryx-text', {
+        hasText: /^Should I build the proposed/u
+    })
+    await expect(summary).toBeVisible()
+    const clipped = await summary.evaluate(element => ({
+        scroll: element.scrollWidth,
+        client: element.clientWidth
+    }))
+    expect(clipped.scroll, 'the answered question is drawn at its full width').toBeGreaterThan(
+        clipped.client
     )
 
     const turn = await page.getByRole('log').innerText()

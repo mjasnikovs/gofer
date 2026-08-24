@@ -202,19 +202,28 @@ function Answered({tool}: Readonly<{tool: ToolActivity}>) {
                     gap={2}
                     align='center'
                 >
-                    <Text
-                        type='supporting'
-                        maxLines={1}
-                    >
-                        {summary}
-                    </Text>
                     {/*
                      * Token, not Badge. How the call ended is a state, and Badge here is for counts
                      * — the same rule the Design tab's chapter label already follows.
+                     *
+                     * First, not last. The summary is a whole sentence and the state is two words,
+                     * so trailing the state put the one fixed thing in the row behind the one
+                     * variable thing, where a long question pushed it off the edge. Leading it also
+                     * stacks the states down the feed in one column, which is what a reader
+                     * scanning for the red one is doing.
+                     *
+                     * Three states, and colour carries two of them: a call that never asked is red,
+                     * a design the user agreed is green, and a plain answer stays neutral. That is
+                     * the two-or-three meaningful colours Token asks for, not a palette.
                      */}
                     <Token
                         size='sm'
-                        color={failed ? 'red' : 'gray'}
+                        color={
+                            failed ? 'red'
+                            : agreed ?
+                                'green'
+                            :   'gray'
+                        }
                         label={
                             failed ? 'not asked'
                             : agreed ?
@@ -222,6 +231,19 @@ function Answered({tool}: Readonly<{tool: ToolActivity}>) {
                             :   'answered'
                         }
                     />
+                    {/*
+                     * The sentence is the only part that has to give. Without the fill it sized off
+                     * its own text and the row ran past the column, which put a horizontal
+                     * scrollbar under the whole conversation.
+                     */}
+                    <StackItem size='fill'>
+                        <Text
+                            type='supporting'
+                            maxLines={1}
+                        >
+                            {summary}
+                        </Text>
+                    </StackItem>
                 </HStack>
             }
         >
