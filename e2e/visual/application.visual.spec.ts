@@ -154,6 +154,14 @@ async function installDesktop(page: Page, state: VisualState) {
                     return undefined
                 }
                 if (command === 'list_project_tasks') return []
+                // Loose files are what opens the new-task dialog. A clean checkout skips it, so the
+                // fixture keeps two here — one Git has seen and one it has not — because those are
+                // the two the dialog's answers are about.
+                if (command === 'pending_project_changes')
+                    return [
+                        {path: 'scripts/player.gd', isNew: false},
+                        {path: 'notes/from-the-user.md', isNew: true}
+                    ]
                 if (command === 'list_project_sketches')
                     return [
                         {
@@ -539,11 +547,11 @@ test('empty workspace', async ({page}) => {
 })
 
 /**
- * The dialog that starts every task, which is the one screen a user cannot avoid.
+ * The dialog that asks the one question making a task cannot answer for itself.
  *
- * It is the plan: the four phases run against the ask before there is a first turn, so the ask has
- * to be taken here. Skipping is the other way out and it has to read as one — a real control, not a
- * second Cancel — because it is what a small, clear change goes through.
+ * It does not ask what the task is — the composer is the only place to write that. It asks what
+ * becomes of the files loose in the checkout, and it is only shown when there are any, so the
+ * fixture's two changes are what puts it on screen at all.
  */
 test('new task dialog', async ({page}) => {
     await installDesktop(page, 'empty')
@@ -554,8 +562,9 @@ test('new task dialog', async ({page}) => {
     // Scoped to the dialog: the workspace header behind it names an untitled task the same way.
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByText('Each task gets its own branch.')).toBeVisible()
-    await expect(dialog.getByRole('button', {name: 'Plan it'})).toBeDisabled()
-    await expect(dialog.getByRole('button', {name: 'Skip planning'})).toBeEnabled()
+    await expect(dialog.getByText('2 files are not committed yet')).toBeVisible()
+    await expect(dialog.getByText('notes/from-the-user.md')).toBeVisible()
+    await expect(dialog.getByRole('button', {name: 'Create task'})).toBeEnabled()
     await stableScreenshot(page, 'new-task-dialog.png')
 })
 
@@ -573,9 +582,9 @@ test('names a worktree file from the composer with @ @interaction', async ({page
     await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
     const composer = page.getByRole('combobox', {name: 'Message input'})
     await composer.click()
-    // Characters out of the middle of `scripts/player.gd`, in order and not adjacent: a substring
-    // filter finds nothing here, which is what the ranking exists for.
-    await composer.pressSequentially('@plyr')
+    // The name typed as it reads, not as a fuzzy subsequence: `rankFileMentions` matches the query
+    // straight, and the folder in front of the name is not needed to find it.
+    await composer.pressSequentially('@play')
     const suggestion = page.getByText('player.gd', {exact: true})
     await expect(suggestion).toBeVisible()
     await suggestion.click()
