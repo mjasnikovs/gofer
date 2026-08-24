@@ -47,3 +47,5 @@ src-tauri/sidecar/gdformat
 src-tauri/sidecar/gdformat.exe
 src-tauri/sidecar/gdformat*.sha256
 src-tauri/sidecar/LICENSES.md
+
+.pi-tasks/
