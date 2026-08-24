@@ -818,7 +818,7 @@ describe('InspectorWorkspace', () => {
             within(screen.getByRole('navigation', {name: 'Explorer'})).getByRole('button', {
                 name: 'Files'
             })
-        ).toHaveAttribute('aria-current', 'page')
+        ).toHaveAttribute('aria-current', 'true')
     })
 
     /*

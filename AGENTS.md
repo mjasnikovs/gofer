@@ -4,7 +4,7 @@ Project-specific guidance for AI coding agents.
 
 <!-- ASTRYX:START -->
 
-Astryx v0.2.0 · 154 components CLI: run every command as `npx astryx <cmd>` (shown below as
+Astryx v0.4.7 · 158 components CLI: run every command as `npx astryx <cmd>` (shown below as
 `astryx ...`).
 
 SETUP (once, in your app entry e.g. main.tsx) — without these, components render unstyled: import
@@ -20,26 +20,27 @@ WORKFLOW — discover, don't guess. Before writing UI:
 
 RULES:
 
-- No <div> — components do all layout/spacing. Full page → AppShell; sidebar nav → SideNav.
-- Frame first: pick the shell (AppShell / Layout+LayoutPanel) and budget regions in px BEFORE
-  writing content (`astryx docs layout`).
-- Dense data = rows (Table, List/Item) edge-to-edge — never Card-wrapped list items. Card =
-  dashboard widgets, galleries, settings groups only.
-- Status → StatusDot/Token; Badge only for counts and enumerated states, never decoration.
+- No <div> — components do all layout/spacing, page frame included.
+- Frame first: read `astryx docs layout` before writing any page or screen — page frame, region
+  widths, breakpoint behavior.
+- Dense data = rows (Table, List/Item), never Card-wrapped list items; Card is for standalone
+  widgets. Status = StatusDot/Token; Badge = counts only.
 - Custom styling: component props first; else style/className with tokens —
   var(--color-_|--spacing-_|--radius-*). No raw hex/px. (No StyleX/Tailwind compiler here — don't
   use xstyle/utility classes.)
-- Tokens for every value (`astryx docs tokens`). Brand/accent via `astryx theme` — never override
-  --color-* in :root.
+- Tokens for every value (`astryx docs tokens`). Brand/accent belongs in the theme
+  (`astryx theme list` / `theme add <slug>`, or `astryx theme template` for a custom one) — never
+  override --color-* in :root.
 - SELF-CHECK before you finish: re-read the file and replace any raw <div>/<span> layout, imported
   .css/@apply, or hardcoded value (#hex, 16px) with the component or a token
   (var(--color-_|--spacing-_|…)). If unsure a component/prop exists, run `astryx component <Name>` /
   `astryx search "<thing>"`; don't hand-roll CSS.
 
-MORE CLI: search "<query>" find any component / hook / doc / template / block component --list 154
-components by category template --list page + block recipes docs <topic> color, elevation, icons,
-illustrations, internationalization, layout, migration, motion, principles, shape, spacing, styling,
-theme, tokens, typography swizzle <Name> eject component source for deep customization upgrade
+MORE CLI: search "<query>" find any component / hook / doc / template / block component --list 158
+components by category template --list page + block recipes docs <topic> browser-support,
+cli-integrations, color, elevation, getting-started, icons, illustrations, internationalization,
+layout, migration, motion, principles, shape, spacing, styling-libraries, styling, theme, tokens,
+typography, working-with-ai swizzle <Name> eject component source for deep customization upgrade
 --apply run after any @astryxdesign/core bump
 <!-- ASTRYX:END -->
 

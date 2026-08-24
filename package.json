@@ -45,11 +45,11 @@
         "check": "node scripts/check.mjs",
         "prepare": "node scripts/setup-hooks.mjs",
         "tauri": "tauri",
-        "astryx": "node node_modules/@astryxdesign/cli/bin/astryx.mjs"
+        "astryx": "astryx"
     },
     "dependencies": {
-        "@astryxdesign/core": "0.2.0",
-        "@astryxdesign/theme-neutral": "0.2.0",
+        "@astryxdesign/core": "0.4.7",
+        "@astryxdesign/theme-neutral": "0.4.7",
         "@earendil-works/pi-agent-core": "0.84.2",
         "@earendil-works/pi-ai": "0.84.2",
         "@fontsource-variable/figtree": "^5.3.0",
@@ -68,7 +68,7 @@
         "turndown": "7.2.4"
     },
     "devDependencies": {
-        "@astryxdesign/cli": "0.2.0",
+        "@astryxdesign/cli": "0.4.7",
         "@axe-core/playwright": "4.12.1",
         "@eslint/js": "10.0.1",
         "@playwright/test": "1.62.1",
