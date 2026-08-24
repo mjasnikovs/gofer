@@ -66,7 +66,7 @@ When a pi-task feature is wanted, this is where it has to land instead.
 | Registers a tool in TypeScript (`makeWorkerTool`)         | A `ToolDomain` in `src-tauri/src/ai_tools.rs`                                                 |
 | Reads config from `~/.config/pi-task/config.json`         | `src-tauri/src/settings.rs` + the settings page                                               |
 | Reads a key from an env var (`BRAVE_SEARCH_API_KEY`)      | The OS keyring (`keyring = "4"`). A bundled app has no shell env                              |
-| Caches in its own SQLite at `XDG_CACHE_HOME`              | `src-tauri/src/storage.rs`, next to RAG                                                       |
+| Caches in its own SQLite at `XDG_CACHE_HOME`              | `src-tauri/src/storage/`, next to RAG                                                         |
 | Persists state to `.pi-tasks/TASK_NNNN.md`                | Gofer's task store. Its worktrees already exist                                               |
 | Snapshots work with its own auto-commit + git-state-guard | Gofer already owns worktrees and merge. Do not add a second git owner                         |
 | Tests with `bun test`                                     | vitest (frontend), `node --test` (scripts), `cargo test` (Rust). **Tests do not port at all** |
@@ -82,7 +82,7 @@ The rule that explains it:
 | Kind of tool                                                                           | Where            | Why                                                                                           |
 | -------------------------------------------------------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------- |
 | A library tool `pi-agent-core` already ships                                           | Node             | It exists; Gofer only confines it                                                             |
-| A Gofer-authored operation (search, fetch, anything hitting the network or the editor) | Rust             | Keyring, approvals, `storage.rs` caching, and the catalogue all live there                    |
+| A Gofer-authored operation (search, fetch, anything hitting the network or the editor) | Rust             | Keyring, approvals, `storage/` caching, and the catalogue all live there                      |
 | Anything needing a **model** — a sub-agent, an extractor, a critic                     | **Node, always** | Rust cannot build an `Agent`. The provider, models and streaming are all in `ai-provider.mjs` |
 
 `scripts/ai-host.mjs` says the router in `ai_tools.rs` is the only place an operation exists. That
@@ -273,7 +273,7 @@ process spawning, which Gofer does not have to solve at all.
 The second step, after §8. What this briefing already settles:
 
 - **The HTTP call lives in Rust**, as a `ToolDomain` in `ai_tools.rs`. Rust holds the keyring, the
-  approval model and `storage.rs`. `reqwest` is already a dependency (§3).
+  approval model and `storage/`. `reqwest` is already a dependency (§3).
 - **The extraction lives in Node**, in the §8 sub-agent. A model is involved, so it has to (§3).
 - **Raw results must not enter the main context** — it holds a live shell and a live editor (§4.1).
   §8 is what makes this possible, which is why it comes first.
@@ -284,6 +284,6 @@ The second step, after §8. What this briefing already settles:
 - **Expect three test failures on purpose**: the closed-catalogue test, the command-surface check,
   and the prompt default test (§4.4, §4.5, §4.6). Each is small and each is the design asking for
   confirmation.
-- **Caching goes in `storage.rs`**, not a second SQLite file (§3).
+- **Caching goes in `storage/`**, not a second SQLite file (§3).
 - pi-task's `pi-worker-search` is the shape to read, not the code to copy. It is its one worker with
   no child process — a direct API call.

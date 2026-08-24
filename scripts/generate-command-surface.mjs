@@ -4,10 +4,17 @@
 // checker can only report that a transcription slipped. This emits them instead, so there is
 // nothing to slip.
 //
-// Three sources, and none of them is generated:
+// The same is now true of what is not a command at all. The sub-agent's six ceilings were a default
+// and a range written on each side of the seam, twenty-four numbers in two languages; the ranges
+// were reconciled by that same checker reading both files as text, and the defaults by nobody. A
+// default and a range are one fact about one ceiling, so they are one row here.
+//
+// Five sources, and none of them is generated:
 //
 //   protocol/schemas/v2/request.schema.json   which commands mutate the edited scene
 //   protocol/schemas/v2/commands.json         every command, and the addon method that answers it
+//   protocol/schemas/v2/params.json           what every tool operation takes, and what refuses it
+//   protocol/subagent-bounds.json             what the sub-agent's ceilings ship as and may be set to
 //   src-tauri/src/lib.rs                      which commands the backend registers
 //
 // Two surfaces stay hand-written on purpose. `src/services/desktop.ts` carries an argument and a
@@ -252,6 +259,41 @@ function replaceRegion(text, path, comment, name, body) {
     return text.slice(0, start) + begin(checksum(body)) + '\n' + body + text.slice(stop)
 }
 
+/**
+ * The sub-agent's ceilings: what each ships as, and what it may be dragged to.
+ *
+ * The default is held to its own range here rather than by either side that receives it. Rust would
+ * refuse the number on save and the slider would silently clamp it, so a default outside its range
+ * is a settings page that cannot save the settings it was opened with — which neither side can
+ * report as the mistake it is.
+ */
+async function subagentBoundsCatalogue() {
+    const path = 'protocol/subagent-bounds.json'
+    const {bounds} = JSON.parse(await read(path))
+    if (!Array.isArray(bounds) || bounds.length === 0) throw new Error(`${path} declares no bounds`)
+    for (const bound of bounds) {
+        for (const key of ['name', 'field', 'summary'])
+            if (typeof bound[key] !== 'string' || bound[key].trim() === '')
+                throw new Error(`${path}: a bound has no ${key}`)
+        for (const key of ['default', 'min', 'max', 'step'])
+            if (!Number.isInteger(bound[key]))
+                throw new Error(`${path}: ${bound.name} has no whole ${key}`)
+        if (bound.min > bound.max) throw new Error(`${path}: ${bound.name} has a min above its max`)
+        if (bound.default < bound.min || bound.default > bound.max)
+            throw new Error(
+                `${path}: ${bound.name} ships as ${bound.default}, which its own range refuses`
+            )
+        // The Rust field is the name in snake_case, and the generator prints it into a closure that
+        // reads it. A field that is not that name compiles into a struct that has no such field.
+        const expected = bound.name.replace(/[A-Z]/gu, letter => `_${letter.toLowerCase()}`)
+        if (bound.field !== expected)
+            throw new Error(
+                `${path}: ${bound.name} names the Rust field ${bound.field}, not ${expected}`
+            )
+    }
+    return bounds
+}
+
 // --- The emitters. Each returns the exact bytes its formatter would leave behind.
 
 function gdMutating(names) {
@@ -464,6 +506,89 @@ function tomlAllowList(names) {
         .join('')}]\n`
 }
 
+/**
+ * The sub-agent's ceilings as Rust enforces them: the table the validator walks, and the six
+ * functions serde fills a missing field from.
+ *
+ * The functions are emitted rather than left beside the table because the default and the range are
+ * one fact about one ceiling. Written apart, a default outside its own range is a settings file
+ * that loads and then refuses to save.
+ */
+function rustSubagentBounds(bounds) {
+    const table = bounds
+        .map(
+            bound =>
+                `    (${rustString(bound.name)}, |s| s.${bound.field}, ${grouped(bound.min)}, ${grouped(bound.max)}),\n`
+        )
+        .join('')
+    const defaults = bounds
+        .map(bound => {
+            const summary = wrapDoc(bound.summary)
+            const note = bound.defaultNote ? `///\n${wrapDoc(bound.defaultNote)}` : ''
+            return `${summary}${note}fn default_subagent_${bound.field}() -> u32 {\n    ${grouped(bound.default)}\n}\n`
+        })
+        .join('\n')
+    return `const SUBAGENT_BOUNDS: [SubagentBound; ${bounds.length}] = [\n${table}];\n\n${defaults}`
+}
+
+/**
+ * An integer literal, digit-grouped from a thousand up, which is how both sources spell one.
+ *
+ * Rust and TypeScript agree on `_` as the separator and on what it means, so one function serves
+ * both regions rather than two that could come to disagree about `24_000`.
+ */
+function grouped(value) {
+    return value >= 1_000 ? value.toLocaleString('en-US').replace(/,/gu, '_') : String(value)
+}
+
+/**
+ * One prose sentence as a `///` block, wrapped where the file it lands in is wrapped.
+ *
+ * rustfmt leaves doc comments exactly as it finds them, so an unwrapped one is a line the formatter
+ * will not fix and `cargo fmt --check` will not complain about — it would simply be the only
+ * three-hundred-character line in the file.
+ */
+function wrapDoc(note) {
+    return `${wrapPrefixed(note, '/// ', 100)}\n`
+}
+
+/**
+ * The same ceilings as the settings page offers them: the defaults that fill in a settings file
+ * written before this section existed, and the range each slider may be dragged to.
+ *
+ * Emitted to prettier's own formatting — four spaces, no semicolons, no bracket spacing — because
+ * `npm run check` runs `format:check` over the file this lands in.
+ */
+function typescriptSubagentBounds(bounds) {
+    const defaults = bounds.map(bound => `    ${bound.name}: ${grouped(bound.default)}`).join(',\n')
+    const ranges = bounds
+        .map(bound => {
+            const note = bound.rangeNote ? `${wrapPrefixed(bound.rangeNote, '    // ', 100)}\n` : ''
+            return `${note}    ${bound.name}: {min: ${grouped(bound.min)}, max: ${grouped(bound.max)}, step: ${grouped(bound.step)}}`
+        })
+        .join(',\n')
+    return (
+        `export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {\n${defaults}\n}\n\n`
+        + `export const SUBAGENT_RANGES = {\n${ranges}\n} as const\n`
+    )
+}
+
+/** Wraps prose so that `prefix` plus each line stays inside `width`. */
+function wrapPrefixed(note, prefix, width) {
+    const lines = []
+    let line = ''
+    for (const word of note.split(' ')) {
+        if (line && prefix.length + line.length + 1 + word.length > width) {
+            lines.push(prefix + line)
+            line = word
+            continue
+        }
+        line = line ? `${line} ${word}` : word
+    }
+    if (line) lines.push(prefix + line)
+    return lines.join('\n')
+}
+
 // --- What each file gets.
 
 export async function generateSurfaces() {
@@ -472,6 +597,7 @@ export async function generateSurfaces() {
     const runtime = await runtimeCatalogue()
     const desktop = await registeredDesktopCommands()
     const {operations: parameters, vocabularies} = await parameterCatalogue()
+    const subagentBounds = await subagentBoundsCatalogue()
 
     const declared = new Set(commands.map(entry => entry.command))
     for (const name of mutating) {
@@ -521,6 +647,17 @@ export async function generateSurfaces() {
                 {name: 'vocabularies', body: rustVocabularies(vocabularies)},
                 {name: 'operations', body: rustOperations(parameters)}
             ]
+        },
+        {
+            path: 'src-tauri/src/settings.rs',
+            comment: '//',
+            rustfmt: true,
+            regions: [{name: 'subagent-bounds', body: rustSubagentBounds(subagentBounds)}]
+        },
+        {
+            path: 'src/models/settings.ts',
+            comment: '//',
+            regions: [{name: 'subagent-bounds', body: typescriptSubagentBounds(subagentBounds)}]
         },
         {
             path: 'src/models/godot-commands.ts',

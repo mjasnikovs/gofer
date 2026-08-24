@@ -1290,7 +1290,7 @@ mod tests {
         // task" would answer this happily, out of the first task's checkout.
         let second = storage
             .tasks()
-            .create(&storage.switch(&|_| Ok(())))
+            .create(&storage.switch_with_no_turn_to_refuse(&|_| Ok(())))
             .expect("create a second task")
             .task_id
             .expect("the new task has an id");
@@ -1393,7 +1393,7 @@ mod tests {
         // Switching tasks is what makes the same session the wrong one to answer from.
         let second = storage
             .tasks()
-            .create(&storage.switch(&|_| Ok(())))
+            .create(&storage.switch_with_no_turn_to_refuse(&|_| Ok(())))
             .expect("create a second task")
             .task_id
             .expect("the new task has an id");
@@ -1414,7 +1414,7 @@ mod tests {
         // And moving back is enough to make it answerable again — nothing has to be restarted.
         storage
             .tasks()
-            .activate(&first, &storage.switch(&|_| Ok(())))
+            .activate(&first, &storage.switch_with_no_turn_to_refuse(&|_| Ok(())))
             .expect("switch back");
         require_session_task(app.handle()).expect("the session's own task answers again");
     }

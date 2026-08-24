@@ -1,0 +1,68 @@
+{
+    "$comment": "What each of the sub-agent's ceilings ships as, and what it may be dragged to. One row per ceiling, and both sides of the seam are emitted from it by `scripts/generate-command-surface.mjs`: `SUBAGENT_BOUNDS` and the `default_subagent_*` functions in `src-tauri/src/settings.rs`, which enforce them, and `DEFAULT_SUBAGENT_SETTINGS` and `SUBAGENT_RANGES` in `src/models/settings.ts`, which offer them. They were twenty-four numbers written twice in two languages with nothing holding them together — a slider that outran the validator would have refused on save, and a default that drifted would have loaded a settings file into a value the validator rejects.",
+    "$fieldComment": "`field` is the Rust field name, which is `name` in snake_case. It is declared rather than derived so the generator never has to guess how a name breaks into words.",
+    "$noteComment": "`defaultNote` explains the shipped number and becomes the Rust doc comment. `rangeNote` explains the top of the range and becomes a comment beside the TypeScript row; it is omitted where the range needs no defending. Both are prose, so they are decisions and stay hand-written here.",
+    "bounds": [
+        {
+            "name": "commandTimeoutMinutes",
+            "field": "command_timeout_minutes",
+            "default": 5,
+            "min": 0,
+            "max": 30,
+            "step": 1,
+            "summary": "Longest one of the sub-agent's tool calls may run, in minutes.",
+            "defaultNote": "The bash tool takes an optional timeout and has no default, so a command the model did not bound runs until the machine is rebooted. Five minutes is short because the sub-agent is a reader: it greps, it reads, it summarises output someone else produced. Nothing it is meant to do takes longer, and a command that does is a command it should have bounded itself."
+        },
+        {
+            "name": "streamInactivityMinutes",
+            "field": "stream_inactivity_minutes",
+            "default": 10,
+            "min": 0,
+            "max": 30,
+            "step": 1,
+            "summary": "Longest the model stream may say nothing while no tool is running, in minutes.",
+            "defaultNote": "Generous on purpose. A local model processing a long prompt emits nothing for minutes, and that is work, not a hang. This exists to turn hours of dead air into minutes, not to police slowness."
+        },
+        {
+            "name": "maxTurns",
+            "field": "max_turns",
+            "default": 24,
+            "min": 0,
+            "max": 40,
+            "step": 1,
+            "summary": "How many model requests one delegation may make.",
+            "defaultNote": "The clocks bound a child that has stopped. This bounds one that has not: a child happily reading its way through a repository is making progress by every other measure. Two to four requests is what the work is for — read and answer, or grep, read the hits, answer — so twenty-four leaves room to guess wrong several times and still land."
+        },
+        {
+            "name": "maxAnswerChars",
+            "field": "max_answer_chars",
+            "default": 12000,
+            "min": 0,
+            "max": 24000,
+            "step": 1000,
+            "summary": "Longest answer the sub-agent may hand back.",
+            "defaultNote": "The whole point is that the raw material stays with the child. Other tool results are bounded at 24,000 characters, so an answer needing more than half of that was never distilled.",
+            "rangeNote": "Capped at what a tool result is truncated to anyway (`MAX_TOOL_TEXT_CHARS`): an answer larger than that is cut by the layer above regardless of what is chosen here."
+        },
+        {
+            "name": "retryAttempts",
+            "field": "retry_attempts",
+            "default": 2,
+            "min": 0,
+            "max": 5,
+            "step": 1,
+            "summary": "How many times a delegation that failed transiently is asked again.",
+            "rangeNote": "Attention, not machine time. Past six the conversation has stopped converging and belongs back in the chat, so the top of the range is a ceiling rather than an absence of one."
+        },
+        {
+            "name": "retryBaseDelaySeconds",
+            "field": "retry_base_delay_seconds",
+            "default": 1,
+            "min": 1,
+            "max": 10,
+            "step": 1,
+            "summary": "The first wait before a delegation is asked again, in seconds, doubled per attempt.",
+            "defaultNote": "Short, because the failure it absorbs is short: one local server with one slot, briefly saturated by the parent and its own child, refusing a connection the next request will get."
+        }
+    ]
+}

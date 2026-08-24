@@ -322,7 +322,7 @@ impl Journey {
         let release = |workspace: &Path| crate::leave_task(self.app.handle(), workspace);
         self.storage
             .tasks()
-            .create(&self.storage.switch(&release))
+            .create(&self.storage.switch_with_no_turn_to_refuse(&release))
             .expect("create task");
         let workspace = self
             .storage
@@ -1078,7 +1078,10 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     let replacement = journey
         .storage
         .tasks()
-        .delete(&doomed.id, &journey.storage.switch(&release))
+        .delete(
+            &doomed.id,
+            &journey.storage.switch_with_no_turn_to_refuse(&release),
+        )
         .expect("delete the task the editor is running in");
 
     assert!(

@@ -2199,7 +2199,7 @@ mod tests {
                 .expect("open project storage");
         let task_id = storage
             .tasks()
-            .create(&storage.switch(&|_| Ok(())))
+            .create(&storage.switch_with_no_turn_to_refuse(&|_| Ok(())))
             .expect("create a task")
             .task_id
             .expect("the new task's id");

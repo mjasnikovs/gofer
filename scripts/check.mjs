@@ -61,7 +61,9 @@ const NODE_COVERAGE_EXCLUDES = [
     'memory-worker.mjs',
     'rag-warmup.mjs',
     'rag-retrieve-worker.mjs',
-    'bench-alone.mjs'
+    'bench-alone.mjs',
+    // Fixtures for the AI turn tests. Scaffolding, not a module anything ships.
+    'ai-turn-harness.mjs'
 ]
     .map(name => `--exclude='scripts/${name}'`)
     .join(' ')

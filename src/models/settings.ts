@@ -326,10 +326,17 @@ export function keepThinkingLevel(model: ThinkingCapable, level: ThinkingLevel):
 }
 
 /**
- * The sub-agent's shipped bounds. The same numbers as `default_subagent_*` in `settings.rs`, which
- * is the side that writes them to disk; these fill in a settings file written before the section
- * existed, or one hand-edited to drop a field.
+ * What the sub-agent's ceilings ship as, and what each slider may be dragged to.
+ *
+ * Emitted from `protocol/subagent-bounds.json`, which is also where Rust's `SUBAGENT_BOUNDS` and
+ * its `default_subagent_*` functions come from. The defaults fill in a settings file written before
+ * the section existed, or one hand-edited to drop a field; Rust is the side that enforces them.
+ *
+ * A range is a claim about what is sensible, which is why the sliders replaced typed numbers: a box
+ * accepts 7 and 700000 with equal confidence, and neither the user nor the field could tell which of
+ * those was a mistake.
  */
+// GENERATED-BEGIN subagent-bounds sha256:2907fc05bb4e4e15
 export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {
     commandTimeoutMinutes: 5,
     streamInactivityMinutes: 10,
@@ -339,15 +346,6 @@ export const DEFAULT_SUBAGENT_SETTINGS: SubagentSettings = {
     retryBaseDelaySeconds: 1
 }
 
-/**
- * What each sub-agent slider may be dragged to.
- *
- * A range is a claim about what is sensible, which is why the sliders replaced typed numbers: a box
- * accepts 7 and 700000 with equal confidence, and neither the user nor the field could tell which of
- * those was a mistake. The top of each range is the largest value that is still a ceiling rather than
- * an absence of one, and every range starts where "off" is a real answer — except the retry wait,
- * which is only read when a retry happens and has no meaning at zero.
- */
 export const SUBAGENT_RANGES = {
     commandTimeoutMinutes: {min: 0, max: 30, step: 1},
     streamInactivityMinutes: {min: 0, max: 30, step: 1},
@@ -360,6 +358,7 @@ export const SUBAGENT_RANGES = {
     retryAttempts: {min: 0, max: 5, step: 1},
     retryBaseDelaySeconds: {min: 1, max: 10, step: 1}
 } as const
+// GENERATED-END subagent-bounds
 
 /** A ceiling in minutes, where zero is not a short ceiling but no ceiling. */
 export function minutesLabel(minutes: number) {

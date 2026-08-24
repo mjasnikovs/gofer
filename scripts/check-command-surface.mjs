@@ -221,7 +221,7 @@ async function readmeMutating() {
 
 /** The SQL that decides which statuses a stored brief may hold. */
 async function sqlBriefStatuses() {
-    const path = 'src-tauri/src/storage.rs'
+    const path = 'src-tauri/src/storage/mod.rs'
     const table = slice(await read(path), path, 'CREATE TABLE brief_runs (', ') STRICT')
     return {
         path: `${path} brief_runs CHECK`,
@@ -231,7 +231,8 @@ async function sqlBriefStatuses() {
 
 /** The columns `record_brief_phase` will write, which is the closed set a phase may name. */
 async function rustBriefFields() {
-    const path = 'src-tauri/src/storage.rs'
+    // The Ledger is a directory: the schema is the database's, the writer is the task view's.
+    const path = 'src-tauri/src/storage/tasks.rs'
     const body = slice(await read(path), path, 'pub fn record_brief_phase(', '_ => return,')
     return {
         path: `${path} record_brief_phase`,
@@ -343,43 +344,12 @@ const withoutOff = surface => ({
     names: surface.names.filter(level => level !== 'off' && level !== 'on')
 })
 
-// --- Surface 8: what the sub-agent's ceilings may be set to.
-
-/**
- * The bounds, as `name→low–high`, from the two places that each enforce them for one caller.
- *
- * The slider was the only thing enforcing them for years: `validate_settings` never looked at
- * `SubagentSettings` at all, so a hand-edited `settings.json` saying `maxTurns: 100000` loaded and
- * was obeyed. Rust bounds them now, which makes this the second copy of the numbers.
- */
-async function rustSubagentBounds() {
-    const path = 'src-tauri/src/settings.rs'
-    const body = slice(
-        await read(path),
-        path,
-        'const SUBAGENT_BOUNDS: [SubagentBound; 6] = [',
-        '\n];'
-    )
-    const rows = [...body.matchAll(/"(\w+)",\s*\|s\| s\.\w+,\s*([\d_]+),\s*([\d_]+),?\s*\)/gu)]
-    return {
-        path: `${path} SUBAGENT_BOUNDS`,
-        names: rows.map(
-            row => `${row[1]}→${row[2].replaceAll('_', '')}–${row[3].replaceAll('_', '')}`
-        )
-    }
-}
-
-async function typescriptSubagentRanges() {
-    const path = 'src/models/settings.ts'
-    const body = slice(await read(path), path, 'export const SUBAGENT_RANGES = {', '\n} as const')
-    const rows = [...body.matchAll(/^ {4}(\w+): \{min: ([\d_]+), max: ([\d_]+),/gmu)]
-    return {
-        path: `${path} SUBAGENT_RANGES`,
-        names: rows.map(
-            row => `${row[1]}→${row[2].replaceAll('_', '')}–${row[3].replaceAll('_', '')}`
-        )
-    }
-}
+// --- Surface 8 was the sub-agent's ceilings, and is gone.
+//
+// The bounds and the ranges were two transcriptions of one fact, and this file could only report
+// that one of them had slipped. They are emitted from `protocol/subagent-bounds.json` now, along
+// with the six defaults nothing here ever compared — so there is nothing left to reconcile. See the
+// header: a surface that can be emitted is not a surface this file should be reading.
 
 // --- Surface 9: the vocabulary the AI worker’s stream is written in.
 
@@ -734,11 +704,6 @@ checkOrder('the reasoning menu', [
     await rustList('settings.rs', 'EFFORT_LEVELS'),
     await typescriptList('settings.ts', 'EFFORT_LEVELS')
 ])
-
-// The sub-agent's ceilings: the slider that offers them, and the validation that now enforces them.
-const subagentBounds = [await rustSubagentBounds(), await typescriptSubagentRanges()]
-for (const surface of subagentBounds) checkForDuplicates(surface)
-checkAgreement('sub-agent bound', subagentBounds)
 
 /**
  * A parameter name that means different shapes in different operations of one domain widens to

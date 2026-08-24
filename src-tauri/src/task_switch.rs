@@ -9,9 +9,20 @@
 //!
 //! The release is handed in once, when the Switch is built, rather than passed to five commands
 //! that each remember to pass it on.
+//!
+//! The single provider operation is taken here too, for the same reason. Moving the checkout while
+//! a turn is streaming pulls the files out from under an agent that is holding hashes for them, so
+//! every one of the five refuses a turn first — and each one used to say so itself, in a line
+//! beside the line that built the Switch. What held the pair together was a test that read
+//! `lib.rs` as a string and looked for both. A sixth caller was written without the guard once
+//! already, which is what that test was added for. It is a field now: the operation is taken as
+//! the Switch is built, held for as long as the Switch lives, and there is no way to ask for the
+//! move without it.
 
 use std::path::{Path, PathBuf};
 
+use crate::ai_turn::AiProviderOperation;
+use crate::command_error::CommandError;
 use crate::git;
 
 /// One project's checkout, and the thing that has to stop before it moves.
@@ -20,16 +31,55 @@ pub(crate) struct Switch<'a> {
     /// Stops everything holding the working tree. Called once per move, and idempotent — deleting a
     /// task stops the editor and then moves the checkout again, onto the task that took over.
     release: &'a dyn Fn(&Path) -> Result<(), String>,
+    /// The one provider operation, held for as long as this Switch is alive.
+    ///
+    /// `None` only for [`Switch::with_no_turn_to_refuse`], where there is no turn to refuse. Kept
+    /// as a field rather than taken and dropped inside a move, because the interval the refusal
+    /// protects is the caller's whole command — a merge settles the editor's unsaved work between
+    /// building this and asking it to move.
+    _operation: Option<AiProviderOperation>,
 }
 
 impl<'a> Switch<'a> {
-    pub(crate) fn new(
+    /// The Switch the application builds: it takes the provider operation, or refuses.
+    ///
+    /// The refusal is a state rather than a fault — something is answering right now — so it is
+    /// retryable, and the sentence tells the user what to wait for.
+    pub(crate) fn refusing_a_turn(
+        workspace: impl Into<PathBuf>,
+        release: &'a dyn Fn(&Path) -> Result<(), String>,
+    ) -> Result<Self, CommandError> {
+        let operation = crate::ai_turn::begin_provider_operation().map_err(|_| {
+            CommandError::new(
+                "ai_request_in_progress",
+                "Wait for the current answer to finish before opening another task",
+            )
+            .retryable()
+        })?;
+        Ok(Self {
+            workspace: workspace.into(),
+            release,
+            _operation: Some(operation),
+        })
+    }
+
+    /// The Switch for a move that no turn can be running during.
+    ///
+    /// Two callers. Opening a project makes its first task before the window has drawn anything,
+    /// let alone asked a model — and taking the operation there would refuse the project itself,
+    /// because a tool handler inside a live turn reopens the same storage. The suites are the
+    /// other: they drive the checkout with no window competing for the process-wide operation.
+    ///
+    /// Stated rather than inferred. A caller that skips the refusal has to name the door that
+    /// skips it, and the name says what it skipped.
+    pub(crate) fn with_no_turn_to_refuse(
         workspace: impl Into<PathBuf>,
         release: &'a dyn Fn(&Path) -> Result<(), String>,
     ) -> Self {
         Self {
             workspace: workspace.into(),
             release,
+            _operation: None,
         }
     }
 
@@ -135,7 +185,7 @@ mod tests {
     fn a_refused_stop_moves_nothing() {
         let recorder = Recorder::new(true);
         let release = recording(&recorder);
-        let switch = Switch::new(nowhere(), &release);
+        let switch = Switch::with_no_turn_to_refuse(nowhere(), &release);
 
         let refusal = switch
             .to("gofer/task-1")
@@ -149,7 +199,7 @@ mod tests {
     fn carrying_loose_files_across_still_stops_the_editor_first() {
         let recorder = Recorder::new(true);
         let release = recording(&recorder);
-        let switch = Switch::new(nowhere(), &release);
+        let switch = Switch::with_no_turn_to_refuse(nowhere(), &release);
 
         switch
             .carrying("gofer/task-1")
@@ -162,11 +212,53 @@ mod tests {
     fn moving_onto_a_branch_always_stops_first() {
         let recorder = Recorder::new(true);
         let release = recording(&recorder);
-        let switch = Switch::new(nowhere(), &release);
+        let switch = Switch::with_no_turn_to_refuse(nowhere(), &release);
 
         switch
             .onto("gofer/task-1")
             .expect_err("a merge may not run under an editor holding the same files");
         assert_eq!(recorder.released(), 1);
+    }
+
+    /**
+     * The operation is held for as long as the Switch is, not for as long as taking it took.
+     *
+     * This was a source-text test in `lib.rs`: it split the file on `\nfn `, found every body
+     * containing `storage.switch(`, and required `refuse_during_turn()?` beside it. That test
+     * exists because a sixth command was written without the guard — and a rule kept by reading
+     * the source is a rule the seventh caller can still be written without, in a file the test
+     * does not read.
+     *
+     * Asserted by asking twice, because that is the whole of the difference: a probe that took the
+     * operation and dropped it would answer yes both times.
+     */
+    #[test]
+    fn a_switch_holds_the_provider_operation_until_it_is_dropped() {
+        // The provider operation is process-wide, and every `ai_turn` test that begins a turn takes
+        // this lock — so this waits behind them rather than refusing one of them by holding it.
+        let _gate = crate::approvals::serialize_gate_tests();
+        let release = |_: &Path| Ok(());
+
+        let moving = Switch::refusing_a_turn(nowhere(), &release)
+            .expect("nothing else is holding the operation");
+        let refused = Switch::refusing_a_turn(nowhere(), &release)
+            .err()
+            .expect("the checkout is moving, so nothing else may take the operation");
+        assert_eq!(refused.code, "ai_request_in_progress");
+
+        drop(moving);
+        Switch::refusing_a_turn(nowhere(), &release)
+            .expect("the move is over, so the next one may begin");
+    }
+
+    /// The suite's door takes nothing, so it cannot refuse and cannot be refused.
+    #[test]
+    fn a_switch_with_no_turn_to_refuse_leaves_the_operation_alone() {
+        let _gate = crate::approvals::serialize_gate_tests();
+        let release = |_: &Path| Ok(());
+
+        let _suite = Switch::with_no_turn_to_refuse(nowhere(), &release);
+        Switch::refusing_a_turn(nowhere(), &release)
+            .expect("a suite's Switch is not holding the operation");
     }
 }

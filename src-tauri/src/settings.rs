@@ -740,55 +740,6 @@ fn default_compaction_percent() -> u32 {
     86
 }
 
-/// Longest one of the sub-agent's tool calls may run, in minutes.
-///
-/// The bash tool takes an optional timeout and has no default, so a command the model did not bound
-/// runs until the machine is rebooted. Five minutes is short because the sub-agent is a reader: it
-/// greps, it reads, it summarises output someone else produced. Nothing it is meant to do takes
-/// longer, and a command that does is a command it should have bounded itself.
-fn default_subagent_command_timeout_minutes() -> u32 {
-    5
-}
-
-/// Longest the model stream may say nothing while no tool is running, in minutes.
-///
-/// Generous on purpose. A local model processing a long prompt emits nothing for minutes, and that
-/// is work, not a hang. This exists to turn hours of dead air into minutes, not to police slowness.
-fn default_subagent_stream_inactivity_minutes() -> u32 {
-    10
-}
-
-/// How many model requests one delegation may make.
-///
-/// The clocks bound a child that has stopped. This bounds one that has not: a child happily reading
-/// its way through a repository is making progress by every other measure. Two to four requests is
-/// what the work is for — read and answer, or grep, read the hits, answer — so twenty-four leaves
-/// room to guess wrong several times and still land.
-fn default_subagent_max_turns() -> u32 {
-    24
-}
-
-/// Longest answer the sub-agent may hand back.
-///
-/// The whole point is that the raw material stays with the child. Other tool results are bounded at
-/// 24,000 characters, so an answer needing more than half of that was never distilled.
-fn default_subagent_max_answer_chars() -> u32 {
-    12_000
-}
-
-/// How many times a delegation that failed transiently is asked again.
-fn default_subagent_retry_attempts() -> u32 {
-    2
-}
-
-/// The first wait before a delegation is asked again, in seconds, doubled per attempt.
-///
-/// Short, because the failure it absorbs is short: one local server with one slot, briefly
-/// saturated by the parent and its own child, refusing a connection the next request will get.
-fn default_subagent_retry_base_delay_seconds() -> u32 {
-    1
-}
-
 impl Default for SubagentSettings {
     fn default() -> Self {
         Self {
@@ -1997,14 +1948,20 @@ fn validate_model_choice(choice: &mut ModelChoice, id_name: &str) -> Result<(), 
 /// One ceiling: the name a settings file spells it with, how to read it, and the range it may hold.
 type SubagentBound = (&'static str, fn(&SubagentSettings) -> u32, u32, u32);
 
-/// What each of the sub-agent's ceilings may be set to, by the name a settings file spells it.
+/// What each of the sub-agent's ceilings ships as, and what it may be set to.
 ///
-/// The same bounds as `SUBAGENT_RANGES` in `settings.ts`, which is the slider that offers them, and
-/// `check-command-surface.mjs` holds the two lists to each other. The slider was the only thing
-/// enforcing them: a hand-edited `settings.json` saying `maxTurns: 100000` loaded, was validated,
-/// and was obeyed. The top of each range is the largest value that is still a ceiling rather than
-/// an absence of one, and every range starts where "off" is a real answer — except the retry wait,
-/// which is only read when a retry happens and has no meaning at zero.
+/// Emitted from `protocol/subagent-bounds.json`, together with the six functions serde fills a
+/// missing field from. They were twenty-four numbers written here and twenty-four more written in
+/// `settings.ts`, and the ranges were reconciled by a checker that read both files as text while
+/// the defaults were reconciled by nobody. A default and a range are one fact about one ceiling, so
+/// they are one row.
+///
+/// The slider was the only thing enforcing the ranges for years: `validate_settings` never looked
+/// at `SubagentSettings` at all, so a hand-edited `settings.json` saying `maxTurns: 100000` loaded,
+/// was validated, and was obeyed. The top of each range is the largest value that is still a
+/// ceiling rather than an absence of one, and every range starts where "off" is a real answer —
+/// except the retry wait, which is only read when a retry happens and has no meaning at zero.
+// GENERATED-BEGIN subagent-bounds sha256:7b34b4c670eb5c90
 const SUBAGENT_BOUNDS: [SubagentBound; 6] = [
     (
         "commandTimeoutMinutes",
@@ -2028,6 +1985,56 @@ const SUBAGENT_BOUNDS: [SubagentBound; 6] = [
         10,
     ),
 ];
+
+/// Longest one of the sub-agent's tool calls may run, in minutes.
+///
+/// The bash tool takes an optional timeout and has no default, so a command the model did not bound
+/// runs until the machine is rebooted. Five minutes is short because the sub-agent is a reader: it
+/// greps, it reads, it summarises output someone else produced. Nothing it is meant to do takes
+/// longer, and a command that does is a command it should have bounded itself.
+fn default_subagent_command_timeout_minutes() -> u32 {
+    5
+}
+
+/// Longest the model stream may say nothing while no tool is running, in minutes.
+///
+/// Generous on purpose. A local model processing a long prompt emits nothing for minutes, and that
+/// is work, not a hang. This exists to turn hours of dead air into minutes, not to police slowness.
+fn default_subagent_stream_inactivity_minutes() -> u32 {
+    10
+}
+
+/// How many model requests one delegation may make.
+///
+/// The clocks bound a child that has stopped. This bounds one that has not: a child happily reading
+/// its way through a repository is making progress by every other measure. Two to four requests is
+/// what the work is for — read and answer, or grep, read the hits, answer — so twenty-four leaves
+/// room to guess wrong several times and still land.
+fn default_subagent_max_turns() -> u32 {
+    24
+}
+
+/// Longest answer the sub-agent may hand back.
+///
+/// The whole point is that the raw material stays with the child. Other tool results are bounded at
+/// 24,000 characters, so an answer needing more than half of that was never distilled.
+fn default_subagent_max_answer_chars() -> u32 {
+    12_000
+}
+
+/// How many times a delegation that failed transiently is asked again.
+fn default_subagent_retry_attempts() -> u32 {
+    2
+}
+
+/// The first wait before a delegation is asked again, in seconds, doubled per attempt.
+///
+/// Short, because the failure it absorbs is short: one local server with one slot, briefly
+/// saturated by the parent and its own child, refusing a connection the next request will get.
+fn default_subagent_retry_base_delay_seconds() -> u32 {
+    1
+}
+// GENERATED-END subagent-bounds
 
 /// Every ceiling held to its own range, named the way the file that carries it names it.
 ///

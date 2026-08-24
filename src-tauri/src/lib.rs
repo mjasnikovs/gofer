@@ -256,9 +256,8 @@ fn save_chat(app: AppHandle, chat: StoredChat) -> Result<(), CommandError> {
 #[tauri::command(async)]
 fn create_chat_task(app: AppHandle, bring_changes: bool) -> Result<StoredChat, CommandError> {
     let storage = project_storage(&app)?;
-    let _turn = refuse_during_turn()?;
     let release = switch_for(&app);
-    let switch = storage.switch(&release);
+    let switch = storage.switch(&release)?;
     if bring_changes {
         storage.tasks().create_carrying_changes(&switch)
     } else {
@@ -284,11 +283,10 @@ fn pending_project_changes(app: AppHandle) -> Result<Vec<git::PendingChange>, Co
 #[tauri::command(async)]
 fn activate_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, CommandError> {
     let storage = project_storage(&app)?;
-    let _turn = refuse_during_turn()?;
     let release = switch_for(&app);
     storage
         .tasks()
-        .activate(&task_id, &storage.switch(&release))
+        .activate(&task_id, &storage.switch(&release)?)
 }
 
 /// Everything that has to stop before the working tree moves.
@@ -315,8 +313,11 @@ fn switch_for(app: &AppHandle) -> impl Fn(&Path) -> Result<(), String> + use<'_>
     move |workspace| leave_task(app, workspace)
 }
 
-/// Takes the single provider operation for the whole of a command that moves the checkout, or
-/// refuses because something is already holding it.
+/// Takes the single provider operation for a command that rewrites the worktree without moving it.
+///
+/// One caller: abandoning a resolution merge, which throws away files an agent may be holding
+/// hashes for and leaves the checkout exactly where it was. Everything that *moves* the checkout
+/// takes the operation by building a `Switch`, which is the operation — see `task_switch`.
 ///
 /// The guard is answered rather than checked, and that is the whole of the fix. This used to bind
 /// it as `Ok(_guard) => Ok(())`, where a `_`-prefixed binding is still a binding: it was dropped at
@@ -324,9 +325,6 @@ fn switch_for(app: &AppHandle) -> impl Fn(&Path) -> Result<(), String> + use<'_>
 /// returned. Five commands then stopped the editor, committed the loose work, and checked another
 /// branch out holding nothing at all — an RAII guard used as a boolean probe, which is a check that
 /// a turn could win the instant after it passed.
-///
-/// So the caller holds it: `let _turn = refuse_during_turn()?;` keeps the operation for as long as
-/// the switch takes, which is the interval the refusal was written to protect.
 fn refuse_during_turn() -> Result<ai_turn::AiProviderOperation, CommandError> {
     ai_turn::begin_provider_operation().map_err(|_| {
         CommandError::new(
@@ -339,15 +337,11 @@ fn refuse_during_turn() -> Result<ai_turn::AiProviderOperation, CommandError> {
 
 #[tauri::command(async)]
 fn delete_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, CommandError> {
-    // Held for the same reason the five commands above hold it, and this is the sixth caller of
-    // `storage.switch`. A turn holds file hashes for the checkout it started on; deleting the task
-    // beside it moves that checkout under the agent's feet.
-    let _turn = refuse_during_turn()?;
     let storage = project_storage(&app)?;
     // Deleting the task the editor is editing stops that editor first: the checkout moves off the
     // deleted branch onto the task that takes over, and the staged addon comes out on the way.
     let release = switch_for(&app);
-    storage.tasks().delete(&task_id, &storage.switch(&release))
+    storage.tasks().delete(&task_id, &storage.switch(&release)?)
 }
 
 #[tauri::command(async)]
@@ -493,12 +487,14 @@ fn merge_task_branch(
     // session is stopped first, which also takes Gofer's own two lines back out of `project.godot`
     // before anything is committed.
     let storage = project_storage(&app)?;
-    let _turn = refuse_during_turn()?;
+    let release = switch_for(&app);
+    // Built before the work below rather than beside the move, because the Switch is the provider
+    // operation: a turn must not begin while the editor is being asked to settle either.
+    let switch = storage.switch(&release)?;
     // Before any of that: the stop is `get_tree().quit()`, which writes nothing. Work the editor is
     // holding is settled here or the merge does not start. Absent means nobody has been asked yet.
     unsaved_work::settle(unsaved_work.unwrap_or_default())?;
-    let release = switch_for(&app);
-    storage.tasks().merge(&task_id, &storage.switch(&release))
+    storage.tasks().merge(&task_id, &switch)
 }
 
 /// Brings the project's branch into the task so the agent can reconcile what clashed.
@@ -511,11 +507,10 @@ fn merge_task_branch(
 #[tauri::command(async)]
 fn resolve_task_merge(app: AppHandle, task_id: String) -> Result<ResolveTaskResult, CommandError> {
     let storage = project_storage(&app)?;
-    let _turn = refuse_during_turn()?;
     let release = switch_for(&app);
     storage
         .tasks()
-        .resolve_conflicts(&task_id, &storage.switch(&release))
+        .resolve_conflicts(&task_id, &storage.switch(&release)?)
 }
 
 /// Throws away an unfinished resolution merge and leaves the task exactly as it was.
@@ -1317,9 +1312,13 @@ mod tests {
      *
      * `refuse_during_turn` used to answer `Ok(_guard) => Ok(())`, and a `_`-prefixed binding is
      * still a binding: the guard was dropped at the end of the match arm, so the single provider
-     * operation was already free again by the time the function returned. Five commands then
-     * stopped the editor, committed the loose work and checked another branch out holding nothing
-     * at all — a turn could begin in the middle of the switch that had just refused it.
+     * operation was already free again by the time the function returned — an RAII guard used as a
+     * boolean probe, which is a check the thing it refuses can win the instant after it passes.
+     *
+     * Every other caller moves the checkout and takes the operation by building a `Switch`, which
+     * is held to this in `task_switch`. `abandon_task_merge` is the one that does not move it: it
+     * throws away a resolution merge under files an agent may be holding hashes for, and this is
+     * the only thing that says the guard it takes lasts the command.
      *
      * Asserted by asking twice, because that is the whole of the difference: a probe answers yes
      * both times.
@@ -1330,46 +1329,18 @@ mod tests {
         // this lock — so this waits behind them rather than refusing one of them by holding it.
         let _gate = crate::approvals::serialize_gate_tests();
 
-        let Ok(switching) = refuse_during_turn() else {
+        let Ok(abandoning) = refuse_during_turn() else {
             panic!("nothing else is running")
         };
         let Err(refused) = refuse_during_turn() else {
-            panic!("the checkout is still moving, so nothing else may take the operation")
+            panic!("the merge is still being abandoned, so nothing else may take the operation")
         };
         assert_eq!(refused.code, "ai_request_in_progress");
 
-        drop(switching);
+        drop(abandoning);
         assert!(
             refuse_during_turn().is_ok(),
-            "the switch is over, so the next turn may begin"
-        );
-    }
-
-    /// Every command that moves the checkout holds the provider operation while it moves it.
-    ///
-    /// Read out of the source, because the failure is an omission rather than a mistake. Five
-    /// commands were given the guard and a sixth was not: `delete_chat_task` stopped the editor and
-    /// checked another branch out beside a streaming turn that still held file hashes from the old
-    /// one. A rule kept by remembering is a rule the next caller is written without.
-    #[test]
-    fn every_command_that_moves_the_checkout_refuses_during_a_turn() {
-        let source = include_str!("lib.rs");
-        let mut guarded = 0;
-        for function in source.split("\nfn ").skip(1) {
-            let body = function.split("\n}\n").next().unwrap_or(function);
-            if !body.contains("storage.switch(") {
-                continue;
-            }
-            let name = function.split('(').next().unwrap_or(function);
-            assert!(
-                body.contains("refuse_during_turn()?"),
-                "{name} moves the checkout without holding the provider operation"
-            );
-            guarded += 1;
-        }
-        assert!(
-            guarded >= 5,
-            "the switch callers moved and this found {guarded}"
+            "the command is over, so the next turn may begin"
         );
     }
 
