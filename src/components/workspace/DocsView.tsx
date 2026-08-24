@@ -96,7 +96,7 @@ export function DocsView() {
                                     gap={2}
                                     align='center'
                                 >
-                                    <Text weight='semibold'>{passage.chapter}</Text>
+                                    <Text type='label'>{passage.chapter}</Text>
                                     {/*
                                      * Token, not Badge: which section of the chapter this passage
                                      * came from is a label on the result, not a count and not one

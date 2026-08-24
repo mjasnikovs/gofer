@@ -428,12 +428,7 @@ export function BottomPanel({
                                                         paddingInline={3}
                                                         paddingBlock={1}
                                                     >
-                                                        <Text
-                                                            type='supporting'
-                                                            weight='semibold'
-                                                        >
-                                                            {entry.scope.name}
-                                                        </Text>
+                                                        <Text type='label'>{entry.scope.name}</Text>
                                                     </VStack>
                                                     {entry.variables.map(variable => (
                                                         <Item

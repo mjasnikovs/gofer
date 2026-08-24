@@ -1,5 +1,6 @@
 import {Button} from '@astryxdesign/core/Button'
 import {Card} from '@astryxdesign/core/Card'
+import {Heading} from '@astryxdesign/core/Heading'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
@@ -54,8 +55,7 @@ function StepLine({step}: Readonly<{step: string}>) {
     // moves every few seconds. `maxLines` also gives the full text back on hover.
     return (
         <Text
-            size='sm'
-            color='secondary'
+            type='supporting'
             maxLines={1}
         >
             {`↳ ${step}`}
@@ -78,11 +78,8 @@ export function BriefProgress({
         >
             <VStack gap={3}>
                 <VStack gap={1}>
-                    <Text weight='medium'>Planning this task</Text>
-                    <Text
-                        size='sm'
-                        color='secondary'
-                    >
+                    <Heading level={4}>Planning this task</Heading>
+                    <Text type='supporting'>
                         This runs before the first message. It can take a few minutes.
                     </Text>
                 </VStack>
@@ -110,16 +107,13 @@ export function BriefProgress({
                                         />
                                     }
                                     <Text
-                                        size='sm'
+                                        type='supporting'
                                         color={isRunning || isDone ? 'primary' : 'secondary'}
                                     >
                                         {BRIEF_PHASE_LABELS[phase]}
                                     </Text>
                                     {phase === 'research' && (isRunning || isDone) && (
-                                        <Text
-                                            size='sm'
-                                            color='secondary'
-                                        >
+                                        <Text type='supporting'>
                                             {`${String(state.research.length)}/${String(RESEARCH_SECTIONS.length)}`}
                                         </Text>
                                     )}
@@ -165,7 +159,7 @@ export function BriefProgress({
                                                             />
                                                         }
                                                         <Text
-                                                            size='sm'
+                                                            type='supporting'
                                                             color={
                                                                 kind || isReading ? 'primary' : (
                                                                     'secondary'
@@ -175,12 +169,7 @@ export function BriefProgress({
                                                             {WORKER_LABELS[section] ?? section}
                                                         </Text>
                                                         {note && (
-                                                            <Text
-                                                                size='sm'
-                                                                color='secondary'
-                                                            >
-                                                                {note}
-                                                            </Text>
+                                                            <Text type='supporting'>{note}</Text>
                                                         )}
                                                     </HStack>
                                                     {isReading && state.step && (
@@ -198,10 +187,7 @@ export function BriefProgress({
                     })}
                 </VStack>
                 {state.cost && (
-                    <Text
-                        size='sm'
-                        color='secondary'
-                    >
+                    <Text type='supporting'>
                         {`Planning cost ${thousands(state.cost.input + state.cost.output)} tokens`}
                     </Text>
                 )}
@@ -230,10 +216,7 @@ export function BriefProgress({
                 )}
                 {state.ended && (
                     <VStack gap={2}>
-                        <Text
-                            size='sm'
-                            color='secondary'
-                        >
+                        <Text type='supporting'>
                             {state.ended.kind === 'stopped' ?
                                 'Stopped. What it had finished is kept.'
                             :   `It could not finish: ${state.ended.reason ?? 'no reason was reported'}`

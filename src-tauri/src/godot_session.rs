@@ -1365,25 +1365,35 @@ const CRASH_MARKER: &str = "Program crashed with signal";
 /// Read without a severity floor on purpose. `handle_crash:` arrives on the editor's stderr and is
 /// not classified as an error line, so the reader that carries error lines never sees it.
 ///
-/// Guarded by [`an_editor_is_still_answering`], because the marker on its own does not say whose
+/// Guarded by [`an_editor_is_still_running`], because the marker on its own does not say whose
 /// death it is: the game inherits the editor's pipes, so a segfaulting game writes the same line
 /// into the same buffer.
 fn editor_crashed() -> Option<String> {
-    if an_editor_is_still_answering() {
+    if an_editor_is_still_running() {
         return None;
     }
-    newest_logs(
+    let entry = newest_logs(
         &LogQuery {
             contains: Some(CRASH_MARKER.to_owned()),
             ..LogQuery::default()
         },
         1,
     )
-    .pop()
-    .map(|entry| entry.message)
+    .pop()?;
+    // The second half of "whose death is this". The buffer is cleared once, when an editor starts,
+    // so a game that segfaulted an hour ago leaves its marker there for the rest of the session —
+    // and once the editor is stopped the guard above no longer rules it out. A crash that ended the
+    // call the model is reading about happened moments ago; an older line belongs to something else.
+    if now_millis().saturating_sub(entry.timestamp) > CRASH_IS_THIS_CALLS_MS {
+        return None;
+    }
+    Some(entry.message)
 }
 
-/// Whether there is still an editor up and answering, which decides whose crash line that was.
+/// How recent a crash line must be to be the crash that ended this call.
+const CRASH_IS_THIS_CALLS_MS: u64 = 60_000;
+
+/// Whether there is still an editor process there, which decides whose crash line that was.
 ///
 /// A game the editor launched writes to the editor's own pipes, so a GDExtension fault or a runaway
 /// recursion inside the game puts `handle_crash: Program crashed with signal 11` into the one
@@ -1392,17 +1402,18 @@ fn editor_crashed() -> Option<String> {
 /// died — retrying will not help", about an editor sitting there ready; and because that branch
 /// returns early, it also threw away the parse errors this function exists to attach.
 ///
-/// A live editor is the one thing a dead one cannot be. `Starting`, `Importing`, `Ready` and
-/// `Playing` all mean the process is up, so a crash line under any of them belongs to something the
-/// editor started rather than to the editor. Only `Error` and `Offline` leave it unclaimed.
-fn an_editor_is_still_answering() -> bool {
-    matches!(
-        current_state(),
-        SessionState::Starting
-            | SessionState::Importing
-            | SessionState::Ready
-            | SessionState::Playing
-    )
+/// The question is aliveness, and it is asked of the process rather than of the derived state. A
+/// list of live states got that wrong in the case that matters most: `derive_state` answers `Error`
+/// for `Readiness::Unavailable`, which is an editor that is *up* with an addon that has stopped
+/// answering — the exact state `session_closed` reports. A game that segfaults leaves both a fresh
+/// crash marker and a dropped addon socket, with the editor window still open, so the list claimed
+/// the engine had died and sent the model off to start a second session. `Staging`, `DebugPaused`
+/// and `Stopping` were missing from it too.
+///
+/// So: `Offline` is no editor, an exited child is a dead one, and everything else is a process that
+/// is still there — whatever it is or is not answering.
+fn an_editor_is_still_running() -> bool {
+    !matches!(current_state(), SessionState::Offline) && !editor_has_exited()
 }
 
 /// Puts the error that ended the game into the failure the model is about to read.
@@ -1427,27 +1438,29 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
     if !GAME_IS_NOT_ANSWERING.contains(&failure.code.as_str()) {
         return failure;
     }
+    // Appended rather than returned. The crash says the engine broke; the lines below say what it
+    // broke on, and a model handed the first without the second is told to go and look for the
+    // parse error this function exists to carry.
     if let Some(crash) = editor_crashed() {
         failure.message = format!(
             "{}\n\nThe Godot editor itself died: {crash}. That is the engine crashing, not this \
              call — retrying it will not help. Start a new session with godot_session start.",
             failure.message.trim_end()
         );
-        return failure;
     }
     // Not for `session_closed`. That one is about the editor, and an editor that has gone takes the
     // staged autoload with it — so the check below would be right about the file and wrong about
     // what happened.
-    if failure.code.starts_with("runtime_")
-        && let Some(missing) = the_helper_is_not_installed()
-    {
-        failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
-        return failure;
-    }
-    if failure.code.starts_with("runtime_")
-        && let Some(held) = the_debugger_holds_the_game()
-    {
-        failure.message = format!("{}\n\n{held}", failure.message.trim_end());
+    // One of the two, because they describe the same call from opposite ends and both cannot be
+    // true. Neither returns: what the session printed is the other half of the answer, and a branch
+    // that leaves without it is the defect the crash branch above was just fixed for — a model told
+    // the autoload is missing, and not told the parse error sitting under it.
+    if failure.code.starts_with("runtime_") {
+        if let Some(missing) = the_helper_is_not_installed() {
+            failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
+        } else if let Some(held) = the_debugger_holds_the_game() {
+            failure.message = format!("{}\n\n{held}", failure.message.trim_end());
+        }
     }
     let printed = last_session_errors(CARRIED_ERROR_LINES);
     if printed.is_empty() {
@@ -2286,6 +2299,15 @@ mod tests {
         }
     }
 
+    /// Ages everything in the buffer, for the checks that are about how old a line is.
+    fn backdated_by(milliseconds: u64) {
+        if let Ok(mut logs) = LOGS.lock() {
+            for entry in &mut logs.entries {
+                entry.timestamp = entry.timestamp.saturating_sub(milliseconds);
+            }
+        }
+    }
+
     /// The failure the addon answers a runtime call with, before this module has touched it.
     fn addon_failure(code: &str, message: &str) -> ToolFailure {
         ToolFailure {
@@ -2340,6 +2362,51 @@ mod tests {
         assert!(
             carried.message.contains("godot_session start"),
             "the failure offered no way out: {}",
+            carried.message
+        );
+    }
+
+    /// A missing autoload is one half of the answer, and what the engine printed is the other.
+    ///
+    /// The branch that names it used to return early, which is the very defect the crash branch was
+    /// fixed for: a branch switch that takes the autoload away while a script has a parse error
+    /// answered with the autoload advice alone, and the model restarted into the same failure.
+    #[test]
+    fn a_missing_helper_still_carries_what_the_session_printed() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (LogSource::Editor, "GOFER_ADDON_READY:2"),
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+            ),
+        ]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            "config_version=5\n\n[application]\n\nconfig/name=\"Fixture\"\n",
+        )
+        .expect("a project with no autoload section");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet.",
+        ));
+
+        bind(None);
+        assert!(
+            carried.message.contains("GoferRuntime"),
+            "the failure named nothing to fix: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "and it threw away what the engine printed: {}",
             carried.message
         );
     }
@@ -2538,6 +2605,136 @@ mod tests {
                 .message
                 .contains("Invalid access to property or key 'velocity'"),
             "and the error that did end the game was thrown away with it: {}",
+            carried.message
+        );
+    }
+
+    /// `Error` is not the same as gone: it is also what a live editor with a silent addon reads as.
+    ///
+    /// `derive_state` answers `Error` for `Readiness::Unavailable`, which is the editor up and the
+    /// addon not answering — the exact state `session_closed` reports. A game that segfaults leaves
+    /// a fresh crash marker AND drops the addon socket, with the editor window still open, so a
+    /// guard written as a list of live states claimed the engine had died and sent the model off to
+    /// start a second session against the one that was already running.
+    #[test]
+    fn an_editor_whose_addon_went_quiet_is_not_reported_as_dead() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+            ),
+            (
+                LogSource::EditorError,
+                "handle_crash: Program crashed with signal 11",
+            ),
+        ]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        bind(Some(std::sync::Arc::new(ExternalEditor::new(
+            SessionInfo {
+                session_id: "external".to_owned(),
+                state: SessionState::Error,
+                rpc_address: String::new(),
+                lsp_port: 0,
+                dap_port: 0,
+                godot_version: REQUIRED_ENGINE_VERSION.to_owned(),
+                worktree: worktree.path().display().to_string(),
+            },
+        ))));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "session_closed",
+            "The RPC session closed",
+        ));
+
+        bind(None);
+        assert!(
+            !carried.message.contains("The Godot editor itself died"),
+            "a live editor with a quiet addon was accused of dying: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "and the error that did end the game went with it: {}",
+            carried.message
+        );
+    }
+
+    /*
+     * The other half of "whose death is this", for the case the live-editor guard cannot answer.
+     *
+     * A game that segfaulted leaves its marker in the editor's own buffer, which is cleared only
+     * when an editor starts. While the editor is up, the guard says the line is not its. Once the
+     * editor is stopped the guard goes quiet, and every later failure was answered "the Godot
+     * editor itself died — retrying will not help" on the strength of an hour-old line about a
+     * different process. Age is what tells them apart: the crash that ended this call just happened.
+     */
+    #[test]
+    fn a_crash_from_earlier_in_the_session_is_not_this_calls_crash() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "handle_crash: Program crashed with signal 11",
+            ),
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+            ),
+        ]);
+        backdated_by(10 * 60 * 1000);
+        bind(None);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game stopped before it could answer",
+        ));
+
+        assert!(
+            !carried.message.contains("The Godot editor itself died"),
+            "an old game crash was reported as the editor's death: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "and the error that did end the game went with it: {}",
+            carried.message
+        );
+    }
+
+    /// A crash that did just happen says so, and still carries what the engine printed on its way.
+    ///
+    /// The saying and the carrying used to be exclusive: naming the crash returned early, so the
+    /// parse errors this function exists to attach were dropped exactly when the model had least
+    /// context to spare.
+    #[test]
+    fn an_editor_that_just_died_says_so_and_still_carries_what_it_printed() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+            ),
+            (
+                LogSource::EditorError,
+                "handle_crash: Program crashed with signal 11",
+            ),
+        ]);
+        bind(None);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game stopped before it could answer",
+        ));
+
+        assert!(
+            carried.message.contains("The Godot editor itself died"),
+            "{}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "the crash branch threw away what the engine printed: {}",
             carried.message
         );
     }

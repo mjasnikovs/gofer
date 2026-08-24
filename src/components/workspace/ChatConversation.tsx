@@ -8,6 +8,7 @@ import {
     ChatMessageMetadata,
     ChatToolCalls
 } from '@astryxdesign/core/Chat'
+import {Collapsible} from '@astryxdesign/core/Collapsible'
 import {Icon} from '@astryxdesign/core/Icon'
 import {Lightbox} from '@astryxdesign/core/Lightbox'
 import {Markdown} from '@astryxdesign/core/Markdown'
@@ -24,6 +25,7 @@ import type {
     VerifyPoint
 } from '../../models/chat'
 import {messageParts} from '../../models/chat-timeline'
+import {AskBlock} from './AskBlock'
 
 type ChatConversationProps = Readonly<{
     attachmentPreviews: Readonly<Record<string, string>>
@@ -34,13 +36,9 @@ type ChatConversationProps = Readonly<{
 }>
 
 /*
- * Gofer's conversation is one left-aligned column, and `ChatMessage sender='user'` lays its bubble
- * out on the right. Neither `ChatMessage` nor `ChatMessageBubble` takes an alignment prop
- * (`npm run astryx -- component ChatMessage`), so the override stays until one of them does.
- */
-const LEFT_ALIGNED_USER_BUBBLE_STYLE = {alignSelf: 'flex-start'} as const
-/*
- * A sent message is shown back the way it was typed. The composer is a contenteditable at
+ * A sent message is shown back the way it was typed — body text, not monospace. It was `code`,
+ * which put the one thing the user wrote in a different family from everything around it and made
+ * every ordinary sentence read as a snippet. The composer is a contenteditable at
  * `white-space: pre-wrap`, but `Text` sets no `white-space` at all below `maxLines`, so the
  * default `normal` collapsed every newline and blank line the moment the message left the
  * box — a paragraphed brief came back as one blob. `ChatMessageBubble` already carries
@@ -277,20 +275,24 @@ type ProseBubbleProps = Readonly<{
 }>
 
 /**
- * The label over a stretch of reasoning.
+ * The caption on a stretch of thinking, and the row that opens it.
  *
  * `ChatMessageBubble` draws `name` in a bare `div` that inherits whatever type surrounds it, so the
- * bare string `'Reasoning'` came out at body size in body colour — larger and louder than the
- * thinking underneath it, which is drawn compact, and louder than the tool rows either side of it.
- * It is a caption on a quiet part of the turn, so it takes the same role the tool rows' own names
- * take: supporting size, secondary colour.
+ * bare string came out at body size in body colour — larger and louder than the thinking
+ * underneath it, which is drawn compact, and louder than the tool rows either side of it. It is a
+ * caption on a quiet part of the turn, so it takes the same role the tool rows' own names take:
+ * supporting size, secondary colour.
+ *
+ * "Thinking", not "Reasoning": the composer's effort control is a button the visual suite finds by
+ * `/^Reasoning:/`, and a second button starting with that word is one dropped colon away from
+ * matching two elements and failing the whole file.
  */
-const REASONING_LABEL = (
+const THINKING_LABEL = (
     <Text
         type='supporting'
         color='secondary'
     >
-        Reasoning
+        Thinking
     </Text>
 )
 
@@ -300,21 +302,39 @@ const REASONING_LABEL = (
  * The model answers in Markdown — headings, lists, fenced code — and a plain `Text` node printed all
  * of it as one unbroken paragraph. `isStreaming` is set only on the stretch still growing, which is
  * what switches `Markdown` to incremental parsing.
+ *
+ * Thinking is folded away once the turn moves past it. The transcript is what the agent said, not
+ * what it muttered getting there, and now that a block has no fill and no inset of its own there is
+ * nothing left to tell the muttering apart from the answer at a glance. It stays open while it is
+ * still arriving: a turn can think for minutes, and a closed row over a spinner is a window that
+ * looks hung. `isStreaming` is set on the last part only, so the fold happens by itself when the
+ * next part starts. A click wins after that and keeps winning — the reader's choice outlives the
+ * stream.
  */
-const ProseBubble = memo(({isReasoning, isStreaming, text}: ProseBubbleProps) => (
-    <ChatMessageBubble
-        variant='ghost'
-        {...(isReasoning && {name: REASONING_LABEL})}
-    >
-        <Markdown
-            density={isReasoning ? 'compact' : 'default'}
-            headingLevelStart={MESSAGE_HEADING_LEVEL}
-            isStreaming={isStreaming}
+const ProseBubble = memo(({isReasoning, isStreaming, text}: ProseBubbleProps) => {
+    const [chosen, setChosen] = useState<boolean | null>(null)
+    const prose = (
+        <ChatMessageBubble variant='ghost'>
+            <Markdown
+                density={isReasoning ? 'compact' : 'default'}
+                headingLevelStart={MESSAGE_HEADING_LEVEL}
+                isStreaming={isStreaming}
+            >
+                {text}
+            </Markdown>
+        </ChatMessageBubble>
+    )
+    if (!isReasoning) return prose
+    return (
+        <Collapsible
+            isOpen={chosen ?? isStreaming}
+            trigger={THINKING_LABEL}
+            onOpenChange={setChosen}
         >
-            {text}
-        </Markdown>
-    </ChatMessageBubble>
-))
+            {prose}
+        </Collapsible>
+    )
+})
 ProseBubble.displayName = 'ProseBubble'
 
 type MessageMetadataProps = Readonly<{
@@ -410,6 +430,19 @@ function AssistantTimeline({message}: {message: Message}) {
                     // A part naming a call the message no longer carries would render an empty row;
                     // there is nothing to show, so it shows nothing.
                     if (!tool) return null
+                    /*
+                     * A question is the one tool call the user has to do something with, so it is
+                     * the one that is not a row. Everything else on this timeline reports what the
+                     * agent did; this one is waiting on them, and a collapsed row saying "ask_user"
+                     * is a thing to open rather than a thing to answer.
+                     */
+                    if (tool.name === 'ask_user')
+                        return (
+                            <AskBlock
+                                key={`tool-${part.toolId}`}
+                                tool={tool}
+                            />
+                        )
                     return (
                         <ToolCallRow
                             key={`tool-${part.toolId}`}
@@ -597,10 +630,7 @@ const ConversationMessage = memo(
         }
         return (
             <ChatMessage sender='user'>
-                <ChatMessageBubble
-                    variant='filled'
-                    style={LEFT_ALIGNED_USER_BUBBLE_STYLE}
-                >
+                <ChatMessageBubble variant='filled'>
                     <VStack
                         gap={2}
                         hAlign='start'
@@ -613,7 +643,7 @@ const ConversationMessage = memo(
                         :   null}
                         {message.text ?
                             <Text
-                                type='code'
+                                type='body'
                                 style={SENT_TEXT_STYLE}
                             >
                                 {message.text}

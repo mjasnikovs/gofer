@@ -312,11 +312,13 @@ export function isAiStreamEvent(value: unknown): value is AiStreamEvent {
             return (
                 isText(value['text'])
                 && isText(value['thinking'])
-                // Checked like the rest, and this is the one the turn's whole ending hangs on:
-                // `applyStreamEvent` reads it to draw a stopped turn as stopped. Unchecked, a `done`
-                // without it passed the guard, was typed as carrying it, read `undefined`, and fell
-                // through to `complete` — the very defect the field was added to fix, silently.
-                && isText(value['stopReason'])
+                // Checked when it is there, and not required to be. `applyStreamEvent` reads it to
+                // draw a stopped turn as stopped, and the type used to say it was always sent —
+                // which is why it is checked at all. Required, though, a `done` that arrived
+                // without it failed this guard whole: the reply text, the usage and the model went
+                // with it, and a turn that worked was drawn as a stopped one with nothing in it.
+                // The type now says optional, and absent reads as the turn ending normally.
+                && (value['stopReason'] === undefined || isText(value['stopReason']))
                 && isRenderableUsage(value['usage'])
                 && isText(value['model'])
                 && Array.isArray(value['agentMessages'])

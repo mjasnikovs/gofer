@@ -562,6 +562,9 @@ pub struct MaintenanceResult {
     pub sketches_removed: usize,
     pub docs_answers_removed: usize,
     pub memory_vectors_removed: usize,
+    /// Vectors that were filed under a scope their memory has left, put back under its current one.
+    /// See [`Memories::refile_drifted_vectors`].
+    pub memory_vectors_refiled: usize,
     pub backups_removed: usize,
     pub memory_embeddings_restored: usize,
 }
@@ -575,6 +578,7 @@ impl MaintenanceResult {
         self.sketches_removed += view.sketches_removed;
         self.docs_answers_removed += view.docs_answers_removed;
         self.memory_vectors_removed += view.memory_vectors_removed;
+        self.memory_vectors_refiled += view.memory_vectors_refiled;
         self.backups_removed += view.backups_removed;
         self.memory_embeddings_restored += view.memory_embeddings_restored;
     }
@@ -615,6 +619,15 @@ impl Cutoffs {
             backups_kept: 5,
         })
     }
+}
+
+/// A vector computed before the write lock was taken, with the text it was computed from.
+///
+/// The text is what makes it checkable. Minutes pass between computing one of these and writing it,
+/// and an edit in that window deletes the row's vector precisely because the content changed.
+pub(crate) struct PendingEmbedding {
+    request: SaveMemoryEmbeddingRequest,
+    content: String,
 }
 
 /// The views maintenance folds over, in the order it visits them.
@@ -663,7 +676,7 @@ impl Upkeep {
         self,
         storage: &ProjectStorage,
         cutoffs: &Cutoffs,
-        pending: &[SaveMemoryEmbeddingRequest],
+        pending: &[PendingEmbedding],
     ) -> Result<Collected, CommandError> {
         match self {
             Self::Chats => storage.chats().collect(cutoffs),
@@ -2942,18 +2955,19 @@ impl Memories<'_> {
     ///
     /// It stops at the first failure, because a worker that cannot answer for one memory cannot
     /// answer for the next two hundred either, and each attempt would pay the same timeout.
-    pub(crate) fn embeddings_to_restore(
-        &self,
-    ) -> Result<Vec<SaveMemoryEmbeddingRequest>, CommandError> {
+    pub(crate) fn embeddings_to_restore(&self) -> Result<Vec<PendingEmbedding>, CommandError> {
         let mut prepared = Vec::new();
         for memory in self.missing_embeddings(BACKFILL_LIMIT)? {
             let Ok(vector) = crate::project_memory::memory_vector(&memory.content) else {
                 break;
             };
-            prepared.push(SaveMemoryEmbeddingRequest {
-                memory_id: memory.id,
-                model: MEMORY_EMBEDDING_MODEL.to_owned(),
-                vector,
+            prepared.push(PendingEmbedding {
+                request: SaveMemoryEmbeddingRequest {
+                    memory_id: memory.id,
+                    model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                    vector,
+                },
+                content: memory.content,
             });
         }
         Ok(prepared)
@@ -3178,12 +3192,33 @@ impl Memories<'_> {
     fn collect(
         &self,
         _cutoffs: &Cutoffs,
-        pending: &[SaveMemoryEmbeddingRequest],
+        pending: &[PendingEmbedding],
     ) -> Result<Collected, CommandError> {
         let mut connection = self.storage.connection()?;
         let mut restored = 0;
-        for request in pending {
-            self.write_embedding(&mut connection, request)?;
+        for entry in pending {
+            // Re-read under the lock, because the vector was computed without it. A memory deleted
+            // in that window has nothing to write; one edited in it had its vector dropped on
+            // purpose, and writing this one back would index the row under text it no longer holds
+            // while `missing_embeddings` stops reporting it. Both are skipped rather than raised:
+            // the backfill is one of six upkeep views and must not take the other five down.
+            let current = connection
+                .query_row(
+                    "SELECT content FROM memory_items WHERE id = ?1",
+                    [&entry.request.memory_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(database_error)?;
+            if current.as_deref() != Some(entry.content.as_str()) {
+                continue;
+            }
+            if self
+                .write_embedding(&mut connection, &entry.request)
+                .is_err()
+            {
+                continue;
+            }
             restored += 1;
         }
         let mut statement = connection
@@ -3206,11 +3241,89 @@ impl Memories<'_> {
                 )
                 .map_err(database_error)?;
         }
+        let refiled = self.refile_drifted_vectors(&connection)?;
         Ok(Collected {
             memory_embeddings_restored: restored,
             memory_vectors_removed: orphaned.len(),
+            memory_vectors_refiled: refiled,
             ..Collected::default()
         })
+    }
+
+    /// Vectors filed under a scope their memory has left, put back under the one it has now.
+    ///
+    /// `scope_key` is a partition key: [`Memories::search`] asks for one scope and vec0 answers
+    /// only out of that partition, so a vector filed under the wrong one is invisible to search
+    /// rather than merely mis-ranked. It is written once, by [`Memories::write_embedding`], and the
+    /// only thing that invalidates it on a scope change is [`Memories::upsert`].
+    ///
+    /// Which leaves the case nothing was watching. `memory_items.task_id` is `ON DELETE SET NULL`,
+    /// so deleting a task rewrites its memories to project scope without going through `upsert` at
+    /// all: the rows survive, the vectors stay filed under a task id nothing can name any more, and
+    /// the memories are lexical-only from then on. Permanently — `missing_embeddings` keys on
+    /// `memory_embeddings`, which is still there, so the backfill never looks at them, and the
+    /// orphan sweep above only removes vectors whose memory is gone.
+    ///
+    /// Re-filed from the stored embedding rather than re-embedded: the vector is the same vector,
+    /// only the partition it sits in is wrong, and the worker is a subprocess round trip away. A
+    /// row with no stored embedding is one the backfill already reports, so its stale vector is
+    /// simply dropped.
+    fn refile_drifted_vectors(&self, connection: &Connection) -> Result<usize, CommandError> {
+        let mut statement = connection
+            .prepare("SELECT memory_id, scope_key FROM memory_vectors")
+            .map_err(database_error)?;
+        let filed = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        drop(statement);
+        let mut refiled = 0;
+        for (memory_id, scope) in filed {
+            let Some(belongs) = connection
+                .query_row(
+                    "SELECT COALESCE(task_id, 'project') FROM memory_items WHERE id = ?1",
+                    [&memory_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(database_error)?
+            else {
+                // Its memory is gone, which is the orphan sweep's to answer for and it already has.
+                continue;
+            };
+            if belongs == scope {
+                continue;
+            }
+            let embedding = connection
+                .query_row(
+                    "SELECT embedding FROM memory_embeddings WHERE memory_id = ?1",
+                    [&memory_id],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .optional()
+                .map_err(database_error)?;
+            connection
+                .execute(
+                    "DELETE FROM memory_vectors WHERE memory_id = ?1",
+                    [&memory_id],
+                )
+                .map_err(database_error)?;
+            let Some(embedding) = embedding else {
+                continue;
+            };
+            connection
+                .execute(
+                    "INSERT INTO memory_vectors (memory_id, embedding, scope_key)
+                     VALUES (?1, ?2, ?3)",
+                    params![memory_id, embedding, belongs],
+                )
+                .map_err(database_error)?;
+            refiled += 1;
+        }
+        Ok(refiled)
     }
 }
 
@@ -3494,14 +3607,32 @@ impl Project<'_> {
     }
 
     fn maintain_database(&self) -> Result<MaintenanceResult, CommandError> {
-        let pending = self.storage.memory().embeddings_to_restore()?;
+        // Not `?`. This is one view's preparation, and a memory table that cannot be read is not a
+        // reason to leave the attachments, the run directories, the stale manual answers and the old
+        // backups where they are. Its own view reports the zero it collected.
+        let pending = self
+            .storage
+            .memory()
+            .embeddings_to_restore()
+            .unwrap_or_default();
         let _write_guard = self.storage.write_lock()?;
         let cutoffs = Cutoffs::current()?;
         let mut collected = MaintenanceResult::default();
+        // Every view is asked, whatever the one before it answered. A view's upkeep is its own —
+        // one unremovable file under `sketches` has nothing to do with the memory backfill or the
+        // backups — and stopping at the first failure meant one such file permanently disabled the
+        // other five. The pass still fails, with the first reason, once all six have run.
+        let mut failure = None;
         for view in Upkeep::every() {
-            collected.absorb(view.collect(self.storage, &cutoffs, &pending)?);
+            match view.collect(self.storage, &cutoffs, &pending) {
+                Ok(view) => collected.absorb(view),
+                Err(error) => failure = failure.or(Some(error)),
+            }
         }
-        Ok(collected)
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(collected),
+        }
     }
 }
 
@@ -7347,6 +7478,172 @@ mod tests {
         assert!(
             sketches.join("notes.txt").is_file(),
             "a name this cannot read is not a sketch, and not ours to delete"
+        );
+    }
+
+    /*
+     * The vectors are computed before the write lock is taken, so what they came FROM is checked
+     * once it is held.
+     *
+     * Two hundred round trips to the memory worker is a window minutes wide, and both things that
+     * can happen in it used to go wrong. A memory deleted in that window made `write_embedding`
+     * error and the `?` took the whole maintenance fold down — backups unpruned, stale answers
+     * unpurged. A memory EDITED in it had its vector dropped precisely because the content changed,
+     * and the stale one was written back against the new text: `missing_embeddings` stopped
+     * reporting the row, so nothing would ever notice it was indexed under words it no longer held.
+     */
+    #[test]
+    fn a_vector_is_written_only_if_the_text_it_was_computed_from_is_still_there() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let remember = |content: &str| {
+            storage
+                .memory()
+                .upsert(&UpsertMemoryRequest {
+                    id: None,
+                    task_id: None,
+                    kind: "fact".to_owned(),
+                    state: "confirmed".to_owned(),
+                    content: content.to_owned(),
+                    provenance: serde_json::json!({"source": "user"}),
+                    superseded_by: None,
+                })
+                .expect("save memory")
+        };
+        let edited = remember("The pause menu lives in ui/pause.tscn");
+        let removed = remember("The player scene lives in scenes/player.tscn");
+        let kept = remember("The input map names ui_cancel");
+        let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        vector[0] = 1.0;
+        let computed = |memory: &MemoryRecord| PendingEmbedding {
+            request: SaveMemoryEmbeddingRequest {
+                memory_id: memory.id.clone(),
+                model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                vector: vector.clone(),
+            },
+            content: memory.content.clone(),
+        };
+        let pending = vec![computed(&edited), computed(&removed), computed(&kept)];
+
+        // The window: one memory rewritten, one deleted, while the worker was busy.
+        storage
+            .memory()
+            .upsert(&UpsertMemoryRequest {
+                id: Some(edited.id.clone()),
+                task_id: None,
+                kind: "fact".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "The pause menu lives in ui/menus/pause.tscn".to_owned(),
+                provenance: serde_json::json!({"source": "user"}),
+                superseded_by: None,
+            })
+            .expect("edit memory");
+        let connection = storage.connection().expect("connection");
+        connection
+            .execute("DELETE FROM memory_items WHERE id = ?1", [&removed.id])
+            .expect("delete memory");
+
+        let collected = storage
+            .memory()
+            .collect(&everything_is_old(), &pending)
+            .expect("collect");
+
+        assert_eq!(
+            collected.memory_embeddings_restored, 1,
+            "only the memory that still holds the text the vector was computed from"
+        );
+        let still_missing = storage
+            .memory()
+            .missing_embeddings(10)
+            .expect("missing")
+            .into_iter()
+            .map(|memory| memory.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            still_missing,
+            vec![edited.id],
+            "the edited row keeps no vector, so the next pass computes one for what it now says"
+        );
+        assert!(!still_missing.contains(&kept.id));
+    }
+
+    /// Deleting a task moves its memories to project scope, and the vectors have to move with them.
+    ///
+    /// `memory_items.task_id` is `ON DELETE SET NULL`, which rewrites the row without going through
+    /// `upsert` — the only place that drops a vector on a scope change. `scope_key` is a partition
+    /// key, so the vector stays filed under a task id nothing can name any more and the search,
+    /// which asks for one scope, never sees it again. Nothing noticed: the embedding row is still
+    /// there, so the backfill skips it, and the memory is still there, so the orphan sweep skips it.
+    #[test]
+    fn the_memories_view_refiles_vectors_whose_task_was_deleted() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        let doomed = storage
+            .tasks()
+            .create(&storage.switch(&NOTHING_TO_STOP))
+            .expect("create task")
+            .task_id
+            .expect("task ID");
+        let memory = storage
+            .memory()
+            .upsert(&UpsertMemoryRequest {
+                id: None,
+                task_id: Some(doomed.clone()),
+                kind: "fact".to_owned(),
+                state: "confirmed".to_owned(),
+                content: "The player scene lives in scenes/player.tscn".to_owned(),
+                provenance: serde_json::json!({"source": "user"}),
+                superseded_by: None,
+            })
+            .expect("save memory");
+        let mut vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        vector[0] = 1.0;
+        storage
+            .memory()
+            .save_embedding(&SaveMemoryEmbeddingRequest {
+                memory_id: memory.id.clone(),
+                model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                vector: vector.clone(),
+            })
+            .expect("save embedding");
+        storage
+            .tasks()
+            .delete(&doomed, &storage.switch(&NOTHING_TO_STOP))
+            .expect("delete the task");
+
+        let found = |storage: &ProjectStorage| {
+            storage
+                .memory()
+                .search(&SearchMemoryRequest {
+                    query: "player scene".to_owned(),
+                    task_id: None,
+                    vector: Some(vector.clone()),
+                    limit: Some(5),
+                })
+                .expect("search")
+        };
+        let stranded = found(&storage);
+        assert_eq!(stranded.len(), 1, "the memory itself survived the task");
+        assert!(
+            stranded[0].vector_distance.is_none(),
+            "and its vector is filed where the search cannot reach it"
+        );
+
+        let collected = storage
+            .memory()
+            .collect(&everything_is_old(), &[])
+            .expect("collect");
+
+        assert_eq!(collected.memory_vectors_refiled, 1);
+        assert_eq!(
+            collected.memory_vectors_removed, 0,
+            "the vector was moved rather than thrown away"
+        );
+        assert!(
+            found(&storage)[0].vector_distance.is_some(),
+            "the same vector, under the scope the memory is in now"
         );
     }
 

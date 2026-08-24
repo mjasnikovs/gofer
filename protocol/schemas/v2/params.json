@@ -1843,7 +1843,7 @@
         {
             "tool": "godot_script",
             "op": "apply_rename",
-            "summary": "Applies a planned rename in one transaction. `files` is the list `rename` answered with, passed back unchanged; a hand-built one is refused.",
+            "summary": "Applies a planned rename in one transaction. `files` is the list `rename` answered with, passed back unchanged. Every entry is checked against the file on disk before anything is written, so a list you edited by hand is refused the moment its `originalHash` does not match. It writes whole files: do not use it to write text you wrote yourself, which is what `save` and `edit` are for.",
             "params": [
                 {
                     "name": "files",
@@ -1874,7 +1874,8 @@
                     "note": "The list `rename` answered with, passed back unchanged."
                 }
             ],
-            "answeredBy": "rust"
+            "answeredBy": "rust",
+            "writes": "scriptText"
         },
         {
             "tool": "godot_debug",

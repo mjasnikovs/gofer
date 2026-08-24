@@ -47,7 +47,7 @@ import {
 import {createCredentialStore} from './ai-credentials.mjs'
 import {probeTools} from './ai-reachability.mjs'
 import {createAskUserTool} from './ai-ask.mjs'
-import {createDesignWithUserTool} from './ai-design.mjs'
+import {createAskDelegate} from './ai-ask-loop.mjs'
 import {createSubagentTool} from './ai-subagent.mjs'
 import {createWebFetchTool} from './ai-fetch.mjs'
 import {createWebSearchTool} from './ai-search.mjs'
@@ -666,21 +666,25 @@ export async function runAgent({
             // a question with no channel behind it cannot be asked, and a tool that cannot answer would
             // stop the turn at the probe rather than never being offered.
             //
-            // `design_with_user` is here for the same reason and under the same rule: it agrees a
-            // layout with the user over several rounds inside a child, and it reaches the window
-            // through this channel or not at all.
+            // One tool, and the delegate is the half of it that agrees a layout over several rounds
+            // inside a child. It borrows the sub-agent's model and ceilings for the reason the page
+            // reader does: a second set of sliders would be a second thing to keep in step with the
+            // first. The pictures are the ones on the message that started this turn, and they are
+            // not optional — a design is asked for in the same breath as the screenshot it is about.
             ...(host ?
                 [
-                    createAskUserTool({host}),
-                    createDesignWithUserTool({
-                        workspacePath,
-                        models,
-                        model: subagent.model,
-                        thinkingLevel: subagent.thinkingLevel,
-                        streamOptions,
-                        settings: settings.subagent,
+                    createAskUserTool({
                         host,
-                        images: askedAbout(messages)
+                        delegate: createAskDelegate({
+                            workspacePath,
+                            models,
+                            model: subagent.model,
+                            thinkingLevel: subagent.thinkingLevel,
+                            streamOptions,
+                            settings: settings.subagent,
+                            host,
+                            images: askedAbout(messages)
+                        })
                     })
                 ]
             :   [])
@@ -1051,7 +1055,17 @@ export async function runAgent({
                 errorMessage: failure.errorMessage
             })
         )
-        await abortableWait(delayMs, signal, timers)
+        // A stop landing in the countdown is the same stop as one landing in the request, and only
+        // the signal knows that: `abortableWait` rejects with its own wording, which threw straight
+        // past the loop's stopped ending and out as a failed turn. This is the widest stop window a
+        // turn has — `retryScheduled` puts a countdown on screen and invites the user to use it.
+        await abortableWait(delayMs, signal, timers).catch(error => {
+            if (!signal?.aborted) throw error
+        })
+        // Handed back untouched for the loop to end on. Nothing below this line belongs to a turn
+        // that is over: a `retryStart` event, a dropped answer, and a resume that asks the provider
+        // again are all preparation for an attempt that must not happen.
+        if (signal?.aborted) return attemptState
         emit(retryStart(attemptState.attempt, retry.attempts))
         // The failed answer is taken back off first. Left on, it teaches the model that its own last
         // word was the provider's error text, and the next answer is written to match it.
@@ -1074,6 +1088,9 @@ export async function runAgent({
             if (verdict === 'again') continue
             if (wasStopped(state)) break
             await classifyAndBackoff(state)
+            // Asked again after the backoff as well as before it. The wait is the longest the loop
+            // ever pauses, so it is where a stop most often lands.
+            if (wasStopped(state)) break
         }
         const {finalMessage, verifyResults} = state
         if (finalMessage.stopReason === 'length') throw new Error(outOfRoom(finalMessage, model))

@@ -18,8 +18,7 @@ import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useConversation} from '../../hooks/useConversation'
 import {useRememberedValue} from '../../hooks/useRememberedValue'
 import {useToolApprovals} from '../../hooks/useToolApprovals'
-import {useDesignSession} from '../../hooks/useDesignSession'
-import {useUserQuestions} from '../../hooks/useUserQuestions'
+import {AskedQuestionsContext, useUserQuestions} from '../../hooks/useUserQuestions'
 import {useTaskBrief} from '../../hooks/useTaskBrief'
 import {ChatColumnContext} from '../../hooks/useChatColumn'
 import type {ChatColumn as ChatColumnValue} from '../../hooks/useChatColumn'
@@ -36,7 +35,6 @@ import {UnsavedWorkDialog} from './UnsavedWorkDialog'
 import {unsavedScenes} from '../../models/unsaved-work'
 import type {UnsavedWork} from '../../models/unsaved-work'
 import {ToolApprovalDialog} from './ToolApprovalDialog'
-import {UserQuestionDialog} from './UserQuestionDialog'
 import {WorkspaceHeader} from './WorkspaceHeader'
 
 type WorkspaceProps = Readonly<{
@@ -176,14 +174,6 @@ export function Workspace({
     // ordinary tool, so an ordinary chat turn can ask the user something too.
     const {questions, answer: answerQuestion} = useUserQuestions({onError: report})
     const isBusy = useSyncExternalStore(watchTurn, isTurnRunning, isTurnRunning)
-    // A design loop asks about one layout several times. Left as ordinary questions the card would
-    // close on every answer and reopen once the agent had redrawn, so the user would watch their own
-    // modal flicker rather than one design change. This keeps it on screen for the whole loop.
-    const design = useDesignSession({
-        questions,
-        isTurnRunning: isBusy,
-        onAnswer: answerQuestion
-    })
 
     const hasConversation = messages.length > 0
     /*
@@ -621,67 +611,69 @@ export function Workspace({
         startWithoutPlan
     }
 
+    // Published rather than passed, for the reason `ChatColumnContext` is: the block that draws a
+    // question is inside a message, inside the list, inside the frame — and the conversation around
+    // it is replaced once per streamed token.
+    const asked = useMemo(() => ({questions, answer: answerQuestion}), [questions, answerQuestion])
+
     return (
         <ComposerContext value={composerValue}>
-            <ChatColumnContext value={chatColumn}>
-                <VStack
-                    gap={0}
-                    height='100%'
-                >
-                    <WorkspaceHeader
-                        connectionState={connectionState}
-                        isTaskBusy={isTaskBusy}
-                        onConnect={connect}
-                        onMergeTask={() => {
-                            void mergeTask()
-                        }}
-                        {...(activeTask && {activeTask})}
-                    />
-                    <Divider />
-                    <StackItem size='fill'>
-                        <ChatReferenceContext.Provider value={references}>
-                            <InspectorWorkspace
-                                chat={CHAT_COLUMN}
-                                onError={report}
-                            />
-                        </ChatReferenceContext.Provider>
-                    </StackItem>
-                    <ToolApprovalDialog
-                        onRespond={respondToApproval}
-                        {...(approvals[0] && {prompt: approvals[0]})}
-                    />
-                    <UserQuestionDialog
-                        onAnswer={design.answer}
-                        isRedrawing={design.isRedrawing}
-                        {...(design.prompt && {prompt: design.prompt})}
-                    />
-                    <UnsavedWorkDialog
-                        scenes={unsaved}
-                        onSave={() => {
-                            void mergeTask('save')
-                        }}
-                        onDiscard={() => {
-                            void mergeTask('discard')
-                        }}
-                        onDismiss={() => {
-                            setUnsaved([])
-                        }}
-                    />
-                    <MergeConflictDialog
-                        conflicts={mergeOffered.paths}
-                        mode={mergeOffered.mode}
-                        onResolve={() => {
-                            void resolveMerge()
-                        }}
-                        onDiscard={() => {
-                            void abandonMerge()
-                        }}
-                        onDismiss={() => {
-                            setMergeOffered(NOTHING_TO_OFFER)
-                        }}
-                    />
-                </VStack>
-            </ChatColumnContext>
+            <AskedQuestionsContext value={asked}>
+                <ChatColumnContext value={chatColumn}>
+                    <VStack
+                        gap={0}
+                        height='100%'
+                    >
+                        <WorkspaceHeader
+                            connectionState={connectionState}
+                            isTaskBusy={isTaskBusy}
+                            onConnect={connect}
+                            onMergeTask={() => {
+                                void mergeTask()
+                            }}
+                            {...(activeTask && {activeTask})}
+                        />
+                        <Divider />
+                        <StackItem size='fill'>
+                            <ChatReferenceContext.Provider value={references}>
+                                <InspectorWorkspace
+                                    chat={CHAT_COLUMN}
+                                    onError={report}
+                                />
+                            </ChatReferenceContext.Provider>
+                        </StackItem>
+                        <ToolApprovalDialog
+                            onRespond={respondToApproval}
+                            {...(approvals[0] && {prompt: approvals[0]})}
+                        />
+                        <UnsavedWorkDialog
+                            scenes={unsaved}
+                            onSave={() => {
+                                void mergeTask('save')
+                            }}
+                            onDiscard={() => {
+                                void mergeTask('discard')
+                            }}
+                            onDismiss={() => {
+                                setUnsaved([])
+                            }}
+                        />
+                        <MergeConflictDialog
+                            conflicts={mergeOffered.paths}
+                            mode={mergeOffered.mode}
+                            onResolve={() => {
+                                void resolveMerge()
+                            }}
+                            onDiscard={() => {
+                                void abandonMerge()
+                            }}
+                            onDismiss={() => {
+                                setMergeOffered(NOTHING_TO_OFFER)
+                            }}
+                        />
+                    </VStack>
+                </ChatColumnContext>
+            </AskedQuestionsContext>
         </ComposerContext>
     )
 }

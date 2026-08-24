@@ -148,6 +148,29 @@ test('a stopped judgement is reported as the user’s doing, not as a fault', as
     assert.equal(endingOf(events).type, 'judge-stopped')
 })
 
+/*
+ * A stop that lands in the probe is the same stop as one that lands in the child.
+ *
+ * The abort signal became live for the first time in this build — the worker had always passed
+ * `undefined` — and only the child's own verdict was ever told apart from a fault. Everything before
+ * it throws instead: `withDeadline` rejects a stopped probe with "the turn was stopped", which the
+ * catch reported as `judge-failed`, so pressing Stop left the row reading "Judging failed" for the
+ * most ordinary way there is to cancel one. Rust sends `judge-stopped` afterwards and loses, because
+ * the panel keeps the first ending it is given.
+ */
+test('a stop before the child answers is a stop, not a failure', async () => {
+    const controller = new AbortController()
+    const world = worldSaying('')
+    world.probeTools = async () => {
+        controller.abort()
+        throw new Error('the turn was stopped')
+    }
+    const {events, promise} = judge({world, signal: controller.signal})
+
+    assert.equal(await promise, null, 'a stop is not rethrown, so the worker exits cleanly')
+    assert.equal(endingOf(events).type, 'judge-stopped')
+})
+
 test('a child that could not answer ends the judgement rather than leaving it running', async () => {
     const world = worldSaying('')
     world.runSubagentOutcome = async () => ({kind: 'failed', reason: 'it used all of its steps'})

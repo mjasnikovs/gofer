@@ -90,3 +90,18 @@ export const SKETCH_RESET =
 export function sketchDocument(html: string): string {
     return `<style>${SKETCH_RESET}</style>${html}`
 }
+
+/**
+ * The sentence a delegated `ask_user` puts in front of the layout the user agreed.
+ *
+ * Written down twice on purpose, the way `SKETCH_RESET` is: the other copy is `agreedSketch` in
+ * `scripts/ai-ask-loop.mjs`, and Node cannot import this file. It is the only thing left in a stored
+ * tool result that says a design was agreed here — `details` do not survive a reload — so it is what
+ * an answered block reads to decide whether to point at the Design tab.
+ */
+export const AGREED_SKETCH_MARK = 'This is the layout they agreed'
+
+/** Whether a finished `ask_user` call ended on a layout the user signed off. */
+export function holdsAgreedSketch(output: string | undefined): boolean {
+    return output?.includes(AGREED_SKETCH_MARK) === true
+}

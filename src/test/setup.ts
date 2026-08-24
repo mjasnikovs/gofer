@@ -108,3 +108,15 @@ Object.defineProperty(window, '__TAURI_INTERNALS__', {
         unregisterCallback: (id: number) => callbacks.delete(id)
     }
 })
+
+/*
+ * jsdom lays nothing out, so it implements no scrolling at all.
+ *
+ * A block with a question waiting scrolls itself into view — the feed's follow settles before the
+ * sketches have measured their own height, and a question drawn below the fold is a question
+ * nothing on screen says is waiting. Here it is a no-op: there is no viewport to be outside of.
+ */
+Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: () => undefined
+})

@@ -643,7 +643,7 @@ function MemoryEditor({
             )}
             {memory.judgement && (
                 <VStack gap={1}>
-                    <Text weight='semibold'>{verdictSummary(memory.judgement)}</Text>
+                    <Text type='label'>{verdictSummary(memory.judgement)}</Text>
                     <Text
                         type='supporting'
                         color='secondary'

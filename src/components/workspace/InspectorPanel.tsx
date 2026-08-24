@@ -266,7 +266,7 @@ export function InspectorPanel({
                                         gap={2}
                                         align='center'
                                     >
-                                        <Text weight='semibold'>{node.data.name}</Text>
+                                        <Text type='label'>{node.data.name}</Text>
                                         <Badge
                                             variant={
                                                 selection?.origin === 'runtime' ?

@@ -357,7 +357,7 @@ async function rustSubagentBounds() {
     const body = slice(
         await read(path),
         path,
-        'const SUBAGENT_BOUNDS: [SubagentBound; 7] = [',
+        'const SUBAGENT_BOUNDS: [SubagentBound; 6] = [',
         '\n];'
     )
     const rows = [...body.matchAll(/"(\w+)",\s*\|s\| s\.\w+,\s*([\d_]+),\s*([\d_]+),?\s*\)/gu)]

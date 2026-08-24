@@ -2,6 +2,7 @@ import {ChatLayoutScrollButton} from '@astryxdesign/core/Chat'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
 import {useChatColumn} from '../../hooks/useChatColumn'
 import {ErrorBoundary} from '../application/ErrorBoundary'
+import {UnownedAsk} from './AskBlock'
 import {BriefProgress} from './BriefProgress'
 import {ChatConversation} from './ChatConversation'
 import {WorkspaceComposer, WorkspaceWelcome} from './WorkspaceComposer'
@@ -59,7 +60,7 @@ export function ChatColumn() {
      * A run that worked reports no ending: it sends the specification, the first message lands, and
      * this branch is gone with the welcome. Only a run that stopped or broke is still here.
      */
-    const composer =
+    const slot =
         brief.isRunning || brief.ended ?
             <BriefProgress
                 state={brief}
@@ -67,6 +68,20 @@ export function ChatColumn() {
                 onStartWithoutPlan={startWithoutPlan}
             />
         :   <WorkspaceComposer />
+    /*
+     * A question that names no tool call goes above whichever of those two is there.
+     *
+     * `AskBlock` draws a question inside the tool call that asked it, which is every question a
+     * chat turn asks and none of the ones a plan asks: a brief runs before the first turn exists.
+     * This slot is on screen either way, so it is where a question with no block to live in can
+     * still be answered. It draws nothing when there is none, which is almost always.
+     */
+    const composer = (
+        <VStack gap={3}>
+            <UnownedAsk />
+            {slot}
+        </VStack>
+    )
 
     if (messages.length === 0) {
         // The welcome scrolls: the centre region shares its height with the bottom panel, and a

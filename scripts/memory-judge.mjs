@@ -226,6 +226,15 @@ export async function runMemoryJudge({
         emit(judgeDone(verdict))
         return verdict
     } catch (error) {
+        // A stop is not a fault, and it is read off the signal rather than off the error. Nothing
+        // between here and the model translates one: `withDeadline` rejects a stopped probe with
+        // "the turn was stopped", and reported as a failure that reaches the row as "Judging
+        // failed" — for the most ordinary way there is to cancel a judgement. Rust sends its own
+        // `judge-stopped` afterwards and loses the race, because the panel keeps the first ending.
+        if (signal?.aborted) {
+            emit(judgeStopped())
+            return null
+        }
         // A probe that refused, a child that could not be built, a fault in here. All three used to
         // be the same thing to the window: nothing, for ever.
         emit(judgeFailed(error instanceof Error ? error.message : String(error)))

@@ -79,13 +79,27 @@ async function installDesktop(page: Page, state: VisualState) {
             + `h1{color:${accent};font-size:34px;letter-spacing:6px;margin:0 0 20px}`
             + `b{display:block;padding:12px;margin:8px 0;border:1px solid ${accent}}</style>`
             + `<div class="p"><h1>PAUSED</h1><b>RESUME</b><b>OPTIONS</b><b>QUIT</b></div>`
-        window.__GOFER_TEST_ASK__ = (sketches: number, design?: {revision: number}) => {
+        window.__GOFER_TEST_ASK__ = (
+            sketches: number,
+            design?: {revision?: number; delegated?: boolean}
+        ) => {
+            // The call the question belongs to, made before the question exists. `ownerCallId` is
+            // the only link between the two, and the block that draws a question IS the row that
+            // call would otherwise have been.
+            window.__GOFER_TEST_EMIT_STREAM__?.({
+                type: 'tool-start',
+                id: 'ask-1',
+                name: 'ask_user',
+                target: 'Which pause menu layout do you prefer?',
+                startedAt: 1_800_000_004_000
+            })
             emit('ai-question-request', {
                 questionId: 'question-1',
                 question: 'Which pause menu layout do you prefer?',
                 why: 'It decides the scene tree I build.',
                 revision: design?.revision ?? 1,
-                ...(design && {designSession: 'design-1'}),
+                ownerCallId: 'ask-1',
+                isDelegated: design?.delegated ?? false,
                 options: sketches === 0 ? ['Its own scene', 'Inside the HUD'] : ([] as string[]),
                 sketches: [
                     {label: 'Centered Overlay', html: sketch('#4f8cff', 'Centered Overlay')},
@@ -93,8 +107,14 @@ async function installDesktop(page: Page, state: VisualState) {
                 ].slice(0, sketches)
             })
         }
-        window.__GOFER_TEST_DESIGN__ = (sessionId: string, closing = false) => {
-            emit(closing ? 'ai-design-closed' : 'ai-design-opened', {sessionId})
+        /** What the child is doing between rounds, on the block's own live line. */
+        window.__GOFER_TEST_ASK_STEP__ = (step: string) => {
+            window.__GOFER_TEST_EMIT_STREAM__?.({
+                type: 'tool-update',
+                id: 'ask-1',
+                output: '',
+                step
+            })
         }
         window.__GOFER_TEST_APPROVE__ = () => {
             emit('ai-approval-request', {
@@ -450,6 +470,12 @@ async function installDesktop(page: Page, state: VisualState) {
                      */
                     if (window.__GOFER_TEST_HOLD_TURN__ === true) {
                         stream.onmessage({requestId, event: events[0]})
+                        // The channel, kept where a test can push one more event down it. A
+                        // question is drawn by the block belonging to the tool call that asked it,
+                        // so a test cannot show one without first making that call exist.
+                        window.__GOFER_TEST_EMIT_STREAM__ = (event: unknown) => {
+                            stream.onmessage({requestId, event})
+                        }
                         return new Promise(() => undefined)
                     }
                     for (const event of events) stream.onmessage({requestId, event})
@@ -632,15 +658,21 @@ test('streaming conversation with tool activity', async ({page}) => {
         expect(clipped, `${tool} is drawn in full, not cut to an ellipsis`).toBe(0)
     }
     /*
-     * And the label over a stretch of reasoning is a caption, not a heading.
+     * And a settled stretch of thinking is folded, under a caption rather than a heading.
      *
-     * `ChatMessageBubble` draws `name` in a bare element that inherits its surroundings, so the
-     * string `Reasoning` came out at body size: bigger than the thinking it labels, which is drawn
-     * compact, and bigger than the tool names either side of it.
+     * Two things are measured here. The caption used to be `ChatMessageBubble`'s `name`, drawn in a
+     * bare element that inherits its surroundings, so the string came out at body size: bigger than
+     * the thinking it labels, which is drawn compact, and bigger than the tool names either side of
+     * it. And the thinking itself used to be always open — which was survivable while every block
+     * had its own outline and is not now that the transcript is flat, because the muttering and the
+     * answer look the same. The fold is by `isStreaming` on the last part only, so a stretch the
+     * turn has moved past closes on its own.
      */
+    const thinking = page.getByRole('button', {name: 'Thinking'})
+    await expect(thinking).toHaveAttribute('aria-expanded', 'false')
     const sizes = await page.evaluate(() => {
-        const label = [...document.querySelectorAll('[data-chat-name]')].find(
-            element => element.textContent === 'Reasoning'
+        const label = [...document.querySelectorAll('.astryx-collapsible-trigger')].find(
+            element => element.textContent === 'Thinking'
         )
         // The deepest element still holding the sentence: Markdown chooses its own tags, and an
         // ancestor's font size is not the one the sentence is drawn at.
@@ -649,13 +681,13 @@ test('streaming conversation with tool activity', async ({page}) => {
             .pop()
         const size = (element: Element | undefined) =>
             element ? Number.parseFloat(getComputedStyle(element).fontSize) : 0
-        return {label: size(label?.firstElementChild ?? label), reply: size(reply)}
+        return {label: size(label?.querySelector('.astryx-text') ?? label), reply: size(reply)}
     })
-    expect(sizes.label, 'the reasoning label is drawn').toBeGreaterThan(0)
+    expect(sizes.label, 'the thinking caption is drawn').toBeGreaterThan(0)
     expect(sizes.reply, 'the reply body is drawn').toBeGreaterThan(0)
     expect(
         sizes.label,
-        'the reasoning label must not outshout the reply it sits over'
+        'the thinking caption must not outshout the reply it sits over'
     ).toBeLessThan(sizes.reply)
     await stableScreenshot(page, 'streaming-tool-activity.png')
 })
@@ -736,6 +768,34 @@ test('inspector workspace', async ({page}) => {
  * likely to regress.
  */
 /**
+ * A turn holding a question open, which is where every question screenshot starts.
+ *
+ * The block that draws a question is the tool call's own row in the conversation, so a question with
+ * no call behind it is a question nothing renders. That is the whole shape of the seam and it is
+ * worth paying for here rather than faking around: hold a turn, make the call, then ask.
+ */
+async function askDuringATurn(
+    page: Page,
+    sketches: number,
+    design?: {revision?: number; delegated?: boolean}
+) {
+    await installDesktop(page, 'streaming')
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => {
+        window.__GOFER_TEST_HOLD_TURN__ = true
+    })
+    await page.getByRole('combobox', {name: 'Message input'}).fill('Design the pause menu')
+    await page.getByRole('combobox', {name: 'Message input'}).press('Enter')
+    await page.evaluate(
+        ({count, options}) => {
+            window.__GOFER_TEST_ASK__?.(count, options)
+        },
+        {count: sketches, options: design}
+    )
+}
+
+/**
  * A question the agent asks with pictures, which is the screen this application is worst at.
  *
  * Two sketches side by side is the case every defect has been in: the columns have to be the same
@@ -743,20 +803,30 @@ test('inspector workspace', async ({page}) => {
  * edge, and the control that answers the question has to be on screen.
  */
 test('question with two sketches', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2))
+    await askDuringATurn(page, 2, {delegated: true})
     await expect(page.getByRole('button', {name: 'Choose Centered Overlay'})).toBeVisible()
     // Side by side means side by side. A label allowed to wrap, or a badge on one column only, put
     // the two sketches out of line — twice — and a screenshot alone never said by how much.
     const frames = await page.evaluate(() =>
-        [...document.querySelectorAll('dialog[open] iframe')].map(frame => {
+        [...document.querySelectorAll('iframe')].map(frame => {
             const rect = frame.getBoundingClientRect()
             return {top: rect.top, width: rect.width, height: rect.height}
         })
     )
     expect(frames).toHaveLength(2)
+    // And the whole block fits the column it is in. A chat column is a few hundred pixels wide and
+    // a flex row sizes itself from its content: three footer controls on one line ran the block off
+    // the right edge in the real window, with the primary action as the half that was cut.
+    const fit = await page.evaluate(() => {
+        const frame = document.querySelector('iframe')
+        const block = frame?.closest('.astryx-card')
+        const column = block?.closest('[class*="astryx-chat-message-list"]') ?? block?.parentElement
+        return {
+            block: block?.getBoundingClientRect().right ?? 0,
+            column: column?.getBoundingClientRect().right ?? 0
+        }
+    })
+    expect(fit.block).toBeLessThanOrEqual(fit.column + 1)
     expect(Math.abs((frames[0]?.top ?? 0) - (frames[1]?.top ?? 0))).toBeLessThanOrEqual(1)
     expect(Math.abs((frames[0]?.width ?? 0) - (frames[1]?.width ?? 1))).toBeLessThanOrEqual(1)
     expect(Math.abs((frames[0]?.height ?? 0) - (frames[1]?.height ?? 1))).toBeLessThanOrEqual(1)
@@ -764,10 +834,7 @@ test('question with two sketches', async ({page}) => {
 })
 
 test('question with one sketch', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(1))
+    await askDuringATurn(page, 1, {delegated: true})
     await expect(page.getByRole('button', {name: 'Choose Centered Overlay'})).toBeVisible()
     await stableScreenshot(page, 'question-one-sketch.png', false, true)
 })
@@ -775,15 +842,14 @@ test('question with one sketch', async ({page}) => {
 /**
  * The same question with no pictures, which is what most questions are.
  *
- * Here so that the small card cannot be broken by work on the large one — the two share a component
+ * Here so that the small block cannot be broken by work on the large one — the two share a component
  * and every change to the sketch half has run through this code.
  */
 test('question in words', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(0))
+    await askDuringATurn(page, 0)
     await expect(page.getByRole('textbox', {name: /Your answer/u})).toBeVisible()
+    // An option is a whole answer, so it is a button that sends rather than one that selects.
+    await expect(page.getByRole('button', {name: 'Its own scene'})).toBeVisible()
     await stableScreenshot(page, 'question-in-words.png')
 })
 
@@ -794,39 +860,33 @@ test('question in words', async ({page}) => {
  * the answer the user had just given, drawn as the one thing they were not allowed to pick.
  */
 test('a sketch chosen', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2))
+    await askDuringATurn(page, 2, {delegated: true})
     await page.getByRole('button', {name: 'Choose Side Panel'}).click()
     await expect(page.getByRole('button', {name: 'Choose Side Panel'})).toBeEnabled()
-    await expect(page.getByRole('button', {name: 'Answer'})).toBeEnabled()
+    await expect(page.getByRole('button', {name: 'Send changes'})).toBeEnabled()
     await stableScreenshot(page, 'question-chosen.png', false, true)
 })
 
 /**
- * A round of a design loop, which is the same card carrying two more controls.
+ * A round of a delegated design, which is the same block carrying one more control.
  *
  * Worth its own screenshot because the footer is where it can go wrong: three buttons instead of
  * two, one of them the primary the loop exists to reach, and a badge in the header that has to sit
  * beside a long question rather than push it. None of that is visible to jsdom.
  */
 test('a design round with two sketches', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2, {revision: 3}))
-    await expect(page.getByRole('button', {name: 'Complete and handoff'})).toBeVisible()
+    await askDuringATurn(page, 2, {delegated: true, revision: 3})
+    await expect(page.getByRole('button', {name: 'Done, build it'})).toBeVisible()
     // Which round this is, drawn. The prompt has carried it since the first build and the card threw
     // it away, so a layout the user had already commented on came back looking like a new question.
     await expect(page.getByText('Round 3')).toBeVisible()
     await page.getByRole('button', {name: 'Choose Side Panel'}).click()
-    await expect(page.getByRole('button', {name: 'Complete and handoff'})).toBeEnabled()
+    await expect(page.getByRole('button', {name: 'Done, build it'})).toBeEnabled()
     // The footer holds three controls now. On the shipped window they have to be on screen together,
     // which is the thing a count in a unit test cannot tell anybody.
     const footer = await page.evaluate(() => {
-        const names = ['Complete and handoff', 'Send changes', 'Let the agent decide']
-        return [...document.querySelectorAll('dialog[open] button')]
+        const names = ['Done, build it', 'Send changes', 'Let the agent decide']
+        return [...document.querySelectorAll('button')]
             .filter(button => names.includes(button.textContent.trim()))
             .map(button => {
                 const rect = button.getBoundingClientRect()
@@ -845,69 +905,27 @@ test('a design round with two sketches', async ({page}) => {
  * Between rounds, which is the state this whole seam was built for.
  *
  * What shipped before was nothing at all here: the card closed on the answer, the window sat empty
- * for the minute the agent spent redrawing, and a new card opened looking like a new question. This
- * is the only screenshot of the thing that replaced it, and it is a real one — a live turn, a real
- * answer sent through the real hook, and the card that stayed.
+ * for the minute the agent spent redrawing, and a new card opened looking like a new question. The
+ * block does not close, because it is not a card that opens — it is the tool call's own place in the
+ * feed, and a revision is the same block with new content in it.
  */
-test('the card between two design rounds', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    // A turn that does not finish. The card outlives an answer only while one is running.
-    await page.evaluate(() => {
-        window.__GOFER_TEST_HOLD_TURN__ = true
-    })
-    await page.getByRole('combobox', {name: 'Message input'}).fill('Design the pause menu')
-    await page.getByRole('combobox', {name: 'Message input'}).press('Enter')
-    await page.evaluate(() => window.__GOFER_TEST_DESIGN__?.('design-1'))
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2, {revision: 2}))
+test('the block between two design rounds', async ({page}) => {
+    await askDuringATurn(page, 2, {delegated: true, revision: 2})
     await page.getByRole('button', {name: 'Choose Side Panel'}).click()
     await page.getByRole('button', {name: 'Send changes'}).click()
 
-    // The answer is gone and the card is not.
-    await expect(page.getByText('Design in progress')).toBeVisible()
-    await expect(page.getByText(/Round 2 sent/u)).toBeVisible()
+    // The question is gone and the block is not: it is back to reporting what the child is doing.
     await expect(page.getByRole('button', {name: 'Choose Side Panel'})).toBeHidden()
-    await stableScreenshot(page, 'question-design-redrawing.png')
-
-    // And it goes when the loop does, rather than sitting over a design that already finished.
-    await page.evaluate(() => window.__GOFER_TEST_DESIGN__?.('design-1', true))
-    await expect(page.getByText('Design in progress')).toBeHidden()
-})
-
-/**
- * The end of a design, which is not the same as the end of the loop.
- *
- * "Complete and handoff" answers the last round and nothing more is coming, but the loop stays open
- * for as long as the child takes to write the agreement down — minutes, on a local model. Held on
- * the session alone, the user watched a "Redrawing your layout" spinner over a design they had just
- * finished, and the card cannot be dismissed: a stray Escape between rounds would end a real one.
- */
-test('the card lets go when the user hands the design off', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
     await page.evaluate(() => {
-        window.__GOFER_TEST_HOLD_TURN__ = true
+        window.__GOFER_TEST_ASK_STEP__?.('read res://ui/pause_menu.tscn')
     })
-    await page.getByRole('combobox', {name: 'Message input'}).fill('Design the pause menu')
-    await page.getByRole('combobox', {name: 'Message input'}).press('Enter')
-    await page.evaluate(() => window.__GOFER_TEST_DESIGN__?.('design-1'))
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2, {revision: 2}))
-    await page.getByRole('button', {name: 'Choose Side Panel'}).click()
-    await page.getByRole('button', {name: 'Complete and handoff'}).click()
-
-    // The turn is still running and the loop was never closed. The card goes anyway.
-    await expect(page.getByText('Design in progress')).toBeHidden()
-    await expect(page.getByRole('button', {name: 'Choose Side Panel'})).toBeHidden()
+    await expect(page.getByText(/read res:\/\/ui\/pause_menu\.tscn/u)).toBeVisible()
+    await stableScreenshot(page, 'question-design-redrawing.png')
 })
 
 /** The zoom: one sketch as large as the window allows, and one way out. */
 test('a sketch zoomed', async ({page}) => {
-    await installDesktop(page, 'streaming')
-    await page.goto('/')
-    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    await page.evaluate(() => window.__GOFER_TEST_ASK__?.(2))
+    await askDuringATurn(page, 2, {delegated: true})
     await page.getByRole('button', {name: 'Open Side Panel'}).click()
     await expect(page.getByRole('button', {name: 'Close'})).toBeVisible()
     await stableScreenshot(page, 'question-zoomed.png', false, true)

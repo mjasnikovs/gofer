@@ -826,9 +826,12 @@ test('the worker asks the backend for domain tools over the duplex channel', asy
     // `ask_user` is probed with them and is not one of them. It is answered by the backend over this
     // same channel, so it is proved the same way — but it is routed by name ahead of the catalogue
     // rather than being a domain in it, because a question has no addon handler and no `ops` list.
+    // It comes first because its probe is run in this process: the tool asks the backend whether it
+    // routes the name AND builds the child that draws a layout, and neither half can be proved from
+    // the other side of the channel.
     assert.deepEqual(
         requests.filter(isProbe).map(request => request.tool),
-        [...catalog.map(domain => domain.name), 'ask_user']
+        ['ask_user', ...catalog.map(domain => domain.name)]
     )
     assert.deepEqual(
         withoutProbes(requests).map(request => ({tool: request.tool, params: request.params})),
@@ -2079,6 +2082,58 @@ test('a turn whose model drops out is asked again by itself', async context => {
     assert.equal(JSON.stringify(mock.bodies.at(-1).messages).split('Build the level').length - 1, 1)
     // An error message left in the transcript teaches the model that its last word was the error.
     assert.ok(!JSON.stringify(completion.agentMessages).includes('connection refused'))
+})
+
+/**
+ * Stop lands in the backoff more than anywhere else, because the backoff is what is on screen.
+ *
+ * `retry-scheduled` draws a countdown and invites the user to use it — up to a minute of it, on the
+ * shipped curve. `abortableWait` rejects with its own wording, which threw straight past the loop's
+ * stopped ending and out as a failed turn: no `done` event, so nothing recorded that the turn had
+ * ended at all. Unreachable before the worker started passing a real signal.
+ */
+test('a stop during the wait between attempts ends the turn as stopped', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {error: {status: 503, message: 'upstream connect error: connection refused'}},
+        {text: 'Back online'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+    const controller = new AbortController()
+    // A clock that never fires: the wait ends on the signal instead, which is the whole point.
+    const timers = {
+        ...instantTimers(),
+        schedule(_fn, ms) {
+            // After the listener is on, so this is the ordinary abort path rather than a race.
+            queueMicrotask(() => {
+                controller.abort()
+            })
+            return ms
+        }
+    }
+
+    const completion = await runAgent({
+        settings: servedBy(url, impatient),
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        timers,
+        signal: controller.signal,
+        emit: event => events.push(event)
+    })
+
+    assert.equal(completion.stopReason, 'aborted')
+    assert.ok(
+        events.some(event => event.type === 'retry-scheduled'),
+        'the wait had begun'
+    )
+    assert.ok(
+        !events.some(event => event.type === 'retry-start'),
+        'and the attempt it was waiting for never ran'
+    )
+    assert.equal(mock.bodies.length, 1, 'the provider was not asked again')
 })
 
 test('a turn gives up once its retry budget is spent', async context => {

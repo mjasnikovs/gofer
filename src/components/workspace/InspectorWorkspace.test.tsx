@@ -4,6 +4,8 @@ import userEvent from '@testing-library/user-event'
 import axe from 'axe-core'
 import {InspectorWorkspace} from './InspectorWorkspace'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
+import {AskedQuestionsContext} from '../../hooks/useUserQuestions'
+import type {UserQuestionPrompt} from '../../models/brief'
 import {RECONCILE_MS} from '../../hooks/useGodotSession'
 import type {ChatReference} from '../../utils/chat-references'
 import type {MonacoStubState} from '../../test/monaco-stub'
@@ -879,6 +881,47 @@ describe('InspectorWorkspace', () => {
         expect(
             server.log.writes.filter(write => write.key === 'ui.workspace').at(-1)?.value
         ).toMatchObject({centerTab: 'game'})
+    })
+
+    /**
+     * A question the agent is blocked on has to be somewhere the user can see it.
+     *
+     * Both places one is drawn — the block inside the tool call, and the slot beside the composer —
+     * are in the chat column, and the chat column is mounted only while the Chat tab is showing. So
+     * a question asked while the user was watching the game appeared nowhere at all and the tool
+     * blocked for its full thirty minutes. Approvals never had this: their dialog is mounted beside
+     * the frame rather than inside it.
+     */
+    it('brings the chat forward when a question starts waiting', async () => {
+        backend()
+        const user = userEvent.setup()
+        const waiting: UserQuestionPrompt = {
+            questionId: 'q-1',
+            question: 'Where does the pause menu live?',
+            options: [],
+            sketches: [],
+            why: 'it changes the scene tree',
+            revision: 1,
+            isDelegated: false
+        }
+        const frame = (questions: readonly UserQuestionPrompt[]) => (
+            <AskedQuestionsContext value={{questions, answer: vi.fn()}}>
+                <InspectorWorkspace
+                    chat={<p>Chat column</p>}
+                    onError={vi.fn()}
+                />
+            </AskedQuestionsContext>
+        )
+        const view = render(frame([]))
+        await flush()
+        await user.click(screen.getByRole('button', {name: 'Game'}))
+        await flush()
+        expect(screen.queryByText('Chat column')).not.toBeInTheDocument()
+
+        view.rerender(frame([waiting]))
+        await flush()
+
+        expect(screen.getByText('Chat column')).toBeInTheDocument()
     })
 
     it('records the node the user chose, with the scene it was chosen in', async () => {

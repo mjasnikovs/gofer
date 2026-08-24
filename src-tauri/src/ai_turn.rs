@@ -372,8 +372,13 @@ pub(crate) struct JobContext {
     credentials: Credentials,
     storage: ProjectStorage,
     workspace_path: String,
-    /// The whole system prompt, as this project sends it. See the note above.
-    system_prompt: String,
+    /// The whole system prompt, as this project sends it, or `None` for a job that sends none.
+    ///
+    /// See the note above for why it is resolved here. `None` is the brief and the memory sweep:
+    /// both compose their own prompt inside the worker and `request` drops this field for them, so
+    /// resolving it was a project-row read and a walk of the whole tool catalogue spent on a string
+    /// nothing sends — and a corrupt or locked `project` row aborted two jobs that never read it.
+    system_prompt: Option<String>,
     /// What the editor session is, in the sentence the prompt tells the model to read.
     session_context: String,
 }
@@ -381,6 +386,15 @@ pub(crate) struct JobContext {
 impl JobContext {
     /// Reads everything a job needs off this machine.
     pub(crate) fn read<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
+        Self::read_with(app, true)
+    }
+
+    /// The same context for a job that sends no system prompt: a brief, or a memory sweep.
+    pub(crate) fn read_without_prompt<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
+        Self::read_with(app, false)
+    }
+
+    fn read_with<R: Runtime>(app: &AppHandle<R>, composes: bool) -> Result<Self, String> {
         let settings = crate::settings::read_settings(app)?;
         let storage = crate::workspace::project_storage(app)?;
         let workspace_path = storage
@@ -391,7 +405,11 @@ impl JobContext {
             .to_string();
         // The one read of the typing rule a job makes, from the settings it already has, rather
         // than a second read further down with an error policy of its own.
-        let system_prompt = resolve_prompt(&storage, settings.godot.strict_typing)?;
+        let system_prompt = if composes {
+            Some(resolve_prompt(&storage, settings.godot.strict_typing)?)
+        } else {
+            None
+        };
         Ok(Self {
             ai: settings.ai,
             credentials: Credentials::read()?,
@@ -419,12 +437,12 @@ impl JobContext {
         workspace_path: String,
     ) -> Result<Self, String> {
         let storage = crate::workspace::project_storage(app)?;
-        let system_prompt = resolve_prompt(
+        let system_prompt = Some(resolve_prompt(
             &storage,
             crate::settings::read_godot_settings(app)
                 .unwrap_or_default()
                 .strict_typing,
-        )?;
+        )?);
         Ok(Self {
             ai,
             credentials: Credentials::default(),
@@ -466,7 +484,7 @@ impl JobContext {
                     agent_messages,
                     is_retry,
                     memory_context,
-                    system_prompt: Some(self.system_prompt.clone()),
+                    system_prompt: self.system_prompt.clone(),
                     session_context: Some(self.session_context.clone()),
                 },
             ),
@@ -880,7 +898,7 @@ struct JudgeContext {
 
 impl JudgeContext {
     fn read(app: &AppHandle) -> Result<Self, String> {
-        let job = JobContext::read(app)?;
+        let job = JobContext::read_without_prompt(app)?;
         let snapshot = crate::files::scan(std::path::Path::new(job.workspace_path()));
         Ok(Self { job, snapshot })
     }
@@ -1096,7 +1114,7 @@ pub(crate) async fn run_brief(
     let turn = AiTurn::begin(request.request_id, stream)?;
     tauri::async_runtime::spawn_blocking(move || {
         let turn = turn;
-        let context = JobContext::read(&app)?;
+        let context = JobContext::read_without_prompt(&app)?;
         let inventory_root = context.workspace_path().to_owned();
         let images = hydrate_chat_attachments(&app, &request.attachments)?;
 
@@ -1230,19 +1248,43 @@ pub(crate) fn read_chat_attachment_in(
 /// answer answers in the time it takes to read one line.
 const WORKER_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
+/// How long the ask itself is given before the caller stops waiting for it and kills.
+///
+/// Small, because it is not the worker's thinking time — that is [`WORKER_CANCEL_GRACE`], and it
+/// only starts once the line is out. This is the time to put one short line down a pipe, which a
+/// healthy worker takes no measurable time over.
+const WORKER_ASK_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Asks the running worker to stop itself, and says whether the ask went out.
 ///
 /// `false` is not a failure, it is the case where there is nothing to ask: no worker registered, a
-/// channel already closed, a poisoned lock. The caller kills instead, which is what stopping a turn
-/// has always been.
+/// channel already closed, a poisoned lock, or a write that did not go through in time. The caller
+/// kills instead, which is what stopping a turn has always been.
+///
+/// Two things are kept away from the calling thread, and both used to wedge Stop on exactly the
+/// worker the kill exists for. The `AI_WORKER_INPUT` guard is dropped before anything is written —
+/// it used to be shadowed, so it was held across the write. And the write runs on a thread with a
+/// deadline on it, because `write_worker_line` takes the shared `ProcessWriter` mutex that every
+/// tool-answer thread takes, and a thread parked in `write_all` against a worker that stopped
+/// reading its stdin holds that mutex for as long as the worker lives. Waited on rather than
+/// forgotten: whether the line went out is what decides between granting the grace and killing now.
 fn ask_worker_to_stop() -> bool {
-    let Ok(input) = AI_WORKER_INPUT.lock() else {
+    // The clone is taken in a block of its own so the guard is dropped at its end. Shadowing it
+    // with the clone, which is what this used to do, keeps it alive to the end of the function.
+    let registered = {
+        let Ok(input) = AI_WORKER_INPUT.lock() else {
+            return false;
+        };
+        input.clone()
+    };
+    let Some(input) = registered else {
         return false;
     };
-    let Some(input) = input.clone() else {
-        return false;
-    };
-    write_worker_line(&input, AI_CANCEL_LINE.as_bytes()).is_ok()
+    let (wrote, written) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = wrote.send(write_worker_line(&input, AI_CANCEL_LINE.as_bytes()).is_ok());
+    });
+    written.recv_timeout(WORKER_ASK_TIMEOUT).unwrap_or(false)
 }
 
 // coverage-critical-start: cancellation
@@ -2575,7 +2617,7 @@ mod tests {
             credentials,
             storage,
             workspace_path: workspace.display().to_string(),
-            system_prompt: system_prompt.to_owned(),
+            system_prompt: Some(system_prompt.to_owned()),
             session_context: describe_session(app),
         }
     }

@@ -246,12 +246,7 @@ pub(crate) fn probe(domain: &str) -> Result<Value, ToolFailure> {
         // turn refused at the start because the user had the window minimised would be refusing
         // work over a state that no longer holds by the time the tool is called. Asking with no
         // window is refused at the call, by name, which is where the answer is still true.
-        // Answered together, and without looking for a window, for the reason above: whether a
-        // window is open is a thing that changes during a turn, and the call is where the answer is
-        // still true.
-        crate::ask::ASK_USER_TOOL | crate::ask::DESIGN_SESSION_TOOL => {
-            Ok(json!({"tool": domain, "reachable": true}))
-        }
+        crate::ask::ASK_USER_TOOL => Ok(json!({"tool": domain, "reachable": true})),
         other => Err(ToolFailure::new(
             "unprobed_tool",
             format!(
@@ -297,12 +292,6 @@ fn dispatch_under<R: Runtime>(
     // reason `web_search` is built in Node: this is simply where the thing that answers it lives.
     if request.tool == crate::ask::ASK_USER_TOOL {
         return crate::ask::ask_user(app, &request.params);
-    }
-    // Beside `ask_user` and for the same reason: not a Godot operation, so not a catalogue domain.
-    // It is also not a tool any model holds — the design tool calls it around its own child, and a
-    // model has no way to reach it, which is why it needs no description and no probe.
-    if request.tool == crate::ask::DESIGN_SESSION_TOOL {
-        return crate::ask::design_session(app, &request.params);
     }
     let domain = CATALOG
         .iter()
@@ -1492,6 +1481,12 @@ fn script_domain<R: Runtime>(
         }
         "apply_rename" => {
             let request: script::ApplyRenameRequest = from_params(params)?;
+            // The same guard `save` and `edit` carry, and for the same reason: this writes whole
+            // files, and a plan written by hand can name any path at all. A rename planned by the
+            // language server only ever names GDScript.
+            for file in &request.files {
+                require_script_path(&json!({"path": file.path}))?;
+            }
             // Through the ledger like every other file-touching arm — the router's, on the way
             // out. Renaming rewrites the files it names, so the hashes recorded for them are claims
             // about text that is gone: the next save over one was refused `file_conflict`, and the
@@ -1960,6 +1955,37 @@ mod tests {
         assert!(
             failure.message.contains("godot_scene"),
             "the refusal must name the tool that owns a scene: {}",
+            failure.message
+        );
+    }
+
+    /// A rename plan is a list of whole files, and it may only name scripts.
+    ///
+    /// The list is meant to be the one `rename` answered with, and a plan the server wrote names
+    /// nothing but GDScript. A hand-built one can name anything at all — `project.godot`, a scene —
+    /// and this arm wrote every entry with no path check, which is exactly the door `save` and
+    /// `edit` are guarded at.
+    #[test]
+    fn a_rename_plan_may_only_name_scripts() {
+        let app = unattended_app();
+        let failure = dispatch(
+            app.handle(),
+            call(
+                "godot_script",
+                "apply_rename",
+                json!({"files": [{
+                    "path": "scenes/level_1.tscn",
+                    "originalText": "[gd_scene]",
+                    "originalHash": "whatever",
+                    "updatedText": "[gd_scene]"
+                }]}),
+            ),
+        )
+        .expect_err("a scene inside a rename plan must be refused");
+        assert_eq!(failure.code, "unsupported_file");
+        assert!(
+            failure.message.contains("scenes/level_1.tscn"),
+            "the refusal must name the entry that is wrong: {}",
             failure.message
         );
     }

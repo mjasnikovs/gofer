@@ -105,9 +105,15 @@ try {
             host.deliver(response)
             credentialHost.deliver(response)
         }
+        // Both hosts, on both endings. `credentialHost` used to be closed only in the `finally`
+        // below, which cannot run while `runRequest` is still awaiting a credential call — so a
+        // token refresh in flight when the channel closed never settled and the worker sat there
+        // until the backend's kill grace, instead of failing with a reason.
         host.close('The Gofer backend closed the tool channel')
+        credentialHost.close('The Gofer backend closed the tool channel')
     })().catch(error => {
         host.close(`The tool channel failed: ${error.message}`)
+        credentialHost.close(`The tool channel failed: ${error.message}`)
     })
 
     try {

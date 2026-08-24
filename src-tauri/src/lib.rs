@@ -339,6 +339,10 @@ fn refuse_during_turn() -> Result<ai_turn::AiProviderOperation, CommandError> {
 
 #[tauri::command(async)]
 fn delete_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, CommandError> {
+    // Held for the same reason the five commands above hold it, and this is the sixth caller of
+    // `storage.switch`. A turn holds file hashes for the checkout it started on; deleting the task
+    // beside it moves that checkout under the agent's feet.
+    let _turn = refuse_during_turn()?;
     let storage = project_storage(&app)?;
     // Deleting the task the editor is editing stops that editor first: the checkout moves off the
     // deleted branch onto the task that takes over, and the staged addon comes out on the way.
@@ -1338,6 +1342,34 @@ mod tests {
         assert!(
             refuse_during_turn().is_ok(),
             "the switch is over, so the next turn may begin"
+        );
+    }
+
+    /// Every command that moves the checkout holds the provider operation while it moves it.
+    ///
+    /// Read out of the source, because the failure is an omission rather than a mistake. Five
+    /// commands were given the guard and a sixth was not: `delete_chat_task` stopped the editor and
+    /// checked another branch out beside a streaming turn that still held file hashes from the old
+    /// one. A rule kept by remembering is a rule the next caller is written without.
+    #[test]
+    fn every_command_that_moves_the_checkout_refuses_during_a_turn() {
+        let source = include_str!("lib.rs");
+        let mut guarded = 0;
+        for function in source.split("\nfn ").skip(1) {
+            let body = function.split("\n}\n").next().unwrap_or(function);
+            if !body.contains("storage.switch(") {
+                continue;
+            }
+            let name = function.split('(').next().unwrap_or(function);
+            assert!(
+                body.contains("refuse_during_turn()?"),
+                "{name} moves the checkout without holding the provider operation"
+            );
+            guarded += 1;
+        }
+        assert!(
+            guarded >= 5,
+            "the switch callers moved and this found {guarded}"
         );
     }
 

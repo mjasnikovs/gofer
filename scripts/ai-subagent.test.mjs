@@ -560,6 +560,35 @@ test('a sub-agent that never stops reading is stopped for it', async context => 
     assert.equal(models.turns, 3)
 })
 
+/**
+ * A loop this file closed on purpose, whose child spent its last request on a tool call.
+ *
+ * `stopWhen` closes the design loop in front of the provider and allows one more request, so the
+ * child can write its answer from the approval it has just been handed. It may spend that request
+ * on a tool call instead — and failing then rejected the whole `ask_user` delegation, throwing away
+ * the layout the user had pressed "Done, build it" on. A closed loop has already got what it was
+ * for; the empty answer is the caller's to compose around.
+ */
+test('a loop closed by its caller does not fail for having no answer left to write', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const models = scriptedModels([{calls: [{name: 'read', args: {path: 'a.gd'}}]}])
+
+    const result = await runSubagent({
+        progress: noProgress,
+        prompt: 'Draw the pause menu.',
+        workspacePath: workspace.path,
+        models,
+        model,
+        stopWhen: () => true
+    })
+
+    assert.equal(result.text, '')
+    // One request reached the model. The second is the one the close allows, and it is answered by
+    // the ended stream rather than by the provider — which is what closing in front of it means.
+    assert.equal(models.turns, 1)
+})
+
 test('every way a sub-agent can fail says the same thing about the reading', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1043,7 +1072,6 @@ test('every bound comes from the settings, not from this file', async context =>
     assert.deepEqual(Object.keys(SUBAGENT_SETTINGS_DEFAULTS).sort(), [
         'commandTimeoutMinutes',
         'maxAnswerChars',
-        'maxShows',
         'maxTurns',
         'retryAttempts',
         'retryBaseDelaySeconds',

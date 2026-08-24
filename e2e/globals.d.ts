@@ -79,9 +79,14 @@ interface Window {
     /** Raises the approval prompt a fixture cannot provoke through an ordinary command. */
     __GOFER_TEST_APPROVE__?: () => void
     /** Raises one question with `sketches` sketches on it, for the visual suite. */
-    __GOFER_TEST_ASK__?: (sketches: number, design?: {revision: number}) => void
-    /** Opens or closes a design loop, which is what keeps the question card alive between rounds. */
-    __GOFER_TEST_DESIGN__?: (sessionId: string, closing?: boolean) => void
+    __GOFER_TEST_ASK__?: (
+        sketches: number,
+        design?: {revision?: number; delegated?: boolean}
+    ) => void
+    /** Pushes one more event down the held turn's stream, so a tool call can be made mid-test. */
+    __GOFER_TEST_EMIT_STREAM__?: (event: unknown) => void
+    /** Reports what the delegated child is doing, on the block's own live line. */
+    __GOFER_TEST_ASK_STEP__?: (step: string) => void
     /** Holds the turn open, for the screens that only exist while one is running. */
     __GOFER_TEST_HOLD_TURN__?: boolean
     __GOFER_TEST_DESKTOP__?: FixtureDesktop

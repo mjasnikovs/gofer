@@ -143,6 +143,37 @@ test('a question the backend refuses ends the run out loud', async () => {
     assert.equal(ending.phase, 'grill', 'and says where it was when it broke')
 })
 
+/*
+ * The other way a question ends: the user presses Stop while the plan is waiting on them.
+ *
+ * `host.call` rejects an aborted call with a plain `Error`, because the host has never heard of a
+ * phase — so this took the failure arm above and the panel reported a broken plan, for the most
+ * ordinary way there is to cancel one. A stop is an outcome of a run that worked.
+ */
+test('a stop while a plan waits on the user ends it as stopped, not as broken', async () => {
+    const world = worldSaying(prompt =>
+        prompt.includes('ANSWER:') ?
+            'UNKNOWN: a person has to decide'
+        :   'QUESTION: how should the menu close?\nA: Escape\nB: a button\nWHY: it decides the input map'
+    )
+    const stopping = new AbortController()
+    const {events, promise} = run({
+        world,
+        signal: stopping.signal,
+        host: {
+            call: async () => {
+                stopping.abort()
+                throw new Error('The tool call was cancelled')
+            }
+        }
+    })
+    assert.equal(await promise, null, 'a stop is not a fault, so the worker exits cleanly')
+
+    const ending = endingOf(events)
+    assert.equal(ending.type, 'brief-stopped')
+    assert.equal(ending.phase, 'grill')
+})
+
 // A phase that cannot produce anything trustworthy is an outcome of a run that worked, so the run
 // answers with nothing rather than throwing — but it still says so on the same event.
 test('a phase that cannot finish ends the run without breaking the worker', async () => {

@@ -171,7 +171,11 @@ export const turnDone = declare(
     ({text, thinking, stopReason, usage, model, agentMessages, verify}) => ({
         text,
         thinking,
-        stopReason,
+        // Defaulted rather than passed through. `JSON.stringify` drops an `undefined`, so a
+        // provider message that carried no reason left the field off the wire entirely — and the
+        // renderer's guard is the wrong place to discover that. `stop` is what every other ending
+        // than an abort means.
+        stopReason: stopReason ?? 'stop',
         usage,
         model,
         agentMessages,

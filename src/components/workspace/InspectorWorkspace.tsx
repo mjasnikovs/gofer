@@ -16,7 +16,9 @@ import {useDebugSession} from '../../hooks/useDebugSession'
 import {EditorSessionContext, useEditorSession} from '../../hooks/useEditorSession'
 import {useGodotSession} from '../../hooks/useGodotSession'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
+import {OpenCenterTabContext} from '../../hooks/useCenterTab'
 import {useRememberedLayout} from '../../hooks/useRememberedLayout'
+import {useWaitingQuestions} from '../../hooks/useUserQuestions'
 import {WorkspaceFailureContext} from '../../hooks/useWorkspaceFailure'
 import {createProjectActions} from '../../services/project-actions'
 import {isSessionOffline, isSessionPlaying} from '../../models/godot'
@@ -93,6 +95,31 @@ const STATE_VARIANT: Readonly<
     debugPaused: 'warning',
     stopping: 'warning',
     error: 'error'
+}
+
+/**
+ * Brings the tab holding a waiting question forward, once per question.
+ *
+ * A question is drawn in the chat column and nowhere else — inside the tool call that asked it, or
+ * beside the composer for a plan's own questions — and the chat column is mounted only while the
+ * Chat tab is showing. So an agent that asked something while the user was watching the game put
+ * nothing on screen anywhere: no card, no badge, nothing to answer, and the tool blocked for its
+ * full thirty minutes and failed `question_timeout`. Approvals never had this: their dialog is
+ * mounted beside the frame rather than inside it.
+ *
+ * Once per question and not while one is waiting, which is the difference between showing the user
+ * where the question is and holding them on a tab they are trying to leave. Answering it is the
+ * only thing that clears it, and they may well want to read the script it is about first.
+ */
+function useTabWithTheQuestionOnIt(openCenterTab: (tab: CenterTab) => void) {
+    const waiting = useWaitingQuestions()
+    const shown = useRef(new Set<string>())
+    useEffect(() => {
+        const fresh = waiting.filter(question => !shown.current.has(question.questionId))
+        if (fresh.length === 0) return
+        for (const question of fresh) shown.current.add(question.questionId)
+        openCenterTab('chat')
+    }, [openCenterTab, waiting])
 }
 
 /** Tracks the one breakpoint the responsive contract names. */
@@ -225,6 +252,13 @@ function FrameRegions({
     // are owned by hooks that only take a starting value, and a starting value that moved is a
     // hook restarted mid-drag.
     const [opened] = useState(layout)
+    const openCenterTab = useCallback(
+        (tab: CenterTab) => {
+            dispatch({type: 'center-tab', tab})
+        },
+        [dispatch]
+    )
+    useTabWithTheQuestionOnIt(openCenterTab)
     const [isInspectorOpen, setIsInspectorOpen] = useState(false)
     const [reveal, setReveal] = useState<ScriptReveal>()
     const inspectorButton = useRef<HTMLButtonElement>(null)
@@ -522,7 +556,15 @@ function FrameRegions({
                                     gap={0}
                                     height='100%'
                                 >
-                                    {chat}
+                                    {/*
+                                     * Published here rather than lifted, because this is where the
+                                     * tab dispatch lives and the conversation is drawn inside it.
+                                     * One reader: an answered design block, pointing at the tab
+                                     * holding the layout it agreed.
+                                     */}
+                                    <OpenCenterTabContext value={openCenterTab}>
+                                        {chat}
+                                    </OpenCenterTabContext>
                                 </VStack>
                             : layout.centerTab === 'scripts' ?
                                 <ScriptWorkspace

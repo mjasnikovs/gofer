@@ -460,7 +460,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:7c9d71fff817fbde
+// GENERATED-BEGIN operations sha256:2eca97384d076d25
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1498,23 +1498,26 @@ pub const GODOT_SCRIPT_OPERATIONS: &[Operation] = &[
             need("newName", Text),
         ],
     ),
-    op(
-        "godot_script",
-        "apply_rename",
-        "Applies a planned rename in one transaction. `files` is the list `rename` answered with, passed back unchanged; a hand-built one is refused.",
-        Answers::Rust,
-        &[noted(
-            shaped(
-                need("files", List),
-                &[
-                    need("path", Text),
-                    need("originalText", Text),
-                    need("originalHash", Text),
-                    need("updatedText", Text),
-                ],
-            ),
-            "The list `rename` answered with, passed back unchanged.",
-        )],
+    writes(
+        op(
+            "godot_script",
+            "apply_rename",
+            "Applies a planned rename in one transaction. `files` is the list `rename` answered with, passed back unchanged. Every entry is checked against the file on disk before anything is written, so a list you edited by hand is refused the moment its `originalHash` does not match. It writes whole files: do not use it to write text you wrote yourself, which is what `save` and `edit` are for.",
+            Answers::Rust,
+            &[noted(
+                shaped(
+                    need("files", List),
+                    &[
+                        need("path", Text),
+                        need("originalText", Text),
+                        need("originalHash", Text),
+                        need("updatedText", Text),
+                    ],
+                ),
+                "The list `rename` answered with, passed back unchanged.",
+            )],
+        ),
+        Writes::ScriptText,
     ),
 ];
 

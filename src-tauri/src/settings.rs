@@ -281,9 +281,6 @@ pub(crate) struct SubagentSettings {
     /// Ceiling on the answer handed back. 0 turns it off.
     #[serde(default = "default_subagent_max_answer_chars")]
     pub(crate) max_answer_chars: u32,
-    /// How many times one delegation may stop the user to show them something. 0 turns showing off.
-    #[serde(default = "default_subagent_max_shows")]
-    pub(crate) max_shows: u32,
     /// How many times a delegation that failed transiently is asked again. 0 turns retry off.
     #[serde(default = "default_subagent_retry_attempts")]
     pub(crate) retry_attempts: u32,
@@ -779,17 +776,6 @@ fn default_subagent_max_answer_chars() -> u32 {
     12_000
 }
 
-/// How many times one delegation may stop the user to show them something.
-///
-/// The only ceiling here that is measured in the user's attention rather than the machine's time,
-/// and the only one whose cost nothing else can see: the parent never learns that a dialog opened,
-/// and no clock ticks while a person is looking at it. Six is two or three revisions of one layout
-/// plus room to be wrong once — past that the conversation has stopped converging and belongs back
-/// in the chat.
-fn default_subagent_max_shows() -> u32 {
-    6
-}
-
 /// How many times a delegation that failed transiently is asked again.
 fn default_subagent_retry_attempts() -> u32 {
     2
@@ -810,7 +796,6 @@ impl Default for SubagentSettings {
             stream_inactivity_minutes: default_subagent_stream_inactivity_minutes(),
             max_turns: default_subagent_max_turns(),
             max_answer_chars: default_subagent_max_answer_chars(),
-            max_shows: default_subagent_max_shows(),
             retry_attempts: default_subagent_retry_attempts(),
             retry_base_delay_seconds: default_subagent_retry_base_delay_seconds(),
             connection: None,
@@ -2020,7 +2005,7 @@ type SubagentBound = (&'static str, fn(&SubagentSettings) -> u32, u32, u32);
 /// and was obeyed. The top of each range is the largest value that is still a ceiling rather than
 /// an absence of one, and every range starts where "off" is a real answer — except the retry wait,
 /// which is only read when a retry happens and has no meaning at zero.
-const SUBAGENT_BOUNDS: [SubagentBound; 7] = [
+const SUBAGENT_BOUNDS: [SubagentBound; 6] = [
     (
         "commandTimeoutMinutes",
         |s| s.command_timeout_minutes,
@@ -2035,7 +2020,6 @@ const SUBAGENT_BOUNDS: [SubagentBound; 7] = [
     ),
     ("maxTurns", |s| s.max_turns, 0, 40),
     ("maxAnswerChars", |s| s.max_answer_chars, 0, 24_000),
-    ("maxShows", |s| s.max_shows, 0, 12),
     ("retryAttempts", |s| s.retry_attempts, 0, 5),
     (
         "retryBaseDelaySeconds",
@@ -2211,8 +2195,25 @@ pub(crate) trait Secrets {
 
 pub(crate) struct SystemSecrets;
 
+/// Whether this build is under a driver that has been told to leave the real store alone.
+///
+/// All three methods, not just the read. A skip on one half is worse than no skip at all: the run
+/// writes its own test key into the developer's `ai-default` slot and then reads back nothing, so
+/// `write_one_secret` records no previous value — and a settings save that fails afterwards
+/// restores by *clearing* the slot. The developer's own key is gone, from a test that was supposed
+/// not to touch it.
+#[cfg(feature = "webdriver")]
+fn store_is_skipped(secret: Secret) -> bool {
+    matches!(secret, Secret::AiDefault)
+        && std::env::var_os("GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE").is_some()
+}
+
 impl Secrets for SystemSecrets {
     fn clear(&self, secret: Secret) -> Result<(), String> {
+        #[cfg(feature = "webdriver")]
+        if store_is_skipped(secret) {
+            return Ok(());
+        }
         match credential_entry(secret.username())?.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(error) => Err(format!("Could not remove the {}: {error}", secret.noun())),
@@ -2221,9 +2222,7 @@ impl Secrets for SystemSecrets {
 
     fn read(&self, secret: Secret) -> Result<Option<String>, String> {
         #[cfg(feature = "webdriver")]
-        if matches!(secret, Secret::AiDefault)
-            && std::env::var_os("GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE").is_some()
-        {
+        if store_is_skipped(secret) {
             return Ok(None);
         }
         let Some(entry) = entry_in_a_store(secret.username())? else {
@@ -2246,6 +2245,10 @@ impl Secrets for SystemSecrets {
     }
 
     fn write(&self, secret: Secret, value: &str) -> Result<(), String> {
+        #[cfg(feature = "webdriver")]
+        if store_is_skipped(secret) {
+            return Ok(());
+        }
         credential_entry(secret.username())?
             .set_password(value)
             .map_err(|error| format!("Could not store the {}: {error}", secret.noun()))
@@ -4534,11 +4537,6 @@ mod tests {
             {
                 let mut value = settings("http://localhost", "model");
                 value.ai.subagent.max_answer_chars = 24_001;
-                value
-            },
-            {
-                let mut value = settings("http://localhost", "model");
-                value.ai.subagent.max_shows = 13;
                 value
             },
             {

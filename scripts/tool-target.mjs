@@ -55,9 +55,8 @@ export function toolTarget(name, args) {
                 given.sketches.map(sketch => sketch?.label).filter(Boolean)
             :   []
         if (labels.length > 0) return labels.join(' / ')
-        return flatten(given.question)
+        return flatten(given.question ?? given.brief)
     }
-    if (name === 'design_with_user') return flatten(given.brief)
     if (name === 'subagent') return flatten(given.prompt)
     return given.path
 }

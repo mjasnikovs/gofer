@@ -57,7 +57,6 @@ import {
     progressLabel,
     progressValue,
     retriesLabel,
-    showsLabel,
     secondsLabel,
     selectAiDriver,
     stepsLabel
@@ -501,7 +500,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                 notice: {
                     status: 'success',
                     title: 'Storage maintenance complete',
-                    description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, ${String(result.sketchesRemoved)} sketches, ${String(result.docsAnswersRemoved)} stale manual answers, ${String(result.memoryVectorsRemoved)} orphaned memory vectors, and ${String(result.backupsRemoved)} old backups removed. ${String(result.memoryEmbeddingsRestored)} memory embeddings restored.`
+                    description: `${String(result.attachmentsRemoved)} attachments, ${String(result.blobsRemoved)} blobs, ${String(result.godotRunsRemoved)} old Godot runs, ${String(result.sketchesRemoved)} sketches, ${String(result.docsAnswersRemoved)} stale manual answers, ${String(result.memoryVectorsRemoved)} orphaned memory vectors, and ${String(result.backupsRemoved)} old backups removed. ${String(result.memoryEmbeddingsRestored)} memory embeddings restored, ${String(result.memoryVectorsRefiled)} re-filed.`
                 }
             })
         })
@@ -1080,22 +1079,6 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 description='A longer answer is cut. What the sub-agent read is meant to stay with it, so an answer near this size means the question was too broad.'
                                 onChange={(maxAnswerChars: number) => {
                                     updateSubagent({maxAnswerChars})
-                                }}
-                            />
-                            <Slider
-                                label='Times it may interrupt you'
-                                value={draft.ai.subagent.maxShows}
-                                {...SUBAGENT_RANGES.maxShows}
-                                valueDisplay='text'
-                                formatValue={showsLabel}
-                                marks={[
-                                    {value: 0, label: 'Off'},
-                                    {value: 6, label: '6'},
-                                    {value: 12, label: '12'}
-                                ]}
-                                description='How often one sub-agent may stop you to show you a layout and wait. The only ceiling here measured in your attention rather than the machine, and the only one nothing else can see being spent.'
-                                onChange={(maxShows: number) => {
-                                    updateSubagent({maxShows})
                                 }}
                             />
                             <Slider

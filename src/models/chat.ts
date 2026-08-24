@@ -136,7 +136,14 @@ export type AiStreamEvent =
           type: 'done'
           text: string
           thinking: string
-          stopReason: string
+          /**
+           * Why the turn ended. Optional, and only `'aborted'` is read.
+           *
+           * Optional because the alternative is worse: required, a `done` that reached the window
+           * without it failed the guard whole and took the reply text, the usage and the model with
+           * it — drawing a turn that worked as a stopped one with nothing in it.
+           */
+          stopReason?: string
           usage: TokenUsage
           model: string
           agentMessages: readonly unknown[]

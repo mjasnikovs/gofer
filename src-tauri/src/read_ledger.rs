@@ -325,6 +325,34 @@ mod tests {
         assert!(answer.get("version").is_none(), "{answer}");
     }
 
+    /*
+     * A `diagnostics` answer carries no hash and is reconciled anyway, and its `version` goes.
+     *
+     * Written down because it changed and nothing said so: the read ledger now takes every answer
+     * from an operation that names a path, and `godot_script diagnostics` is one that never passed
+     * through here before. The rule it meets is the one above — `version` is the language server's
+     * document counter, no operation accepts it as a parameter, and a field the model cannot spend
+     * anywhere is context it pays for. This is that rule holding for an answer with no stamp in it.
+     */
+    #[test]
+    fn a_verdict_that_carries_no_hash_still_loses_its_document_counter() {
+        let tree = root("reconcile-diagnostics");
+        let answer = reconcile(
+            &tree,
+            serde_json::json!({
+                "path": "player.gd",
+                "version": 7,
+                "published": true,
+                "diagnostics": [{"line": 3, "message": "Parse Error"}]
+            }),
+        );
+
+        assert_eq!(answer["path"], "player.gd");
+        assert_eq!(answer["published"], true);
+        assert_eq!(answer["diagnostics"][0]["message"], "Parse Error");
+        assert!(answer.get("version").is_none(), "{answer}");
+    }
+
     /// The other shape every file-touching operation answers with: a `files` list of the same
     /// stamps. One rule over both, so a batched arm cannot leak what a single one does not.
     #[test]

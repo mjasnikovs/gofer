@@ -285,20 +285,39 @@ export async function runBrief({
         // stalling the events drawing the question on screen.
         askUser: async question => {
             const askedAt = now()
-            const answer = await host.call(
-                ASK_TOOL_NAME,
-                {
-                    question: question.question,
-                    options: question.options,
-                    why: question.why
-                },
-                signal
+            const answer = await stoppableCall(() =>
+                host.call(
+                    ASK_TOOL_NAME,
+                    {
+                        question: question.question,
+                        options: question.options,
+                        why: question.why
+                    },
+                    signal
+                )
             )
             // Held apart from the deadline: a person reading the code a question is about is not a
             // runaway, and a ceiling that fires on them is a ceiling on the wrong thing.
             waitedOnTheUser += now() - askedAt
             const text = typeof answer?.answer === 'string' ? answer.answer.trim() : ''
             return text.length > 0 ? text : null
+        }
+    }
+
+    /*
+     * A tool call, with a stop told apart from a fault.
+     *
+     * `host.call` rejects an aborted call with a plain `Error`, because the host has never heard of
+     * a phase. Only a worker's own verdict was translated into `PhaseStopped`, so pressing Stop
+     * while a plan waited on the user took the failure arm below: the panel reported a broken plan,
+     * and the worker exited non-zero, for the most ordinary way there is to cancel one.
+     */
+    const stoppableCall = async run => {
+        try {
+            return await run()
+        } catch (error) {
+            if (signal?.aborted) throw new PhaseStopped(atPhase)
+            throw error
         }
     }
 
@@ -316,7 +335,7 @@ export async function runBrief({
             deps: childDeps
         })
         try {
-            await world.probeTools({tools, host, workspacePath, signal})
+            await stoppableCall(() => world.probeTools({tools, host, workspacePath, signal}))
         } finally {
             await env.cleanup()
         }

@@ -633,6 +633,7 @@ describe('project storage', () => {
                 sketchesRemoved: 6,
                 docsAnswersRemoved: 7,
                 memoryVectorsRemoved: 8,
+                memoryVectorsRefiled: 9,
                 backupsRemoved: 1,
                 memoryEmbeddingsRestored: 2
             }
@@ -646,7 +647,7 @@ describe('project storage', () => {
         expect(screen.getByText('Storage maintenance complete')).toBeInTheDocument()
         expect(
             screen.getByText(
-                '3 attachments, 4 blobs, 5 old Godot runs, 6 sketches, 7 stale manual answers, 8 orphaned memory vectors, and 1 old backups removed. 2 memory embeddings restored.'
+                '3 attachments, 4 blobs, 5 old Godot runs, 6 sketches, 7 stale manual answers, 8 orphaned memory vectors, and 1 old backups removed. 2 memory embeddings restored, 9 re-filed.'
             )
         ).toBeInTheDocument()
     })

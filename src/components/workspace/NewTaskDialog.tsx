@@ -1,5 +1,6 @@
 import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
+import {Heading} from '@astryxdesign/core/Heading'
 import {SelectableCard} from '@astryxdesign/core/SelectableCard'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
@@ -81,7 +82,7 @@ export function NewTaskDialog({isOpen, onOpenChange, changes, onCreate}: NewTask
                 padding={4}
             >
                 <VStack gap={2}>
-                    <Text weight='medium'>
+                    <Text type='label'>
                         {changes.length === 1 ?
                             '1 file is not committed yet'
                         :   `${String(changes.length)} files are not committed yet`}
@@ -89,18 +90,14 @@ export function NewTaskDialog({isOpen, onOpenChange, changes, onCreate}: NewTask
                     <VStack gap={0}>
                         {changes.slice(0, NAMED_CHANGES).map(change => (
                             <Text
+                                type='supporting'
                                 key={change.path}
-                                size='sm'
-                                color='secondary'
                             >
                                 {change.path}
                             </Text>
                         ))}
                         {changes.length > NAMED_CHANGES && (
-                            <Text
-                                size='sm'
-                                color='secondary'
-                            >
+                            <Text type='supporting'>
                                 and {String(changes.length - NAMED_CHANGES)} more
                             </Text>
                         )}
@@ -116,13 +113,8 @@ export function NewTaskDialog({isOpen, onOpenChange, changes, onCreate}: NewTask
                             }}
                         >
                             <VStack gap={1}>
-                                <Text weight='medium'>{choice.title}</Text>
-                                <Text
-                                    size='sm'
-                                    color='secondary'
-                                >
-                                    {choice.detail}
-                                </Text>
+                                <Heading level={4}>{choice.title}</Heading>
+                                <Text type='supporting'>{choice.detail}</Text>
                             </VStack>
                         </SelectableCard>
                     ))}

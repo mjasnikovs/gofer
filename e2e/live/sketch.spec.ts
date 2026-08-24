@@ -14,10 +14,14 @@ import {
 /**
  * Puts a question with pictures in front of a real model, in the real window.
  *
- * Nothing else in this repository renders a sketch in WebKitGTK. The unit tests draw the dialog in
+ * Nothing else in this repository renders a sketch in WebKitGTK. The unit tests draw the block in
  * jsdom, which lays nothing out and never loads an iframe, so every layout defect this surface has
- * shipped — a dialog wider than the window, a sketch cut off by the column edge, a frame put inside
+ * shipped — a block wider than its column, a sketch cut off by the column edge, a frame put inside
  * a button and spilling over everything — was invisible to them and obvious here.
+ *
+ * Only a delegated `ask_user` can put markup in front of anybody, so the prompt asks for a design:
+ * the parent's copy of the tool has no `sketches` parameter at all. `design.spec.ts` next door
+ * proves the several-rounds half; this one proves one round, drawn.
  *
  * The model is the user's own. What it decides to send is not asserted: this fails only when the
  * *window* is wrong, and it reports what the model did either way.
@@ -26,8 +30,8 @@ const workspace = process.env.GOFER_WORKSPACE_DIR ?? ''
 const shots = join(process.env.GOFER_APP_DATA_DIR ?? '', 'shots')
 
 const PROMPT =
-    'I need a pause menu for this game, 1280x720. Show me two layouts side by side and '
-    + "I'll pick one. Don't build anything yet."
+    'Use your ask_user tool with a brief: I need a pause menu for this game, 1280x720. Show me two '
+    + "layouts side by side and I'll pick one. Don't build anything yet."
 
 /** How long the model may work before the run is called off. */
 const RUN_LIMIT_MS = 900_000
@@ -68,7 +72,7 @@ async function sendChat(prompt: string) {
 }
 
 /**
- * Every box the dialog draws, in window pixels.
+ * Every box the question draws, in window pixels.
  *
  * Read from the page rather than from a screenshot, because "is the second sketch cut off" is a
  * question about numbers and a picture can only be looked at.
@@ -81,9 +85,18 @@ type Boxes = Readonly<{
     answer: Readonly<{bottom: number}> | null
 }>
 
-/** How many sketches the dialog is drawing, asked of the page rather than of the driver. */
+/**
+ * How many sketches are on screen, asked of the page rather than of the driver.
+ *
+ * The question lives in the conversation feed now, not in a dialog, so the scope is the document —
+ * except while the zoom is open, which IS a dialog and is drawing one of the same sketches over the
+ * block. Whichever is in front is the one being looked at.
+ */
 async function sketchCount(): Promise<number> {
-    return browser.execute(() => document.querySelectorAll('dialog[open] iframe').length)
+    return browser.execute(() => {
+        const zoom = document.querySelector('dialog[open]')
+        return (zoom ?? document).querySelectorAll('iframe').length
+    })
 }
 
 async function measure(): Promise<Boxes> {
@@ -98,12 +111,13 @@ async function measure(): Promise<Boxes> {
                 right: rect.right
             }
         }
-        const answer = [...document.querySelectorAll('dialog[open] button')].find(button =>
-            button.textContent.trim().startsWith('Answer')
+        const scope = document.querySelector('dialog[open]') ?? document
+        const answer = [...scope.querySelectorAll('button')].find(button =>
+            button.textContent.trim().startsWith('Send')
         )
         return {
             window: {width: window.innerWidth, height: window.innerHeight},
-            frames: [...document.querySelectorAll('dialog[open] iframe')].map(box),
+            frames: [...scope.querySelectorAll('iframe')].map(box),
             answer: answer ? {bottom: answer.getBoundingClientRect().bottom} : null
         }
     })
@@ -179,34 +193,40 @@ describe('a question the agent asks with pictures', () => {
     it('opens one sketch on its own and answers the question', async () => {
         type Control = Readonly<{name: string; disabled: boolean}>
         /*
-         * Scoped to the dialog that is open.
+         * Scoped to whichever surface is in front.
          *
-         * A closed <dialog> stays in the document, so `dialog button` also finds the controls of
-         * every card this window is not showing — including another Close, which is what the zoom's
-         * Close press landed on.
+         * The question is a block in the feed, so its controls are the page's. The zoom over one
+         * sketch is still a dialog, and while it is open it owns every press — a closed <dialog>
+         * stays in the document, so an unscoped search finds the controls of cards this window is
+         * not showing, including another Close, which is what the zoom's Close press once landed on.
          */
-        /** Every control the dialog offers, as the window has it. */
+        /** Every control the question offers, as the window has it. */
         const controls = () =>
             browser.execute(() =>
-                [...document.querySelectorAll('dialog[open] button')].map(button => ({
+                [
+                    ...(document.querySelector('dialog[open]') ?? document).querySelectorAll(
+                        'button'
+                    )
+                ].map(button => ({
                     name: button.getAttribute('aria-label') ?? button.textContent.trim(),
-                    disabled: (button as HTMLButtonElement).disabled
+                    disabled: button.disabled
                 }))
             )
         /** Clicked in the page, so nothing here depends on how the driver decides what is visible. */
         const press = (name: string) =>
             browser.execute((wanted: string) => {
-                const found = [...document.querySelectorAll('dialog[open] button')].find(
+                const scope = document.querySelector('dialog[open]') ?? document
+                const found = [...scope.querySelectorAll('button')].find(
                     button =>
                         (button.getAttribute('aria-label') ?? button.textContent.trim()) === wanted
                 )
                 if (!found) return false
-                ;(found as HTMLButtonElement).click()
+                found.click()
                 return true
             }, name)
 
         const before = await controls()
-        console.log(`the dialog offers ${JSON.stringify(before)}`)
+        console.log(`the question offers ${JSON.stringify(before)}`)
 
         const open = before.find(control => control.name.startsWith('Open '))
         if (open) {
@@ -242,15 +262,17 @@ describe('a question the agent asks with pictures', () => {
         const chosen = await waitFor('Choose ')
         expect(await press(chosen?.name ?? '')).toBe(true)
 
-        const answer = await waitFor('Answer')
+        const answer = await waitFor('Send changes')
         expect(answer?.disabled).toBe(false)
-        expect(await press('Answer')).toBe(true)
+        expect(await press('Send changes')).toBe(true)
 
-        // The dialog goes when the answer is sent, which is what unblocks the turn behind it.
+        // The sketches go when the answer is sent, which is what unblocks the child behind them.
+        // The block itself stays: it is the tool call's own place in the feed, and it is back to
+        // reporting what the child is doing.
         await browser.waitUntil(async () => (await sketchCount()) === 0, {
             timeout: 30_000,
             interval: 500,
-            timeoutMsg: 'the dialog stayed up after the question was answered'
+            timeoutMsg: 'the sketches stayed up after the question was answered'
         })
         await shoot('answered')
         if (!existsSync(shots)) throw new Error('no screenshots were written')

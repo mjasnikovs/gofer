@@ -13,7 +13,6 @@ import type {PendingChange, TaskSummary} from '../models/app'
 import type {
     BriefEvent,
     BriefRun,
-    DesignSessionEvent,
     UserQuestionPrompt,
     UserQuestionResponse,
     UserQuestionSettled
@@ -318,12 +317,6 @@ type DesktopEventMap = Readonly<{
     'ai-memory-judge': MemoryJudgeEvent
     /** How far through the list a sweep is, and how it ended. One event for the run, not the row. */
     'ai-memory-sweep': MemorySweepEvent
-    /**
-     * A design loop's two edges. Between them the question card holds itself open, because the
-     * rounds are one layout being revised rather than a queue of unrelated questions.
-     */
-    'ai-design-opened': DesignSessionEvent
-    'ai-design-closed': DesignSessionEvent
     'godot-session-event': GodotSessionEvent
     'rag-download-progress': DownloadProgress
     /** What the settings file now says, sent by whichever screen saved it to every other one. */

@@ -563,12 +563,7 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
                 padding={3}
                 align='center'
             >
-                <Text
-                    size='sm'
-                    color='secondary'
-                >
-                    {TOOL_HINT[mode]}
-                </Text>
+                <Text type='supporting'>{TOOL_HINT[mode]}</Text>
             </HStack>
             <StackItem
                 size='fill'
@@ -628,12 +623,7 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
                 justify='between'
                 align='center'
             >
-                <Text
-                    size='sm'
-                    color='secondary'
-                >
-                    Sending uses the flattened picture.
-                </Text>
+                <Text type='supporting'>Sending uses the flattened picture.</Text>
                 <HStack gap={2}>
                     <Button
                         label='Cancel'

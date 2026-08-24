@@ -62,16 +62,15 @@ export const SUBAGENT_TOOL_NAME = 'subagent'
  * starting point: `assertChildTools` refuses anything outside it, so widening any child's reach
  * means editing this line on purpose.
  *
- * Notably absent, and staying absent: `web_fetch` and `design_with_user`. Each is itself a
- * sub-agent — one hands a page to a toolless child so the raw text never reaches the caller, the
- * other hands a brief to a child that talks to the user — so a child holding either is a grandchild,
+ * Notably absent, and staying absent: `web_fetch`. It is itself a sub-agent — it hands a page to a
+ * toolless child so the raw text never reaches the caller — so a child holding it is a grandchild,
  * and "a child cannot delegate" stops being true with nothing in the code left to say so. A caller
  * that needs a page fetches it and puts the answer in the child's prompt.
  *
- * `ask_user` is on the list and is not an exception to that rule. It builds no agent; it is a call
- * to the window, the same shape as `godot_docs_search`'s call to the editor. What it needs instead
- * is a ceiling of its own, and that ceiling is a count rather than a name: nothing else in the
- * system can see a child spending somebody's attention. See `REACHING_CHILD_TOOLS`.
+ * `ask_user` is on the list and is not an exception to that rule, because the copy a child gets is
+ * the drafting half: it builds no agent and it takes no brief. It is a call to the window, the same
+ * shape as `godot_docs_search`'s call to the editor. What it needs instead is the call it is asking
+ * on behalf of, so its rounds land on one card. See `REACHING_CHILD_TOOLS`.
  */
 export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot_docs_search', 'web_search', 'ask_user']
 
@@ -86,7 +85,7 @@ export const CHILD_TOOL_NAMES = ['read', 'bash', 'godot_docs_search', 'web_searc
 export const SUBAGENT_TOOL_NAMES = ['read', 'bash']
 
 /**
- * What `design_with_user` hands its child: the delegation ration, plus the window.
+ * What a delegated `ask_user` hands its child: the reading tools, plus the window.
  *
  * Named here rather than written at the call site so the one child allowed to interrupt the user is
  * a constant somebody can grep for, and so a test can assert that `SUBAGENT_TOOL_NAMES` did not
@@ -111,7 +110,6 @@ export const SUBAGENT_SETTINGS_DEFAULTS = {
     streamInactivityMinutes: 10,
     maxTurns: 24,
     maxAnswerChars: 12_000,
-    maxShows: 6,
     retryAttempts: 2,
     retryBaseDelaySeconds: 1
 }
@@ -128,7 +126,6 @@ export function boundsFrom(settings) {
         streamInactivityMs: pick('streamInactivityMinutes') * 60_000,
         maxTurns: pick('maxTurns'),
         maxAnswerChars: pick('maxAnswerChars'),
-        maxShows: pick('maxShows'),
         retryAttempts: pick('retryAttempts'),
         retryBaseDelayMs: pick('retryBaseDelaySeconds') * 1_000
     }
@@ -392,22 +389,22 @@ const REACHING_CHILD_TOOLS = {
     },
     web_search: ({searchProvider = 'exa', braveApiKey}) =>
         createWebSearchTool({provider: searchProvider, apiKey: braveApiKey}),
-    ask_user: ({host, asks, sketchesRequired = false, sessionId, agreed}) => {
+    ask_user: ({host, ownerCallId, agreed}) => {
         if (!host) {
             throw new Error(
                 'A child was asked for ask_user without the tool host that answers it. '
                     + 'Pass `host` to createChildTools.'
             )
         }
-        if (!Number.isInteger(asks) || asks < 1) {
+        if (typeof ownerCallId !== 'string' || ownerCallId === '') {
             throw new Error(
-                'A child was asked for ask_user without a ration. A child that can interrupt the '
-                    + 'user has to say how many times, because nothing else can see that it did: '
-                    + 'the parent never learns a dialog was opened, and the clocks here do not tick '
-                    + 'while a person is thinking.'
+                'A child was asked for ask_user without the call it is asking on behalf of. That '
+                    + 'identifier is the only link between a tool call and the questions it '
+                    + 'produces: without it every round of one design lands in the feed as an '
+                    + 'unrelated question. Pass `ownerCallId` to createChildTools.'
             )
         }
-        return createAskUserTool({host, budget: asks, sketchesRequired, sessionId, agreed})
+        return createAskUserTool({host, ownerCallId, agreed})
     }
 }
 
@@ -617,6 +614,7 @@ async function attemptSubagent({
     progress,
     bounds,
     timers,
+    stopWhen,
     deps
 }) {
     const {env, tools} = createChildTools(workspacePath, {
@@ -635,6 +633,16 @@ async function attemptSubagent({
     let overran = false
     let stalled = false
     /*
+     * The caller's own ending, and the request number it first showed on.
+     *
+     * `undefined` until the condition is true. One more request is allowed after that, because the
+     * thing that closed the loop — a user pressing the button on a design card — reaches the model
+     * as a tool result it has not read yet, and a loop closed before it reads one has an ending with
+     * no answer in it. The request after that is where the loop actually stops.
+     */
+    let closedAt
+    let closed = false
+    /*
      * The step ceiling is spent here, in front of the provider, rather than by aborting the loop from
      * a listener — which does not work and is worth writing down. The agent loop never asks whether
      * it has been aborted: it starts the next request and lets the provider and the tools notice the
@@ -646,6 +654,15 @@ async function attemptSubagent({
      */
     const streamFn = (nextModel, context, options) => {
         requests += 1
+        // Asked before the ceiling, because it is the ending the caller wants and the ceiling is
+        // the one nobody wants. A child closed on both should report the close.
+        if (stopWhen?.() === true) {
+            closedAt ??= requests
+            if (requests > closedAt) {
+                closed = true
+                return endedStream(nextModel, 'The sub-agent was ended by the user.')
+            }
+        }
         if (!(bounds.maxTurns > 0) || requests <= bounds.maxTurns)
             return models.streamSimple(nextModel, context, {...options, ...streamOptions})
         overran = true
@@ -735,15 +752,23 @@ async function attemptSubagent({
                 `it used all ${String(bounds.maxTurns)} of its steps without reaching an answer`,
                 {retryable: false, cause: 'step-ceiling'}
             )
-        if (lastFailure)
+        // A loop this file closed on purpose ends on an assistant message that stopped with an
+        // error, because that is the only ending the agent loop stops cleanly on. It is not a
+        // failure and must not be reported as one: the answer the child already wrote is the whole
+        // point of closing it.
+        if (lastFailure && !closed)
             throw new SubagentFailed(lastFailure.errorMessage || 'the model returned an error', {
                 message: lastFailure,
                 cause: 'model-error'
             })
-        const failed = agent.state.errorMessage
+        const failed = closed ? undefined : agent.state.errorMessage
         if (failed) throw new SubagentFailed(failed, {cause: 'model-error'})
         const text = answer.trim()
-        if (!text)
+        // Not for a loop this file closed. The child gets one more request after the close and may
+        // spend it on a bare tool call rather than prose — which is a child with nothing left to
+        // say, not a failed delegation. Failing here rejected the whole `ask_user` call, so the
+        // layout the user had just pressed "Done, build it" on was thrown away with it.
+        if (!text && !closed)
             throw new SubagentFailed('it finished without writing an answer', {
                 retryable: false,
                 cause: 'no-answer'
@@ -855,6 +880,15 @@ export async function runSubagentOutcome({
     progress,
     settings,
     timers = realTimers,
+    /**
+     * A caller's own ending, asked before every request to the model.
+     *
+     * The one caller is a delegated `ask_user`: the user presses the button that agrees the layout,
+     * and the loop is closed. It is closed here rather than through the abort signal because the
+     * loop never asks whether it has been aborted, and the abort that does fire discards the child's
+     * answer — which is the thing the button exists to produce.
+     */
+    stopWhen,
     deps
 }) {
     // Asked before the abort check, so a stopped turn does not hide the mistake until the next run.
@@ -887,6 +921,7 @@ export async function runSubagentOutcome({
                     progress,
                     bounds,
                     timers,
+                    stopWhen,
                     deps
                 }))
             }

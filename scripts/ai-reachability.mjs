@@ -22,7 +22,7 @@
 import {rm, writeFile} from 'node:fs/promises'
 import {join} from 'node:path'
 import {SUBAGENT_PROBE_ANSWER, SUBAGENT_TOOL_NAME} from './ai-subagent.mjs'
-import {DESIGN_PROBE_ANSWER, DESIGN_TOOL_NAME} from './ai-design.mjs'
+import {ASK_PROBE_ANSWER, ASK_USER_TOOL_NAME} from './ai-ask.mjs'
 import {WEB_FETCH_PROBE_ANSWER, WEB_FETCH_TOOL_NAME} from './ai-fetch.mjs'
 import {WEB_SEARCH_PROBE_ANSWER, WEB_SEARCH_TOOL_NAME} from './ai-search.mjs'
 
@@ -75,18 +75,19 @@ const SUBAGENT_PROBE = {
 }
 
 /**
- * The design loop, proven the same way and for a sharper reason.
+ * The question tool, which is two things that can be absent for two reasons.
  *
- * It is the only child that may reach the user, and the ration that lets it is refused at build time
- * rather than at the call. Proving it here means a machine set never to be interrupted, or a build
- * where the ration was dropped, says so before the turn starts — instead of the model discovering it
- * halfway through a design the user was waiting on. The canned provider answers immediately, so no
- * dialog is ever opened by a probe.
+ * Every other tool here is either local or routed through the backend, and `ask_user` is both: the
+ * question goes to Rust, and a question about a layout goes to a child that draws it. So it is
+ * probed locally and its own probe does both halves — a backend that does not route the name and a
+ * child that will not build are different faults, and either one discovered mid-design is
+ * discovered with the user waiting on it. The child runs against a canned provider, so no probe
+ * ever puts a question on screen.
  */
-const DESIGN_PROBE = {
-    name: DESIGN_TOOL_NAME,
+const ASK_PROBE = {
+    name: ASK_USER_TOOL_NAME,
     params: PROBE_REQUEST,
-    answersWith: DESIGN_PROBE_ANSWER
+    answersWith: ASK_PROBE_ANSWER
 }
 
 /**
@@ -111,7 +112,7 @@ const WEB_PROBES = [
 ]
 
 /** Every tool proven in this process. Everything not named here is proven through the backend. */
-const LOCAL_PROBES = [...WORKSPACE_PROBES, SUBAGENT_PROBE, DESIGN_PROBE, ...WEB_PROBES]
+const LOCAL_PROBES = [...WORKSPACE_PROBES, SUBAGENT_PROBE, ASK_PROBE, ...WEB_PROBES]
 
 function resultText(result) {
     return (result?.content ?? [])

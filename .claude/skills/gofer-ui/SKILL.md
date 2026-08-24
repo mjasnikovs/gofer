@@ -16,14 +16,25 @@ they are the source of truth over anything you remember about design systems:
 npm run astryx -- docs color        # surface ramp body → surface → card → popover, text roles
 npm run astryx -- docs elevation    # when a surface is none / low / med / high
 npm run astryx -- docs layout       # frame first: pick the shell, budget regions in px
+npm run astryx -- docs typography   # the semantic type scale, and why not to reach past it
 npm run astryx -- docs principles   # the anti-pattern list
 npm run astryx -- component <Name>  # props and examples, for every component you touch
+```
+
+Astryx's chat pieces carry their own rules, and they are the ones this repo got wrong. Read them
+before touching the transcript:
+
+```bash
+npm run astryx -- component ChatMessage
+npm run astryx -- component ChatMessageBubble
+npm run astryx -- component ChatMessageList
+npm run astryx -- component ChatToolCalls
 ```
 
 `AGENTS.md` carries the mechanical half of this (import paths, tokens not hex, no raw `<div>`). This
 skill carries the half that decides whether the screen is readable.
 
-## The four failures this repo actually shipped
+## The failures this repo actually shipped
 
 Every rule below is here because it was measured on a real Gofer screenshot, not because it is good
 practice in general.
@@ -50,6 +61,36 @@ deliberate.
 neighbours was a 2px underline plus `#F7F7F7` vs `#D2D2D2` text. That is the component's job, not
 yours — use `TabList` and let it draw the state; if the state still does not read, the theme's text
 ramp is collapsed, which is a token fix, not a per-screen fix.
+
+**Two typography APIs at once.** 28 tags set raw `size=` or `weight=` while 56 used the semantic
+`type=`, so the same role rendered differently depending on which file it was in, and one tag set
+`type='supporting'` _and_ `weight='semibold'` — the two APIs fighting each other on one element.
+Astryx says it plainly in its own best practices: do not override size and weight when a semantic
+type already matches. Use `type=` on `Text`, `level=` on `Heading`, and nothing else. If no semantic
+type fits, the theme is missing one — add it in `theme.ts`, not on the element.
+
+**A named font that was never loaded.** `--font-family-body` said `Figtree` and no file in the tree
+provided it, so `fc-match Figtree` answered LiberationSans and every screenshot in the suite was
+recorded in a fallback. `@astryxdesign/theme-neutral` names fonts; it ships none. A family in a
+token is a claim, not a load — check it:
+
+```bash
+fc-match "<Family>"                                # is it on the machine at all
+document.fonts.check('1em "<Family>"')             # in the devtools console, is it live
+```
+
+Note the name in the token has to be the name in the `@font-face` rule. `@fontsource-variable/*`
+declares `Figtree Variable`, not `Figtree`, so the two did not meet even once the file was there.
+
+**A translucent token composites in opposite directions per theme.** A filled chat bubble takes
+`--color-neutral`, which is white at 10% in dark and black at 6% in light. The same rule put the
+bubble 10.1 L* _above_ the panel in dark and 4.9 _below_ it in light. State every surface decision
+in both modes, and prefer a solid token when the answer has to be the same in both.
+
+**Four surfaces stacked in one column.** Panel, card, popover and a composited bubble measured
+#262626 / #2e2e2e / #363636 / #3c3c3c — 3.1, 3.0 and 2.3 L* apart. Each step passed the gate on its
+own; the column read as a pile of unrelated boxes. A region gets one raised surface for the thing
+the user acts on, and everything else is flat.
 
 ## Theme changes
 
@@ -83,6 +124,12 @@ It is a ratchet, not a bar. `scripts/design-baseline.json` lists the violations 
 to keep; anything new fails, and fixing one means deleting its line in the same commit. The list is
 empty today, which is the state to keep it in. Never add a line to that file — read the count out of
 the file rather than from this sentence.
+
+**The gate measures tokens, not composition.** It passed with zero violations while the chat column
+held four surfaces, two type scales and a fallback font, because every one of those is what a screen
+_makes_ out of the tokens rather than a property of the tokens themselves. It also cannot resolve a
+translucent token over the parent it lands on. A clean `check:design` is not a reviewed screen —
+measure the screen too, the way the next section says.
 
 ## Checking a screen by measurement, not by eye
 

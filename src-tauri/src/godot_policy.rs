@@ -184,6 +184,7 @@ pub(crate) fn enforcement_refusal(
                 .get("text")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
+                .or_else(|| whole_files(params))
                 .unwrap_or_else(|| introduced_text(params));
             suppressed_warning(&proposed).map(|warning| {
                 format!(
@@ -201,6 +202,25 @@ pub(crate) fn enforcement_refusal(
         }
         _ => None,
     }
+}
+
+/// Every whole file a call puts on disk, or `None` for a call that proposes none.
+///
+/// `apply_rename` is the only one: its entries carry `updatedText`, which is the file as it will be
+/// written, exactly the way `save` carries `text`. So the whole file is what it proposes and the
+/// whole file is what is read — including an annotation the rename did not introduce, for the same
+/// reason a `save` of that file is refused over one. An `edit` has no such field and falls through
+/// to the text it introduces.
+fn whole_files(params: &Value) -> Option<String> {
+    let files = params.get("files")?.as_array()?;
+    let bodies: Vec<&str> = files
+        .iter()
+        .filter_map(|file| file.get("updatedText").and_then(Value::as_str))
+        .collect();
+    if bodies.is_empty() {
+        return None;
+    }
+    Some(bodies.join("\n"))
 }
 
 /// Every `newText` an edit proposes, joined into one body to read for annotations. Nothing else in
@@ -475,6 +495,39 @@ mod tests {
             ])),
             None,
             "an edit that removes an annotation is exactly the fix the rule asks for"
+        );
+    }
+
+    /// The third door, and the one nothing was watching: hand-build a rename plan.
+    ///
+    /// `apply_rename` writes a whole file per entry, exactly the way `save` does, and for a while it
+    /// carried no `writes` tag at all — so an agent refused on `save` could read the file back, put
+    /// its text in a one-entry plan and land the same annotation on disk with the rule on. The
+    /// whole file is what it proposes, so the whole file is what is read.
+    #[test]
+    fn a_rename_plan_cannot_write_what_a_save_would_be_refused_for() {
+        let plan = |updated: &str| {
+            refusal(
+                &enforcing(),
+                &(
+                    "godot_script",
+                    "apply_rename".to_owned(),
+                    json!({"files": [{
+                        "path": "res://player.gd",
+                        "originalText": "var x = 1\n",
+                        "originalHash": "whatever",
+                        "updatedText": updated,
+                    }]}),
+                ),
+            )
+        };
+        let message = plan("@warning_ignore(\"unsafe_cast\")\nvar x = 1\n")
+            .expect("a plan carrying the annotation is refused");
+        assert!(message.contains("godot_docs_search"));
+        assert_eq!(
+            plan("var x: int = 1\n"),
+            None,
+            "an ordinary rename is still an ordinary rename"
         );
     }
 

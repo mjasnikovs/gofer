@@ -5,6 +5,21 @@ export const goferTheme = defineTheme({
     name: 'gofer',
     extends: neutralTheme,
     radius: {base: 4, multiplier: 0.25},
+    /*
+     * The name in the token has to be the name in the `@font-face` rule, and the two did not match.
+     * The neutral theme asks for `Figtree` and ships no font file, so `fc-match Figtree` answered
+     * LiberationSans and the whole window rendered in a fallback the design was never measured on.
+     * `@fontsource-variable/figtree` declares itself `Figtree Variable` — one woff2 covering weights
+     * 300 through 900 — so the family is spelled its way and the fallbacks are kept verbatim for the
+     * moments before the file arrives.
+     */
+    typography: {
+        body: {
+            family: 'Figtree Variable',
+            fallbacks:
+                "Figtree, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+        }
+    },
     tokens: {
         /*
          * Three roles, three lightnesses.
@@ -76,7 +91,17 @@ export const goferTheme = defineTheme({
         '--color-accent': ['#0064e0', '#2694fe'],
         '--color-text-accent': ['#0064e0', '#3e9efb'],
         '--color-icon-accent': ['#0064e0', '#2694fe'],
-        '--color-accent-muted': ['#0082fb33', '#0082fb3f']
+        '--color-accent-muted': ['#0082fb33', '#0082fb3f'],
+        /*
+         * One corner in the window.
+         *
+         * The radius scale is `base: 4, multiplier: 0.25`, which lands containers on 3px and the
+         * chat's own radius on 7px — so a card and the bubble beside it in the same column were
+         * rounded to two different amounts. Chat is not a floating shape here; it is a band in a
+         * column of bands, and it takes the corner every other box in the app takes. This also
+         * pulls the composer in, which derives from the same token.
+         */
+        '--radius-chat': '3px'
     },
     components: {
         /*
@@ -107,6 +132,32 @@ export const goferTheme = defineTheme({
                 boxShadow: 'inset 2px 0 0 0 var(--color-accent)'
             }
         },
-        'tree-list-item-label': {selected: {fontWeight: 'var(--font-weight-semibold)'}}
+        'tree-list-item-label': {selected: {fontWeight: 'var(--font-weight-semibold)'}},
+        /*
+         * The chat column is a column, not a messenger thread.
+         *
+         * Astryx models a bubble on a chat app: it caps itself at `max(80%, 280px)` and its row
+         * aligns to the sender's side, which is right when two people are talking and wrong when
+         * one column has to hold a paragraph, a tool call and a question that all belong to the
+         * same turn. Measured, the three blocks of one turn ended at 754, 332 and 948 px — three
+         * right edges in a 960 px column, which is what made the screen read as unrelated cards.
+         * Uncapping the bubble is half of that; `src/theme/chat.css` is the other half.
+         *
+         * A ghost bubble keeps a spacious inset it has no fill to justify, so prose started five
+         * spacing steps in from the tool rows below it, which have no inline padding at all. Zero
+         * puts every part of a turn on one line and leaves the insetting to the column.
+         *
+         * The fill is here because the sent message inverted between modes. A filled bubble takes
+         * `--color-neutral`, which is translucent — white at 10% in dark, black at 6% in light — so
+         * the same rule composited in opposite directions: 10.1 L* *above* the panel in dark, 4.9
+         * *below* it in light. In light it was the only thing in the column beneath its own
+         * background while the card and the composer were both above it. A solid token is the same
+         * decision in both modes, and it is the one the question block and the composer take.
+         */
+        'chat-message-bubble': {
+            base: {maxWidth: '100%'},
+            'variant:filled': {backgroundColor: 'var(--color-background-popover)'},
+            'variant:ghost': {paddingInline: '0'}
+        }
     }
 })

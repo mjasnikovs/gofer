@@ -173,6 +173,31 @@ describe('applyStreamEvent', () => {
         expect(isAiStreamEvent({type: 'tool-update', id: 'a', output: 'x', step: 7})).toBe(false)
     })
 
+    /*
+     * The reason a turn ended is optional, and a `done` without one is still a `done`.
+     *
+     * `JSON.stringify` drops an `undefined`, so a producer that let the field through unset put no
+     * field on the wire at all. Required, that failed the guard whole: the reply text, the usage and
+     * the model went with it and the turn was drawn as stopped with nothing in it. Only `aborted`
+     * is ever read, so absent is a turn that ended normally.
+     */
+    it('accepts a completion that names no reason, and reads it as a finished turn', () => {
+        const done = {
+            type: 'done',
+            text: 'Scene inspected.',
+            thinking: '',
+            usage: USAGE,
+            model: 'local',
+            agentMessages: []
+        }
+        expect(isAiStreamEvent(done)).toBe(true)
+        expect(isAiStreamEvent({...done, stopReason: 7})).toBe(false)
+
+        const message = replay([done as AiStreamEvent])
+        expect(message.status).toBe('complete')
+        expect(message.text).toBe('Scene inspected.')
+    })
+
     it('keeps everything the agent said, not only its last step', () => {
         // The backend takes `done.text` from the final `turn_end`, which for a turn that called
         // tools is the last step alone. Preferring it dropped every earlier narration.

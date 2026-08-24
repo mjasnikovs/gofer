@@ -171,14 +171,23 @@ export type UserQuestionPrompt = Readonly<{
     /** Which asking of this question it is, counting from one. */
     revision: number
     /**
-     * The design loop this question belongs to, or nothing, which is every ordinary question.
+     * The tool call this question belongs to, which is the block in the feed that draws it.
      *
-     * A design loop asks about one layout several times over. Left to look like a queue of unrelated
-     * questions, the card closes on every answer and opens again a minute later once the agent has
-     * redrawn — so the user watches their own modal flicker instead of watching one design change.
-     * This is what tells the card the rounds belong together.
+     * The one link between a call and the questions it produced. A delegated design asks about one
+     * layout several times over, and every round carries the parent's call id — so the rounds land
+     * on one block being revised rather than as a pile of unrelated questions.
+     *
+     * Absent only for a question asked with no window-side block to land on, which nothing produces
+     * today. The block matches on it.
      */
-    designSession?: string
+    ownerCallId?: string
+    /**
+     * Whether a child is asking this on another agent's behalf.
+     *
+     * It decides one control: the button that ends a delegation. Only a delegated question has an
+     * agent still looping behind it, so only a delegated question has a loop to end.
+     */
+    isDelegated: boolean
 }>
 
 /**
@@ -197,24 +206,28 @@ export type UserQuestionResponse = Readonly<{
     blocked?: readonly string[]
     skipped?: boolean
     /**
-     * The user ended a design here: this layout is agreed and there is nothing more to show them.
+     * The user ended a delegation here: this layout is agreed and there is nothing more to show.
      *
-     * The opposite of `skipped`, and only a design loop can produce it, because only its card has the
-     * button. The agent is told the design is settled, and its ration to interrupt is spent at the
-     * same moment so it cannot ask anyway.
+     * The opposite of `skipped`, and only a delegated question can produce it, because only its
+     * block carries the button. The child is told the design is settled, and its loop is closed at
+     * the same moment so it cannot ask anyway.
      */
     approved?: boolean
+    /**
+     * The user wants another round on this, whatever else they wrote.
+     *
+     * The middle of the three endings, and the one that had no control at all for a while: a design
+     * could be iterated because its block carried "Send changes", and an ordinary question could
+     * only be answered. Where the line between one round and three falls is the user's to draw —
+     * that is the whole reason the two tools became one.
+     */
+    again?: boolean
 }>
 
 /** Emitted when a question stops waiting, however it stopped. */
 export type UserQuestionSettled = Readonly<{
     questionId: string
     answered: boolean
-}>
-
-/** A design loop starting or finishing. The card between its two edges is one design. */
-export type DesignSessionEvent = Readonly<{
-    sessionId: string
 }>
 
 /**
