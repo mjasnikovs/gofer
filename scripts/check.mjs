@@ -1,4 +1,5 @@
 import {spawn} from 'node:child_process'
+import {cpus} from 'node:os'
 import {delimiter, resolve} from 'node:path'
 
 // Runs everything `npm run check` used to run one after another, in three lanes at once.
@@ -26,15 +27,39 @@ import {delimiter, resolve} from 'node:path'
 /** A step whose command is a `package.json` script, because something other than this file runs it. */
 const script = name => [name, `npm run --silent ${name}`]
 
-const GODOT_LANE = [script('test:godot')]
+// How many cores each lane may claim.
+//
+// Every one of these tools sizes itself against the whole machine, and until they ran together each
+// was right to: Cargo builds and tests with a thread per core, Vitest forks one process per test
+// file up to the same number, and the Godot runner boots an editor per worker. Side by side they
+// ask for about forty threads on sixteen cores, and what that costs is not evenly spread slowness —
+// it is failures. `stopping_the_game_answers_only_once_the_game_is_gone` asserts that the game is
+// gone the instant `runtime.stop` answers, and a starved machine has not reaped the process yet.
+// That is a real assertion about a real contract, so the fix is to stop starving it.
+//
+// The Godot lane gets more than its third because a worker there spends most of its life waiting on
+// an editor that is booting rather than computing. Measured on sixteen cores, alternating whole
+// runs: eight Godot workers gave 63.9s, 63.8s and 64.4s, ten gave 61.6s, 61.9s and 61.1s, all
+// seventeen checks green in every one. Ten and four and four is eighteen on sixteen, which is the
+// point — the lanes are not all busy at the same moment, and pretending they are left two cores
+// idle for a minute.
+const CORES = Math.max(4, cpus().length)
+const GODOT_JOBS = Math.floor((CORES * 5) / 8)
+const CARGO_JOBS = Math.floor(CORES / 4)
+const OTHER_JOBS = Math.floor(CORES / 4)
+
+const GODOT_LANE = [['test:godot', `GOFER_GODOT_JOBS=${GODOT_JOBS} npm run --silent test:godot`]]
 
 const CARGO_LANE = [
     [
         'check:clippy',
-        'cargo clippy --quiet --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings'
+        `cargo clippy --quiet --jobs ${CARGO_JOBS} --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
     ],
-    ['test:rust', 'cargo test --quiet --manifest-path src-tauri/Cargo.toml'],
-    ['check:cargo', 'cargo check --quiet --manifest-path src-tauri/Cargo.toml']
+    [
+        'test:rust',
+        `cargo test --quiet --jobs ${CARGO_JOBS} --manifest-path src-tauri/Cargo.toml -- --test-threads=${CARGO_JOBS}`
+    ],
+    ['check:cargo', `cargo check --quiet --jobs ${CARGO_JOBS} --manifest-path src-tauri/Cargo.toml`]
 ]
 
 const NODE_COVERAGE_EXCLUDES = [
@@ -77,14 +102,18 @@ const OTHER_LANE = [
     ['check:version', 'node scripts/check-version.mjs'],
     script('check:command-surface'),
     script('check:design'),
-    ['test:coverage:frontend', 'vitest run --coverage'],
+    ['test:coverage:frontend', `vitest run --coverage --maxWorkers=${OTHER_JOBS}`],
+    // Both c8 runs need a directory of their own. Left to itself c8 writes its raw V8 output to
+    // `coverage/tmp` and wipes that directory on start, and these two are adjacent in a lane two
+    // workers wide — so the second to start deletes the first one's measurements out from under it
+    // and both report numbers taken from whatever survived the race.
     [
         'test:coverage:node',
-        `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --reporter=text --check-coverage --lines 80 --branches 75 npm run --silent test:worker`
+        `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=coverage/node/tmp --reports-dir=coverage/node --reporter=text --check-coverage --lines 80 --branches 75 npm run --silent test:worker`
     ],
     [
         'test:coverage:node-critical',
-        "c8 --include='scripts/workspace-confinement.mjs' --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/workspace-confinement.test.mjs"
+        "c8 --include='scripts/workspace-confinement.mjs' --temp-directory=coverage/node-critical/tmp --reports-dir=coverage/node-critical --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/workspace-confinement.test.mjs"
     ],
     // The source worker passing proves nothing about the file a built Gofer runs: that one is
     // bundled, and a bundle can lose a module the source resolved fine.

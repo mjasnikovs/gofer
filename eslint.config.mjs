@@ -15,8 +15,6 @@ export default tseslint.config(
             js.configs.recommended,
             ...tseslint.configs.strictTypeChecked,
             ...tseslint.configs.stylisticTypeChecked,
-            reactHooks.configs.flat.recommended,
-            reactRefresh.configs.vite,
             eslintConfigPrettier
         ],
         languageOptions: {
@@ -97,6 +95,20 @@ export default tseslint.config(
                 }
             ]
         }
+    },
+    {
+        /*
+         * The React rules, over the React.
+         *
+         * `reactHooks` is version 7, where `flat.recommended` is not two rules about hooks any more
+         * — it is the React Compiler, eighteen rules that each put the file through the compiler's
+         * own pipeline. Applied to `**` that ran over the thirteen end-to-end specs and the five
+         * wdio configs as well, none of which contain a component, and it is the most expensive
+         * thing in the lint. `reactRefresh` is here for the same reason: its subject is a module
+         * Vite hot-reloads, and nothing outside `src` is one.
+         */
+        files: ['src/**/*.{ts,tsx}'],
+        extends: [reactHooks.configs.flat.recommended, reactRefresh.configs.vite]
     },
     {
         files: ['vite.config.ts'],

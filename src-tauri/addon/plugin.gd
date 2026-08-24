@@ -144,6 +144,24 @@ var _quit_countdown: int = 0
 const RUNTIME_REQUEST_TIMEOUT_MS := 20000
 const RUNTIME_LAUNCH_TIMEOUT_MS := 30000
 
+## The launch deadline this editor actually waits out.
+##
+## The constant above is what a person gets and the only value anything ships with. It is also
+## thirty seconds that one acceptance test has to sit through on purpose: a game whose helper never
+## announces is told apart from a dead one by the deadline expiring, so the test cannot assert the
+## difference without paying for it. That one test was the whole suite's floor, hoisted to run first
+## because nothing could follow it. The environment lets it buy the same proof for four seconds.
+##
+## Read once, here, rather than at each of the three call sites: a deadline that could change
+## between the launch and the stop is a different bug to debug.
+var _runtime_launch_timeout_ms: int = _configured_launch_timeout_ms()
+
+static func _configured_launch_timeout_ms() -> int:
+    var value := OS.get_environment("GOFER_RUNTIME_LAUNCH_TIMEOUT_MS")
+    if value.is_empty():
+        return RUNTIME_LAUNCH_TIMEOUT_MS
+    return maxi(1, value.to_int())
+
 ## The pending kinds that are waiting on a game the editor has already been told to start, and so
 ## are ended by that game dying. `restart` is not one of them: it is waiting for the *previous*
 ## game to go, and a stopped editor is the thing it wants.
@@ -1004,7 +1022,7 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
             # this boundary has been an answer describing work the editor had not done yet. A
             # game that does outlive the request parks like every other deferred answer.
             if EditorInterface.is_playing_scene():
-                _runtime_pending.append({"id": id, "kind": "stop", "deadline": _runtime_deadline(RUNTIME_LAUNCH_TIMEOUT_MS)})
+                _runtime_pending.append({"id": id, "kind": "stop", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
             else:
                 _respond_result(id, {"running": false})
         "runtime.capture":
@@ -1057,7 +1075,7 @@ func _runtime_launch(id: String, restart: bool) -> void:
     if playing:
         # Stopping is asynchronous; the sweep starts the new instance once the old one is gone.
         _runtime_stop()
-        _runtime_pending.append({"id": id, "kind": "restart", "deadline": _runtime_deadline(RUNTIME_LAUNCH_TIMEOUT_MS)})
+        _runtime_pending.append({"id": id, "kind": "restart", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
         return
     # An editor already asking a question will not start a game, and pressing Play again only adds
     # a second dialog on top of the first.
@@ -1090,7 +1108,7 @@ func _launch_pending(id: String, kind: String) -> Dictionary:
     return {
         "id": id,
         "kind": kind,
-        "deadline": _runtime_deadline(RUNTIME_LAUNCH_TIMEOUT_MS),
+        "deadline": _runtime_deadline(_runtime_launch_timeout_ms),
         "seen_playing": false,
     }
 

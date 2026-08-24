@@ -69,6 +69,12 @@ jobs:
             - uses: dtolnay/rust-toolchain@stable
               with:
                   toolchain: 1.97.1
+            # Every run before this one rebuilt the whole dependency tree from source, inside a
+            # thirty-minute cap. Nothing in that tree changes between commits.
+            - name: Reuse the compiled dependency tree between runs
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: src-tauri
             - uses: actions/setup-python@v5
               with:
                   python-version: '3.13'
@@ -76,7 +82,7 @@ jobs:
               if: runner.os == 'Linux'
               run: >-
                   sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
-                  libappindicator3-dev librsvg2-dev patchelf
+                  libappindicator3-dev librsvg2-dev patchelf mold
             - name: Install JavaScript dependencies
               run: npm ci
             # Both of these have to happen before the Tauri build, because the Tauri build is what

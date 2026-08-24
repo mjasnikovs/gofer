@@ -64,6 +64,18 @@ image = { version = "0.25.10", default-features = false, features = [
     "dds",
 ] }
 
+# Debug info is the other half of the link cost, and almost none of it is ever read. A backtrace
+# from a failing test needs the function, the file and the line; the variable-level DWARF that the
+# default `debug = true` also emits is only ever asked for by a debugger stepping through this
+# crate, which is not what the gate does. Emitting it cost a 61 GB `target/debug` that every link
+# had to read, write and relocate.
+#
+# `unpacked` keeps what remains in `.o` files beside the objects instead of copying it into every
+# artifact, so the linker moves references rather than megabytes.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 tempfile = "3"

@@ -37,11 +37,17 @@ jobs:
             - uses: dtolnay/rust-toolchain@stable
               with:
                   toolchain: 1.97.1
+            # Every run before this one rebuilt the whole dependency tree from source, inside a
+            # thirty-minute cap. Nothing in that tree changes between commits.
+            - name: Reuse the compiled dependency tree between runs
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: src-tauri
             - name: Install Linux system dependencies
               if: runner.os == 'Linux'
               run: >-
                   sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
-                  libappindicator3-dev librsvg2-dev patchelf unzip xvfb
+                  libappindicator3-dev librsvg2-dev patchelf unzip xvfb mold
             - uses: actions/setup-python@v5
               with:
                   python-version: '3.13'

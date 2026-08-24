@@ -1,0 +1,15 @@
+# Linking is what a warm Cargo run actually spends its time on here. Nothing in the crate changed
+# between two `cargo test` invocations and both still cost tens of seconds, because the test binary
+# is relinked against a dependency tree that includes `rusqlite`'s bundled SQLite, `zstd`, `image`
+# with twelve decoders, and the whole of Tauri. GNU ld does that single-threaded.
+#
+# mold is a drop-in for the same job and uses every core. It is a hard requirement rather than a
+# preference: a machine without it gets "linker `mold` not found" rather than a slow build, which is
+# the honest failure — a config that silently falls back would make every measurement here a lie
+# about which linker produced it.
+# At the repository root rather than beside the manifest, because Cargo looks for this file from the
+# working directory and walks up — and the gate runs `cargo test --manifest-path src-tauri/...` from
+# here. A copy under `src-tauri/` is found only by `tauri build`, which is the one caller that
+# happens to change directory first, and missed by every other one.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

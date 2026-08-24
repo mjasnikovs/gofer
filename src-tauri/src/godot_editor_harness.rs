@@ -270,6 +270,7 @@ pub(crate) struct Launch<'a> {
     dap_port: Option<u16>,
     tee_session_logs: bool,
     config_home: Option<&'a Path>,
+    launch_timeout_ms: Option<u64>,
 }
 
 impl<'a> Launch<'a> {
@@ -282,6 +283,7 @@ impl<'a> Launch<'a> {
             dap_port: None,
             tee_session_logs: false,
             config_home: None,
+            launch_timeout_ms: None,
         }
     }
 
@@ -290,6 +292,16 @@ impl<'a> Launch<'a> {
     /// what the first wrote needs this — the two have to share the directory to prove anything.
     pub(crate) fn config_home(mut self, home: &'a Path) -> Self {
         self.config_home = Some(home);
+        self
+    }
+
+    /// Shortens the deadline the addon gives a launch, for the one test that has to outlive one.
+    ///
+    /// Left unset the editor uses the thirty seconds it ships with. A test asserting what happens
+    /// *after* the deadline has to sit through it, and thirty seconds of sitting was the whole
+    /// acceptance suite's floor. Four seconds proves the same thing.
+    pub(crate) fn launch_timeout_ms(mut self, milliseconds: u64) -> Self {
+        self.launch_timeout_ms = Some(milliseconds);
         self
     }
 
@@ -347,6 +359,13 @@ impl<'a> Launch<'a> {
                 ]
             })
             .unwrap_or_default();
+
+        if let Some(milliseconds) = self.launch_timeout_ms {
+            environment.push((
+                OsString::from("GOFER_RUNTIME_LAUNCH_TIMEOUT_MS"),
+                OsString::from(milliseconds.to_string()),
+            ));
+        }
 
         // Every editor gets a throwaway config home, because `editor.set_setting` writes to the
         // machine-wide EditorSettings the developer running this suite uses for their own work. A
@@ -424,6 +443,8 @@ pub(crate) struct Transports {
     /// A config home outliving this session, for a test that starts a second editor and expects it
     /// to read back what the first one wrote. Left unset, the editor gets a throwaway of its own.
     pub(crate) editor_config_home: Option<PathBuf>,
+    /// A shorter launch deadline, for the one test whose subject is the deadline expiring.
+    pub(crate) launch_timeout_ms: Option<u64>,
 }
 
 /// A staged addon inside a launched editor, answering over the wire the desktop app uses.
@@ -503,6 +524,9 @@ impl Session {
         }
         if let Some(home) = transports.editor_config_home.as_deref() {
             launch = launch.config_home(home);
+        }
+        if let Some(milliseconds) = transports.launch_timeout_ms {
+            launch = launch.launch_timeout_ms(milliseconds);
         }
         let editor = launch.start();
 

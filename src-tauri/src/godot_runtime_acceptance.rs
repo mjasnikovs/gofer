@@ -584,6 +584,11 @@ fn stopping_the_game_answers_only_once_the_game_is_gone() {
         "the game must be holding its port before the stop is asked for"
     );
     // Long enough that the spin has started and the debugger channel is dead.
+    //
+    // Polling for those two rather than sleeping through them was tried and reverted: asking
+    // `runtime.get_state` while the game is wedged is a question the editor answers slowly, and
+    // under `npm run check` the loop turned an 11s test into a 33s failure. The wait is cheap and
+    // the thing being waited for is not observable without disturbing it.
     std::thread::sleep(Duration::from_secs(6));
 
     let stopped = session.call("runtime.stop", json!({}));
@@ -680,13 +685,23 @@ fn a_game_that_stops_at_an_error_ends_the_launch_waiting_on_it() {
     assert_eq!(after["broke"], false, "{after}");
 }
 
+/// The deadline this test gives the editor, in place of the thirty seconds it ships with.
+///
+/// This is the only test whose subject is the deadline expiring, so it is the only one that has to
+/// sit through one. At thirty seconds it was the acceptance suite's floor — hoisted to run first
+/// because nothing could follow it, and still the last worker to finish. Four seconds proves the
+/// same thing: the game is up, its helper is not, and the editor says so rather than calling the
+/// game dead. What is being asserted is which answer comes back, not how long it took.
+const STALL_LAUNCH_TIMEOUT_MS: u64 = 4_000;
+
 /// An autoload that holds the main thread past the launch deadline without ever letting go of the
 /// process, which is what a game whose helper cannot load looks like from the editor: playing, and
 /// silent. A parse error in the addon's own runtime script produces exactly this.
 ///
-/// Forty seconds is the launch deadline plus a margin. It is also the fallback: the process leaves
-/// on its own if the stop below cannot reach a main thread that is inside a `delay_msec`.
-const STALLING_AUTOLOAD: &str = "extends Node\n\nfunc _ready() -> void:\n\tOS.delay_msec(40000)\n";
+/// Fifteen seconds is the shortened deadline plus room for the two calls that follow it. It is also
+/// the fallback: the process leaves on its own if the stop below cannot reach a main thread that is
+/// inside a `delay_msec`.
+const STALLING_AUTOLOAD: &str = "extends Node\n\nfunc _ready() -> void:\n\tOS.delay_msec(15000)\n";
 
 /// A launch that outlives its deadline while the editor is still playing says the game is up.
 ///
@@ -708,7 +723,15 @@ fn a_launch_that_outlives_its_deadline_while_playing_says_the_game_is_up() {
         + "\n[autoload]\n\nStall=\"*res://scripts/stall.gd\"\n";
     std::fs::write(&project, configured).expect("write the project");
     let ledger = directory.path().join("ledger.json");
-    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+    let session = Session::start_on_worktree_with(
+        worktree,
+        ledger,
+        Some(directory),
+        Transports {
+            launch_timeout_ms: Some(STALL_LAUNCH_TIMEOUT_MS),
+            ..Transports::default()
+        },
+    );
 
     let error = session
         .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
