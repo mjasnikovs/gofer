@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {Collapsible, CollapsibleGroup} from '@astryxdesign/core/Collapsible'
 import {Divider} from '@astryxdesign/core/Divider'
@@ -309,10 +309,15 @@ export function MemoryView() {
             })
     }, [])
 
-    const all = memories ?? []
-    const needingReview = all.filter(memory => memory.check === 'stale')
-    const broken = all.filter(isBroken)
-    const unjudged = all.filter(isUnjudged)
+    /*
+     * Memoised because two callbacks below list them. Rebuilt in the render body they changed
+     * identity every render, so neither `useCallback` ever returned a cached function and the
+     * wrapper cost without buying anything.
+     */
+    const all = useMemo(() => memories ?? [], [memories])
+    const needingReview = useMemo(() => all.filter(memory => memory.check === 'stale'), [all])
+    const broken = useMemo(() => all.filter(isBroken), [all])
+    const unjudged = useMemo(() => all.filter(isUnjudged), [all])
     const shown =
         filter === 'review' ? needingReview
         : filter === 'broken' ? broken
@@ -516,6 +521,10 @@ export function MemoryView() {
                                             gap={2}
                                             align='center'
                                         >
+                                            {/*
+                                             * The dot's label is its accessible name, so the same
+                                             * sentence beside it was read out twice per row.
+                                             */}
                                             <StatusDot
                                                 variant={DOT[memory.check]}
                                                 label={checkSummary(memory)}
@@ -523,6 +532,7 @@ export function MemoryView() {
                                             <Text
                                                 type='supporting'
                                                 color='secondary'
+                                                aria-hidden
                                             >
                                                 {checkSummary(memory)}
                                             </Text>

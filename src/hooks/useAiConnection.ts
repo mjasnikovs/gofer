@@ -34,6 +34,17 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
     )
     /** Which server the listed models came from, so a save that changed nothing costs nothing. */
     const listedFor = useRef<string | undefined>(undefined)
+    /**
+     * Which connection attempt is the current one.
+     *
+     * `connect` is a control — the header offers it by name while the connection is offline — and
+     * nothing stopped a second press starting a second attempt over the first. A `load_settings`
+     * that is timing out settles *after* the retry that worked, and every write in its tail landed
+     * last: the state went back to `offline`, the banner said Local AI was unavailable, and the
+     * models the working attempt had listed were painted over by the failed one's. So each attempt
+     * takes a number and writes nothing once a later one has started.
+     */
+    const attempt = useRef(0)
 
     const listModels = useCallback(async (of: GoferSettings) => {
         const available = await invoke('list_ai_models', {
@@ -121,17 +132,22 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
 
     const connect = useCallback(async () => {
         if (!isTauri()) return
+        const mine = ++attempt.current
+        const isCurrent = () => attempt.current === mine
         await Promise.resolve()
         setConnectionState('connecting')
         onConnected()
         try {
             const response = await invoke('load_settings')
+            if (!isCurrent()) return
             const loadedSettings = normalizeSettings(response.settings)
             setSettings(loadedSettings)
             const available = await listModels(loadedSettings)
+            if (!isCurrent()) return
             setConnectionState('connected')
             await reconcileModel(available, loadedSettings)
         } catch (error) {
+            if (!isCurrent()) return
             setConnectionState('offline')
             onError(`Local AI is unavailable: ${commandErrorMessage(error)}`)
         }

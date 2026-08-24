@@ -112,11 +112,16 @@ export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): Mo
                                     gap={2}
                                     vAlign='center'
                                 >
+                                    {/*
+                                     * The dot's label is its accessible name, so the plain word
+                                     * beside it was announced twice. Qualified here and left plain
+                                     * on screen, which is what the frame's session dot does.
+                                     */}
                                     <StatusDot
                                         variant={cacheStateVariant(cache.state)}
-                                        label={cacheStateLabel(cache.state)}
+                                        label={`Model cache: ${cacheStateLabel(cache.state)}`}
                                     />
-                                    <Text>{cacheStateLabel(cache.state)}</Text>
+                                    <Text aria-hidden>{cacheStateLabel(cache.state)}</Text>
                                 </HStack>
                                 <VStack gap={1}>
                                     <Text type='supporting'>Cache location</Text>
@@ -128,21 +133,17 @@ export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): Mo
                                 </VStack>
                             </VStack>
 
+                            {/*
+                             * One label, not two. `ProgressBar` draws its own above the bar unless
+                             * told to hide it, and the line underneath repeated it word for word.
+                             */}
                             {busy.downloading && (
-                                <VStack gap={2}>
-                                    <ProgressBar
-                                        label={progressLabel(progress)}
-                                        value={value ?? 0}
-                                        isIndeterminate={value === undefined}
-                                        hasValueLabel={value !== undefined}
-                                    />
-                                    <Text
-                                        type='supporting'
-                                        color='secondary'
-                                    >
-                                        {progressLabel(progress)}
-                                    </Text>
-                                </VStack>
+                                <ProgressBar
+                                    label={progressLabel(progress)}
+                                    value={value ?? 0}
+                                    isIndeterminate={value === undefined}
+                                    hasValueLabel={value !== undefined}
+                                />
                             )}
                         </VStack>
                     :   <Text color='secondary'>

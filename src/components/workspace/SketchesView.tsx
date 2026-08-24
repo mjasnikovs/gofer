@@ -258,19 +258,27 @@ export function SketchesView() {
                                     </VStack>
                                 }
                             >
-                                <SketchBody
-                                    sketch={sketch}
-                                    {...(html.get(sketch.id) && {html: html.get(sketch.id)})}
-                                    {...(readFailure?.id === sketch.id && {
-                                        failure: readFailure.reason
-                                    })}
-                                    refused={refused}
-                                    onBlocked={noteBlocked}
-                                    onZoom={() => {
-                                        setZoomed(sketch)
-                                    }}
-                                    {...(references && {onSend: references.paste})}
-                                />
+                                {/*
+                                 * Only the open row is built. `Collapsible` always renders its
+                                 * children and hides them with `display: none`, so every sketch
+                                 * opened once kept a live iframe and a ResizeObserver mounted for
+                                 * the rest of the session.
+                                 */}
+                                {openId === sketch.id && (
+                                    <SketchBody
+                                        sketch={sketch}
+                                        {...(html.get(sketch.id) && {html: html.get(sketch.id)})}
+                                        {...(readFailure?.id === sketch.id && {
+                                            failure: readFailure.reason
+                                        })}
+                                        refused={refused}
+                                        onBlocked={noteBlocked}
+                                        onZoom={() => {
+                                            setZoomed(sketch)
+                                        }}
+                                        {...(references && {onSend: references.paste})}
+                                    />
+                                )}
                             </Collapsible>
                         ))}
                     </CollapsibleGroup>

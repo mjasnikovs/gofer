@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useReducer, useRef, useState} from 'react'
+import {useCallback, useEffect, useMemo, useReducer, useRef, useState} from 'react'
 import {schedule} from '../services/clock'
 import {isTauri} from '../services/desktop'
 import {
@@ -93,6 +93,26 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
     const buffersRef = useRef<readonly ScriptBuffer[]>([])
     // The breakpoints of files not open yet, waiting for the tab that carries them to come back.
     const restored = useRef<Readonly<Record<string, readonly number[]>>>(restore?.breakpoints ?? {})
+
+    // First among this hook's effects, so every later one — and every command below — reads the
+    // buffers of the commit it is running in rather than of the render that built its closure.
+    useEffect(() => {
+        buffersRef.current = buffers
+    }, [buffers])
+
+    /**
+     * The buffer one command is about, taken from the ref rather than from `buffers`.
+     *
+     * `saveBuffer`, `overwriteBuffer` and `previewFormat` are the three commands that need a
+     * buffer's text, and depending on the array for it rebuilt all three on every keystroke. That
+     * is not this hook's own cost: the frame wraps two of them in `useCallback`s that then changed
+     * per character typed, and `ScriptEditor` keeps its handlers in a ref precisely because they
+     * would not hold still. The ref holds the same committed array the array dependency did.
+     */
+    const bufferAt = useCallback(
+        (path: string) => buffersRef.current.find(entry => entry.path === path),
+        []
+    )
 
     const report = useCallback(
         (error: unknown, action: string) => {
@@ -228,7 +248,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
 
     const saveBuffer = useCallback(
         async (path: string) => {
-            const buffer = buffers.find(entry => entry.path === path)
+            const buffer = bufferAt(path)
             if (!buffer || !isTauri()) return
             flushChange(path)
             try {
@@ -244,7 +264,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
                 report(error, `${path} could not be saved`)
             }
         },
-        [buffers, flushChange, report, resolved]
+        [bufferAt, flushChange, report, resolved]
     )
 
     /** Discards the buffer and takes what is on disk, clearing any conflict. */
@@ -259,7 +279,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
     /** Keeps the buffer and overwrites whatever the file now holds. */
     const overwriteBuffer = useCallback(
         async (path: string) => {
-            const buffer = buffers.find(entry => entry.path === path)
+            const buffer = bufferAt(path)
             if (!buffer || !isTauri()) return
             flushChange(path)
             try {
@@ -271,7 +291,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
                 report(error, `${path} could not be overwritten`)
             }
         },
-        [buffers, flushChange, report, resolved]
+        [bufferAt, flushChange, report, resolved]
     )
 
     /** Shows a tab that is already open. Opening one that is not is `openBuffer`'s job. */
@@ -286,7 +306,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
     /** Formats through the pinned sidecar and returns the diff for the user to accept. */
     const previewFormat = useCallback(
         async (path: string): Promise<FormatPreview | undefined> => {
-            const buffer = buffers.find(entry => entry.path === path)
+            const buffer = bufferAt(path)
             if (!buffer || !isTauri()) return undefined
             try {
                 const response = await formatGdscript(buffer.text)
@@ -301,7 +321,7 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
                 return undefined
             }
         },
-        [buffers, report]
+        [bufferAt, report]
     )
 
     const applyFormat = useCallback(
@@ -380,10 +400,6 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
         }
     }, [openBuffer, refreshFiles])
 
-    useEffect(() => {
-        buffersRef.current = buffers
-    }, [buffers])
-
     /*
      * Reopens the tabs the project was left with.
      *
@@ -441,24 +457,54 @@ export function useScriptBuffers({onError, onResolved, restore}: ScriptBufferOpt
 
     const activeBuffer = buffers.find(buffer => buffer.path === activePath)
 
-    return {
-        activeBuffer,
-        activePath,
-        buffers,
-        diagnostics,
-        files,
-        applyFormat,
-        changeBuffer,
-        closeBuffer,
-        commitRename,
-        openBuffer,
-        overwriteBuffer,
-        previewFormat,
-        previewRename,
-        refreshFiles,
-        reloadBuffer,
-        saveBuffer,
-        showBuffer,
-        toggleBreakpoint
-    }
+    /*
+     * One value, kept until something in it actually moved.
+     *
+     * The frame holds this and hands it on whole, and every consumer that reads a command off it
+     * puts that command in a dependency list. A fresh object literal per render made all eighteen
+     * members look new on a render this hook had nothing to do with — a streamed token, a resize —
+     * which is what left the callers memoizing around it instead.
+     */
+    return useMemo(
+        () => ({
+            activeBuffer,
+            activePath,
+            buffers,
+            diagnostics,
+            files,
+            applyFormat,
+            changeBuffer,
+            closeBuffer,
+            commitRename,
+            openBuffer,
+            overwriteBuffer,
+            previewFormat,
+            previewRename,
+            refreshFiles,
+            reloadBuffer,
+            saveBuffer,
+            showBuffer,
+            toggleBreakpoint
+        }),
+        [
+            activeBuffer,
+            activePath,
+            applyFormat,
+            buffers,
+            changeBuffer,
+            closeBuffer,
+            commitRename,
+            diagnostics,
+            files,
+            openBuffer,
+            overwriteBuffer,
+            previewFormat,
+            previewRename,
+            refreshFiles,
+            reloadBuffer,
+            saveBuffer,
+            showBuffer,
+            toggleBreakpoint
+        ]
+    )
 }

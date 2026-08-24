@@ -1,6 +1,6 @@
 import {Button} from '@astryxdesign/core/Button'
 import {Card} from '@astryxdesign/core/Card'
-import {Heading} from '@astryxdesign/core/Heading'
+import {Heading} from '@astryxdesign/core/Text'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'

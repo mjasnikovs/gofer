@@ -201,6 +201,40 @@ describe('the AI connection form', () => {
         })
     })
 
+    /*
+     * The catalogue is keyed on the driver and on nothing else. The request that carries it is built
+     * from the whole draft, so the tab is one careless dependency away from sending one per
+     * character typed into the address beside it.
+     *
+     * Two things stop that — the effect's list, and the ref that remembers which driver was asked —
+     * and this fails only when both are gone, which is the honest shape: it asserts the property,
+     * not either mechanism.
+     */
+    it('asks a driver for its catalogue once, however much is typed afterwards', async () => {
+        answer({list_ai_models: serverModels})
+        const user = userEvent.setup()
+        await open()
+
+        const listings = () => tauri.invoke.mock.calls.filter(call => call[0] === 'list_ai_models')
+        expect(listings()).toHaveLength(1)
+
+        await user.clear(screen.getByLabelText(/Base URL/))
+        await user.type(screen.getByLabelText(/Base URL/), 'https://ai.example.com/v1')
+        await user.clear(screen.getByLabelText(/Model ID/))
+        await user.type(screen.getByLabelText(/Model ID/), 'big-model')
+        await flush()
+
+        expect(listings()).toHaveLength(1)
+
+        // Changing driver is the one edit that does ask again, because the answer would be a
+        // different server's.
+        await user.click(screen.getByRole('combobox', {name: 'AI driver'}))
+        await user.click(screen.getByRole('option', {name: 'ChatGPT subscription'}))
+        await flush()
+
+        expect(listings()).toHaveLength(2)
+    })
+
     it('reports a save the backend refused', async () => {
         answer({save_settings: new Error('credential store is locked')})
         await open()
@@ -251,11 +285,15 @@ describe('the AI connection form', () => {
         await user.click(screen.getByRole('option', {name: /Qwen3 Coder/}))
         await flush()
 
-        await user.click(screen.getByRole('button', {name: 'Reasoning: off'}))
-        await user.click(screen.getByRole('menuitem', {name: 'high'}))
+        // A field now, not a menu: the level has its own label and shows its value in the control.
+        // The starting value is asserted first, or this passes on a picker that already read `high`
+        // and never moved.
+        expect(screen.getByRole('combobox', {name: 'Reasoning'})).toHaveTextContent('off')
+        await user.click(screen.getByRole('combobox', {name: 'Reasoning'}))
+        await user.click(screen.getByRole('option', {name: 'high'}))
         await flush()
 
-        expect(screen.getByRole('button', {name: 'Reasoning: high'})).toBeInTheDocument()
+        expect(screen.getByRole('combobox', {name: 'Reasoning'})).toHaveTextContent('high')
     })
 
     it('gives the sub-agent a model of its own without touching the main one', async () => {

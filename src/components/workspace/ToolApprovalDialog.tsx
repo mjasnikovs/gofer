@@ -55,6 +55,10 @@ export function ToolApprovalDialog({prompt, onRespond}: ToolApprovalDialogProps)
             title={title}
             description={`${reasons} The agent is waiting to run ${waitingFor}.`}
             actionLabel='Approve'
+            // Left at its default, the action is `destructive` — so the red button was the one that
+            // said Approve and the quiet one was the refusal. The colour said the opposite of the
+            // words, on the dialog where that reading costs the most.
+            actionVariant='primary'
             cancelLabel='Reject'
             onAction={() => {
                 onRespond(prompt.approvalId, true)

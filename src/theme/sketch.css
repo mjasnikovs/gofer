@@ -1,0 +1,14 @@
+/*
+ * The ground a sketch is drawn on, and the one colour in the window that must not follow the theme.
+ *
+ * A sketch chooses its own background. Left transparent the frame borrows the application's, which
+ * is the one surface a game menu must never be judged against — a light menu on Gofer's dark panel
+ * is a design the user is being asked to approve having never seen it.
+ *
+ * Declared here rather than in `theme.ts`, whose `tokens` map only accepts names Astryx already
+ * knows, and never in `gofer-theme.css`, which is generated and would drop it on the next build.
+ */
+
+:root {
+    --gofer-sketch-paper: #ffffff;
+}

@@ -1,5 +1,4 @@
 import {useEffect, useMemo, useState} from 'react'
-import {Badge} from '@astryxdesign/core/Badge'
 import {Button} from '@astryxdesign/core/Button'
 import {EmptyState} from '@astryxdesign/core/EmptyState'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
@@ -8,6 +7,7 @@ import {Table} from '@astryxdesign/core/Table'
 import {proportional} from '@astryxdesign/core/Table'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
+import {MetadataList, MetadataListItem} from '@astryxdesign/core/MetadataList'
 import {Token} from '@astryxdesign/core/Token'
 import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon'
 import {schedule} from '../../services/clock'
@@ -107,8 +107,11 @@ const PROJECT_SETTING_COLUMNS = [
         width: proportional(1, {minWidth: 80}),
         renderCell: (row: SettingRow) =>
             row.restart ?
-                <Badge
-                    variant='warning'
+                // Token, not Badge: whether a setting needs a restart is a label on the row, and
+                // Badge in this repo is for counts.
+                <Token
+                    size='sm'
+                    color='orange'
                     label='Restart'
                 />
             :   ''
@@ -267,11 +270,14 @@ export function InspectorPanel({
                                         align='center'
                                     >
                                         <Text type='label'>{node.data.name}</Text>
-                                        <Badge
-                                            variant={
-                                                selection?.origin === 'runtime' ?
-                                                    'warning'
-                                                :   'neutral'
+                                        {/*
+                                         * Which tree this node came from is an enumerated state,
+                                         * not a count, so it is a Token like the groups below it.
+                                         */}
+                                        <Token
+                                            size='sm'
+                                            color={
+                                                selection?.origin === 'runtime' ? 'orange' : 'gray'
                                             }
                                             label={
                                                 selection?.origin === 'runtime' ?
@@ -280,66 +286,52 @@ export function InspectorPanel({
                                             }
                                         />
                                     </HStack>
-                                    <VStack gap={1}>
-                                        <Text
-                                            type='supporting'
-                                            color='secondary'
-                                        >
-                                            Type
-                                        </Text>
-                                        <Text>{node.data.type}</Text>
-                                    </VStack>
-                                    <VStack gap={1}>
-                                        <Text
-                                            type='supporting'
-                                            color='secondary'
-                                        >
-                                            Path
-                                        </Text>
-                                        <Text>{node.data.path}</Text>
-                                    </VStack>
-                                    <VStack gap={1}>
-                                        <Text
-                                            type='supporting'
-                                            color='secondary'
-                                        >
-                                            Groups
-                                        </Text>
-                                        {node.data.groups && node.data.groups.length > 0 ?
-                                            <HStack
-                                                gap={1}
-                                                wrap='wrap'
-                                            >
-                                                {node.data.groups.map(group => (
-                                                    <Token
-                                                        key={group}
-                                                        size='sm'
-                                                        label={group}
-                                                    />
-                                                ))}
-                                            </HStack>
-                                        :   <Text color='secondary'>None</Text>}
-                                    </VStack>
-                                    {node.data.connections ?
-                                        <VStack gap={1}>
-                                            <Text
-                                                type='supporting'
-                                                color='secondary'
-                                            >
-                                                Connections
-                                            </Text>
-                                            {node.data.connections.length > 0 ?
-                                                node.data.connections.map(connection => (
-                                                    <Text
-                                                        key={connectionKey(connection)}
-                                                        type='supporting'
-                                                    >
-                                                        {connectionLabel(connection)}
-                                                    </Text>
-                                                ))
+                                    {/*
+                                     * The component for exactly this: a detail panel of labelled
+                                     * values. Hand-rolled out of stacks and supporting text it was
+                                     * four copies of the same two elements, and the label column
+                                     * was a convention rather than a contract.
+                                     */}
+                                    <MetadataList columns='single'>
+                                        <MetadataListItem label='Type'>
+                                            {node.data.type}
+                                        </MetadataListItem>
+                                        <MetadataListItem label='Path'>
+                                            {node.data.path}
+                                        </MetadataListItem>
+                                        <MetadataListItem label='Groups'>
+                                            {node.data.groups && node.data.groups.length > 0 ?
+                                                <HStack
+                                                    gap={1}
+                                                    wrap='wrap'
+                                                >
+                                                    {node.data.groups.map(group => (
+                                                        <Token
+                                                            key={group}
+                                                            size='sm'
+                                                            label={group}
+                                                        />
+                                                    ))}
+                                                </HStack>
                                             :   <Text color='secondary'>None</Text>}
-                                        </VStack>
-                                    :   null}
+                                        </MetadataListItem>
+                                        {node.data.connections ?
+                                            <MetadataListItem label='Connections'>
+                                                {node.data.connections.length > 0 ?
+                                                    <VStack gap={1}>
+                                                        {node.data.connections.map(connection => (
+                                                            <Text
+                                                                key={connectionKey(connection)}
+                                                                type='supporting'
+                                                            >
+                                                                {connectionLabel(connection)}
+                                                            </Text>
+                                                        ))}
+                                                    </VStack>
+                                                :   <Text color='secondary'>None</Text>}
+                                            </MetadataListItem>
+                                        :   null}
+                                    </MetadataList>
                                 </VStack>
                             :   null}
                         </PanelState>

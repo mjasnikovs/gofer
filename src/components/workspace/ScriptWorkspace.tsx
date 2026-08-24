@@ -1,4 +1,4 @@
-import {useCallback, useState} from 'react'
+import {useCallback, useMemo, useState} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -16,7 +16,7 @@ import type {
     ScriptBuffer,
     ScriptBuffers
 } from '../../hooks/useScriptBuffers'
-import type {ScriptPosition} from '../../models/script'
+import type {ScriptDiagnostic, ScriptPosition} from '../../models/script'
 import type {ScriptViews} from '../../models/ui-state'
 import {MonacoDiff} from './MonacoDiff'
 import {ScriptEditor} from './ScriptEditor'
@@ -41,6 +41,12 @@ type RenameTarget = Readonly<{
     position: ScriptPosition
     name: string
 }>
+
+/** Shared so a file with no published diagnostics does not hand Monaco a new array each render. */
+const NO_DIAGNOSTICS: readonly ScriptDiagnostic[] = []
+
+/** The same, for the open-path list when nothing is open. */
+const NO_PATHS: readonly string[] = []
 
 const DIFF_HEIGHT = 420
 
@@ -85,8 +91,24 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
     const [renameTarget, setRenameTarget] = useState<RenameTarget>()
     const [renamePreview, setRenamePreview] = useState<RenamePreview>()
 
-    const openPaths = buffers.map(buffer => buffer.path)
-    const activeDiagnostics = activePath ? (diagnostics[activePath] ?? []) : []
+    /*
+     * Both of these are effect dependencies inside `ScriptEditor` — the open list drives model
+     * disposal, the diagnostics drive `setModelMarkers`. Minted fresh in render they moved on every
+     * keystroke, so Monaco re-disposed and re-marked per character typed. The empty fallback is
+     * shared rather than built, because a file the language server has not published for is the
+     * common case, not the exception.
+     *
+     * Keyed on the paths themselves and not on `buffers`. Typing dispatches `edited`, which rebuilds
+     * the buffer array, so a memo over `[buffers]` is handed a new array per character and holds
+     * exactly as poorly as no memo at all. What the disposal effect actually cares about is which
+     * files are open, and that changes only when a tab opens or closes.
+     */
+    const openPathKey = buffers.map(buffer => buffer.path).join('\n')
+    const openPaths = useMemo(
+        () => (openPathKey === '' ? NO_PATHS : openPathKey.split('\n')),
+        [openPathKey]
+    )
+    const activeDiagnostics = (activePath ? diagnostics[activePath] : undefined) ?? NO_DIAGNOSTICS
 
     const open = useCallback(
         (path: string) => {
@@ -195,6 +217,9 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
                         <Button
                             label='Save'
                             size='sm'
+                            // Not primary, for the reason measured on `Run` in the Game panel: a
+                            // clean buffer disables it, and a disabled accent fill loses more
+                            // contrast than the secondary it replaced. The dialogs keep theirs.
                             isDisabled={!activeBuffer?.dirty}
                             clickAction={() => {
                                 if (activePath) save(activePath)

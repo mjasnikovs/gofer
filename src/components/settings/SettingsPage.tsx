@@ -45,6 +45,14 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
     /** Runs one task, and owns its began / failed / ended. See `runSettingsTask`. */
     const run = (task: SettingsTask, title: string, work: () => Promise<void>) =>
         runSettingsTask(dispatchAny, task, title, work)
+    /*
+     * A fresh object every render, on purpose.
+     *
+     * It was briefly memoised "so a tab can honestly depend on it"; no tab did, and the memo listed
+     * `state`, so it changed on every keystroke regardless. An effect that must read the whole draft
+     * but may only re-run when the driver changes wants `useEffectEvent`, not a stable object — see
+     * the AI tab.
+     */
     const view: SettingsView = {state, dispatch, run}
     const {tab} = state
 
@@ -86,7 +94,9 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         }
 
         void load()
-    }, [])
+        // `dispatch` is `useReducer`'s, so this list is stable and the ref above is what keeps the
+        // load to one. Listed rather than elided because the alias hides that from the linter.
+    }, [dispatch])
 
     const ai = useAiTab(view)
     const prompt = usePromptTab(view)

@@ -1,7 +1,8 @@
-import {useCallback, useEffect, useRef, useState} from 'react'
+import {useCallback, useLayoutEffect, useRef, useState} from 'react'
 import {IconButton} from '@astryxdesign/core/IconButton'
 import {Icon} from '@astryxdesign/core/Icon'
 import MagnifyingGlassPlusIcon from '@heroicons/react/24/outline/MagnifyingGlassPlusIcon'
+import {VStack} from '@astryxdesign/core/Stack'
 import {sketchDocument} from '../../models/sketch'
 
 type SketchFrameProps = Readonly<{
@@ -107,7 +108,16 @@ export function SketchFrame({
         setDrawn(document.documentElement.scrollHeight)
     }, [onBlocked])
 
-    useEffect(() => {
+    /*
+     * A layout effect, so the first measurement lands before the browser paints.
+     *
+     * `scale` is 0 until the column has been measured, and at zero the whole frame is a box of no
+     * height. Measured in a passive effect that arrives after the paint, so every mount showed one
+     * frame of nothing and then jumped the rest of the panel down by the height of a sketch. It was
+     * always wrong on first open; it became wrong on *every* open when the closed rows stopped
+     * being kept mounted.
+     */
+    useLayoutEffect(() => {
         const element = column.current
         if (!element) return
         const measure = () => {
@@ -127,16 +137,16 @@ export function SketchFrame({
     }, [])
 
     return (
-        <div
+        <VStack
             ref={column}
+            width='100%'
+            maxWidth='100%'
+            height={height * scale}
             style={{
                 // A flex or grid item sizes itself from its content unless told not to, and the
                 // content here is 1280 pixels wide however small the column is. Two sketches side by
-                // side became one sketch and a sliver.
-                width: '100%',
-                minWidth: 0,
-                maxWidth: '100%',
-                height: height * scale
+                // side became one sketch and a sliver. `minWidth` has no prop; the rest do.
+                minWidth: 0
             }}
         >
             {/*
@@ -147,11 +157,12 @@ export function SketchFrame({
              * the picture it belongs to. Centred, because a sketch off to one side under a
              * full-width button reads as a mistake.
              */}
-            <div
+            <VStack
+                width={canvasSize.width * scale}
+                height={height * scale}
                 style={{
+                    // `position`, `margin` and `overflow` have no props; the sizing does.
                     position: 'relative',
-                    width: canvasSize.width * scale,
-                    height: height * scale,
                     margin: '0 auto',
                     overflow: 'hidden'
                 }}
@@ -180,11 +191,20 @@ export function SketchFrame({
                         // The sketch chooses its own ground. Left transparent it would borrow this
                         // application's, which is the one colour a game menu must not be judged
                         // against.
-                        background: '#ffffff'
+                        // The fallback is not decoration: transparent is the one value this must
+                        // never take, so the literal stays here as the floor if the sheet that
+                        // defines the token ever fails to load.
+                        background: 'var(--gofer-sketch-paper, #ffffff)'
                     }}
                 />
                 {onOpen && (
-                    <div style={{position: 'absolute', top: 8, right: 8}}>
+                    <VStack
+                        style={{
+                            position: 'absolute',
+                            top: 'var(--spacing-2)',
+                            right: 'var(--spacing-2)'
+                        }}
+                    >
                         <IconButton
                             label={openLabel}
                             icon={<Icon icon={MagnifyingGlassPlusIcon} />}
@@ -193,9 +213,9 @@ export function SketchFrame({
                             elevation='med'
                             onClick={onOpen}
                         />
-                    </div>
+                    </VStack>
                 )}
-            </div>
-        </div>
+            </VStack>
+        </VStack>
     )
 }

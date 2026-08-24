@@ -44,7 +44,12 @@ type NavigationProps = Readonly<{
     onNewTask: () => void
     onOpenTask: (taskId: string) => void
     onDeleteTask: (taskId: string) => void
-    onSideNavChange: (sideNav: SideNavLayout) => void
+    /*
+     * An updater, not a value. `SideNav` answers one expand with two callbacks in the same tick —
+     * the collapse first, then the resize — and both used to spread the same captured prop, so the
+     * width write put the stale `isCollapsed` straight back and opening the sidebar was never kept.
+     */
+    onSideNavChange: (change: (current: SideNavLayout) => SideNavLayout) => void
 }>
 
 type TaskRowProps = Readonly<{
@@ -176,7 +181,7 @@ export function Navigation({
                 collapsible={{
                     defaultIsCollapsed: sideNav.isCollapsed,
                     onCollapsedChange: isCollapsed => {
-                        onSideNavChange({...sideNav, isCollapsed})
+                        onSideNavChange(current => ({...current, isCollapsed}))
                     }
                 }}
                 resizable={{
@@ -184,7 +189,7 @@ export function Navigation({
                     minWidth: SIDE_NAV_MIN,
                     maxWidth: SIDE_NAV_MAX,
                     onWidthChange: width => {
-                        if (isSideNavWidth(width)) onSideNavChange({...sideNav, width})
+                        if (isSideNavWidth(width)) onSideNavChange(current => ({...current, width}))
                     }
                 }}
                 header={

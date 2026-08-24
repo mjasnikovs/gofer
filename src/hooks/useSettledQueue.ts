@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from 'react'
+import {useCallback, useEffect, useRef, useState} from 'react'
 import {isTauri, listen} from '../services/desktop'
 import type {DesktopEvent} from '../services/desktop'
 
@@ -26,6 +26,20 @@ export function useSettledQueue<T>({
     keyOf: (prompt: T) => string
 }>) {
     const [queue, setQueue] = useState<readonly T[]>([])
+    /*
+     * The key function, held rather than depended on.
+     *
+     * Listed as a dependency it decided the subscription's lifetime: a caller that writes
+     * `keyOf={prompt => prompt.id}` inline would tear the two listeners down and register them
+     * again on every render, and a prompt announced in that gap reaches nobody — a paused agent
+     * with no card to answer it. It also said one thing to the effect and another to `settle`,
+     * which read the mount's copy through an `exhaustive-deps` suppression. One ref answers both,
+     * always with the latest.
+     */
+    const identify = useRef(keyOf)
+    useEffect(() => {
+        identify.current = keyOf
+    }, [keyOf])
 
     useEffect(() => {
         if (!isTauri()) return
@@ -42,9 +56,13 @@ export function useSettledQueue<T>({
                 if (isCancelled) return
                 const arriving = event.payload as T
                 setQueue(previous =>
-                    previous.some(prompt => keyOf(prompt) === keyOf(arriving)) ? previous : (
-                        [...previous, arriving]
-                    )
+                    (
+                        previous.some(
+                            prompt => identify.current(prompt) === identify.current(arriving)
+                        )
+                    ) ?
+                        previous
+                    :   [...previous, arriving]
                 )
             })
         )
@@ -53,14 +71,14 @@ export function useSettledQueue<T>({
                 if (isCancelled) return
                 const key = settledKey(event.payload)
                 if (key === undefined) return
-                setQueue(previous => previous.filter(prompt => keyOf(prompt) !== key))
+                setQueue(previous => previous.filter(prompt => identify.current(prompt) !== key))
             })
         )
         return () => {
             isCancelled = true
             for (const dispose of disposers) dispose()
         }
-    }, [requestEvent, settledEvent, keyOf])
+    }, [requestEvent, settledEvent])
 
     /**
      * Drops one prompt without waiting for its settled event.
@@ -70,9 +88,7 @@ export function useSettledQueue<T>({
      * is the correct outcome rather than a race.
      */
     const settle = useCallback((key: string) => {
-        setQueue(previous => previous.filter(prompt => keyOf(prompt) !== key))
-        // `keyOf` is read through the closure rather than listed, so answering never re-subscribes.
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        setQueue(previous => previous.filter(prompt => identify.current(prompt) !== key))
     }, [])
 
     return {queue, settle}

@@ -63,6 +63,10 @@ export function MergeConflictDialog({
                 :   `The task and the project both changed ${namedConflicts(conflicts)}. Gofer can bring the project's branch into this task and reconcile them, then you can merge again. Nothing is committed while a file still holds both versions.`
             }
             actionLabel={unfinished ? 'Discard the merge' : 'Let Gofer resolve it'}
+            // Only one of these two branches throws work away. Left at the default both were
+            // destructive, so bringing the project's branch in — which commits nothing — was
+            // painted exactly like discarding a merge in progress.
+            actionVariant={unfinished ? 'destructive' : 'primary'}
             cancelLabel={unfinished ? 'Leave it open' : 'Leave it to me'}
             onAction={unfinished ? onDiscard : onResolve}
             onOpenChange={isOpen => {

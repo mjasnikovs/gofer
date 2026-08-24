@@ -118,6 +118,32 @@ describe('the sketches panel', () => {
     })
 
     /**
+     * Closing a row throws its frame away. It must not throw away what the row cost to fetch.
+     *
+     * Only the open row is built, so shutting one drops its iframe and its observer — which is the
+     * whole point, and is also the moment a cache keyed on the open row would quietly stop being a
+     * cache. The gesture here is the plainest one there is: the same trigger, twice.
+     */
+    it('keeps what it read when the same row is shut and opened again', async () => {
+        const {log} = backend([sketch()])
+        await open()
+
+        await userEvent.click(screen.getByText('Centered overlay'))
+        await flush()
+        expect(screen.getByTitle('Sketch')).toBeInTheDocument()
+
+        await userEvent.click(screen.getByText('Centered overlay'))
+        await flush()
+        expect(screen.queryByTitle('Sketch')).not.toBeInTheDocument()
+
+        await userEvent.click(screen.getByText('Centered overlay'))
+        await flush()
+
+        expect(screen.getByTitle('Sketch')).toBeInTheDocument()
+        expect(log.sketchReads).toEqual(['question-1-run'])
+    })
+
+    /**
      * A revision overwrites the layout under the same identifier, so the cache has to let go of it.
      *
      * `new_sketch_id` is per question, not per round: every revision of one question upserts the

@@ -378,9 +378,10 @@ function PlanButton() {
             icon={<Icon icon={MapIcon} />}
             isDisabled={meta.isStreaming || meta.isSavingAttachments || !state.draft.trim()}
             tooltip='Read the project and write a specification first. Takes several minutes.'
-            onClick={() => {
-                void actions.plan(state.draft)
-            }}
+            // `clickAction`, not `onClick`: planning takes minutes, so a button that gave no pending
+            // state stayed clickable while the plan was already running. `clickAction` is the prop
+            // that awaits the promise and disables for its duration.
+            clickAction={() => actions.plan(state.draft)}
         />
     )
 }

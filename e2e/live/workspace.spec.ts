@@ -975,11 +975,14 @@ describe('the live workspace', () => {
         })
 
         it('offers the thinking levels the configured model supports', async () => {
-            await clickSelector(
-                '//button[starts-with(normalize-space(.), "Reasoning:")]',
-                'the reasoning menu'
-            )
-            await expectSelector('[role="menuitem"]')
+            /*
+             * A labelled field, not a menu. It used to be a `DropdownMenu` whose button read
+             * "Reasoning: off", so the level was reachable only through the button's own text — and
+             * an XPath on that text also matched the composer's identical control, which is still
+             * mounted behind this dialog.
+             */
+            await clickControl('Reasoning')
+            await expectSelector('[role="option"]')
             await browser.keys('Escape')
         })
 

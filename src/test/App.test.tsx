@@ -194,12 +194,14 @@ describe('SettingsPage', () => {
         // state on its own schedule rather than by the time the interaction's promise resolves. On
         // a loaded machine an unwaited click reads the state before it lands and tests the previous
         // intent twice, so every interaction here waits for the render that proves it took effect.
-        await user.type(screen.getByPlaceholderText('Stored securely'), ' new-secret ')
+        // By label: a stored key no longer puts a sentence in the placeholder, because a
+        // placeholder reads as a typed value.
+        await user.type(screen.getByLabelText(/^API key/), ' new-secret ')
         // `toHaveValue` rather than `findByDisplayValue`: the surrounding spaces are the point of
         // this key, and the display-value query normalizes them away before it compares.
         await flush()
 
-        expect(screen.getByPlaceholderText('Stored securely')).toHaveValue(' new-secret ')
+        expect(screen.getByLabelText(/^API key/)).toHaveValue(' new-secret ')
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
         const setRequest = tauri.invoke.mock.calls
             .filter(call => call[0] === 'test_ai_connection')

@@ -1,4 +1,4 @@
-import {memo, useCallback, useEffect, useMemo, useRef, useState} from 'react'
+import {memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react'
 import type {ReactNode} from 'react'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -124,18 +124,25 @@ function useTabWithTheQuestionOnIt(openCenterTab: (tab: CenterTab) => void) {
 
 /** Tracks the one breakpoint the responsive contract names. */
 function useNarrowViewport() {
-    const [isNarrow, setIsNarrow] = useState(() => window.matchMedia(NARROW_QUERY).matches)
-    useEffect(() => {
-        const media = window.matchMedia(NARROW_QUERY)
-        const update = (event: MediaQueryListEvent) => {
-            setIsNarrow(event.matches)
-        }
-        media.addEventListener('change', update)
-        return () => {
-            media.removeEventListener('change', update)
-        }
-    }, [])
-    return isNarrow
+    /*
+     * Subscribed rather than seeded and then listened to. A `useState` initialiser reads the match
+     * during render and the listener only starts after commit, so a viewport that crossed the
+     * breakpoint in between fired nothing and the frame drew the wrong regions until the next
+     * resize. `useSyncExternalStore` re-reads on subscribe, which closes that window.
+     */
+    return useSyncExternalStore(subscribeToWidth, isNarrowNow)
+}
+
+function subscribeToWidth(onChange: () => void) {
+    const media = window.matchMedia(NARROW_QUERY)
+    media.addEventListener('change', onChange)
+    return () => {
+        media.removeEventListener('change', onChange)
+    }
+}
+
+function isNarrowNow() {
+    return window.matchMedia(NARROW_QUERY).matches
 }
 
 /**
@@ -341,22 +348,43 @@ function FrameRegions({
         [call, debug, dispatch, ensureReady, report]
     )
 
+    /*
+     * Depending on the member, not the container. `useScriptBuffers` memoises what it returns, but
+     * that memo lists `buffers` — which typing replaces — so `scripts` still moves on every
+     * keystroke. `openBuffer` does not, so these hold. The breakpoint and open-script effects below
+     * already follow the same rule.
+     */
+    const openBuffer = scripts.openBuffer
+
     const openFile = useCallback(
         (path: string) => {
-            void scripts.openBuffer(path)
+            void openBuffer(path)
             dispatch({type: 'center-tab', tab: 'scripts'})
         },
-        [dispatch, scripts]
+        [dispatch, openBuffer]
     )
 
     const openLocation = useCallback(
         (path: string, line: number) => {
-            void scripts.openBuffer(path)
+            void openBuffer(path)
             dispatch({type: 'center-tab', tab: 'scripts'})
             setReveal({path, line, at: Date.now()})
         },
-        [dispatch, scripts]
+        [dispatch, openBuffer]
     )
+
+    // Wrapped like its neighbours: the explorer's file-tree memo lists this handler, so a fresh
+    // arrow here rebuilt every row of the tree — up to the listing cap — on every frame render.
+    const openScene = useCallback(
+        (path: string) => {
+            void project.openScene(path)
+        },
+        [project]
+    )
+
+    const openMainScene = useCallback(() => {
+        void project.openMainScene()
+    }, [project])
 
     const select = useCallback(
         (next: GodotSelection) => {
@@ -409,12 +437,8 @@ function FrameRegions({
                             selection={selection}
                             onSelect={select}
                             onOpenFile={openFile}
-                            onOpenScene={path => {
-                                void project.openScene(path)
-                            }}
-                            onOpenMainScene={() => {
-                                void project.openMainScene()
-                            }}
+                            onOpenScene={openScene}
+                            onOpenMainScene={openMainScene}
                             onStartSession={startSession}
                         />
                     </LayoutPanel>

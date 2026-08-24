@@ -1,5 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {act, cleanup, render} from '@testing-library/react'
+import {flushSync} from 'react-dom'
+import {createRoot} from 'react-dom/client'
 import {SketchFrame} from './SketchFrame'
 
 afterEach(cleanup)
@@ -126,6 +128,43 @@ describe('SketchFrame', () => {
             />
         )
         expect(container.querySelector('iframe')?.style.transform).toBe('scale(1)')
+    })
+
+    /**
+     * The first frame the browser paints already has the sketch in it.
+     *
+     * The scale is nothing until the column has been measured, and the measurement is what a mount
+     * does. Taken in a passive effect it lands *after* the browser has painted, so every mount put
+     * one frame of a zero-height, zero-scale box on screen and then jumped — which is a blink on
+     * first open and a blink on every reopen now that the closed rows are unmounted.
+     *
+     * `flushSync` commits the render and its layout effects and returns; the passive queue is still
+     * pending. So this is exactly what the browser would have had to paint.
+     */
+    it('has measured itself before the first paint', () => {
+        const container = document.createElement('div')
+        document.body.append(container)
+        const root = createRoot(container)
+        const environment = globalThis as {IS_REACT_ACT_ENVIRONMENT?: boolean | undefined}
+        const wasActing = environment.IS_REACT_ACT_ENVIRONMENT
+        environment.IS_REACT_ACT_ENVIRONMENT = false
+        try {
+            flushSync(() => {
+                root.render(
+                    <SketchFrame
+                        html='<p>hello</p>'
+                        canvasSize={CANVAS}
+                    />
+                )
+            })
+            expect(container.querySelector('iframe')?.style.transform).toBe('scale(0.5)')
+        } finally {
+            environment.IS_REACT_ACT_ENVIRONMENT = wasActing
+            act(() => {
+                root.unmount()
+            })
+            container.remove()
+        }
     })
 
     /**

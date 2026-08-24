@@ -1,4 +1,4 @@
-import {useCallback, useState} from 'react'
+import {useCallback, useEffect, useRef, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {Icon} from '@astryxdesign/core/Icon'
 import ArrowPathIcon from '@heroicons/react/24/outline/ArrowPathIcon'
@@ -54,8 +54,26 @@ export function GameView() {
     const isOffline = isSessionOffline(state)
     const isPlaying = isSessionPlaying(state)
 
+    /*
+     * The session the capture is stamped with has to be the one running when the answer lands, not
+     * the one that was running when this callback was built. `call` never changes identity, so a
+     * `run` that closed over `session` was built once at mount and stamped every capture with the
+     * session of the first render — normally none at all. The retirement check below then read
+     * that as "a session that has ended" and threw the picture away as it arrived.
+     */
+    const live = useRef(session?.sessionId)
+
+    useEffect(() => {
+        live.current = session?.sessionId
+    }, [session?.sessionId])
+
     const run = useCallback(
         (command: GameControl, source: 'game' | 'editor' = 'game') => {
+            // Read when the command is sent, not when it answers. The frame that comes back is a
+            // picture of whatever session `call` addressed just now, so a session that changes while
+            // the command is in flight would otherwise stamp the picture with the wrong one — and a
+            // capture stamped with the live session is never retired.
+            const stamp = live.current
             setIsBusy(true)
             // The old picture goes down with the game it was of, at the moment that game is asked
             // to end — not when its replacement arrives, which is a second later and a whole
@@ -70,8 +88,7 @@ export function GameView() {
                     // A stop answers about the game, not with a picture of it, so it carries no
                     // frame at all — which the map now says, rather than leaving it to be read for.
                     const frame = 'frame' in result ? asFrame(result.frame) : undefined
-                    if (frame)
-                        setTaken({frame, source, at: Date.now(), sessionId: session?.sessionId})
+                    if (frame) setTaken({frame, source, at: Date.now(), sessionId: stamp})
                     // A stop answers with nothing to show, so the last frame is cleared with it.
                     if (command === 'runtime.stop') setTaken(undefined)
                 })
@@ -146,6 +163,15 @@ export function GameView() {
                         <Button
                             label='Run'
                             size='sm'
+                            /*
+                             * Deliberately not primary, which the UI rules allow when it is a
+                             * choice. Measured: this button is disabled whenever no game is
+                             * running, which is most of its life, and Astryx halves the opacity of
+                             * a disabled control. As a primary its label fell to 2.42:1 against its
+                             * own fill — worse than the 3.96:1 it has as a secondary — and the fill
+                             * landed dimmer than the ghost icons beside it. The screen's one
+                             * primary is `Run Game` in the frame header.
+                             */
                             // A second run of a game that is already running can only answer
                             // `already_running`, which is an error the user provoked by pressing a
                             // control the panel was offering. Restart beside it is the action they

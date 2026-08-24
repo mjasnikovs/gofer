@@ -1,7 +1,6 @@
-import {useEffect, useRef, useState} from 'react'
+import {useEffect, useEffectEvent, useRef, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {Divider} from '@astryxdesign/core/Divider'
-import {DropdownMenu} from '@astryxdesign/core/DropdownMenu'
 import {FormLayout} from '@astryxdesign/core/FormLayout'
 import {Grid} from '@astryxdesign/core/Grid'
 import {Icon} from '@astryxdesign/core/Icon'
@@ -42,6 +41,7 @@ import {
 } from '../../models/settings'
 import type {
     AiConnectionProfile,
+    AiConnectionType,
     AiModelOption,
     AiSettings,
     ModelChoice,
@@ -84,10 +84,28 @@ export function useAiTab(view: SettingsView): AiTabView {
         draft?.ai.web.searchProvider ?? 'exa'
     )
     const subagentConnection = draft?.ai.subagent.connection
+    /*
+     * The two drivers, named on their own, because they are the whole of what may send a catalogue
+     * request. Pulled out of the draft here so the effects below can list what they really watch
+     * instead of reaching through an object they must not re-run for.
+     */
+    const driver = draft?.ai.connectionType
+    const subagentDriver = subagentConnection?.connectionType
 
     const modelsFor = useRef<string | undefined>(undefined)
     /** Which connection the sub-agent's model list came from, so it is fetched once per driver. */
     const subagentModelsFor = useRef<string | undefined>(undefined)
+    /*
+     * Which request is the newest, for each of the two lists.
+     *
+     * A monotonic count rather than the driver's name. Naming the driver cannot tell two requests
+     * for the *same* driver apart, and that pair is reachable: a local server that hangs on connect,
+     * then a switch away and back, issues a second request while the first is still open. The first
+     * one's failure would pass a name-keyed guard, clear the "already asked" ref, and make the
+     * second one's success look stale — leaving an empty model picker that nothing re-fills.
+     */
+    const modelsRequest = useRef(0)
+    const subagentModelsRequest = useRef(0)
 
     const [isAuthenticating, setIsAuthenticating] = useState(false)
     const [loginMessage, setLoginMessage] = useState<string | undefined>(undefined)
@@ -102,16 +120,27 @@ export function useAiTab(view: SettingsView): AiTabView {
      * from whatever the file happened to say — including a `false` written before any catalogue had
      * been read. Keyed on the driver rather than the address, because the address is a field the
      * user is still typing.
+     *
+     * An effect event, because the two halves of this pull in opposite directions: the request is
+     * built from the whole draft, and only a change of driver may send one. As a plain effect the
+     * draft, the state and the dispatch were closed over and left off the list. Here they are read
+     * when the event fires, which is the same instant, and the list below is the truth.
      */
-    useEffect(() => {
+    const loadModels = useEffectEvent((asked: AiConnectionType) => {
         if (!draft) return
-        if (modelsFor.current === draft.ai.connectionType) return
-        modelsFor.current = draft.ai.connectionType
+        if (modelsFor.current === asked) return
+        // Which request this is. Switching driver while one is in flight used to let the late answer
+        // dispatch anyway — writing one driver's catalogue, and on ChatGPT its first model, into
+        // whichever connection is live by the time it lands.
+        const asking = modelsRequest.current + 1
+        modelsRequest.current = asking
+        modelsFor.current = asked
         const request = settingsRequest(state)
         if (!request) return
-        const isChatGpt = draft.ai.connectionType === 'openai-codex'
+        const isChatGpt = asked === 'openai-codex'
         void invoke('list_ai_models', {request})
             .then(models => {
+                if (modelsRequest.current !== asking) return
                 dispatch({type: 'models-listed', models})
                 const configured = models.find(
                     model => model.id === activeConnection(draft.ai)?.model.id
@@ -124,6 +153,7 @@ export function useAiTab(view: SettingsView): AiTabView {
                 else if (isChatGpt && models[0]) dispatch({type: 'model-chosen', model: models[0]})
             })
             .catch((error: unknown) => {
+                if (modelsRequest.current !== asking) return
                 modelsFor.current = undefined
                 // A local server that is simply not running is not a settings failure, and saying so
                 // on every open would put a red banner in front of anyone who opens the page first.
@@ -138,29 +168,42 @@ export function useAiTab(view: SettingsView): AiTabView {
                     }
                 })
             })
-    }, [draft?.ai.connectionType])
+    })
+
+    useEffect(() => {
+        if (!driver) return
+        loadModels(driver)
+    }, [driver])
 
     /*
      * The sub-agent's own list, asked for from the connection it names rather than the one the page
      * is showing. `selectAiDriver` is what turns the settings into that connection — the same
      * function the driver control above uses — so the backend resolves the address and the
      * credential exactly as it would if the user had switched to it.
+     *
+     * An effect event for the same reason as the one above.
      */
-    useEffect(() => {
+    const loadSubagentModels = useEffectEvent((asked: AiConnectionType) => {
         if (!draft || !subagentConnection) return
-        if (subagentModelsFor.current === subagentConnection.connectionType) return
-        subagentModelsFor.current = subagentConnection.connectionType
+        if (subagentModelsFor.current === asked) return
+        // Same guard as the parent's: two switches in quick succession left the sub-agent showing
+        // the other connection's catalogue.
+        const asking = subagentModelsRequest.current + 1
+        subagentModelsRequest.current = asking
+        subagentModelsFor.current = asked
         const request = settingsRequest(state)
         if (!request) return
-        const ai = selectAiDriver(draft.ai, subagentConnection.connectionType)
+        const ai = selectAiDriver(draft.ai, asked)
         void invoke('list_ai_models', {request: {...request, settings: {...draft, ai}}})
             .then(models => {
+                if (subagentModelsRequest.current !== asking) return
                 dispatch({type: 'subagent-models-listed', models})
                 // The same re-read the parent gets: what the chosen model can actually be asked.
                 const chosen = models.find(model => model.id === subagentConnection.model.id)
                 if (chosen) dispatch({type: 'subagent-model-reconciled', model: chosen})
             })
             .catch((error: unknown) => {
+                if (subagentModelsRequest.current !== asking) return
                 subagentModelsFor.current = undefined
                 dispatch({
                     type: 'noticed',
@@ -172,7 +215,12 @@ export function useAiTab(view: SettingsView): AiTabView {
                     }
                 })
             })
-    }, [subagentConnection?.connectionType])
+    })
+
+    useEffect(() => {
+        if (!subagentDriver) return
+        loadSubagentModels(subagentDriver)
+    }, [subagentDriver])
 
     const updateAi = (update: Partial<AiSettings>) => {
         dispatch({type: 'ai-changed', update})
@@ -438,26 +486,29 @@ export function useAiTab(view: SettingsView): AiTabView {
                                                 if (model) selectModel(model)
                                             }}
                                         />
+                                        {/*
+                                         * Read-only, not disabled. These three are true values the
+                                         * catalogue answered; disabling dims a real value and puts
+                                         * its explanation behind a tooltip, so a fact the user came
+                                         * to read looked like a broken field.
+                                         */}
                                         <TextInput
                                             label='Context window'
                                             value={connection.model.contextWindow.toLocaleString()}
-                                            isDisabled
-                                            disabledMessage="OpenRouter's catalogue answers this, so there is nothing to type."
-                                            onChange={() => undefined}
+                                            isReadOnly
+                                            description="OpenRouter's catalogue answers this, so there is nothing to type."
                                         />
                                         <TextInput
                                             label='Maximum output tokens'
                                             value={connection.model.maxTokens.toLocaleString()}
-                                            isDisabled
-                                            disabledMessage="OpenRouter's catalogue answers this, so there is nothing to type."
-                                            onChange={() => undefined}
+                                            isReadOnly
+                                            description="OpenRouter's catalogue answers this, so there is nothing to type."
                                         />
                                         <TextInput
                                             label='Accepts'
                                             value={connection.model.input.join(', ')}
-                                            isDisabled
-                                            disabledMessage='What this model takes as input, as OpenRouter describes it.'
-                                            onChange={() => undefined}
+                                            isReadOnly
+                                            description='What this model takes as input, as OpenRouter describes it.'
                                         />
                                     </>
                                 :   <>
@@ -590,24 +641,36 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         updateAi({maxRetries: Number(maxRetries)})
                                     }}
                                 />
-                                <DropdownMenu
-                                    button={{
-                                        label: `Reasoning: ${connection.model.thinkingLevel}`,
-                                        variant: 'secondary'
-                                    }}
-                                    items={thinkingLevelsFor(connection.model).map(level => ({
-                                        label: level,
-                                        onClick: () => {
-                                            updateModel({thinkingLevel: level})
-                                        }
+                                {/*
+                                 * A field, not a menu. The level is one of a fixed set, and drawn as
+                                 * a dropdown it was the only control in this form with no label and
+                                 * no description — its value readable only inside the button's own
+                                 * text.
+                                 */}
+                                <Selector
+                                    label='Reasoning'
+                                    value={connection.model.thinkingLevel}
+                                    description='How much the model is asked to think before it answers. Only the levels this model accepts are offered.'
+                                    options={thinkingLevelsFor(connection.model).map(level => ({
+                                        value: level,
+                                        label: level
                                     }))}
+                                    onChange={chosen => {
+                                        // Selector answers with a plain string; the level is a union.
+                                        // Found in the list rather than cast, so a value the model
+                                        // does not accept can never reach the request.
+                                        const thinkingLevel = thinkingLevelsFor(
+                                            connection.model
+                                        ).find(level => level === chosen)
+                                        if (thinkingLevel) updateModel({thinkingLevel})
+                                    }}
                                 />
                                 {draft.ai.connectionType === 'openai-compatible' && (
                                     <TextInput
                                         label='API dialect'
                                         value='OpenAI chat completions'
-                                        isDisabled
-                                        disabledMessage='The local driver uses OpenAI chat completions.'
+                                        isReadOnly
+                                        description='The local driver uses OpenAI chat completions.'
                                     />
                                 )}
                                 {draft.ai.connectionType === 'openai-compatible' && (
@@ -703,22 +766,23 @@ export function useAiTab(view: SettingsView): AiTabView {
                                                     dispatch({type: 'subagent-model-chosen', model})
                                             }}
                                         />
-                                        <DropdownMenu
-                                            button={{
-                                                label: `Sub-agent reasoning: ${subagentConnection.model.thinkingLevel}`,
-                                                variant: 'secondary'
+                                        <Selector
+                                            label='Sub-agent reasoning'
+                                            value={subagentConnection.model.thinkingLevel}
+                                            description='The level the child is asked to think at, which need not match the parent.'
+                                            options={thinkingLevelsFor(
+                                                subagentConnection.model
+                                            ).map(level => ({value: level, label: level}))}
+                                            onChange={chosen => {
+                                                const thinkingLevel = thinkingLevelsFor(
+                                                    subagentConnection.model
+                                                ).find(level => level === chosen)
+                                                if (thinkingLevel)
+                                                    dispatch({
+                                                        type: 'subagent-thinking-chosen',
+                                                        thinkingLevel
+                                                    })
                                             }}
-                                            items={thinkingLevelsFor(subagentConnection.model).map(
-                                                thinkingLevel => ({
-                                                    label: thinkingLevel,
-                                                    onClick: () => {
-                                                        dispatch({
-                                                            type: 'subagent-thinking-chosen',
-                                                            thinkingLevel
-                                                        })
-                                                    }
-                                                })
-                                            )}
                                         />
                                     </>
                                 )}

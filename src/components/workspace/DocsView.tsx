@@ -1,4 +1,4 @@
-import {useCallback, useState} from 'react'
+import {useCallback, useRef, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {Divider} from '@astryxdesign/core/Divider'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
@@ -22,21 +22,32 @@ export function DocsView() {
     const [error, setError] = useState<GodotError>()
     const [isLoading, setIsLoading] = useState(false)
 
+    /*
+     * Only the newest question gets to answer. Enter is not gated on the spinner the way the button
+     * is, so two searches can be in flight at once — and they resolve in arrival order, which let an
+     * older answer land on top of a newer one and clear the spinner that was still waiting for it.
+     */
+    const latest = useRef(0)
+
     const search = useCallback(() => {
         const asked = question.trim()
         if (asked === '') return
+        const asking = latest.current + 1
+        latest.current = asking
         setIsLoading(true)
         void queryGodotDocs({question: asked, maxPassages: MAX_PASSAGES})
             .then(response => {
+                if (latest.current !== asking) return
                 setPassages(response.passages)
                 setError(undefined)
             })
             .catch((failure: unknown) => {
+                if (latest.current !== asking) return
                 setError(toGodotError(failure))
                 setPassages(undefined)
             })
             .finally(() => {
-                setIsLoading(false)
+                if (latest.current === asking) setIsLoading(false)
             })
     }, [question])
 

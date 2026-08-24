@@ -3,6 +3,7 @@ import {act, cleanup, render, screen} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {Workspace} from './Workspace'
 import {ErrorBoundary} from '../application/ErrorBoundary'
+import type {ComposerActions} from '../../hooks/useComposer'
 import type {Message, StoredChat} from '../../models/chat'
 import type {MonacoStubState} from '../../test/monaco-stub'
 import {createManualScheduler, immediateScheduler, setScheduler} from '../../services/clock'
@@ -17,6 +18,26 @@ import type {ProjectSketch} from '../../models/sketch'
 const tauri = createDesktopFake()
 
 const editor = vi.hoisted(() => ({state: undefined as MonacoStubState | undefined}))
+
+/**
+ * The actions object the composer was handed the first time it rendered.
+ *
+ * The workspace publishes one object for the life of the mount and swaps what it closes over
+ * behind it, so this is the only way to hold the thing a control holds and call it later.
+ */
+const composerProbe = vi.hoisted(() => ({mounted: undefined as ComposerActions | undefined}))
+
+vi.mock('../../hooks/useComposer', async importOriginal => {
+    const real = await importOriginal<typeof import('../../hooks/useComposer')>()
+    return {
+        ...real,
+        useComposer: () => {
+            const value = real.useComposer()
+            composerProbe.mounted ??= value.actions
+            return value
+        }
+    }
+})
 
 vi.mock('../../services/monaco-runtime', async () => {
     const {createMonacoStub} = await import('../../test/monaco-stub')
@@ -853,5 +874,50 @@ describe('Workspace sending a saved sketch to the chat', () => {
 
         const draft = await submitDraft(user)
         expect(draft.split('<p>pause</p>')).toHaveLength(2)
+    })
+})
+
+/*
+ * The composer's actions are one object for the life of the mount, and every control in the
+ * composer is handed it once. What they close over is replaced behind them through a ref, so this
+ * is the only thing holding them to the commit they were called against: an action that read a
+ * stale closure would stop a turn nobody is running, send without the image just attached, or
+ * write the draft under the previous task's key — none of which says anything on screen.
+ */
+describe('Workspace composer actions', () => {
+    beforeEach(() => {
+        composerProbe.mounted = undefined
+    })
+
+    /*
+     * Stop is the sharpest of them: it is not one function with changing state behind it but two
+     * different functions, and which one it is changes when a plan starts. Held from the mount, it
+     * is the chat turn's stop — which does nothing at all when no chat turn is running — so a
+     * stale read here cancels nothing and the plan runs on with the button already pressed.
+     */
+    it('stops the plan that is running now, not the turn it was built against', async () => {
+        const user = userEvent.setup()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        const mounted = composerProbe.mounted
+        expect(mounted).toBeDefined()
+
+        const input = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(input)
+        await user.paste('add a pause menu')
+        await user.click(screen.getByRole('button', {name: 'Execute as plan'}))
+        await flush()
+        const started = tauri.invoke.mock.calls.find(([command]) => command === 'run_task_brief')
+        const {requestId} = (started?.[1] as {request: {requestId: number}}).request
+        announceBrief({type: 'brief-started'})
+        await flush()
+
+        act(() => {
+            mounted?.stop()
+        })
+        await flush()
+
+        expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId})
     })
 })

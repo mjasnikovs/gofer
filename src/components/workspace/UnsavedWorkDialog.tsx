@@ -1,6 +1,7 @@
 import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
-import {HStack, Layout, LayoutContent, LayoutFooter, VStack} from '@astryxdesign/core/Layout'
+import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
+import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 
 type UnsavedWorkDialogProps = Readonly<{

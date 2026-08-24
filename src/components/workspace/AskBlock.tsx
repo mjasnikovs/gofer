@@ -1,4 +1,4 @@
-import {useEffect, useRef, useState} from 'react'
+import {useEffect, useMemo, useRef, useState} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -6,11 +6,12 @@ import {Card} from '@astryxdesign/core/Card'
 import {Collapsible} from '@astryxdesign/core/Collapsible'
 import {Dialog} from '@astryxdesign/core/Dialog'
 import {Grid} from '@astryxdesign/core/Grid'
-import {Heading} from '@astryxdesign/core/Heading'
+import {Heading} from '@astryxdesign/core/Text'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {TextArea} from '@astryxdesign/core/TextArea'
+import {Token} from '@astryxdesign/core/Token'
 import {useAskedQuestion, useUnownedQuestion} from '../../hooks/useUserQuestions'
 import {useOpenCenterTab} from '../../hooks/useCenterTab'
 import {SKETCH_CANVAS, holdsAgreedSketch} from '../../models/sketch'
@@ -207,8 +208,13 @@ function Answered({tool}: Readonly<{tool: ToolActivity}>) {
                     >
                         {summary}
                     </Text>
-                    <Badge
-                        variant={failed ? 'error' : 'neutral'}
+                    {/*
+                     * Token, not Badge. How the call ended is a state, and Badge here is for counts
+                     * — the same rule the Design tab's chapter label already follows.
+                     */}
+                    <Token
+                        size='sm'
+                        color={failed ? 'red' : 'gray'}
                         label={
                             failed ? 'not asked'
                             : agreed ?
@@ -346,12 +352,22 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
      * remounted.
      */
     const [takesFocus] = useState(() => !isVisual && !somebodyIsTyping())
-    // Both sources, unioned. The scan is what the markup asks for and is right immediately; the
-    // listener is what the policy actually refused and catches whatever resolves later.
-    const refused = describeBlocked([
-        ...sketches.flatMap(sketch => remoteReferences(sketch.html)),
-        ...blocked
-    ])
+    /*
+     * Both sources, unioned. The scan is what the markup asks for and is right immediately; the
+     * listener is what the policy actually refused and catches whatever resolves later.
+     *
+     * Memoised because the scan runs five global regexes over each sketch's whole page. In the
+     * render body it re-ran on every keystroke in the answer box, and once a second besides: an
+     * unanswered question keeps a clock running that re-renders the timeline around it.
+     */
+    const refused = useMemo(
+        () =>
+            describeBlocked([
+                ...sketches.flatMap(sketch => remoteReferences(sketch.html)),
+                ...blocked
+            ]),
+        [blocked, sketches]
+    )
     const zoomed = opened === undefined ? undefined : sketches[opened]
     const hasAnswer = answer.length > 0 || picked !== undefined
     // Approving without a pick hands the agent three layouts and the news that the user liked a
@@ -467,9 +483,16 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                                             width='100%'
                                             {...(isRecommended(index) && {
                                                 style: RECOMMENDED_STYLE,
+                                                /*
+                                                 * The same component as the sketch layout's mark,
+                                                 * so one recommendation has one appearance. A Badge
+                                                 * here was neutral-coloured to match but still drew
+                                                 * a 20px pill against the other's square chip —
+                                                 * `endContent` takes any node, so it takes this.
+                                                 */
                                                 endContent: (
-                                                    <Badge
-                                                        variant='success'
+                                                    <Token
+                                                        size='sm'
                                                         label='Recommended'
                                                     />
                                                 )
@@ -518,7 +541,7 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                                     <HStack
                                         gap={2}
                                         align='center'
-                                        height={28}
+                                        height='var(--spacing-7)'
                                     >
                                         {/*
                                          * The label is the only thing in a column whose width comes
@@ -538,9 +561,10 @@ function Asking({prompt, onAnswer, canAskAgain = true}: AskingProps) {
                                                 {sketch.label}
                                             </Text>
                                         </StackItem>
+                                        {/* The same mark the option layout draws. */}
                                         {index === 0 && sketches.length > 1 && (
-                                            <Badge
-                                                variant='success'
+                                            <Token
+                                                size='sm'
                                                 label='Recommended'
                                             />
                                         )}

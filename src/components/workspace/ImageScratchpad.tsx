@@ -260,6 +260,12 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
 
     const isRound = ROUND_MODES.includes(mode)
     const drawWidth = isRound ? roundWidth : width
+    // The round cursor is an SVG built and URL-encoded per call. In the render return that was once
+    // per pointer frame, because a stroke in progress sets state on every move.
+    const brushCursor = useMemo(
+        () => (isRound ? roundCursor(drawWidth * scale, color) : undefined),
+        [color, drawWidth, isRound, scale]
+    )
     const shapes = moving ?? history.shapes
     // Memoised because it is what the redraw watches: a fresh array per render repaints per render.
     const painted = useMemo(
@@ -590,10 +596,7 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
                             tabIndex={0}
                             style={{
                                 ...CANVAS_STYLE,
-                                cursor:
-                                    hovered ? 'move'
-                                    : isRound ? roundCursor(drawWidth * scale, color)
-                                    : MODE_CURSOR[mode]
+                                cursor: hovered ? 'move' : (brushCursor ?? MODE_CURSOR[mode])
                             }}
                             onPointerDown={onPointerDown}
                             onPointerMove={onPointerMove}

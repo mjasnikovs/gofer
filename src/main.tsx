@@ -13,6 +13,7 @@ import './theme/chat.css'
 import './theme/editor.css'
 import './theme/inputs.css'
 import './theme/rows.css'
+import './theme/sketch.css'
 import './theme/tool-calls.css'
 import './theme/toolbar.css'
 

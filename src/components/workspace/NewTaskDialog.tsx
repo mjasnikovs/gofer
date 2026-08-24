@@ -1,8 +1,9 @@
 import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
-import {Heading} from '@astryxdesign/core/Heading'
+import {Heading} from '@astryxdesign/core/Text'
 import {SelectableCard} from '@astryxdesign/core/SelectableCard'
-import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
+import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout'
+import {HStack, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {useState} from 'react'
 
@@ -73,72 +74,84 @@ export function NewTaskDialog({isOpen, onOpenChange, changes, onCreate}: NewTask
                 if (!next) close()
             }}
         >
-            <DialogHeader
-                title='New task'
-                subtitle='Each task gets its own branch.'
-            />
-            <VStack
-                gap={4}
-                padding={4}
-            >
-                <VStack gap={2}>
-                    <Text type='label'>
-                        {changes.length === 1 ?
-                            '1 file is not committed yet'
-                        :   `${String(changes.length)} files are not committed yet`}
-                    </Text>
-                    <VStack gap={0}>
-                        {changes.slice(0, NAMED_CHANGES).map(change => (
-                            <Text
-                                type='supporting'
-                                key={change.path}
-                            >
-                                {change.path}
+            {/*
+             * The same frame `UnsavedWorkDialog` uses: header, content, footer. Flat, the actions
+             * sat in the body with none of the footer's treatment, and the header drew no close
+             * button at all because it was never given the handler that makes one.
+             */}
+            <Layout
+                header={
+                    <DialogHeader
+                        title='New task'
+                        subtitle='Each task gets its own branch.'
+                        onOpenChange={close}
+                    />
+                }
+                content={
+                    <LayoutContent>
+                        <VStack gap={2}>
+                            <Text type='label'>
+                                {changes.length === 1 ?
+                                    '1 file is not committed yet'
+                                :   `${String(changes.length)} files are not committed yet`}
                             </Text>
-                        ))}
-                        {changes.length > NAMED_CHANGES && (
-                            <Text type='supporting'>
-                                and {String(changes.length - NAMED_CHANGES)} more
-                            </Text>
-                        )}
-                    </VStack>
-                    {CHANGE_CHOICES.map(choice => (
-                        <SelectableCard
-                            key={choice.title}
-                            label={choice.title}
-                            padding={3}
-                            isSelected={bring === choice.bring}
-                            onChange={() => {
-                                setBring(choice.bring)
-                            }}
-                        >
-                            <VStack gap={1}>
-                                <Heading level={4}>{choice.title}</Heading>
-                                <Text type='supporting'>{choice.detail}</Text>
+                            <VStack gap={0}>
+                                {changes.slice(0, NAMED_CHANGES).map(change => (
+                                    <Text
+                                        type='supporting'
+                                        key={change.path}
+                                    >
+                                        {change.path}
+                                    </Text>
+                                ))}
+                                {changes.length > NAMED_CHANGES && (
+                                    <Text type='supporting'>
+                                        and {String(changes.length - NAMED_CHANGES)} more
+                                    </Text>
+                                )}
                             </VStack>
-                        </SelectableCard>
-                    ))}
-                </VStack>
-                <HStack
-                    gap={2}
-                    vAlign='center'
-                >
-                    <StackItem size='fill' />
-                    <Button
-                        label='Cancel'
-                        variant='ghost'
-                        onClick={close}
-                    />
-                    <Button
-                        label='Create task'
-                        variant='primary'
-                        onClick={() => {
-                            onCreate(bring)
-                            close()
-                        }}
-                    />
-                </HStack>
-            </VStack>
+                            {CHANGE_CHOICES.map(choice => (
+                                <SelectableCard
+                                    key={choice.title}
+                                    label={choice.title}
+                                    padding={3}
+                                    isSelected={bring === choice.bring}
+                                    onChange={() => {
+                                        setBring(choice.bring)
+                                    }}
+                                >
+                                    <VStack gap={1}>
+                                        <Heading level={4}>{choice.title}</Heading>
+                                        <Text type='supporting'>{choice.detail}</Text>
+                                    </VStack>
+                                </SelectableCard>
+                            ))}
+                        </VStack>
+                    </LayoutContent>
+                }
+                footer={
+                    <LayoutFooter>
+                        <HStack
+                            gap={2}
+                            hAlign='end'
+                        >
+                            <Button
+                                label='Cancel'
+                                variant='ghost'
+                                onClick={close}
+                            />
+                            <Button
+                                label='Create task'
+                                variant='primary'
+                                onClick={() => {
+                                    onCreate(bring)
+                                    close()
+                                }}
+                            />
+                        </HStack>
+                    </LayoutFooter>
+                }
+            />
         </Dialog>
     )
 }

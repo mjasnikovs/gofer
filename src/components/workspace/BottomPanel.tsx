@@ -1,4 +1,4 @@
-import {useCallback, useMemo, useState} from 'react'
+import {useCallback, useDeferredValue, useMemo, useState} from 'react'
 import {Badge} from '@astryxdesign/core/Badge'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
@@ -115,9 +115,19 @@ export function BottomPanel({
         minSeverity,
         contains
     })
-    // The archive is searched, not followed: it holds the sessions that already stopped, so it
-    // answers a query rather than a filter over what is on screen.
-    const history = useLogHistory({enabled: isOutput && scope === 'history', query: contains})
+    /*
+     * The archive is searched, not followed: it holds the sessions that already stopped, so it
+     * answers a query rather than a filter over what is on screen.
+     *
+     * Deferred, because that query is a round trip. The box keeps its own value and stays
+     * responsive while the search lags behind it.
+     *
+     * A lower priority, not a debounce: React still commits an intermediate value when renders are
+     * cheap, so this reduces how many searches a typed filter issues rather than reducing it to one.
+     * A real debounce would need a timer, and the searches are already cancelled correctly.
+     */
+    const query = useDeferredValue(contains)
+    const history = useLogHistory({enabled: isOutput && scope === 'history', query})
 
     const listed = useMemo(() => problems(diagnostics), [diagnostics])
     const imported = useMemo(
@@ -173,6 +183,9 @@ export function BottomPanel({
                     <Button
                         label='Launch'
                         size='sm'
+                        // Not primary, for the reason measured on `Run` in the Game panel: this is
+                        // disabled until a session exists, and a disabled accent fill reads dimmer
+                        // than the ghost icons next to it.
                         isDisabled={isOffline || debug.isLaunched || debug.isBusy}
                         clickAction={() => {
                             void debug.launch()

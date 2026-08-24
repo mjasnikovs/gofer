@@ -1,4 +1,12 @@
-import {useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react'
+import {
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+    useSyncExternalStore
+} from 'react'
 import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
@@ -24,7 +32,7 @@ import {ChatColumnContext} from '../../hooks/useChatColumn'
 import type {ChatColumn as ChatColumnValue} from '../../hooks/useChatColumn'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
 import {ComposerContext} from '../../hooks/useComposer'
-import type {Composer} from '../../hooks/useComposer'
+import type {Composer, ComposerActions} from '../../hooks/useComposer'
 import {appendReference} from '../../utils/chat-references'
 import type {ChatReference} from '../../utils/chat-references'
 import {ChatColumn} from './ChatColumn'
@@ -443,7 +451,9 @@ export function Workspace({
         }
     }
 
-    const usage = messageUsage(messages)
+    // Memoised because `composerValue` depends on it: the counts are a fresh object per call, so
+    // computing them during render made that memo miss on every render and hold nothing.
+    const usage = useMemo(() => messageUsage(messages), [messages])
     /** The model the composer is about to send to, which is the live connection's. */
     const model = activeModel(settings)
     const supportsImages = Boolean(model?.input.includes('image'))
@@ -536,46 +546,110 @@ export function Workspace({
         }
     }
 
-    const composerValue: Composer = {
-        state: {
+    /*
+     * The actions keep their identity for the life of the workspace; only what they close over is
+     * replaced. Several of them read the draft and the attachment list, so a plain `useCallback`
+     * would still be rebuilt on every keystroke — and this value is published to every control in
+     * the composer, which is replaced once per streamed token besides.
+     *
+     * The refresh is a layout effect with no dependency list, which is the only kind of effect
+     * that cannot lose the race. React flushes passive effects synchronously at the end of a
+     * commit only when the update arrived at sync priority — `commitRoot` in react-dom 19.2 does
+     * it under `0 !== (pendingEffectsLanes & 3)`. A commit at default priority, which is every
+     * `setState` after an `await` and so every attached image, instead posts the flush as a
+     * scheduler task; a browser that runs input ahead of a MessageChannel task can dispatch a
+     * click before it. A layout effect runs inside the commit, so the ref is rewritten before
+     * anything at all can be dispatched against that commit.
+     */
+    const liveActions: ComposerActions = {
+        applyModel,
+        applyThinkingLevel,
+        attachClipboardImage,
+        changeDraft: setDraft,
+        editAttachment,
+        plan: planMessage,
+        removeAttachment,
+        selectAttachments,
+        stop: isBriefRunning ? stopBrief : stop,
+        submit: submitMessage
+    }
+    const newest = useRef(liveActions)
+
+    useLayoutEffect(() => {
+        newest.current = liveActions
+    })
+
+    const actions = useMemo<ComposerActions>(
+        () => ({
+            applyModel: (chosen, previous) => newest.current.applyModel(chosen, previous),
+            applyThinkingLevel: (level, previous) =>
+                newest.current.applyThinkingLevel(level, previous),
+            attachClipboardImage: () => newest.current.attachClipboardImage(),
+            changeDraft: value => {
+                newest.current.changeDraft(value)
+            },
+            editAttachment: (attachmentId, file, shapes) =>
+                newest.current.editAttachment(attachmentId, file, shapes),
+            plan: value => newest.current.plan(value),
+            removeAttachment: attachmentId => {
+                newest.current.removeAttachment(attachmentId)
+            },
+            selectAttachments: files => newest.current.selectAttachments(files),
+            stop: () => {
+                newest.current.stop()
+            },
+            submit: value => newest.current.submit(value)
+        }),
+        []
+    )
+
+    const composerValue = useMemo<Composer>(
+        () => ({
+            state: {
+                draft,
+                draftAttachments,
+                selectedModel: model?.name ?? model?.id ?? 'Loading model…',
+                thinkingLevel: model?.thinkingLevel ?? 'off',
+                usage,
+                ...(streamError && {streamError})
+            },
+            actions,
+            meta: {
+                canAttachImages: supportsImages && !isBusy && !isSavingAttachments && isTauri(),
+                contextWindow: model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+                isSavingAttachments,
+                // The chat has to have been read before this can mean anything: an unread task
+                // reports no messages, which is the same shape as a task that genuinely has none.
+                isPlanOffered: isChatLoaded && !hasConversation && !isPlanStarted,
+                isStreaming: isBusy,
+                models,
+                supportsImages,
+                // Asked, not re-derived. The composer's copy of this rule read `reasoning` alone, so
+                // a chat template that thinks and names no efforts — llama.cpp reports exactly that
+                // pair for a Qwen build — was offered `minimal` through `max` here and `off`/`on` in
+                // settings. The template raises on an effort it does not know, and llama.cpp turns
+                // that into an HTTP 500 on every request of the turn.
+                thinkingLevels: model ? thinkingLevelsFor(model) : NO_THINKING_LEVELS,
+                ...(settings && {settings})
+            }
+        }),
+        [
+            actions,
             draft,
             draftAttachments,
-            selectedModel: model?.name ?? model?.id ?? 'Loading model…',
-            thinkingLevel: model?.thinkingLevel ?? 'off',
-            usage,
-            ...(streamError && {streamError})
-        },
-        actions: {
-            applyModel,
-            applyThinkingLevel,
-            attachClipboardImage,
-            changeDraft: setDraft,
-            editAttachment,
-            plan: planMessage,
-            removeAttachment,
-            selectAttachments,
-            stop: isBriefRunning ? stopBrief : stop,
-            submit: submitMessage
-        },
-        meta: {
-            canAttachImages: supportsImages && !isBusy && !isSavingAttachments && isTauri(),
-            contextWindow: model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+            hasConversation,
+            isBusy,
+            isChatLoaded,
+            isPlanStarted,
             isSavingAttachments,
-            // The chat has to have been read before this can mean anything: an unread task reports
-            // no messages, which is the same shape as a task that genuinely has none.
-            isPlanOffered: isChatLoaded && !hasConversation && !isPlanStarted,
-            isStreaming: isBusy,
+            model,
             models,
+            settings,
+            streamError,
             supportsImages,
-            // Asked, not re-derived. The composer's copy of this rule read `reasoning` alone, so a
-            // chat template that thinks and names no efforts — llama.cpp reports exactly that pair
-            // for a Qwen build — was offered `minimal` through `max` here and `off`/`on` in
-            // settings. The template raises on an effort it does not know, and llama.cpp turns that
-            // into an HTTP 500 on every request of the turn.
-            thinkingLevels: model ? thinkingLevelsFor(model) : NO_THINKING_LEVELS,
-            ...(settings && {settings})
-        }
-    }
+            usage
+        ]
+    )
 
     // Every panel below the header can name what it shows in the message being written.
     const references = useMemo(
@@ -598,18 +672,33 @@ export function Workspace({
         [setDraft]
     )
 
-    const chatColumn: ChatColumnValue = {
-        attachmentPreviews,
-        isStreaming: isBusy,
-        messages,
-        scrollRef: messageScrollRef,
-        isScrolledUp: chatScroll.isScrolledUp,
-        scrollToBottom: jumpToNewest,
-        retry: retryTurn,
-        brief: briefState,
-        cancelBrief: stopBrief,
-        startWithoutPlan
-    }
+    // Memoised for the same reason `asked` and `references` below are: a render where none of these
+    // moved — a keystroke, an unsaved-work flag — used to re-render the whole conversation anyway.
+    const chatColumn = useMemo<ChatColumnValue>(
+        () => ({
+            attachmentPreviews,
+            isStreaming: isBusy,
+            messages,
+            scrollRef: messageScrollRef,
+            isScrolledUp: chatScroll.isScrolledUp,
+            scrollToBottom: jumpToNewest,
+            retry: retryTurn,
+            brief: briefState,
+            cancelBrief: stopBrief,
+            startWithoutPlan
+        }),
+        [
+            attachmentPreviews,
+            briefState,
+            chatScroll.isScrolledUp,
+            isBusy,
+            jumpToNewest,
+            messages,
+            retryTurn,
+            startWithoutPlan,
+            stopBrief
+        ]
+    )
 
     // Published rather than passed, for the reason `ChatColumnContext` is: the block that draws a
     // question is inside a message, inside the list, inside the frame — and the conversation around

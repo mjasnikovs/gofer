@@ -41,13 +41,13 @@ const ICONS: Readonly<Record<FileKind, typeof DocumentIcon>> = {
 
 /** The 16px box. `Icon size='sm'` is exactly 1rem, so a square never shifts the row an icon held. */
 const THUMBNAIL_STYLE = {
-    width: '1rem',
-    height: '1rem',
+    width: 'var(--spacing-4)',
+    height: 'var(--spacing-4)',
     objectFit: 'contain',
     // Pixel art has to stay pixels: the browser's default smoothing turns a 32px tile into a smear
     // at this size, which is the one size where it needed to stay legible.
     imageRendering: 'pixelated',
-    borderRadius: '2px',
+    borderRadius: 'var(--radius-element)',
     flexShrink: 0
 } as const
 

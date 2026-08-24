@@ -32,8 +32,9 @@ type StoredKeyCopy = Readonly<{
 const STORED_KEY_COPY: Readonly<Record<TypedSecret, StoredKeyCopy>> = {
     'ai-default': {
         label: 'API key',
-        placeholder: 'Not required by local servers',
-        description: 'Enter a key only if this server requires authentication.',
+        placeholder: '',
+        description:
+            'Not required by local servers. Enter a key only if this server requires authentication.',
         removeLabel: 'Remove stored API key',
         keepLabel: 'Keep stored API key',
         isRequired: false,
@@ -50,8 +51,9 @@ const STORED_KEY_COPY: Readonly<Record<TypedSecret, StoredKeyCopy>> = {
     },
     brave: {
         label: 'Brave Search API key',
-        placeholder: 'From api.search.brave.com',
-        description: 'Stored in the operating system credential store, never in the settings file.',
+        placeholder: '',
+        description:
+            'From api.search.brave.com. Stored in the operating system credential store, never in the settings file.',
         removeLabel: 'Remove stored Brave key',
         keepLabel: 'Keep stored Brave key',
         isRequired: false,
@@ -85,11 +87,17 @@ export function StoredKeyField({secret, draft, dispatch}: StoredKeyFieldProps) {
                 isRequired={copy.isRequired}
                 isOptional={copy.isOptional}
                 startIcon={KeyIcon}
-                placeholder={draft.isStored ? 'Stored securely' : copy.placeholder}
+                /*
+                 * Only a real format example is a placeholder. A placeholder reads as a typed value,
+                 * so a sentence in it — "Stored securely", "Not required by local servers" — looked
+                 * like something the user had entered. Every one of those statements is a
+                 * description, and they were already duplicated there.
+                 */
+                placeholder={draft.isStored ? '' : copy.placeholder}
                 description={
                     isRemoving ? 'The stored key will be removed when you save.'
                     : draft.isStored ?
-                        'Leave blank to keep the key stored in the operating system credential store.'
+                        'A key is stored. Leave this blank to keep it in the operating system credential store.'
                     :   copy.description
                 }
                 onChange={value => {
