@@ -86,7 +86,11 @@ const NODE_COVERAGE_EXCLUDES = [
     'memory-worker.mjs',
     'rag-warmup.mjs',
     'rag-retrieve-worker.mjs',
-    'bench-alone.mjs',
+    // Every `bench-*.mjs` is a measurement harness: run by hand against a real model, never
+    // imported, never shipped. `bench-alone.mjs` was excluded by name and the family has since
+    // grown to eight, which left the gate 0.53 of a point above its own line — one more
+    // measurement away from failing for having measured something.
+    'bench-*.mjs',
     // Fixtures for the AI turn tests. Scaffolding, not a module anything ships.
     'ai-turn-harness.mjs'
 ]
@@ -103,13 +107,19 @@ const OTHER_LANE = [
     script('check:command-surface'),
     script('check:design'),
     ['test:coverage:frontend', `vitest run --coverage --maxWorkers=${OTHER_JOBS}`],
+    // The floor is 90/80 because the number it measures is 93.07/87.98. It was 80/75 against a
+    // measured 80.53, which is not a floor — it is a number one uncovered file away from failing,
+    // and eight of the files it was counting were `bench-*.mjs` measurement harnesses that nothing
+    // imports and nothing ships. Excluding those moved the real figure twelve and a half points,
+    // and the floor moved with it so the gate goes on meaning something about the code that ships.
+    //
     // Both c8 runs need a directory of their own. Left to itself c8 writes its raw V8 output to
     // `coverage/tmp` and wipes that directory on start, and these two are adjacent in a lane two
     // workers wide — so the second to start deletes the first one's measurements out from under it
     // and both report numbers taken from whatever survived the race.
     [
         'test:coverage:node',
-        `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=coverage/node/tmp --reports-dir=coverage/node --reporter=text --check-coverage --lines 80 --branches 75 npm run --silent test:worker`
+        `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=coverage/node/tmp --reports-dir=coverage/node --reporter=text --check-coverage --lines 90 --branches 80 npm run --silent test:worker`
     ],
     [
         'test:coverage:node-critical',

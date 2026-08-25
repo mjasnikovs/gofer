@@ -1779,7 +1779,8 @@ fn is_the_editors_progress_bar(line: &str) -> bool {
 /// Three things, measured over the 655 entries the recorded live runs read back: the escape codes
 /// are 7.5% of them, the lines that are nothing but escape codes are 3.7%, and the editor's own
 /// progress bar is 22%. Together they are a third of every character `godot_logs read` answers
-/// with, and `godot_logs read` is 18% of everything the model reads back from any tool.
+/// with, and `godot_logs read` is 18% of everything the ten Godot tools answer — 15% once `read`
+/// and `bash` are counted in too.
 ///
 /// Counted rather than silently dropped, and only here: the renderer reads the same buffer through
 /// [`godot_session::read_logs`] and shows the user their editor's output as their editor wrote it.

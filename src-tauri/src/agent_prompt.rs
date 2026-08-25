@@ -59,7 +59,7 @@ Editing the project:
 - Build with godot_node create_nodes and set_properties: one call carrying every node, then one carrying every property, not one call per node — every call costs a whole request, and a batch is also one undo step
 - The edited scene (godot_scene, godot_node) and the running game (godot_runtime) are separate: editing one never changes the other
 - A property holding a resource takes {"type": "resource", "value": {"path": "res://..."}}; a bare string is refused
-- Small resources have no tool: write the .tres yourself, as `[gd_resource type="RectangleShape2D" format=3]`, a blank line, `[resource]`, then `size = Vector2(64, 16)`
+- A 2D collision shape has a tool: godot_resource create_shape writes it and imports it. Anything else small has none — write the .tres yourself, as `[gd_resource type="BoxMesh" format=3]`, a blank line, `[resource]`, then `size = Vector3(2, 2, 2)`
 - Build a 2D level from tiles — godot_resource create_tileset, then godot_node set_cells on a TileMapLayer; a hundred ColorRects is not a level, and a TileSet written as text opens with no tiles in it
 - Wire a scene with godot_node connect_signal and add_to_group, never with a connect call in _ready as well: the second connection errors every time the node loads
 - Write and attach a script before connecting to it, because a connection names a method that has to exist; godot_node inspect reads groups, signals and connections
@@ -261,6 +261,42 @@ mod tests {
     /// A project with the rule off is not told GDScript warnings are errors, because there they are
     /// not — and a placeholder left behind would say `{typing}` to the model, which is the failure
     /// the engine-line test guards against for the same reason.
+    #[test]
+    fn every_operation_the_prompt_names_is_one_the_catalogue_has() {
+        let prompt = default_prompt(crate::ai_tools::CATALOG, true);
+        let mut checked: Vec<String> = Vec::new();
+        for domain in crate::ai_tools::CATALOG {
+            let known: Vec<&str> = domain.operations.iter().map(|one| one.op).collect();
+            for occurrence in prompt.match_indices(&format!("{} ", domain.name)) {
+                let rest = &prompt[occurrence.0 + domain.name.len() + 1..];
+                let word: String = rest
+                    .chars()
+                    .take_while(|one| one.is_ascii_lowercase() || *one == '_')
+                    .collect();
+                // Only a name that could not be an English word: two lowercase runs joined by an
+                // underscore. `create_shape` and `set_cells` are unmistakable; `godot_logs when`
+                // is prose and is not the business of this test.
+                if !word.contains('_') || word.starts_with('_') || word.ends_with('_') {
+                    continue;
+                }
+                checked.push(format!("{} {word}", domain.name));
+                assert!(
+                    known.contains(&word.as_str()),
+                    "the prompt tells the model to use `{} {word}`, and {} has no such operation. \
+                     Its operations are: {known:?}",
+                    domain.name,
+                    domain.name
+                );
+            }
+        }
+        // Named rather than counted, so a prompt edit that quietly stops naming any operation
+        // fails here instead of leaving a test that asserts nothing.
+        assert!(
+            checked.len() >= 5,
+            "this test only means something while the prompt names operations; it found {checked:?}"
+        );
+    }
+
     #[test]
     fn the_strict_typing_rule_is_in_the_prompt_only_where_it_is_enforced() {
         let enforced = default_prompt(CATALOG, true);
