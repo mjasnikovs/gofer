@@ -1,5 +1,5 @@
 import {expect, test} from '@playwright/test'
-import type {CDPSession, Page} from '@playwright/test'
+import type {BrowserContext, CDPSession, Page} from '@playwright/test'
 import {installDesktop} from './desktop-fixture'
 
 /**
@@ -22,6 +22,14 @@ const SHORT_CHAT = 4
 const LONG_CHAT = 400
 /** Enough characters that per-key noise averages out, few enough that the line never wraps. */
 const KEYSTROKES = 40
+/**
+ * Below this, a measurement is the machine's noise rather than the window's work.
+ *
+ * The short conversation is the divisor, and a fast enough machine can lay four messages out in a
+ * time the counter rounds to nothing — which would turn a passing ratio into an infinity. The floor
+ * is what the assertion falls back to, so a budget stays a budget.
+ */
+const NOISE_FLOOR_MS = 0.1
 /**
  * How much more a keystroke may cost on the long conversation.
  *
@@ -55,19 +63,23 @@ async function openConversation(page: Page, messages: number) {
     await installDesktop(page, 'streaming', {seededMessages: messages})
     await page.goto('/')
     await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
-    // The last row a user sent. Only those carry the numbered opening line; an assistant reply is
-    // drawn from its `parts`, which start with its reasoning.
-    const lastAsked = messages % 2 === 0 ? messages - 1 : messages
     await expect(
         page
             .getByRole('log')
-            .getByText(`Message ${String(lastAsked)}. Make`)
+            .getByText(`Message ${String(messages)}.`)
             .first()
     ).toBeAttached()
 }
 
-/** Layout milliseconds one keystroke costs with `messages` already on screen. */
-async function typingCost(page: Page, messages: number): Promise<number> {
+/**
+ * Layout milliseconds one keystroke costs with `messages` already on screen.
+ *
+ * On a page of its own. `installDesktop` adds an init script, and init scripts accumulate on a
+ * page — measuring twice on one page would run the first conversation's fixture alongside the
+ * second's, and the slope would be of something neither of them is.
+ */
+async function typingCost(context: BrowserContext, messages: number): Promise<number> {
+    const page = await context.newPage()
     await openConversation(page, messages)
     const composer = page.getByRole('combobox', {name: 'Message input'})
     await composer.click()
@@ -83,21 +95,22 @@ async function typingCost(page: Page, messages: number): Promise<number> {
     await settle(page)
     const after = await layoutMs(session)
     await session.detach()
+    await page.close()
 
     return (after - before) / KEYSTROKES
 }
 
-test('typing costs the same whatever is in the conversation @interaction', async ({page}) => {
-    const short = await typingCost(page, SHORT_CHAT)
-    const long = await typingCost(page, LONG_CHAT)
+test('typing costs the same whatever is in the conversation @interaction', async ({context}) => {
+    const short = await typingCost(context, SHORT_CHAT)
+    const long = await typingCost(context, LONG_CHAT)
 
-    const slope = long / Math.max(short, Number.EPSILON)
+    const budget = Math.max(short, NOISE_FLOOR_MS) * ALLOWED_SLOPE
     expect(
-        slope,
+        long,
         `a keystroke costs ${long.toFixed(2)}ms of layout with ${String(LONG_CHAT)} messages and `
-            + `${short.toFixed(2)}ms with ${String(SHORT_CHAT)} — ${slope.toFixed(1)}x, so the `
-            + 'conversation is being laid out again per character'
-    ).toBeLessThan(ALLOWED_SLOPE)
+            + `${short.toFixed(2)}ms with ${String(SHORT_CHAT)}, against a budget of `
+            + `${budget.toFixed(2)}ms — so the conversation is being laid out again per character`
+    ).toBeLessThan(budget)
 })
 
 /**

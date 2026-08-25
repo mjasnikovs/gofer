@@ -70,3 +70,33 @@
 .astryx-collapsible-trigger > span {
     min-width: 0;
 }
+
+/*
+ * A message off the top of the viewport is not laid out until it is scrolled to.
+ *
+ * The composer is a `contenteditable` and the transcript is its sibling inside one full-height
+ * column, so a typed character dirties the column and the browser lays every message in it out
+ * again. Measured on a four-hundred-message conversation, one keystroke cost 2.2ms of layout
+ * against 0.4ms on a short one, and it grew with the conversation — a window that types slower the
+ * longer you have been working in it. Containing the scroll viewport buys nothing, and neither does
+ * containing the composer: only skipping the subtree does.
+ *
+ * `auto` on the intrinsic size is the remembered height of a row that has been drawn once, falling
+ * back to the estimate for one that has not. The estimate only sizes the scrollbar until the row is
+ * reached, and the row corrects it the moment it is.
+ *
+ * `flex-shrink` is not a tweak. A skipped row has no content, so its automatic minimum size is zero
+ * and this list — a flex column taller than its viewport — shrank every one of them away: a
+ * twenty-message conversation collapsed from 6194px of scroll to 1875px, with the rows off screen
+ * having no height at all. A message never gives ground anyway; saying so is what keeps the
+ * estimate.
+ *
+ * `e2e/visual/application.visual.spec.ts` holds the transcript's baseline, so a drift fails
+ * there.
+ */
+
+.astryx-chat-message-list > div > .astryx-chat-message {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 240px;
+    flex-shrink: 0;
+}

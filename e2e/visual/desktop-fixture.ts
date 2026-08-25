@@ -373,6 +373,9 @@ export async function installDesktop(
                             + '\tvelocity.y += gravity * delta\n\tmove_and_slide()\n```\n\n'
                             + '- The camera lags on the way down\n'
                             + '- It catches up on the way up\n'
+                        const reasoning =
+                            'The camera has to read the collision the body reports, not the velocity '
+                            + 'it was given, or it lags a frame behind every landing.'
                         const stored = Array.from({length: seededMessages}, (_, index) => {
                             const id = index + 1
                             if (index % 2 === 0) {
@@ -402,22 +405,16 @@ export async function installDesktop(
                                 id,
                                 sender: 'assistant',
                                 text: `Message ${String(id)}. ${prose}`,
-                                thinking:
-                                    'The camera has to read the collision the body reports, not the '
-                                    + 'velocity it was given, or it lags a frame behind every landing.',
+                                thinking: reasoning,
                                 tools,
+                                // The timeline draws a reply from `parts` and never from `thinking`
+                                // or `text`, so the words have to be here too or the rows measured
+                                // are lighter than the ones this fixture stands in for.
                                 parts: [
-                                    {kind: 'thinking'},
+                                    {kind: 'thinking', text: reasoning},
                                     ...tools.map(tool => ({kind: 'tool', toolId: tool.id})),
-                                    {kind: 'text'}
-                                ].map(part =>
-                                    part.kind === 'tool' ?
-                                        part
-                                    :   {
-                                            kind: part.kind,
-                                            text: part.kind === 'text' ? prose : 'why'
-                                        }
-                                ),
+                                    {kind: 'text', text: `Message ${String(id)}. ${prose}`}
+                                ],
                                 timestamp: 1_800_000_000_000,
                                 status: 'complete',
                                 model: 'local-model',

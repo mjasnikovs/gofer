@@ -130,9 +130,13 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
      */
     const FRAME_MS = 16
     let isNotificationPending = false
+    /** Calls off the frame a held delta is waiting for, so no timer outlives the state it carried. */
+    let cancelPendingNotification: (() => void) | undefined
 
     const notify = () => {
         isNotificationPending = false
+        cancelPendingNotification?.()
+        cancelPendingNotification = undefined
         for (const listener of [...listeners]) listener()
     }
 
@@ -146,9 +150,10 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
         current = next
         if (isNotificationPending) return
         isNotificationPending = true
-        schedule(() => {
-            if (isNotificationPending) notify()
-        }, FRAME_MS)
+        // The flag rather than the canceller is what holds a second delta back, because a clock
+        // with no delay runs `notify` inside `schedule` and answers with a canceller for a frame
+        // that has already happened. Left here it is called once and does nothing.
+        cancelPendingNotification = schedule(notify, FRAME_MS)
     }
 
     const amend = (
