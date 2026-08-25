@@ -487,6 +487,13 @@ pub struct GodotDocsResponse {
     /// The reader had the chapters and could not settle what they say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abstained: Option<bool>,
+    /// Why the reader could not be reached at all, when an `ask` fell back to `search`'s passages.
+    ///
+    /// A configuration or a provider refusal, not a fact about the manual — so the answer beside it
+    /// is the passages, and the next asker is allowed to pay to try the reader again. See
+    /// `whenTheReaderCannotBeReached` in `scripts/rag-retrieve.mjs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_unavailable: Option<String>,
     /// Which manual answered. Not shown to the model; it is what a cached answer is keyed on.
     #[serde(default, skip_serializing)]
     pub corpus_version: Option<String>,
@@ -500,6 +507,12 @@ impl GodotDocsResponse {
     /// the one that matters most — an answer whose quote is not in the manual, which is an answer
     /// written from memory and must never become the cached truth.
     pub fn is_worth_remembering(&self) -> bool {
+        // A reader that was not reachable is the one dead end that is about this machine rather
+        // than about the manual, so caching it would hand every later task a refusal that has
+        // since cleared.
+        if self.reader_unavailable.is_some() {
+            return false;
+        }
         if self.coverage_miss == Some(true) || self.abstained == Some(true) {
             return false;
         }
@@ -586,6 +599,8 @@ struct RetrieveWorkerResponse {
     coverage_miss: Option<bool>,
     #[serde(default)]
     abstained: Option<bool>,
+    #[serde(default)]
+    reader_unavailable: Option<String>,
     #[serde(default)]
     corpus_version: Option<String>,
     #[serde(default)]
@@ -733,6 +748,7 @@ pub fn retrieve_query_with(
             chapters: response.chapters,
             coverage_miss: response.coverage_miss,
             abstained: response.abstained,
+            reader_unavailable: response.reader_unavailable,
             corpus_version: response.corpus_version,
         });
     }
@@ -962,6 +978,28 @@ mod tests {
             }
             .is_worth_remembering(),
             "an answer whose quote is not in the manual was written from memory"
+        );
+        // The one dead end that is about this machine rather than about the manual: a reader that
+        // was refused a request, whose passages are a real answer and whose refusal may have
+        // cleared by the time anything asks again.
+        assert!(
+            !GodotDocsResponse {
+                reader_unavailable: Some(
+                    "The provider refused this request (400): Reasoning is mandatory for this \
+                     endpoint and cannot be disabled."
+                        .to_owned()
+                ),
+                passages: vec![RankedPassage {
+                    text: "Tween".to_owned(),
+                    chapter: "Tween".to_owned(),
+                    order: 1,
+                    score: 1.0,
+                    pinned: None,
+                }],
+                ..answered("these are the passages the search operation would have returned")
+            }
+            .is_worth_remembering(),
+            "a reader that was not reachable must not become the cached answer"
         );
     }
 

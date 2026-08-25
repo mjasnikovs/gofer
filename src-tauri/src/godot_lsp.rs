@@ -126,12 +126,26 @@ struct Shared {
 }
 
 /// A connected GDScript language server session.
+/// One open document, as this client last sent it. See [`LspClient::documents`].
+#[derive(Clone)]
+struct Document {
+    version: i32,
+    text: String,
+}
+
 pub struct LspClient {
     shared: Arc<Mutex<Shared>>,
     next_id: AtomicU64,
     reader: Mutex<Option<JoinHandle<()>>>,
     capabilities: ServerCapabilities,
-    documents: Mutex<HashMap<Url, i32>>,
+    /// The open documents, each with the version and the text this client last sent for it.
+    ///
+    /// The text, because the buffer the server holds is not the file: the renderer pushes every
+    /// debounced keystroke through `change_document`, so a document open in Gofer's editor is
+    /// usually ahead of what is on disk. Anything that has to make the server read a document
+    /// again — see `script::reparse_open_documents` — has to hand back *that* text, or it silently
+    /// replaces what the user is typing with the last thing they saved.
+    documents: Mutex<HashMap<Url, Document>>,
 }
 
 impl LspClient {
@@ -262,9 +276,13 @@ impl LspClient {
     pub fn open_document(&self, uri: &Url, text: &str) -> Result<i32, LspError> {
         let version = {
             let mut documents = self.documents.lock().map_err(|_| LspError::poisoned())?;
-            let version = documents.entry(uri.clone()).or_insert(0);
-            *version += 1;
-            *version
+            let held = documents.entry(uri.clone()).or_insert(Document {
+                version: 0,
+                text: String::new(),
+            });
+            held.version += 1;
+            held.text = text.to_owned();
+            held.version
         };
         self.invalidate_diagnostics(uri);
         self.notify(
@@ -278,14 +296,15 @@ impl LspClient {
     pub fn change_document(&self, uri: &Url, text: &str) -> Result<i32, LspError> {
         let version = {
             let mut documents = self.documents.lock().map_err(|_| LspError::poisoned())?;
-            let Some(version) = documents.get_mut(uri) else {
+            let Some(held) = documents.get_mut(uri) else {
                 return Err(LspError::new(
                     "document_not_open",
                     "The document is not open in this LSP session",
                 ));
             };
-            *version += 1;
-            *version
+            held.version += 1;
+            held.text = text.to_owned();
+            held.version
         };
         self.invalidate_diagnostics(uri);
         self.notify(
@@ -312,6 +331,24 @@ impl LspClient {
             "textDocument/didSave",
             json!({"textDocument": {"uri": uri}, "text": text}),
         )
+    }
+
+    /// Every open document with the text this client last sent for it, so a caller that has
+    /// changed something *outside* the documents can ask the server to read them again.
+    ///
+    /// The text rather than the path, because the file is not what the server holds: a document
+    /// open in Gofer's editor carries every keystroke since the last save. See
+    /// `script::reparse_open_documents`.
+    pub fn open_documents(&self) -> Vec<(Url, String)> {
+        self.documents
+            .lock()
+            .map(|documents| {
+                documents
+                    .iter()
+                    .map(|(uri, held)| (uri.clone(), held.text.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Forgets the cached diagnostics of a document whose text just changed, so the next pull
@@ -1484,6 +1521,46 @@ mod tests {
                 .expect("session still works")
                 .is_none()
         );
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    /// What `open_documents` reports is what the server was last told, never what is on disk.
+    ///
+    /// The renderer pushes every debounced keystroke through `change_document`, so a document open
+    /// in Gofer's editor is normally ahead of the file. `script::reparse_open_documents` re-sends
+    /// this text to make the server read a document again after something outside it changed —
+    /// and re-sending the *file* there would replace what the user is typing with the last thing
+    /// they saved, then clear the diagnostics cache so the next answer described it.
+    #[test]
+    fn an_open_document_reports_the_text_the_server_was_last_given() {
+        let (_directory, root) = workspace();
+        let server = start_fake_server(|message, writer| {
+            match message.get("method").and_then(Value::as_str) {
+                Some("initialize") | Some("shutdown") => handshake_handler(message, writer),
+                _ => FakeAction::Ignore,
+            }
+        });
+        let client = LspClient::connect(server.address, root.root()).expect("connect");
+        let uri = Url::parse("file:///tmp/typing.gd").expect("uri");
+
+        client.open_document(&uri, "extends Node\n").expect("open");
+        assert_eq!(
+            client.open_documents(),
+            vec![(uri.clone(), "extends Node\n".to_owned())]
+        );
+
+        client
+            .change_document(&uri, "extends Node\n\nvar unsaved := 1\n")
+            .expect("change");
+        assert_eq!(
+            client.open_documents(),
+            vec![(uri.clone(), "extends Node\n\nvar unsaved := 1\n".to_owned())],
+            "the buffer the user is typing is what the server holds"
+        );
+
+        client.close_document(&uri).expect("close");
+        assert!(client.open_documents().is_empty());
         client.shutdown();
         server.join.join().expect("server thread");
     }

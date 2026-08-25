@@ -182,6 +182,134 @@ test('a rescued passage is reported as one', async () => {
     )
 })
 
+/*
+ * `godot_docs_search ask` answered `docs_unavailable: 400: {"message":"Reasoning is mandatory for
+ * this endpoint and cannot be disabled."...}` in three recorded live runs, and in each of them the
+ * agent never tried `ask` again for the rest of the turn. The retrieval had already happened, so
+ * what was thrown away was the whole cost of the call.
+ */
+test('a reader that cannot be reached answers with the passages instead of the refusal', async () => {
+    const handleLine = createRetriever({
+        retrieve: fakeRetrieve([
+            {text: 'Tweens interpolate', chapter: 'Tween', order: 1, score: 0.9}
+        ]),
+        askDocs: async () => {
+            throw new Error(
+                '400: {"message":"Reasoning is mandatory for this endpoint and cannot be disabled.",'
+                    + '"code":400,"metadata":{"provider_name":null}}'
+            )
+        }
+    })
+
+    const response = await handleLine(request({mode: 'ask'}))
+
+    assert.equal(response.error, undefined, 'the call must not fail outright')
+    assert.equal(response.passages.length, 1, 'the passages already retrieved are answered with')
+    assert.equal(response.passages[0].chapter, 'Tween')
+    // The provider's JSON body becomes a sentence, the way a turn's own failure already does.
+    assert.match(response.text, /search operation would have returned/u)
+    assert.match(response.text, /Reasoning is mandatory/u)
+    assert.ok(!response.text.includes('{'), `no JSON reaches the model: ${response.text}`)
+    // And the reason rides in its own field, which is what stops the answer being cached.
+    assert.match(response.readerUnavailable, /provider refused this request \(400\)/u)
+})
+
+/*
+ * The single most common failure in the recorded runs: seven of the nine that reached
+ * `godot_docs_search` were told `Reasoning is mandatory for this endpoint and cannot be disabled`,
+ * because the sub-agent's stored model says `thinkingLevel: "off"` and carries no
+ * `reasoningMandatory` to escape it. The provider states the fact; the fix is to believe it.
+ */
+test('a model that says it cannot stop thinking is asked again without asking it to', async () => {
+    const built = []
+    const handleLine = createRetriever({
+        retrieve: fakeRetrieve([
+            {text: 'Tweens interpolate', chapter: 'Tween', order: 1, score: 0.9}
+        ]),
+        createCompletion: connection => {
+            built.push(connection.reasoningMandatory === true)
+            return async () => 'unused'
+        },
+        askDocs: async ({complete}) => {
+            await complete({})
+            if (built.length === 1) {
+                throw new Error(
+                    '400: {"message":"Reasoning is mandatory for this endpoint and cannot be'
+                        + ' disabled.","code":400}'
+                )
+            }
+            return {text: 'A tween interpolates a property.', excerptVerified: true}
+        }
+    })
+
+    const response = await handleLine(
+        request({mode: 'ask', connection: {baseUrl: 'http://127.0.0.1:8080/v1', model: 'm'}})
+    )
+
+    assert.deepEqual(built, [false, true], 'the second attempt insists the model reasons')
+    assert.equal(response.text, 'A tween interpolates a property.')
+    assert.equal(response.readerUnavailable, undefined, 'nothing was lost, so nothing is reported')
+})
+
+/* And a refusal that means something else is not retried — one wasted request, not two. */
+/* A fault of ours is not a reader that could not be reached, and must still fail the call. */
+test('a defect in the reader is not answered with passages', async () => {
+    const handleLine = createRetriever({
+        retrieve: fakeRetrieve([
+            {text: 'Tweens interpolate', chapter: 'Tween', order: 1, score: 0.9}
+        ]),
+        createCompletion: () => async () => 'unused',
+        askDocs: async () => {
+            throw new TypeError('passages.map is not a function')
+        }
+    })
+
+    const response = await handleLine(
+        request({mode: 'ask', connection: {baseUrl: 'http://127.0.0.1:8080/v1', model: 'm'}})
+    )
+
+    assert.match(response.error, /passages\.map is not a function/u)
+    assert.equal(response.passages, undefined, 'a defect is a failure, not a poorer answer')
+})
+
+test('a refusal that is not about reasoning is answered with the passages at once', async () => {
+    let attempts = 0
+    const handleLine = createRetriever({
+        retrieve: fakeRetrieve([
+            {text: 'Tweens interpolate', chapter: 'Tween', order: 1, score: 0.9}
+        ]),
+        createCompletion: () => async () => 'unused',
+        askDocs: async () => {
+            attempts += 1
+            throw new Error('503: {"message":"upstream is down","code":503}')
+        }
+    })
+
+    const response = await handleLine(
+        request({mode: 'ask', connection: {baseUrl: 'http://127.0.0.1:8080/v1', model: 'm'}})
+    )
+
+    assert.equal(attempts, 1, 'a refusal with no fix in it is not tried again')
+    assert.equal(response.passages.length, 1)
+    assert.match(response.readerUnavailable, /upstream is down/u)
+})
+
+/* A reader that answers is untouched: nothing about this path runs when the model is reachable. */
+test('a reader that answers is left exactly as it was', async () => {
+    const handleLine = createRetriever({
+        retrieve: fakeRetrieve([
+            {text: 'Tweens interpolate', chapter: 'Tween', order: 1, score: 0.9}
+        ]),
+        askDocs: async () => ({text: 'A tween interpolates a property.', excerptVerified: true})
+    })
+
+    const response = await handleLine(request({mode: 'ask'}))
+
+    assert.equal(response.text, 'A tween interpolates a property.')
+    assert.equal(response.readerUnavailable, undefined)
+    assert.equal(response.passages, undefined, 'ask answers with prose, not with the chapters')
+})
+
 test('rejects malformed requests and still returns an error shape', async () => {
     const handleLine = createRetriever({retrieve: fakeRetrieve([])})
 

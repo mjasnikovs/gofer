@@ -619,6 +619,73 @@ const UNPARSABLE_PROBE_SCRIPT: &str = "extends Node2D\n\nfunc _ready() -> void:\
 /// spent the full budget, and answered `runtime_timeout: The game did not answer in time` — a
 /// sentence about a slow game, for a game that had stopped at an error half a minute earlier. An
 /// agent reads that as "wait longer", and waits.
+/// One scene can be run without making it the project's entry point.
+///
+/// Two live turns reached for a `playArgs` parameter `godot_runtime run` does not have, and a
+/// third took the only route that was open: it wrote `application/run/main_scene` to the scene it
+/// wanted, ran, and wrote it back — two calls of detour, and a window in which the project boots
+/// into a test scene. `play_custom_scene` is the editor's own F6 and is what "run this scene"
+/// means.
+#[test]
+fn a_named_scene_runs_without_becoming_the_project_entry_point() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    std::fs::write(
+        worktree.join("other.tscn"),
+        "[gd_scene format=3]\n\n[node name=\"OtherScene\" type=\"Node2D\"]\n",
+    )
+    .expect("write the other scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    let run = session
+        .try_call_within(
+            "runtime.run",
+            json!({"scene": "res://other.tscn"}),
+            LAUNCH_TIMEOUT_MS,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "runtime.run on a named scene failed: {error}\n--- editor output ---\n{}",
+                session.output()
+            )
+        });
+    assert_eq!(run["running"], true);
+    assert_frame(&run["frame"]);
+
+    // The running tree is the named scene's, and the project's main scene is untouched — which is
+    // the whole point: the detour this replaces left the project pointing somewhere else.
+    let running = session.call("runtime.get_tree", json!({}));
+    assert!(
+        running.to_string().contains("OtherScene"),
+        "the named scene must be the one running: {running}"
+    );
+    let settings = session.call("project.get_settings", json!({}));
+    assert_eq!(
+        settings["mainScene"], "res://main.tscn",
+        "running one scene must not rewrite the project's entry point: {settings}"
+    );
+
+    // A restart restarts what is running, not what the project starts with.
+    let restarted = session
+        .try_call_within("runtime.restart", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| panic!("runtime.restart failed: {error}"));
+    assert_eq!(restarted["running"], true);
+    let again = session.call("runtime.get_tree", json!({}));
+    assert!(
+        again.to_string().contains("OtherScene"),
+        "a restart must restart the scene that was running: {again}"
+    );
+
+    session.call("runtime.stop", json!({}));
+    // And a scene that is not there is refused by name, before anything is launched.
+    let refused = session.error("runtime.run", json!({"scene": "res://nope.tscn"}), None);
+    assert!(
+        refused.starts_with("scene_not_found") && refused.contains("nope.tscn"),
+        "a scene that does not exist must be refused by name: {refused}"
+    );
+}
+
 #[test]
 fn a_game_that_stops_at_an_error_ends_the_launch_waiting_on_it() {
     let directory = TempDir::new().expect("temporary directory");

@@ -76,6 +76,11 @@ export function jsonSchemaOfKind(kind) {
             }
         case 'either':
             return {anyOf: (kind.of ?? []).map(jsonSchemaOfKind)}
+        // A list that says what one entry is. `list` alone says only that a bracket is expected,
+        // and a name that means a list of objects in one operation of a domain and a bare list in
+        // another widens this to an array that swallows the strict branch.
+        case 'listOf':
+            return {type: 'array', items: jsonSchemaOfKind(kind.of ?? {kind: 'text'})}
         // A kind the router knows and this does not. Constraining it to nothing would refuse calls
         // that are right, so it is left open and the router remains the one that decides.
         default:

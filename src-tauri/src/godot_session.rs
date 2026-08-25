@@ -1539,13 +1539,49 @@ fn last_session_errors(wanted: usize) -> Vec<String> {
     newest_logs(
         &LogQuery {
             min_severity: Some(LogSeverity::Error),
+            // Asked for more than are wanted, because the epilogue below is dropped afterwards and
+            // a game that exited cleanly prints nothing else. Six of the wanted six were epilogue
+            // in both recorded occurrences.
             ..LogQuery::default()
         },
-        wanted,
+        wanted * 4,
     )
     .into_iter()
     .map(|entry| entry.message)
+    .filter(|message| !is_the_engines_own_epilogue(message))
+    .rev()
+    .take(wanted)
+    .collect::<Vec<_>>()
+    .into_iter()
+    .rev()
     .collect()
+}
+
+/// A line the engine prints while taking itself apart, rather than about the project.
+///
+/// `runtime_not_running` carried these six lines in two recorded live runs, identically:
+///
+/// ```text
+/// ERROR: BUG: Unreferenced static string to 0: _exists
+/// ERROR: BUG: Unreferenced static string to 0: _recognize_path
+/// ERROR: BUG: Unreferenced static string to 0: _set_path_cache
+/// ERROR: BUG: Unreferenced static string to 0: _reset_state
+/// ERROR: BUG: Unreferenced static string to 0: servers
+/// ERROR: Pages in use exist at exit in PagedAllocator: N10StringName5_DataE
+/// ```
+///
+/// That is Godot's leak accounting on the way out. It is attached to a failure whose whole job is
+/// to carry the error that ended the game, and it says nothing about the game at all — while
+/// reading, to a model, exactly like six errors it caused. A game that exited cleanly has no error
+/// to carry, and saying nothing is the honest version of that.
+///
+/// Dropped from the *carried tail* only. `godot_logs read` still answers with every line, which is
+/// where a reader who wants the engine's own diagnostics goes.
+fn is_the_engines_own_epilogue(message: &str) -> bool {
+    message.contains("BUG: Unreferenced static string")
+        || message.contains("at exit in PagedAllocator")
+        || message.contains("still in use at exit")
+        || message.contains("leaked at exit")
 }
 
 #[cfg(test)]
@@ -2831,6 +2867,90 @@ mod tests {
             "The game did not answer in time",
         ));
         assert_eq!(alone.message, "The game did not answer in time");
+    }
+
+    /// The engine's own shutdown accounting is not the error that ended the game.
+    ///
+    /// Two live runs carried exactly these six lines with `runtime_not_running`, and nothing else.
+    /// They name no script, no line and no cause — they are Godot's leak tracking on the way out —
+    /// and to a model they read like six errors it caused, attached to a failure whose whole job
+    /// is to say what went wrong.
+    #[test]
+    fn the_engines_shutdown_notes_are_not_carried_as_the_cause() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "ERROR: BUG: Unreferenced static string to 0: _exists",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: BUG: Unreferenced static string to 0: _recognize_path",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: BUG: Unreferenced static string to 0: _set_path_cache",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: BUG: Unreferenced static string to 0: _reset_state",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: BUG: Unreferenced static string to 0: servers",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: Pages in use exist at exit in PagedAllocator: N10StringName5_DataE",
+            ),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "No game with the Gofer runtime helper is running",
+        ));
+
+        assert_eq!(
+            carried.message, "No game with the Gofer runtime helper is running",
+            "a game that exited cleanly has no error to carry, and saying nothing is the honest \
+             version of that"
+        );
+    }
+
+    /// And the real cause still travels, even when the epilogue printed after it.
+    #[test]
+    fn an_error_before_the_shutdown_notes_is_still_the_one_carried() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: BUG: Unreferenced static string to 0: _exists",
+            ),
+            (
+                LogSource::EditorError,
+                "ERROR: Pages in use exist at exit in PagedAllocator: N10StringName5_DataE",
+            ),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "No game with the Gofer runtime helper is running",
+        ));
+
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "the parse error is what ended it: {}",
+            carried.message
+        );
+        assert!(
+            !carried.message.contains("Unreferenced static string"),
+            "and the epilogue is not beside it: {}",
+            carried.message
+        );
     }
 
     /// A buffer with nothing wrong in it leaves the failure exactly as the addon wrote it.

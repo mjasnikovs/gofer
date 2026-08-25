@@ -807,3 +807,192 @@ fn the_first_mutation_of_a_session_needs_no_read_before_it() {
     .expect("the mutation after the first needs no read either");
     assert_eq!(again["ops"][0]["result"]["node"], "/AiFixture/SecondMarker");
 }
+
+/// A handler the editor cannot compile is refused for the reason it really is.
+///
+/// The method list a node reports comes from the compiled script. An autoload registered while the
+/// editor has been running is not in the map its compiler resolves global names from, so every
+/// script naming one stops compiling *in the editor* while running perfectly in the game —
+/// `Script.reload` answers `ERR_PARSE_ERROR` and the old method list stays. `connect_signal` then
+/// refused with `Its script declares _process`, which reads as a fact about the file and is not
+/// one. One live turn was told that three times, and recovered only by stopping and starting the
+/// whole session.
+#[test]
+fn a_handler_the_editor_cannot_compile_says_so_rather_than_blaming_the_script() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+    std::fs::create_dir_all(session.worktree.join("scripts")).expect("create scripts");
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    let save = |path: &str, text: &str| {
+        call(
+            "godot_script",
+            json!({"ops": [{"op": "save", "path": path, "text": text}]}),
+        )
+    };
+
+    save(
+        "scripts/thing.gd",
+        "extends Node2D\n\n\nfunc _process(_d: float) -> void:\n\tpass\n",
+    )
+    .expect("write the script");
+    call(
+        "godot_node",
+        json!({"ops": [
+            {"op": "create", "parent": "/AiFixture", "name": "Thing", "type": "Node2D"},
+            {"op": "set_property", "node": "/AiFixture/Thing", "property": "script",
+             "value": {"type": "resource", "value": {"path": "res://scripts/thing.gd"}}},
+            {"op": "create", "parent": "/AiFixture", "name": "Ticker", "type": "Timer"}
+        ]}),
+    )
+    .expect("attach the script and add a timer");
+
+    // A method nobody wrote, while the script still compiles: the old sentence, which is true.
+    let plain = call(
+        "godot_node",
+        json!({"ops": [{"op": "connect_signal", "node": "/AiFixture/Ticker", "signal": "timeout",
+                        "method": "_on_nothing", "target": "/AiFixture/Thing"}]}),
+    )
+    .expect_err("a method nobody wrote must be refused");
+    assert!(
+        plain.message.contains("Its script declares _process"),
+        "a script that compiles is described by its methods: {}",
+        plain.message
+    );
+
+    save(
+        "scripts/score_probe.gd",
+        "extends Node\n\n\nfunc add(_n: int) -> void:\n\tpass\n",
+    )
+    .expect("write the autoload script");
+    call(
+        "godot_project",
+        json!({"ops": [{"op": "set_autoload", "name": "ScoreProbe",
+                        "path": "res://scripts/score_probe.gd"}]}),
+    )
+    .expect("register the autoload");
+    call(
+        "godot_script",
+        json!({"ops": [{"op": "open", "path": "scripts/thing.gd"}]}),
+    )
+    .expect("read before writing");
+    save(
+        "scripts/thing.gd",
+        "extends Node2D\n\n\nfunc _process(_d: float) -> void:\n\tpass\n\n\n\
+         func _on_ticker_timeout() -> void:\n\tScoreProbe.add(1)\n",
+    )
+    .expect("write the handler");
+
+    let refused = call(
+        "godot_node",
+        json!({"ops": [{"op": "connect_signal", "node": "/AiFixture/Ticker", "signal": "timeout",
+                        "method": "_on_ticker_timeout", "target": "/AiFixture/Thing"}]}),
+    )
+    .expect_err("the editor cannot compile the script, so it cannot vouch for the method");
+    assert!(
+        refused.message.contains("cannot compile its script"),
+        "the refusal must say the editor cannot compile it: {}",
+        refused.message
+    );
+    assert!(
+        refused.message.contains("ScoreProbe"),
+        "and name the autoload this session registered: {}",
+        refused.message
+    );
+    assert!(
+        !refused.message.contains("Its script declares"),
+        "and never describe the stale method list as the script's own: {}",
+        refused.message
+    );
+}
+
+/// A script open in the language server is read again once an autoload gives its global a meaning.
+///
+/// An autoload is a global name, and a script parsed before the autoload existed was told the name
+/// is not declared — correctly, at the time. Nothing about the document changes when the autoload
+/// is registered, so the server never revisits it, and `godot_script diagnostics` keeps serving
+/// that verdict off its cache. A live turn wrote a `Score` autoload, registered it, and was told
+/// `Identifier "Score" not declared in the current scope` on three separate calls; it recovered by
+/// closing the file and opening it again, which is this, done by hand and three calls later.
+#[test]
+fn a_script_is_read_again_once_an_autoload_declares_the_name_it_uses() {
+    let session = start_session();
+    let app = mock_app();
+    let scripts = session.worktree.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("create scripts");
+    std::fs::write(
+        scripts.join("settings.gd"),
+        "extends Node\n\nvar volume := 0.5\n",
+    )
+    .expect("write settings.gd");
+    std::fs::write(
+        scripts.join("uses_autoload.gd"),
+        "extends Node\n\n\nfunc _ready() -> void:\n\tprint(Settings.volume)\n",
+    )
+    .expect("write uses_autoload.gd");
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+        .unwrap_or_else(|failure| {
+            panic!("{tool} was refused: {} {}", failure.code, failure.message)
+        })
+    };
+    let named = |answer: &Value| -> Vec<String> {
+        answer["ops"][0]["result"]["diagnostics"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|one| one["message"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    call(
+        "godot_script",
+        json!({"ops": [{"op": "open", "path": "scripts/uses_autoload.gd"}]}),
+    );
+    let before = call(
+        "godot_script",
+        json!({"ops": [{"op": "diagnostics", "path": "scripts/uses_autoload.gd"}]}),
+    );
+    assert!(
+        named(&before)
+            .iter()
+            .any(|message| message.contains("Settings")),
+        "the name has no meaning yet, so the server must say so: {before}"
+    );
+
+    call(
+        "godot_project",
+        json!({"ops": [{"op": "set_autoload", "name": "Settings",
+                        "path": "res://scripts/settings.gd"}]}),
+    );
+    let after = call(
+        "godot_script",
+        json!({"ops": [{"op": "diagnostics", "path": "scripts/uses_autoload.gd"}]}),
+    );
+    assert_eq!(
+        named(&after),
+        Vec::<String>::new(),
+        "once the autoload declares it, the script that uses it is clean: {after}"
+    );
+}

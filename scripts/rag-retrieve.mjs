@@ -1,5 +1,6 @@
 import {readFileSync} from 'node:fs'
 import {createCompletion as defaultCreateCompletion} from './rag-expand.mjs'
+import {readableProviderError} from './provider-error.mjs'
 import {askDocs as defaultAskDocs} from './rag-ask.mjs'
 
 export const RESPONSE_PREFIX = 'GOFER_RAG_RESULT:'
@@ -127,13 +128,92 @@ export function createRetriever({
             if (request.mode === 'search') return {passages, corpusVersion: corpus}
             // `ask` reads the very passages `search` would have returned, so the retrieval above is
             // shared rather than repeated: the two operations differ only in what comes back.
-            return {
-                ...(await askDocs({question: request.question, passages, complete})),
+            const read = async reader => ({
+                ...(await askDocs({question: request.question, passages, complete: reader})),
                 corpusVersion: corpus
+            })
+            try {
+                return await read(complete)
+            } catch (error) {
+                if (!saysReasoningIsMandatory(error)) {
+                    return {...whenTheReaderCannotBeReached(error, passages), corpusVersion: corpus}
+                }
+                // The model has just said it cannot be asked to stop thinking, which is exactly what
+                // `reasoningMandatory` means — so it is set and the same call made again, and
+                // `piThinkingLevel` picks the least effort the model named instead of `off`.
+                const insisting =
+                    createCompletion(
+                        {...request.connection, reasoningMandatory: true},
+                        {persistCredential}
+                    ) ?? refuseCompletion
+                try {
+                    return await read(insisting)
+                } catch (again) {
+                    return {...whenTheReaderCannotBeReached(again, passages), corpusVersion: corpus}
+                }
             }
         } catch (error) {
             return {error: error instanceof Error ? error.message : String(error)}
         }
+    }
+}
+
+/**
+ * Whether the provider turned this request away for asking the model not to think.
+ *
+ * The single most common failure across the recorded live runs — seven of the nine that reached
+ * `godot_docs_search` — and it is not the model's fault or the question's. `off` resolves to
+ * `reasoning: {enabled: false}` on the wire, and 90 of the 287 reasoning models OpenRouter lists
+ * answer HTTP 400 to it. `piThinkingLevel` already avoids that for a model whose record says
+ * `reasoningMandatory`, and the field reaches a settings file only through the desktop app's
+ * catalogue read — so a file written before the field existed, or any headless caller, keeps
+ * sending `off` and keeps being refused.
+ *
+ * Read off the wording because that is all the failure carries by the time it arrives here: the
+ * completion throws a string. The provider states the fact plainly and in its own words, so those
+ * are the words matched.
+ */
+export function saysReasoningIsMandatory(error) {
+    const message = error instanceof Error ? error.message : String(error ?? '')
+    return /reasoning is mandatory/iu.test(message)
+}
+
+/**
+ * The passages `search` would have answered with, when the reader that turns them into prose is not
+ * reachable.
+ *
+ * The retrieval already happened — `ask` reads the very chunks `search` returns — so the whole cost
+ * of the call has been paid by the time the reader is asked. Throwing it away turns one broken
+ * connection into a lost capability: `godot_docs_search ask` answered
+ * `docs_unavailable: 400: {"message":"Reasoning is mandatory for this endpoint and cannot be
+ * disabled."...}` in three recorded live runs, and in each of them the agent never tried `ask`
+ * again for the rest of the turn. What it was handed was a provider's JSON body about a setting it
+ * has no way to change.
+ *
+ * So it degrades the way an unreachable model was always supposed to mean here: the passages, and
+ * one sentence saying they were not read and why. `askDocs` already answers that way for a
+ * connection that was never configured; this is the same answer for one that was configured and
+ * refused. Measured, the fallback is not a poor one — over six questions, interleaved, `search`
+ * carried the fact 5 times out of 6 and `ask` also 5 out of 6.
+ *
+ * `readerUnavailable` is what stops the answer being cached: a refusal that clears is one the next
+ * asker should be allowed to pay to retry. See `GodotDocsResponse::is_worth_remembering`.
+ */
+export function whenTheReaderCannotBeReached(error, passages) {
+    // A fault of ours, or a turn the user stopped, is not a reader that could not be reached, and
+    // answering it with passages would be this operation quietly never failing again: a `TypeError`
+    // inside the reader would come back as a successful answer, and the suite would stay green.
+    // Both are exact checks rather than a reading of the wording, so nothing a provider says can
+    // be mistaken for one.
+    if (error instanceof TypeError || error instanceof ReferenceError) throw error
+    if (error?.name === 'AbortError') throw error
+    const because = readableProviderError(error instanceof Error ? error.message : String(error))
+    return {
+        passages,
+        text:
+            `The documentation could not be read into an answer, so these are the passages the `
+            + `search operation would have returned. ${because}`,
+        readerUnavailable: because
     }
 }
 

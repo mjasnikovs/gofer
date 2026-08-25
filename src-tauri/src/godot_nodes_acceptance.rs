@@ -218,6 +218,199 @@ fn a_node_reports_its_property_values() {
     }
 }
 
+/// Inspecting three named properties answers with three, and with nothing else.
+///
+/// A Label answers with 119 properties. One such answer was 15 885 characters — 81% of everything
+/// twelve tool calls of a live turn returned — and in that same turn the model read the running
+/// game's copy of the same node through `runtime.inspect_node` for 300 characters, because only
+/// that one took a list of names. An earlier turn asked `node.inspect` for
+/// `["text", "position", "size"]` by hand and was refused. This is that list, on the editor side.
+#[test]
+fn a_node_answers_with_only_the_properties_that_were_named() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://narrow.tscn", "rootType": "Node2D"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/narrow", "name": "Caption", "type": "Label"}),
+    );
+
+    let whole = session.call("node.inspect", json!({"node": "/narrow/Caption"}));
+    let all = whole["properties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("node.inspect answered without any properties: {whole}"))
+        .len();
+    assert!(
+        all > 20,
+        "an inspect that names nothing must still answer with the whole list, answered {all}"
+    );
+
+    let narrowed = session.call(
+        "node.inspect",
+        json!({"node": "/narrow/Caption", "properties": ["text", "position", "size"]}),
+    );
+    let mut named: Vec<&str> = narrowed["properties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a narrowed inspect answered without properties: {narrowed}"))
+        .iter()
+        .filter_map(|property| property["name"].as_str())
+        .collect();
+    named.sort_unstable();
+    assert_eq!(
+        named,
+        vec!["position", "size", "text"],
+        "a narrowed inspect must answer with exactly the names it was given"
+    );
+    // Everything a caller reads a node for besides its properties is still there, so narrowing is
+    // not a second, poorer operation the caller has to choose between.
+    assert_eq!(narrowed["type"], "Label", "{narrowed}");
+    assert!(
+        narrowed["signals"]
+            .as_array()
+            .is_some_and(|signals| !signals.is_empty()),
+        "a narrowed inspect must still report the signals: {narrowed}"
+    );
+
+    // `script` is the one name the whole list leaves out, because it is the node's own script
+    // rather than a property of it. A caller that names it has answered that objection — and a
+    // live turn asked a narrowed inspect for it on its first try and was told, of a node that
+    // plainly has one, `has no property script. Did you mean script?`.
+    let scripted = session.call(
+        "node.inspect",
+        json!({"node": "/narrow/Caption", "properties": ["script", "text"]}),
+    );
+    let mut both: Vec<&str> = scripted["properties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a narrowed inspect answered without properties: {scripted}"))
+        .iter()
+        .filter_map(|property| property["name"].as_str())
+        .collect();
+    both.sort_unstable();
+    assert_eq!(
+        both,
+        vec!["script", "text"],
+        "a named script is answered: {scripted}"
+    );
+    // And it is still left out of the list nobody narrowed.
+    assert!(
+        !whole["properties"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|one| one["name"] == "script")),
+        "an inspect that names nothing must still leave `script` out"
+    );
+
+    // A property the inspector shows under another name is answered when it is asked for. Godot
+    // registers `global_position` and friends with no usage flags at all, so the list nobody
+    // narrowed leaves them out — and the narrowed list used to refuse them, about properties
+    // `set_property` writes perfectly well, pointing at `node.inspect` as the way to see them.
+    let computed = session.call(
+        "node.inspect",
+        json!({"node": "/narrow/Caption", "properties": ["global_position"]}),
+    );
+    assert_eq!(
+        computed["properties"][0]["name"], "global_position",
+        "a named property is answered whatever the inspector would do with it: {computed}"
+    );
+    // The two operations have to agree about what a node has.
+    session.mutate(
+        "node.set_property",
+        json!({"node": "/narrow/Caption", "property": "global_position",
+               "value": {"type": "vector2", "value": [10, 20]}}),
+    );
+
+    // A name the node does not have is refused, rather than left as a gap the caller reads as
+    // "this node holds no value for it". Near enough to a real one and it is corrected; not near
+    // enough and it is pointed at the call that lists them all — the rule `_nearest_property`
+    // already applies to a property that is written rather than read.
+    let corrected = session.error(
+        "node.inspect",
+        json!({"node": "/narrow/Caption", "properties": ["posit"]}),
+        None,
+    );
+    assert!(
+        corrected.contains("posit") && corrected.contains("position"),
+        "a property one prefix short must be refused and corrected, said: {corrected}"
+    );
+    // `postion` is a transposition, so nothing is a prefix of anything and there is no correction
+    // to give. What it gets instead is the call that would have answered it.
+    let refused = session.error(
+        "node.inspect",
+        json!({"node": "/narrow/Caption", "properties": ["postion"]}),
+        None,
+    );
+    assert!(
+        refused.contains("postion") && refused.contains("node.inspect lists every property"),
+        "a property nothing is near must be refused and pointed somewhere, said: {refused}"
+    );
+}
+
+/// A handler written after the editor loaded the script can still be connected to.
+///
+/// Every live turn writes the method and then connects the signal to it, so by the time
+/// `node.connect_signal` checks, the file on disk is ahead of the script the editor loaded — and
+/// `has_method` reads the loaded one. One turn wrote `_on_score_timer_timeout` into `player.gd`,
+/// rescanned, saved the scene and reloaded it, and was told three times running that the node's
+/// script declares only `_process`. The third refusal tripped the repeated-call guard, and the
+/// connection was abandoned and hand-wired in code instead.
+#[test]
+fn a_handler_written_after_the_script_was_loaded_can_still_be_connected() {
+    let directory = tempfile::TempDir::new().expect("temporary directory");
+    let worktree = crate::godot_editor_harness::fixture_worktree(&directory);
+    std::fs::write(
+        worktree.join("player.gd"),
+        "extends Node2D\n\n\nfunc _process(_delta: float) -> void:\n\tpass\n",
+    )
+    .expect("write the script");
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://stale.tscn", "rootType": "Node2D"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/stale", "name": "Player", "type": "Node2D"}),
+    );
+    session.mutate(
+        "node.set_property",
+        json!({"node": "/stale/Player", "property": "script",
+               "value": {"type": "resource", "value": {"path": "res://player.gd"}}}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/stale", "name": "Ticker", "type": "Timer"}),
+    );
+
+    std::fs::write(
+        worktree.join("player.gd"),
+        "extends Node2D\n\n\nfunc _process(_delta: float) -> void:\n\tpass\n\n\n\
+         func _on_ticker_timeout() -> void:\n\tpass\n",
+    )
+    .expect("rewrite the script");
+
+    session.mutate(
+        "node.connect_signal",
+        json!({"node": "/stale/Ticker", "signal": "timeout", "method": "_on_ticker_timeout",
+               "target": "/stale/Player"}),
+    );
+
+    // And a method that is on neither copy is still refused, so the re-read is not a way past the
+    // check that stops a connection whose handler nobody wrote.
+    let refused = session.error(
+        "node.connect_signal",
+        json!({"node": "/stale/Ticker", "signal": "timeout", "method": "_on_nothing",
+               "target": "/stale/Player"}),
+        Some(session.revision()),
+    );
+    assert!(
+        refused.contains("_on_nothing") && refused.contains("_on_ticker_timeout"),
+        "a method nobody wrote is still refused, and the ones there are named: {refused}"
+    );
+}
+
 /// The properties an AI reaches for first can be written, on every family of node.
 ///
 /// `Control.position` and `Control.size` and every `theme_override_*` carry no storage flag — the

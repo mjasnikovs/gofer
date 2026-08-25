@@ -716,6 +716,16 @@ fn run_one<R: Runtime>(
         tool_params::Answers::Addon(command) => {
             a_path_that_climbs_out(&params)?;
             let answered = rpc(app, command, params);
+            // An autoload is a global name, and every script the language server already has open
+            // was parsed without it. Nothing about those documents changed, so the server never
+            // revisits them and their diagnostics keep naming a global that now exists. Done here
+            // rather than in the addon because the language server is this process's connection,
+            // and only after the command was accepted — a refused autoload changed nothing.
+            if answered.is_ok()
+                && matches!(command, "project.set_autoload" | "project.remove_autoload")
+            {
+                crate::script::reparse_open_documents();
+            }
             if domain.name == "godot_runtime" {
                 // A game that broke does not die, so a runtime call that failed has to carry the
                 // error that ended it rather than the transport's own.

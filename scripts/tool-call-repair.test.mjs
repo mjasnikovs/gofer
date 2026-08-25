@@ -149,6 +149,122 @@ test('a call naming only real operations is left alone', () => {
 })
 
 /*
+ * `godot_node inspect` sent `properties: ["text", "position", "size"]` — a live turn asking to read
+ * three named properties. `properties` belonged to `set_properties` alone, so the merged entry
+ * types answered `ops.0.properties.0: must be object`; the model then wrote `[{property: "text"}, …]`
+ * and was answered `must have required properties node, value`. Two turns spent being taught to
+ * write the properties it wanted to read.
+ *
+ * That exact call is now correct — `inspect` takes the list — so the case here is the same mistake
+ * one operation over: `create` written with `create_nodes`' list, which is what a model does when it
+ * flattens a batch back onto the single call.
+ */
+test('a parameter belonging to a sibling operation is refused by name', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node')
+    assert.throws(
+        () =>
+            normalizeToolCalls(node.operations, {
+                ops: [{op: 'create', parent: '/Main', type: 'Node2D', nodes: ['Player']}]
+            }),
+        error => {
+            assert.match(error.message, /create has no `nodes` parameter/u)
+            // And where that parameter really lives, so the next call has somewhere to go.
+            assert.match(error.message, /is a parameter of create_nodes/u)
+            return true
+        }
+    )
+})
+
+/* The shape it does take, quoted from the signature Rust printed off the same parameter table. */
+test('the refusal quotes the signature the operation was advertised under', () => {
+    const operations = [
+        {op: 'create', signature: '{parent: text}', params: [{name: 'parent', kind: 'text'}]},
+        {
+            op: 'create_nodes',
+            signature: '{nodes: list of {parent: text}}',
+            params: [{name: 'nodes', kind: 'list', entry: [{name: 'parent', kind: 'text'}]}]
+        }
+    ]
+    assert.throws(
+        () => normalizeToolCalls(operations, {ops: [{op: 'create', nodes: [{parent: '/Main'}]}]}),
+        error => {
+            assert.match(error.message, /It takes \{parent: text\}\./u)
+            return true
+        }
+    )
+})
+
+/*
+ * A key many operations declare is left for the router, which answers it better. `godot_script edit`
+ * sent `path` was refused here with a signpost naming ten operations, where the router's own
+ * sentence is shorter, carries the parameter's note, and spells the nearest real name.
+ */
+test('a key more than one sibling declares is left for the router', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script')
+    const call = {
+        ops: [{op: 'edit', path: 'scripts/player.gd', files: [{path: 'a.gd', edits: []}]}]
+    }
+    assert.deepEqual(normalizeToolCalls(script.operations, call), call)
+})
+
+/* And a sibling that declares the name without a shape inside it, likewise. */
+test('a sibling parameter with nothing inside it is left for the router', () => {
+    const operations = [
+        {op: 'stop', signature: '{}', params: []},
+        {op: 'wait', signature: '{ms: int}', params: [{name: 'ms', kind: 'int'}]}
+    ]
+    const call = {ops: [{op: 'stop', ms: 20}]}
+    assert.deepEqual(normalizeToolCalls(operations, call), call)
+})
+
+/*
+ * A key no operation declares is left exactly where it was. The entry schema is open for it, and
+ * the router answers it better than this can — it spells the nearest real parameter.
+ */
+test('a key no operation declares is left for the router to refuse', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node')
+    assert.deepEqual(
+        normalizeToolCalls(node.operations, {ops: [{op: 'inspect', node: '/Main', depth: 2}]}),
+        {ops: [{op: 'inspect', node: '/Main', depth: 2}]}
+    )
+})
+
+/*
+ * A bracket opened by mistake in front of three operations the model meant. The whole call was
+ * refused with `ops.0.op: must have required properties op`, about the one entry that is empty.
+ */
+test('an entry with nothing written into it does not take the batch with it', async () => {
+    const domains = await declaredDomains()
+    const runtime = domains.find(domain => domain.name === 'godot_runtime')
+    assert.deepEqual(
+        normalizeToolCalls(runtime.operations, {
+            ops: [{}, {op: 'wait', ms: 2200}, {op: 'capture'}]
+        }),
+        {ops: [{op: 'wait', ms: 2200}, {op: 'capture'}]}
+    )
+})
+
+/* A call that is only empty entries is left to be refused by name, not turned into an empty list. */
+test('a call with nothing in it at all is left exactly as it came', async () => {
+    const domains = await declaredDomains()
+    const runtime = domains.find(domain => domain.name === 'godot_runtime')
+    assert.deepEqual(normalizeToolCalls(runtime.operations, {ops: [{}]}), {ops: [{}]})
+})
+
+/* And a padded key is renamed onto its real parameter before this ever looks at it. */
+test('a padded key that trims onto a real parameter is not refused as a stranger', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node')
+    assert.deepEqual(
+        normalizeToolCalls(node.operations, {ops: [{op: 'inspect', 'node ': '/Main'}]}),
+        {ops: [{op: 'inspect', node: '/Main'}]}
+    )
+})
+
+/*
  * The one entry of a list, written flat on the operation. Three times across two live turns, and
  * the router's own refusal — which prints the whole `{files: [{path, edits}]}` shape — was resent
  * in the same shape once. Same mistake `foldStrayEntries` repairs, one bracket earlier.

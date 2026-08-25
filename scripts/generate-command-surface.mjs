@@ -168,7 +168,8 @@ const KINDS = [
     'hash',
     'tagged',
     'choice',
-    'either'
+    'either',
+    'listOf'
 ]
 
 /** One parameter of the source, held to the kinds the Rust checker knows how to enforce. */
@@ -182,6 +183,14 @@ function checkKind(path, entry, param) {
         if (!Array.isArray(param.of) || param.of.length < 2)
             throw new Error(`${where} is an either of fewer than two kinds`)
         for (const one of param.of) checkKind(path, entry, {...one, name: param.name})
+    }
+    // What one entry of a list *is*, where `entry` can only say what one entry *holds*. A scalar,
+    // deliberately: a list of objects is `entry`, and saying it twice is the drift this file ends.
+    if (param.kind === 'listOf') {
+        if (!param.of?.kind) throw new Error(`${where} is a listOf nothing`)
+        if (param.of.kind === 'list' || param.of.kind === 'listOf' || param.of.kind === 'object')
+            throw new Error(`${where} is a listOf ${param.of.kind}; use an entry shape for that`)
+        checkKind(path, entry, {...param.of, name: param.name})
     }
     // What one entry holds, where the kind stops. Only a list or an object has an inside, and an
     // inside written down half-way is worse than none: the checker refuses a key the shape does
@@ -345,6 +354,9 @@ function rustKind(param) {
         return `Kind::Choice(&[${param.of.map(word => rustString(word)).join(', ')}])`
     if (param.kind === 'either')
         return `Kind::Either(&[${param.of.map(one => rustKind(one)).join(', ')}])`
+    // A reference, because the variant holds one kind rather than a slice of them. `Kind` is `Copy`
+    // and every kind here is a const expression, so `&Kind::Text` is a `&'static Kind`.
+    if (param.kind === 'listOf') return `Kind::ListOf(&${rustKind(param.of)})`
     return param.kind.charAt(0).toUpperCase() + param.kind.slice(1)
 }
 

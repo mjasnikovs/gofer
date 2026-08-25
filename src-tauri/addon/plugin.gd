@@ -114,6 +114,20 @@ const SCENE_SWITCH_TIMEOUT_MS := 30000
 const SCENE_SWITCH_RETRY_MS := 1000
 
 # Runtime bridge state. `_runtime_session_id` names the debugger session of the running game and
+## The autoloads registered while this editor session has been running.
+##
+## The editor's GDScript compiler resolves an autoload's name from the map it built at startup, and
+## `ProjectSettings.set_setting` does not add to it — so a script naming one registered since then
+## fails to compile *in the editor*, while the same script is fine in the running game. This is what
+## lets a refusal say which of the two is happening. See `_reread_the_script_on`.
+var _autoloads_added_here: Array[String] = []
+
+## The scene the running game was started on, or "" for the project's own main scene.
+##
+## Held so `runtime.restart` restarts what is actually running rather than the project's entry
+## point, which is a different game whenever `run` named a scene.
+var _runtime_scene: String = ""
+
 # `_runtime_ready` flips when its GoferRuntime autoload announces itself. `_runtime_pending` holds
 # RPC requests waiting on the game — forwarded queries, launches waiting for the helper, and the
 # first-frame capture chained onto every launch — each with a deadline `_process` sweeps.
@@ -299,7 +313,7 @@ const MUTATING_COMMANDS: Array[String] = [
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:7483fa1decd0e07f
+# GENERATED-BEGIN command-params sha256:3a698c27e8a3de50
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.answer_dialog": {"required": ["button"], "optional": []},
@@ -312,7 +326,7 @@ const COMMAND_PARAMS: Dictionary = {
     "scene.save": {"required": [], "optional": []},
     "scene.save_as": {"required": ["path"], "optional": []},
     "scene.reload": {"required": [], "optional": []},
-    "node.inspect": {"required": ["node"], "optional": ["scene"]},
+    "node.inspect": {"required": ["node"], "optional": ["properties", "scene"]},
     "node.create": {"required": ["parent", "type", "name"], "optional": ["index", "scene"]},
     "node.create_nodes": {"required": ["nodes"], "optional": ["scene"]},
     "node.instantiate": {"required": ["parent", "path"], "optional": ["name", "index", "scene"]},
@@ -350,7 +364,7 @@ const COMMAND_PARAMS: Dictionary = {
     "resource.create_texture": {"required": ["path", "size"], "optional": ["background", "rects"]},
     "resource.create_shape": {"required": ["path", "shapeType"], "optional": ["size", "radius", "height", "points"]},
     "resource.describe_tileset": {"required": ["path"], "optional": []},
-    "runtime.run": {"required": [], "optional": []},
+    "runtime.run": {"required": [], "optional": ["scene"]},
     "runtime.stop": {"required": [], "optional": []},
     "runtime.restart": {"required": [], "optional": []},
     "runtime.get_state": {"required": [], "optional": []},
@@ -1010,9 +1024,9 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
                 "broke": _runtime_broke,
             })
         "runtime.run":
-            _runtime_launch(id, false)
+            _runtime_launch(id, false, str(params.get("scene", "")))
         "runtime.restart":
-            _runtime_launch(id, true)
+            _runtime_launch(id, true, _runtime_scene)
         "runtime.stop":
             _runtime_stop()
             # Answered from what the editor holds, not from a `false` this used to assert. The
@@ -1067,13 +1081,23 @@ func _runtime_stop() -> void:
 ## Starts (or restarts) the game. The response waits for the GoferRuntime autoload to announce
 ## itself, then rides back with the first rendered frame attached — the launch is only proven once
 ## the game has produced pixels.
-func _runtime_launch(id: String, restart: bool) -> void:
+func _runtime_launch(id: String, restart: bool, scene: String) -> void:
     var playing := EditorInterface.is_playing_scene()
     if playing and not restart:
         _respond_error(id, "already_running", "The project is already running; stop it or use runtime.restart", true)
         return
+    if not scene.is_empty() and not FileAccess.file_exists(scene):
+        _respond_error(
+            id,
+            "scene_not_found",
+            "No scene at '%s'. godot_scene list names every scene this project has" % scene,
+            false,
+            {"scene": scene}
+        )
+        return
     if playing:
         # Stopping is asynchronous; the sweep starts the new instance once the old one is gone.
+        _runtime_scene = scene
         _runtime_stop()
         _runtime_pending.append({"id": id, "kind": "restart", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
         return
@@ -1083,8 +1107,24 @@ func _runtime_launch(id: String, restart: bool) -> void:
     if asking != null:
         _respond_dialog_open(id, asking)
         return
-    EditorInterface.play_main_scene()
+    # Remembered only now, because everything above this line answers without starting anything —
+    # and a `restart` after one of those would otherwise restart a scene that never ran.
+    _runtime_scene = scene
+    _runtime_play()
     _runtime_pending.append(_launch_pending(id, "run"))
+
+## Presses Play, on the scene the caller named or on the project's own.
+##
+## `play_custom_scene` is the editor's F6, and it is what an agent asking to run one scene means.
+## Without it the only way to run anything but the main scene is to write
+## `application/run/main_scene`, run, and write it back — which one live turn did, spending two
+## calls on the detour and leaving a window in which the project boots into a test scene. Another
+## two reached for a `playArgs` parameter that `godot_runtime run` does not have.
+func _runtime_play() -> void:
+    if _runtime_scene.is_empty():
+        EditorInterface.play_main_scene()
+    else:
+        EditorInterface.play_custom_scene(_runtime_scene)
 
 ## Answers a request the editor turned into a question for a person.
 ##
@@ -1313,7 +1353,7 @@ func _sweep_runtime_pending() -> void:
         elif pending["kind"] == "stop" and not playing:
             _respond_result(pending["id"], {"running": false})
         elif pending["kind"] == "restart" and not playing:
-            EditorInterface.play_main_scene()
+            _runtime_play()
             pending["kind"] = "run"
             pending["seen_playing"] = false
             kept.append(pending)
@@ -2116,6 +2156,11 @@ func _project_set_autoload(params: Dictionary) -> Dictionary:
         )
     var entry := ("*" if enabled else "") + path
     ProjectSettings.set_setting("autoload/" + name, entry)
+    # Remembered because the editor's script compiler does not learn it. See
+    # `_reread_the_script_on`: a script naming this autoload cannot be recompiled in this editor
+    # session, and the refusal that follows has to say so rather than blame the script.
+    if not _autoloads_added_here.has(name):
+        _autoloads_added_here.append(name)
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
@@ -4822,13 +4867,30 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
     var target: Node = resolved["target"]
     var signal_name: String = resolved["signal"]
     var method: String = resolved["method"]
+    # The method the caller named is written first and connected second, so the file on disk is
+    # ahead of the script the editor loaded — and `has_method` reads the loaded one. A live turn
+    # wrote `_on_score_timer_timeout` into `player.gd`, rescanned, saved and reloaded the scene,
+    # and was told three times running that the node's script declares only `_process`; the third
+    # refusal tripped the repeated-call guard and the connection was abandoned. Re-read before
+    # refusing, never before accepting: a connection that already works costs nothing here.
+    var recompiled := true
+    if not target.has_method(method):
+        recompiled = _reread_the_script_on(target)
     if not target.has_method(method):
         return {
             "_gofer_error": {
                 "code": "method_not_found",
                 "message": (
                     "%s has no method %s to receive %s%s"
-                    % [_node_path(target), method, signal_name, _where_a_method_would_be(target)]
+                    % [
+                        _node_path(target),
+                        method,
+                        signal_name,
+                        (
+                            _where_a_method_would_be(target) if recompiled
+                            else _why_the_editor_cannot_see_it(target)
+                        )
+                    ]
                 ),
                 "retryable": false,
                 "readiness": "ready",
@@ -5074,11 +5136,25 @@ func _node_inspect(params: Dictionary) -> Dictionary:
     var node := _find_node(node_path_str)
     if node == null:
         return _node_not_found_error(node_path_str)
+    var wanted: Array[String] = []
+    for name in params.get("properties", []) as Array:
+        wanted.append(str(name))
+    var properties := _node_properties(node, wanted)
+    # A name that is not answered is refused rather than left as a gap, which is the rule
+    # `runtime.inspect_node` already follows: an answer missing the property the caller came for
+    # reads as "this node holds no value for it", and the caller acts on that instead of on a typo.
+    if not wanted.is_empty():
+        var answered: Array[String] = []
+        for property in properties:
+            answered.append(str((property as Dictionary)["name"]))
+        for name in wanted:
+            if not answered.has(name):
+                return _property_not_found_error(node, node_path_str, name)
     return {
         "name": node.name,
         "type": node.get_class(),
         "path": _node_path(node),
-        "properties": _node_properties(node),
+        "properties": properties,
         "groups": _authored_groups(node),
         "signals": _node_signals(node),
         "connections": _node_connections(node),
@@ -5094,17 +5170,38 @@ func _node_inspect(params: Dictionary) -> Dictionary:
 ##
 ## Categories, groups and subgroups are inspector headings rather than values, and `script` is the
 ## node's own script rather than a property of it; none of them are reported.
-func _node_properties(node: Node) -> Array:
+##
+## `wanted` narrows the answer to the names it holds, and empty means every one of them. A Label
+## answers with 119 properties: one such answer was 15 885 characters, 81% of everything twelve tool
+## calls of a live turn returned, and the same turn read the running game's copy of the same node
+## through `runtime.inspect_node` for 300 characters, because only that one took a list of names.
+func _node_properties(node: Node, wanted: Array[String] = []) -> Array:
     var properties: Array = []
     for info in node.get_property_list():
         var usage := int(info.get("usage", 0))
         if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
             continue
-        if not (usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)):
-            continue
         var property_name := str(info.get("name", ""))
-        if property_name.is_empty() or property_name == "script":
+        if property_name.is_empty():
             continue
+        # A name the caller asked for is answered, whatever the inspector would do with it. The
+        # filters below shape a list nobody chose; a caller who named `global_position` has chosen,
+        # and every one of those filters would answer them "this node has no such property" about a
+        # property `set_property` writes perfectly well — with the only pointer being `node.inspect`
+        # itself, which is the call that just refused it. `script` is the same case: left out of the
+        # whole list because it is the node's own script rather than a property of it, and answered
+        # the moment anybody names it.
+        if not wanted.is_empty():
+            if not wanted.has(property_name):
+                continue
+        else:
+            # Both halves of the inspector, and nothing that carries neither flag: `global_position`
+            # and friends are `PROPERTY_USAGE_NONE` and would otherwise be listed twice over, once
+            # as themselves and once as the `position` they are computed from.
+            if not (usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)):
+                continue
+            if property_name == "script":
+                continue
         properties.append(
             {
                 "name": property_name,
@@ -5202,6 +5299,65 @@ func _the_signals_it_does_have(node: Node, wanted: String) -> String:
         named = named.slice(0, 14)
     return ". It emits %s." % ", ".join(named)
 
+## Re-reads a node's script from disk, so a method written a moment ago is one it has.
+##
+## The source is assigned and the script recompiled, rather than loaded again. Both were measured
+## in the pinned editor against the test below: `ResourceLoader.load(path, "Script",
+## CACHE_MODE_REPLACE)` leaves `has_method` answering exactly as it did, because the instance the
+## node carries is built from the compiled script and only `reload` rebuilds it. `resource.rescan`
+## does not do it either — that scans the filesystem, and a script the editor has already loaded
+## stays as it was loaded.
+##
+## Assigning updates the resource every node and every open editor already holds, which is the
+## point: a second copy would answer this one call and leave the rest of the editor behind.
+## `keep_state` because the editor holds instances of it, and dropping their state to answer a
+## question about a method name would be a strange thing for a read to do.
+func _reread_the_script_on(target: Node) -> bool:
+    var script: Variant = target.get_script()
+    if not (script is Script):
+        return true
+    var path := (script as Script).resource_path
+    # An unsaved or built-in script has nothing on disk to be behind.
+    if path.is_empty() or not FileAccess.file_exists(path):
+        return true
+    var text := FileAccess.get_file_as_string(path)
+    if text.is_empty():
+        return true
+    # Assigned and recompiled without first asking whether the text changed. That check was here
+    # and it is the wrong question: `godot_script edit` writes through the editor, so the script
+    # resource can already hold the new source while the compiled class every instance runs on is
+    # still the old one — which is exactly the state this is called in. It is called only when the
+    # method the caller named is already missing, so there is nothing to save by skipping.
+    var loaded := script as Script
+    loaded.source_code = text
+    return loaded.reload(true) == OK
+
+## Why the editor's answer about a script's methods is out of date, and what to do about it.
+##
+## The method list a node reports comes from the compiled script, and the editor cannot compile
+## this one — so what it is really saying is "the last version that compiled had no such method",
+## which reads as a fact about the file and is not one. Measured against the pinned editor:
+## `Script.reload` answers `ERR_PARSE_ERROR` and leaves the old method list in place.
+##
+## The commonest cause has nothing to do with the file. An autoload registered while the editor has
+## been running is not in the map its compiler resolves global names from, so every script naming
+## one stops compiling *in the editor* while running perfectly in the game. One live turn met this:
+## it wrote the handler, registered the `Score` autoload, and was told three times that the script
+## declares only `_process`; it recovered by stopping and starting the whole session, which is the
+## only thing that rebuilds that map.
+func _why_the_editor_cannot_see_it(target: Node) -> String:
+    var named := ". The editor cannot compile its script, so the methods it reports are the last "
+    named += "version that compiled — read godot_script diagnostics for what is wrong with it."
+    if _autoloads_added_here.is_empty():
+        return named
+    return (
+        named
+        + " If the only thing wrong is a name from %s: an autoload registered while the editor has "
+        % ", ".join(_autoloads_added_here)
+        + "been running is not one the editor can resolve until it restarts, though the running "
+        + "game resolves it fine. Stop and start the session with godot_session, then connect."
+    )
+
 ## Where a method the caller named would have to live, said to a caller that has not put one there.
 ##
 ## `\/Pickup has no method _on_body_entered to receive body_entered` is the whole of what two live
@@ -5285,7 +5441,11 @@ func _nearest_property(node: Node, property: String) -> String:
             continue
         var plain := name.to_lower().replace("_", "")
         if plain == wanted:
-            return name
+            # Spelled the same way, so there is nothing to correct and `Did you mean script?` about
+            # `script` is what a caller was told. A near miss of case or underscores is still worth
+            # answering — `Position` for `position` is a real correction — so only an exact match
+            # is dropped.
+            return "" if name == property else name
         if mini(plain.length(), wanted.length()) < 4:
             continue
         if plain.begins_with(wanted) or wanted.begins_with(plain):

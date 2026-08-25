@@ -56,6 +56,15 @@ pub enum Kind {
     Choice(&'static [&'static str]),
     /// Any one of several kinds. `tileSize` is one number or two, `solid` a list or the word "all".
     Either(&'static [Kind]),
+    /// A list whose entries are one scalar kind, where [`Param::entry`] can only say what an
+    /// *object* entry holds.
+    ///
+    /// `properties: list` said nothing about what goes in it, and the gap was not cosmetic: a name
+    /// that means a list of objects in one operation of a domain and a bare list in another widens
+    /// the generated schema to an array that swallows the strict branch, which
+    /// `everyMergedNameDeclaresItsShape` refuses outright. So a list of strings had no way to be
+    /// declared beside a list of objects at all.
+    ListOf(&'static Kind),
 }
 
 /// One parameter of one operation.
@@ -460,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:2eca97384d076d25
+// GENERATED-BEGIN operations sha256:4e0b39c522016141
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -659,9 +668,16 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     op(
         "godot_node",
         "inspect",
-        "Inspects a node. Answers with its type, every property with its current value, its groups, every signal it can emit, and the connections it already has. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
+        "Inspects a node. Answers with its type, every property with its current value, its groups, every signal it can emit, and the connections it already has. `properties` narrows that to the names you list, exactly as runtime.inspect_node does for the running game: a Label answers with 119 properties and about four thousand tokens of them, so name the ones you came for. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
         Answers::Addon("node.inspect"),
-        &[need("node", Text), hidden("scene", Text)],
+        &[
+            need("node", Text),
+            noted(
+                opt("properties", Kind::ListOf(&Text)),
+                "The property names to read, like [\"text\", \"position\"]. Without it every property is answered.",
+            ),
+            hidden("scene", Text),
+        ],
     ),
     op(
         "godot_node",
@@ -1726,9 +1742,12 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         op(
             "godot_runtime",
             "run",
-            "Runs the project and captures the first frame.",
+            "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 — use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started.",
             Answers::Addon("runtime.run"),
-            &[],
+            &[noted(
+                opt("scene", Text),
+                "A res:// path to a .tscn, like res://scenes/level_2.tscn. Without it the project's main scene runs.",
+            )],
         ),
         Sharing::Repeat,
         "There is one running game, so a second one in the same call is the first one again.",
@@ -1990,6 +2009,7 @@ pub fn signature(params: &[Param]) -> String {
                 Kind::Object => format!("{}{mark}: object", param.name),
                 Kind::Hash => format!("{}{mark}: hash", param.name),
                 Kind::Tagged => format!("{}{mark}: tagged", param.name),
+                Kind::ListOf(inner) => format!("{}{mark}: list of {}", param.name, short(*inner)),
                 Kind::Either(kinds) => {
                     let names: Vec<&str> = kinds.iter().map(|one| short(*one)).collect();
                     format!("{}{mark}: {}", param.name, names.join("|"))
@@ -2013,6 +2033,7 @@ fn short(kind: Kind) -> &'static str {
         Kind::Tagged => "tagged",
         Kind::Choice(_) => "choice",
         Kind::Either(_) => "either",
+        Kind::ListOf(_) => "list",
     }
 }
 
@@ -2225,6 +2246,9 @@ fn fits(kind: Kind, value: &Value) -> bool {
         Kind::Choice(allowed) => value.as_str().is_some_and(|text| allowed.contains(&text)),
         Kind::Either(kinds) => kinds.iter().any(|one| fits(*one, value)),
         Kind::Tagged => value.is_object(),
+        // The bracket only. An entry that does not fit is named by its position in `check_inside`,
+        // rather than folded into "this one was an array of three items".
+        Kind::ListOf(_) => value.is_array(),
     }
 }
 
@@ -2251,6 +2275,7 @@ fn wanted(kind: Kind) -> String {
             names.join(" or ")
         }
         Kind::Tagged => "a tagged value".to_owned(),
+        Kind::ListOf(inner) => format!("a list of {}", wanted(*inner)),
     }
 }
 
@@ -2306,6 +2331,25 @@ fn check_inside(
     param: &Param,
     value: &Value,
 ) -> Result<(), ToolFailure> {
+    if let Kind::ListOf(inner) = param.kind {
+        for (index, item) in value.as_array().into_iter().flatten().enumerate() {
+            if !fits(*inner, item) {
+                return Err(failure(
+                    "invalid_param",
+                    join(
+                        format!(
+                            "{call} `{here}[{index}]` takes {}, and this one was {}.",
+                            wanted(*inner),
+                            describe(item)
+                        ),
+                        param.note,
+                    ),
+                    json!({"param": format!("{here}[{index}]"), "received": item}),
+                ));
+            }
+        }
+        return Ok(());
+    }
     if param.entry.is_empty() {
         return Ok(());
     }
@@ -3858,6 +3902,50 @@ mod tests {
         assert_eq!(
             signature(params_of("godot_script", "edit").expect("edit declares its parameters")),
             "{files: list of {path: text, edits: list of {oldText: text, newText: text}}}"
+        );
+    }
+
+    /// A list of one scalar kind says so, and refuses an entry that is not one, by position.
+    ///
+    /// `entry` can only say what an *object* entry holds, so `properties: list` was the whole of
+    /// what `node.inspect` could have declared — and a name that means a list of objects in one
+    /// operation of a domain and a bare list in another widens the generated schema to an array
+    /// that swallows the strict branch. `everyMergedNameDeclaresItsShape` refuses that outright,
+    /// so a list of strings had no way to be declared beside `set_properties`' list of objects.
+    #[test]
+    fn a_list_of_one_kind_says_which_and_refuses_the_entry_that_is_not_it() {
+        assert_eq!(
+            signature(params_of("godot_node", "inspect").expect("inspect declares its parameters")),
+            "{node: text, properties?: list of text}"
+        );
+        check_ok(
+            "godot_node",
+            "inspect",
+            json!({"node": "/Main/Label", "properties": ["text", "position"]}),
+        );
+        // Naming none of them is still the whole list, so the narrowing is not a second operation.
+        check_ok("godot_node", "inspect", json!({"node": "/Main/Label"}));
+
+        // The position is in the refusal, for the reason every other entry check carries one: the
+        // caller has to know which of the names it wrote is the one that is not a name.
+        let refused = message(
+            "godot_node",
+            "inspect",
+            json!({"node": "/Main/Label", "properties": ["text", {"name": "position"}]}),
+        );
+        assert!(
+            refused.contains("properties[1]") && refused.contains("a string"),
+            "the entry that is not a string must be named by its position: {refused}"
+        );
+        // And the bracket itself is still checked.
+        assert!(
+            message(
+                "godot_node",
+                "inspect",
+                json!({"node": "/x", "properties": "text"})
+            )
+            .contains("a list of a string"),
+            "a list of strings written as one string must be refused"
         );
     }
 

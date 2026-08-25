@@ -290,12 +290,19 @@
         {
             "tool": "godot_node",
             "op": "inspect",
-            "summary": "Inspects a node. Answers with its type, every property with its current value, its groups, every signal it can emit, and the connections it already has. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
+            "summary": "Inspects a node. Answers with its type, every property with its current value, its groups, every signal it can emit, and the connections it already has. `properties` narrows that to the names you list, exactly as runtime.inspect_node does for the running game: a Label answers with 119 properties and about four thousand tokens of them, so name the ones you came for. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
             "params": [
                 {
                     "name": "node",
                     "kind": "text",
                     "required": true
+                },
+                {
+                    "name": "properties",
+                    "kind": "listOf",
+                    "of": {"kind": "text"},
+                    "required": false,
+                    "note": "The property names to read, like [\"text\", \"position\"]. Without it every property is answered."
                 }
             ],
             "command": "node.inspect",
@@ -2187,12 +2194,19 @@
         {
             "tool": "godot_runtime",
             "op": "run",
-            "summary": "Runs the project and captures the first frame.",
+            "summary": "Runs the project and captures the first frame. `scene` runs that one scene instead of the project's main scene, which is the editor's own F6 \u2014 use it to try a scene you just built, rather than writing application/run/main_scene, running, and writing it back. restart restarts whatever run started.",
             "alone": {
                 "scope": "repeat",
                 "why": "There is one running game, so a second one in the same call is the first one again."
             },
-            "params": [],
+            "params": [
+                {
+                    "name": "scene",
+                    "kind": "text",
+                    "required": false,
+                    "note": "A res:// path to a .tscn, like res://scenes/level_2.tscn. Without it the project's main scene runs."
+                }
+            ],
             "command": "runtime.run"
         },
         {

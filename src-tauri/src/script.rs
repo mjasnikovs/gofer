@@ -880,6 +880,56 @@ pub fn diagnostics_for(
     })
 }
 
+/// Asks the language server to read every open document again, after something outside the
+/// documents changed what they mean.
+///
+/// An autoload is a global name, and a script parsed before the autoload existed was told the name
+/// is not declared — correctly, at the time. Nothing about the document changes when the autoload
+/// is registered, so the server never revisits it and `diagnostics` keeps serving that verdict. A
+/// live turn wrote a `Score` autoload, registered it, and was told `Identifier "Score" not declared
+/// in the current scope` three times over three calls; it recovered by closing the file and opening
+/// it again, which is exactly this, done by hand and three calls later.
+///
+/// A `didChange` carrying the text the server already has, because that is what makes it publish
+/// again — measured in the pinned editor: a second `didOpen` for a document already open publishes
+/// nothing at all.
+///
+/// **The text the server has, never the file.** The renderer pushes every debounced keystroke
+/// through `update_document`, so a document open in Gofer's editor is normally ahead of what is on
+/// disk. Reading the file here would tell the server the user's buffer is the last thing they
+/// saved, clear the diagnostics cache, and answer the next completion about text that is not on
+/// screen — until the next keystroke put it back.
+///
+/// Nothing happens without a live connection. `connection()` opens a socket and runs `initialize`
+/// when there is none cached, and this runs after every accepted autoload write — a handshake to
+/// discover that no document is open is a cost with no answer behind it.
+///
+/// Best effort throughout: a server that has gone away is not a reason to fail the call that got
+/// here.
+pub fn reparse_open_documents() {
+    let Some(client) = live_connection() else {
+        return;
+    };
+    for (uri, text) in client.open_documents() {
+        let _ = client.change_document(&uri, &text);
+    }
+}
+
+/// The language-server client already connected for the bound session, or nothing.
+///
+/// Unlike [`connection`], this never opens one: it answers what is, for a caller whose work is
+/// only about documents that are already open.
+fn live_connection() -> Option<Arc<LspClient>> {
+    let (lsp_port, worktree) = active_session()?;
+    let key = format!("{lsp_port}|{worktree}");
+    let slot = CONNECTION.lock().ok()?;
+    let existing = slot.as_ref()?;
+    if existing.key != key || existing.client.is_closed() {
+        return None;
+    }
+    Some(Arc::clone(&existing.client))
+}
+
 /// Reads each named document's diagnostics under one deadline for the whole batch.
 ///
 /// Split out for the same reason [`collect_published`] is: this rule — that the window belongs to

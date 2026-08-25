@@ -355,6 +355,83 @@ export function refuseUnknownOperation(operations, entry, elsewhere) {
     throw new Error(`This tool has no '${entry.op}' operation. It has: ${known}.${pointer}`)
 }
 
+/**
+ * A parameter that belongs to a sibling operation, refused by name instead of by type.
+ *
+ * `godot_node create` written with `create_nodes`' `nodes` list — what a model does when it
+ * flattens a batch back onto the single call — is answered `ops.0.nodes.0: must be object`, about
+ * a parameter `create` does not have. The entry schema merges the domain's parameter types under
+ * one open object, deliberately, for the reason `jsonSchemaOfEntry` measures; the design intends a
+ * stray key to fall through to the router, which answers `godot_node create has no \`nodes\`
+ * parameter. It takes {parent: text, type: text, name: text, index?: int}.` — but that only happens
+ * for a name *no* operation declares.
+ *
+ * Same seam as `refuseUnknownOperation`, one level in: the generated schema refuses before the
+ * router is reached, and `prepareArguments` is the one hook that runs first.
+ *
+ * **Exactly one sibling, and it has to have a shape inside it.** That narrowing is the whole rule,
+ * and a live run bought it: `godot_script edit` sent `path` was refused with a signpost naming ten
+ * operations, where the router's own sentence for the same call is shorter, carries the parameter's
+ * note, and spells the nearest real name. A key many operations declare is a key the merged type
+ * accepts and the router explains better. What it cannot explain is a key whose sibling declares an
+ * `entry`: ajv walks *inside* the value against the wrong operation's shape, and every line of the
+ * refusal is then about a parameter the caller never had.
+ *
+ * `signature` is the string Rust printed from the same parameter table, carried on the wire, so the
+ * shape quoted here cannot drift from the shape the router accepts. An operation whose parameters
+ * are all hidden signs as the empty string and takes nothing; one with no signature at all — a
+ * caller holding the declared contract rather than the catalogue — says nothing about what it takes
+ * rather than guessing.
+ */
+export function refuseSiblingParameter(operations, entry) {
+    const operation = operations.find(one => one.op === entry.op)
+    if (!Array.isArray(operation?.params)) return
+    for (const key of Object.keys(entry)) {
+        if (key === 'op') continue
+        if (operation.params.some(param => param.name === key)) continue
+        const owners = operations.filter(
+            other =>
+                other.op !== entry.op
+                && Array.isArray(other.params)
+                && other.params.some(param => param.name === key)
+        )
+        if (owners.length !== 1) continue
+        const shaped = owners[0].params.find(param => param.name === key)
+        if (!Array.isArray(shaped?.entry) || shaped.entry.length === 0) continue
+        const takes =
+            operation.signature ? ` It takes ${operation.signature}.`
+            : operation.signature === '' && operation.params.every(param => param.hidden) ?
+                ' It takes no parameters.'
+            :   ''
+        throw new Error(
+            `${entry.op} has no \`${key}\` parameter.${takes}`
+                + ` \`${key}\` is a parameter of ${owners[0].op}.`
+        )
+    }
+}
+
+/**
+ * The entry a model opened and wrote nothing into, dropped rather than taking the batch with it.
+ *
+ * `{"ops": [{}, {"op": "wait", "ms": 2200}, {"op": "inspect_node", …}, {"op": "capture"}]}` is what
+ * one live turn wrote: three operations it meant, behind a bracket it opened by mistake. The whole
+ * call was refused with `ops.0.op: must have required properties op`, which names the empty entry
+ * and says nothing about the three that were fine.
+ *
+ * An empty object carries no operation, no parameters and no intent, so there is nothing to lose by
+ * dropping it — which is what makes this a repair rather than a guess. Every other torn shape here
+ * is repaired by working out what the caller meant; this one is the single case where the answer is
+ * that they meant nothing.
+ *
+ * A call that is *only* empty entries is left exactly as it came. Dropping them would leave an
+ * empty `ops`, refused by `minItems` with a sentence no better than the one it already gets, and a
+ * caller who sent nothing at all is better told so by name.
+ */
+export function dropEmptyEntries(entries) {
+    const written = entries.filter(entry => !isObject(entry) || Object.keys(entry).length > 0)
+    return written.length > 0 ? written : entries
+}
+
 export function normalizeToolCalls(operations, args, elsewhere) {
     const raw = isObject(args) ? args : {}
     const listed = Array.isArray(raw.ops) ? raw.ops : [raw]
@@ -365,7 +442,7 @@ export function normalizeToolCalls(operations, args, elsewhere) {
     // second as an entry with no `op`, and validation refuses the batch and loses b entirely.
     const entries = foldStrayEntries(
         operations,
-        listed
+        dropEmptyEntries(listed)
             .map(entry => normalizeEntry(operations, entry))
             .map(entry => foldFlatEntry(operations, entry))
     )
@@ -375,7 +452,11 @@ export function normalizeToolCalls(operations, args, elsewhere) {
             .map(entry => {
                 refuseUnknownOperation(operations, entry, elsewhere)
                 const params = operations.find(operation => operation.op === entry.op)?.params
-                return wrapBareResource(params, trimPaddedKeys(params, entry))
+                // After the repairs, so a padded key that was about to be renamed onto a real
+                // parameter is never refused as one belonging somewhere else.
+                const shaped = wrapBareResource(params, trimPaddedKeys(params, entry))
+                refuseSiblingParameter(operations, shaped)
+                return shaped
             })
     }
 }
