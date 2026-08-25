@@ -135,6 +135,17 @@ pub const CATALOG: &[ToolDomain] = &[
                       read the tree to fetch it.",
         operations: tool_params::GODOT_SCENE_OPERATIONS,
     },
+    // The last clause is the corpus's most common surviving mistake, answered where the call is
+    // written. `{"op": "save"}` batched onto `godot_node` is **seven of the nine recorded refusals
+    // that still reach one before the router**, across six runs, and each one takes a whole batch
+    // of good work down with it because a list is refused as one. The description said how a
+    // mutation is revisioned and what a path looks like, and never that none of them writes the
+    // file.
+    //
+    // **Unmeasured.** `scripts/bench-where-save-lives.mjs` is the interleaved A/B for it, primed to
+    // the call before the mistake. The local model cannot answer it — three seeds an arm and it
+    // never wrote `connect_signal` or a `save` on any tool, because it wires buttons in `_ready`
+    // instead — and OpenRouter's free tier for the model that does write it was spent for the day.
     ToolDomain {
         name: "godot_node",
         description: "Node authoring inside the edited scene. Every mutation is undoable and every \
@@ -142,7 +153,8 @@ pub const CATALOG: &[ToolDomain] = &[
                       supplies from the last answer that carried one, and every mutation's own \
                       answer carries the next. So mutate, then mutate again: there is no revision to \
                       pass and no tree to re-read between them. Paths are the scene's own, like \
-                      /Level1 or /Level1/Ground.",
+                      /Level1 or /Level1/Ground. Nothing here writes the file: godot_scene save \
+                      does.",
         operations: tool_params::GODOT_NODE_OPERATIONS,
     },
     ToolDomain {
