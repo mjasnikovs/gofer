@@ -103,6 +103,14 @@ export function gluedWrapperKey(declared, raw, namedBy) {
  * same name, because a model that wrote both meant the one it wrote deliberately.
  */
 export function normalizeEntry(operations, args) {
+    // An entry written as the operation's name and nothing else. `{"ops": ["wait", {"op": "wait",
+    // "ms": 2200}, …]}` is what one live turn wrote — the first entry as a bare string, the three
+    // after it properly — and the whole call was refused with `ops.0.op: must have required
+    // properties op`, which is pi's own sentence and not one this repo can improve. A string is
+    // never a valid entry, and a string that is one of this domain's operation names carries no
+    // other reading.
+    if (typeof args === 'string' && operations.some(operation => operation.op === args))
+        return {op: args}
     const raw = isObject(args) ? args : {}
     const only = operations.length === 1 ? operations[0].op : undefined
     const namedBy = OP_KEYS.find(key => typeof raw[key] === 'string')
@@ -236,7 +244,19 @@ export function nameTheOperation(operations, entry) {
     const fitting = operations.filter(
         operation => Array.isArray(operation.params) && exactFit(operation.params, keys)
     )
-    return fitting.length === 1 ? {...entry, op: fitting[0].op} : entry
+    if (fitting.length === 1) return {...entry, op: fitting[0].op}
+    // The same entry written flat, which is `foldFlatEntry`'s shape with the operation left off as
+    // well. `{"ops": [{"path": "scripts/player.gd", "edits": […]}]}` is one recorded call: `edit`'s
+    // own `files` entry, written as the entry. `foldFlatEntry` cannot reach it — it starts from an
+    // `op` — and neither can the fit above, because `{path, edits}` is nothing `edit` declares. It
+    // is the entry of the one list parameter `edit` does declare, and exactly one operation in the
+    // domain is shaped like that, which is what makes it a repair rather than a guess.
+    const folding = operations.filter(
+        operation => listParamShapedLike(operations, operation.op, keys) !== undefined
+    )
+    if (folding.length !== 1) return entry
+    const name = listParamShapedLike(operations, folding[0].op, keys)
+    return {op: folding[0].op, [name]: [entry]}
 }
 
 /**

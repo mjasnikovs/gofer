@@ -552,8 +552,13 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }
     )
 
-    // Nothing to fold into, and no operation shaped like it: the first entry of a call is nobody's
-    // stray, and a domain of several operations still cannot guess which one it meant.
+    // Nothing to fold into — the first entry of a call is nobody's stray — and still not left as
+    // it came: `{path, edits}` is exactly the shape of `edit`'s own `files` entry and of nothing
+    // else in the domain, so `nameTheOperation` reads the operation back out of it. This used to
+    // be asserted the other way round, when the only reading of a missing `op` was an exact fit
+    // against an operation's own parameters; `s33-iterate` sent this shape as a whole call and was
+    // refused with `ops.0.op: must have required properties op`, which is the agent loop's own
+    // sentence rather than one this repo can write.
     assert.deepEqual(
         normalizeToolCalls(script, {
             ops: [
@@ -563,7 +568,7 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }),
         {
             ops: [
-                {path: 'b.gd', edits: []},
+                {op: 'edit', files: [{path: 'b.gd', edits: []}]},
                 {path: 'a.gd', op: 'open'}
             ]
         }
@@ -849,4 +854,57 @@ test('a refused list says that none of it ran, and a refused single call does no
             return true
         }
     )
+})
+
+/*
+ * Two entries a live run wrote that only pi's own validator ever answered.
+ *
+ * `s22-hud` sent `{"ops": ["wait", {"op": "wait", "ms": 2200}, {"op": "inspect_node", …},
+ * {"op": "capture"}]}` — the first entry as a bare string, the three after it properly written —
+ * and `s33-iterate` sent `{"ops": [{"path": "scripts/player.gd", "edits": […]}]}`, which is
+ * `edit`'s own `files` entry written as the entry. Both were refused with `ops.0.op: must have
+ * required properties op`, which comes out of the agent loop's schema check rather than out of
+ * this repo, so it is the one refusal here that cannot be improved — only avoided.
+ */
+test('an entry written as an operation name, and one written as its own list entry', () => {
+    const runtime = [
+        {op: 'wait', params: [{name: 'ms', kind: 'int'}]},
+        {op: 'capture', params: []}
+    ]
+    assert.deepEqual(normalizeToolCalls(runtime, {ops: ['wait', {op: 'capture'}]}), {
+        ops: [{op: 'wait'}, {op: 'capture'}]
+    })
+
+    // A string naming nothing is left to be refused. Repairing it would mean inventing an
+    // operation out of a word the domain does not have.
+    assert.deepEqual(normalizeToolCalls(runtime, {ops: ['nonsense', {op: 'capture'}]}), {
+        ops: [{}, {op: 'capture'}]
+    })
+
+    const script = [
+        {
+            op: 'edit',
+            params: [
+                {
+                    name: 'files',
+                    kind: 'list',
+                    required: true,
+                    entry: [
+                        {name: 'path', kind: 'text', required: true},
+                        {name: 'edits', kind: 'list', required: true, entry: [{name: 'oldText'}]}
+                    ]
+                }
+            ]
+        },
+        {op: 'open', params: [{name: 'path', kind: 'text', required: true}]}
+    ]
+    const edits = [{oldText: 'a', newText: 'b'}]
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{path: 'scripts/player.gd', edits}]}), {
+        ops: [{op: 'edit', files: [{path: 'scripts/player.gd', edits}]}]
+    })
+
+    // `{path}` alone fits `open` outright and is named that way, not folded into `edit`.
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{path: 'scripts/player.gd'}]}), {
+        ops: [{op: 'open', path: 'scripts/player.gd'}]
+    })
 })
