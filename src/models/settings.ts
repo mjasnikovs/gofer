@@ -175,6 +175,17 @@ export type AiModelOption = Readonly<{
     maxTokens: number
     reasoning: boolean
     supportsReasoningEffort: boolean
+    /**
+     * Whether this model refuses to be asked not to think, which is what makes `off` unavailable
+     * rather than merely unhelpful.
+     *
+     * 90 of the 287 reasoning models OpenRouter listed on 2026-08-25 say so, and they are the ones
+     * people pick: GPT-5, Gemini 3.x, Grok 4.x, Claude Fable 5, DeepSeek R1, gpt-oss. `off`
+     * resolves to `reasoning: {enabled: false}` on the wire, and every one of them answers that
+     * with HTTP 400 — so a menu that offers `off` for them offers a setting that breaks every
+     * request the connection makes.
+     */
+    reasoningMandatory: boolean
     /** See `AiSettings`. Empty for anything but a local server that named its own efforts. */
     thinkingLevels: readonly ThinkingLevel[]
     input: readonly string[]
@@ -307,22 +318,44 @@ export function thinkingLevelsFor(model: ThinkingCapable): readonly ThinkingLeve
     // Reasoning first, and it is not redundant: a model can be marked as taking an effort and as
     // not thinking at all, and a model that does not think has nothing to spend an effort on.
     if (!model.reasoning) return NO_THINKING_LEVELS
+    // And then whether it may be turned off at all. A model whose reasoning is mandatory answers
+    // HTTP 400 to the request `off` builds, so `off` is not a quieter setting there — it is a
+    // connection that cannot make a single call. See `AiModelOption.reasoningMandatory`.
+    const off: readonly ThinkingLevel[] = model.reasoningMandatory ? [] : ['off']
     // What the server named wins outright. Its template raises on an effort it does not know, and
     // llama.cpp turns that into an HTTP 500 on every request of the turn.
-    if (model.thinkingLevels.length > 0) return ['off', ...model.thinkingLevels]
-    return model.supportsReasoningEffort ? EFFORT_LEVELS : ON_OFF_THINKING_LEVELS
+    if (model.thinkingLevels.length > 0) return [...off, ...model.thinkingLevels]
+    if (!model.supportsReasoningEffort) return [...off, 'on']
+    return model.reasoningMandatory ? EFFORT_LEVELS.filter(level => level !== 'off') : EFFORT_LEVELS
 }
 
 /** The three fields that decide what a reasoning menu offers. See `thinkingLevelsFor`. */
 type ThinkingCapable = Readonly<{
     reasoning: boolean
     supportsReasoningEffort: boolean
+    reasoningMandatory: boolean
     thinkingLevels: readonly ThinkingLevel[]
 }>
 
-/** The stored level, kept if the model still offers it and dropped to `off` if it does not. */
+/**
+ * The stored level, kept if the model still offers it and replaced if it does not.
+ *
+ * The replacement is the cheapest level the model does offer. `off` is the cheapest of all and is
+ * first in `EFFORT_LEVELS`, so for every model that can be turned off this is the same answer it
+ * always gave; for a model that cannot, falling back to `off` was falling onto the one value that
+ * makes every request fail, reached by nothing more than switching to that model.
+ *
+ * Cheapest by `EFFORT_LEVELS`, never by the model's own order. `thinkingLevels` is the provider's
+ * list in the provider's order — OpenRouter answers `["max", "high", "low"]` — so taking the first
+ * of it would answer a request for no thinking at all with the most expensive setting there is, on
+ * a metered API. This is the same choice `leastEffort` makes in `scripts/thinking-level.mjs` for
+ * the same situation one layer down, and the two have to agree or the file says one thing and the
+ * request sends another.
+ */
 export function keepThinkingLevel(model: ThinkingCapable, level: ThinkingLevel): ThinkingLevel {
-    return thinkingLevelsFor(model).includes(level) ? level : 'off'
+    const offered = thinkingLevelsFor(model)
+    if (offered.includes(level)) return level
+    return EFFORT_LEVELS.find(cheapest => offered.includes(cheapest)) ?? offered[0] ?? 'off'
 }
 
 /**
@@ -471,6 +504,7 @@ export function adoptModelReasoning(choice: ModelChoice, model: AiModelOption): 
     if (
         choice.reasoning === model.reasoning
         && choice.supportsReasoningEffort === model.supportsReasoningEffort
+        && choice.reasoningMandatory === model.reasoningMandatory
     ) {
         return choice
     }
@@ -478,9 +512,40 @@ export function adoptModelReasoning(choice: ModelChoice, model: AiModelOption): 
         ...choice,
         reasoning: model.reasoning,
         supportsReasoningEffort: model.supportsReasoningEffort,
+        reasoningMandatory: model.reasoningMandatory,
         thinkingLevels: model.thinkingLevels,
         thinkingLevel: keepThinkingLevel(model, choice.thinkingLevel)
     }
+}
+
+/**
+ * The same re-read, for the sub-agent's own model.
+ *
+ * The sub-agent names a connection and a model of its own, and neither is the active connection's —
+ * so `withActiveConnection` never reaches it and its facts were never brought up to date. That is
+ * not a cosmetic gap: the sub-agent is what `godot_docs_search ask` and every delegation run on,
+ * and a sub-agent left at `off` against a model whose reasoning is mandatory answers HTTP 400 to
+ * every call it makes. Its facts came from the same catalogue as the parent's and go stale the
+ * same way.
+ *
+ * Only when the child is on the driver that was just listed, and only for the model it named:
+ * a catalogue from one server says nothing about a model on another. So a child on a *different*
+ * driver from the parent is not reconciled here at all, and cannot be — reaching it would mean
+ * listing a second server's catalogue on every connect. Until it is selected, or that connection
+ * is tested, `piThinkingLevel` is what keeps its stored level off the wire.
+ */
+export function adoptSubagentReasoning(
+    ai: AiSettings,
+    listedFor: AiConnectionType,
+    available: readonly AiModelOption[]
+): AiSettings {
+    const chosen = ai.subagent.connection
+    if (chosen?.connectionType !== listedFor) return ai
+    const configured = available.find(model => model.id === chosen.model.id)
+    if (!configured) return ai
+    const model = adoptModelReasoning(chosen.model, configured)
+    if (model === chosen.model) return ai
+    return {...ai, subagent: {...ai.subagent, connection: {...chosen, model}}}
 }
 
 /** Which stored connection serves a driver, or nothing when that driver has never been configured. */

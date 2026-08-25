@@ -38,10 +38,21 @@ function verdict(label, toolName, args) {
     const tool = byName.get(toolName)
     const validate = ajv.compile(tool.parameters)
     const raw = validate(args)
-    const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args
-    const ok = validate(prepared)
+    // A throw is a refusal, not a crash: `prepareArguments` refuses an operation the tool does not
+    // have, which is one of the shapes this probe exists to measure.
+    let prepared = args
+    let refusal
+    try {
+        if (tool.prepareArguments) prepared = tool.prepareArguments(args)
+    } catch (error) {
+        refusal = error instanceof Error ? error.message : String(error)
+    }
+    const ok = refusal === undefined && validate(prepared)
     if (!ok) refused += 1
-    const note = !raw && ok ? '  (refused raw, repaired by the normalizer)' : ''
+    const note =
+        refusal !== undefined ? `  (${refusal})`
+        : !raw && ok ? '  (refused raw, repaired by the normalizer)'
+        : ''
     console.log(`${ok ? 'ACCEPTS' : 'REFUSES'}  ${label}${note}`)
     return ok
 }

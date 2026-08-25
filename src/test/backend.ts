@@ -298,6 +298,7 @@ const STORED_SETTINGS: GoferSettings = {
                     maxTokens: 120_064,
                     reasoning: false,
                     supportsReasoningEffort: false,
+                    reasoningMandatory: false,
                     thinkingLevels: [],
                     input: ['text'],
                     thinkingLevel: 'off'

@@ -42,6 +42,7 @@ const SETTINGS: GoferSettings = {
                     maxTokens: 4096,
                     reasoning: true,
                     supportsReasoningEffort: true,
+                    reasoningMandatory: false,
                     thinkingLevels: [],
                     input: ['text'],
                     thinkingLevel: 'high'
@@ -266,6 +267,7 @@ describe('editing the connection', () => {
             maxTokens: 2048,
             reasoning: true,
             supportsReasoningEffort: false,
+            reasoningMandatory: false,
             thinkingLevels: [],
             input: ['text', 'image']
         }
@@ -287,6 +289,7 @@ describe('editing the connection', () => {
             maxTokens: 2048,
             reasoning: true,
             supportsReasoningEffort: true,
+            reasoningMandatory: false,
             thinkingLevels: [],
             input: ['text']
         }
@@ -301,6 +304,7 @@ describe('editing the connection', () => {
             maxTokens: 2048,
             reasoning: false,
             supportsReasoningEffort: false,
+            reasoningMandatory: false,
             thinkingLevels: [],
             input: ['text']
         }
@@ -322,6 +326,7 @@ describe('editing the connection', () => {
             maxTokens: 1_024,
             reasoning: true,
             supportsReasoningEffort: true,
+            reasoningMandatory: false,
             thinkingLevels: [],
             input: ['text']
         }
@@ -332,6 +337,7 @@ describe('editing the connection', () => {
                 update: {
                     reasoning: false,
                     supportsReasoningEffort: false,
+                    reasoningMandatory: false,
                     thinkingLevel: 'off',
                     contextWindow: 999_999
                 }
@@ -353,6 +359,7 @@ describe('editing the connection', () => {
             reasoning: chosen(loaded)?.reasoning ?? false,
             thinkingLevels: [],
             supportsReasoningEffort: chosen(loaded)?.supportsReasoningEffort ?? false,
+            reasoningMandatory: false,
             input: ['text']
         }
 
@@ -368,6 +375,7 @@ describe('choosing the model the sub-agent answers with', () => {
         maxTokens: 2048,
         reasoning: false,
         supportsReasoningEffort: false,
+        reasoningMandatory: false,
         thinkingLevels: [],
         input: ['text']
     }

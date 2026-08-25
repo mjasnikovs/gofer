@@ -18,9 +18,26 @@
  * only written for a connection that said it takes efforts. All that matters is that it is above
  * `off`, so the switch resolves to true.
  */
-export function piThinkingLevel(level) {
+export function piThinkingLevel(level, model = {}) {
     if (level === 'on') return 'medium'
-    return level || 'off'
+    const chosen = level || 'off'
+    if (chosen !== 'off' || !model.reasoningMandatory) return chosen
+    // A model that refuses to stop thinking, asked to stop. `off` resolves to
+    // `reasoning: {enabled: false}` on the wire, and OpenRouter answers HTTP 400 `Reasoning is
+    // mandatory for this endpoint and cannot be disabled` — measured against `stealth/ox-alpha` on
+    // 2026-08-25, where it took out `godot_docs_search ask` and every delegation for the whole run.
+    //
+    // The least effort the model named, not its default: the setting said as little thinking as
+    // possible, and that is the nearest thing to it this model has. Nothing named means no effort
+    // field is written at all, so which level this is never leaves the building — all that matters
+    // is that it is above `off`.
+    return leastEffort(model.thinkingLevels)
+}
+
+/** The cheapest effort a model named, or `medium` when it named none. See `piThinkingLevel`. */
+function leastEffort(levels) {
+    const named = new Set(levels ?? [])
+    return KNOWN_EFFORTS.find(effort => named.has(effort)) ?? 'medium'
 }
 
 /**

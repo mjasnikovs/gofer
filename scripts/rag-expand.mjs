@@ -156,7 +156,7 @@ export function createCompletion(connection, {models: injected, persistCredentia
             codex ? {...model, maxTokens} : modelFor(connection, maxTokens),
             {systemPrompt: system, messages: [{role: 'user', content: user}]},
             {
-                reasoning: piThinkingLevel(connection.thinkingLevel),
+                reasoning: piThinkingLevel(connection.thinkingLevel, connection),
                 timeoutMs: connection.timeoutMs ?? 120_000,
                 maxRetries: connection.maxRetries ?? 2
             }

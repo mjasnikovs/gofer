@@ -191,6 +191,36 @@ export function foldStrayEntries(operations, entries) {
 }
 
 /**
+ * The one entry of a list, written flat on the operation instead of inside the list.
+ *
+ * `{op: "edit", path: "scripts/player.gd", edits: [...]}` where `godot_script edit` takes
+ * `{files: [{path, edits}]}`. Three times across two live turns on 2026-08-25, and the router's
+ * refusal — "godot_script edit has no `path` parameter. It takes {files: list of {path: text,
+ * edits: list of {oldText: text, newText: text}}}" — was resent in the same shape once.
+ *
+ * The same mistake `foldStrayEntries` already repairs, one bracket earlier: there the entries after
+ * the first are written beside the list, here the only entry is written instead of it. So it is the
+ * same test — `listParamShapedLike` — asked about the entry's own keys.
+ *
+ * Three guards, and each one is a call this must not touch. The list has to be absent, or the model
+ * meant both. Exactly one list parameter may fit, or folding is a guess. And no key may be a
+ * parameter the operation declares itself, because then the flat shape is the right one and the
+ * resemblance is a coincidence.
+ */
+export function foldFlatEntry(operations, entry) {
+    if (typeof entry.op !== 'string') return entry
+    const params = operations.find(operation => operation.op === entry.op)?.params
+    if (!Array.isArray(params)) return entry
+    const {op, ...rest} = entry
+    const keys = Object.keys(rest)
+    if (keys.length === 0) return entry
+    if (keys.some(key => params.some(param => param.name === key))) return entry
+    const name = listParamShapedLike(operations, op, keys)
+    if (name === undefined || entry[name] !== undefined) return entry
+    return {op, [name]: [rest]}
+}
+
+/**
  * The operation an entry named its parameters for but never named itself.
  *
  * A model that has written one entry properly writes the ones after it as parameters alone: an
@@ -256,21 +286,96 @@ export function trimPaddedKeys(params, entry) {
     }, shaped)
 }
 
-export function normalizeToolCalls(operations, args) {
+/**
+ * A resource written straight into a tagged value, put back inside the `value` it belongs in.
+ *
+ * `{"type": "resource", "path": "res://scripts/coin.gd"}` is what two live turns wrote against
+ * `stealth/ox-alpha` on 2026-08-25 — eight values across two `set_properties` calls, and the whole
+ * call was refused each time, because nothing is written unless every entry is accepted. The shape
+ * it should have is `{"type": "resource", "value": {"path": "…"}}`, and the tag says so: only the
+ * payload wrapper was left out.
+ *
+ * The opposite mistake — a second `{type, value}` pair around the payload — is the one
+ * `TAGGED_PAYLOAD` in `tool-schema.mjs` and `tool_params::repair_tagged` already answer. This is
+ * the same gap from the other side, and it has to be repaired here rather than there: the tagged
+ * schema requires `value`, so the agent loop refuses the call with `must have required properties
+ * value` before the router is reached, and the router's own sentence — which prints the corrected
+ * call with the caller's path in it — is never written.
+ *
+ * `path` alone, and nothing else. Every other tag's payload is a bare value or a list of numbers,
+ * so there is no second key this could read as a payload by mistake, and a tagged value that
+ * already carries `value` is left exactly as it came.
+ */
+export function wrapBareResource(params, entry) {
+    if (!Array.isArray(params) || !isObject(entry)) return entry
+    return params.reduce((walked, param) => {
+        const held = walked[param.name]
+        if (held === undefined) return walked
+        if (param.kind === 'tagged') {
+            if (!isObject(held) || 'value' in held) return walked
+            const {type, path, ...rest} = held
+            if (type !== 'resource' || typeof path !== 'string') return walked
+            if (Object.keys(rest).length > 0) return walked
+            return {...walked, [param.name]: {type, value: {path}}}
+        }
+        if (!Array.isArray(param.entry) || param.entry.length === 0) return walked
+        if (param.kind === 'list' && Array.isArray(held))
+            return {...walked, [param.name]: held.map(one => wrapBareResource(param.entry, one))}
+        if (param.kind === 'object')
+            return {...walked, [param.name]: wrapBareResource(param.entry, held)}
+        return walked
+    }, entry)
+}
+
+/**
+ * The refusal a model gets for an operation this domain does not have.
+ *
+ * `{"op": "save"}` sent to `godot_node`, twice across two live turns on 2026-08-25 — batched
+ * beside `connect_signal`, which is a reasonable thing to want and is one tool away from being
+ * right. What came back was `ops.2.op: must be equal to one of the allowed values`: it does not
+ * name the value it refused, it does not name the values it would have taken, and it does not say
+ * that `save` is a real operation living on `godot_scene`. The whole batch was refused with it.
+ *
+ * Thrown from `prepareArguments`, which the agent loop runs before it validates — and whose throw
+ * it turns into the tool result the model reads. That is the only point at which Gofer can answer
+ * an `op` the generated enum is about to refuse, and the enum is worth keeping: it is what the
+ * model is shown while it writes the call.
+ *
+ * `elsewhere` answers which other tools have this operation, so the sentence can point at one. It
+ * is optional because a caller holding a single domain has nothing to point at, and a wrong
+ * signpost is worse than none.
+ */
+export function refuseUnknownOperation(operations, entry, elsewhere) {
+    if (typeof entry.op !== 'string') return
+    if (operations.some(operation => operation.op === entry.op)) return
+    const known = operations.map(operation => operation.op).join(', ')
+    const others = elsewhere?.(entry.op) ?? []
+    const pointer =
+        others.length > 0 ? ` '${entry.op}' is an operation of ${others.join(' and ')}.` : ''
+    throw new Error(`This tool has no '${entry.op}' operation. It has: ${known}.${pointer}`)
+}
+
+export function normalizeToolCalls(operations, args, elsewhere) {
     const raw = isObject(args) ? args : {}
     const listed = Array.isArray(raw.ops) ? raw.ops : [raw]
+    // `foldFlatEntry` before `foldStrayEntries`, and the order is the repair. Both mistakes at once
+    // — `[{op: "edit", path: a, edits: […]}, {path: b, edits: […]}]` — is the one a model writes
+    // when it flattens the first file and then keeps going. The stray fold needs the list to exist
+    // before it can add to it, so run the other way round it repairs the first file, leaves the
+    // second as an entry with no `op`, and validation refuses the batch and loses b entirely.
     const entries = foldStrayEntries(
         operations,
-        listed.map(entry => normalizeEntry(operations, entry))
+        listed
+            .map(entry => normalizeEntry(operations, entry))
+            .map(entry => foldFlatEntry(operations, entry))
     )
     return {
         ops: entries
             .map(entry => nameTheOperation(operations, entry))
-            .map(entry =>
-                trimPaddedKeys(
-                    operations.find(operation => operation.op === entry.op)?.params,
-                    entry
-                )
-            )
+            .map(entry => {
+                refuseUnknownOperation(operations, entry, elsewhere)
+                const params = operations.find(operation => operation.op === entry.op)?.params
+                return wrapBareResource(params, trimPaddedKeys(params, entry))
+            })
     }
 }

@@ -102,8 +102,17 @@ function entriesOf(message, tools) {
         } catch {
             continue
         }
-        const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args
-        const accepts = ajv.compile(tool.parameters)(prepared)
+        // A throw is a refusal. `prepareArguments` refuses an operation the tool does not have,
+        // and a wrong-tool `op` is exactly the mistake these recorded calls carry — so it is
+        // counted as refused rather than allowed to end the run.
+        let prepared = args
+        let threw = false
+        try {
+            if (tool.prepareArguments) prepared = tool.prepareArguments(args)
+        } catch {
+            threw = true
+        }
+        const accepts = !threw && ajv.compile(tool.parameters)(prepared)
         for (const entry of Array.isArray(prepared.ops) ? prepared.ops : [prepared])
             if (entry && typeof entry === 'object') out.push({entry, accepts, tool: tool.name})
     }

@@ -236,10 +236,16 @@ export function startScriptedServer(turns) {
                 response.writeHead(script.error.status ?? 400, {
                     'content-type': 'application/json'
                 })
+                // `body` for a gateway that answers with more than a sentence. OpenRouter puts the
+                // real cause and the one thing the user can do about it in `metadata`, and a test
+                // about how that reaches a person cannot be written against a shape this harness
+                // makes up. Absent, it is the one-line body llama.cpp sends.
                 response.end(
-                    JSON.stringify({
-                        error: {message: script.error.message, type: 'invalid_request_error'}
-                    })
+                    JSON.stringify(
+                        script.error.body ?? {
+                            error: {message: script.error.message, type: 'invalid_request_error'}
+                        }
+                    )
                 )
                 return
             }

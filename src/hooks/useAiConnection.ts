@@ -5,6 +5,7 @@ import {commandErrorMessage} from '../utils/command-error'
 import {
     activeConnection,
     adoptModelReasoning,
+    adoptSubagentReasoning,
     applyModelSelection,
     normalizeSettings,
     withActiveConnection
@@ -116,15 +117,31 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
         async (available: readonly AiModelOption[], loaded: GoferSettings) => {
             const chosen = activeConnection(loaded.ai)
             const configured = available.find(model => model.id === chosen?.model.id)
-            if (!configured) {
+            // The sub-agent's model first, and on both paths. It is stored beside the connections
+            // rather than inside one, so `withActiveConnection` cannot reach it and the parent's
+            // own outcome says nothing about whether it needs re-reading — a parent whose model
+            // the catalogue no longer names still has a child whose model it does. Written first
+            // so the two changes are one save. See `adoptSubagentReasoning`.
+            const withChild = adoptSubagentReasoning(loaded.ai, loaded.ai.connectionType, available)
+            if (!configured || !chosen) {
                 const onlyModel = available.length === 1 ? available[0] : undefined
-                if (onlyModel) await applyModel(onlyModel, loaded)
+                if (onlyModel) {
+                    await applyModel(onlyModel, {...loaded, ai: withChild})
+                    return
+                }
+                if (withChild === loaded.ai) return
+                await saveSettings(
+                    {...loaded, ai: withChild},
+                    "The model's reasoning support could not be saved"
+                )
                 return
             }
-            if (!chosen) return
             const model = adoptModelReasoning(chosen.model, configured)
-            if (model === chosen.model) return
-            const ai = withActiveConnection(loaded.ai, connection => ({...connection, model}))
+            const ai =
+                model === chosen.model ?
+                    withChild
+                :   withActiveConnection(withChild, connection => ({...connection, model}))
+            if (ai === loaded.ai) return
             await saveSettings({...loaded, ai}, "The model's reasoning support could not be saved")
         },
         [applyModel, saveSettings]

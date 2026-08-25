@@ -32,6 +32,9 @@ const SETTINGS_VERSION: u32 = 1;
 /// `EFFORT_LEVELS` in `settings.ts` too, and neither of them holds `on`.
 const EFFORT_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// `off` as an owned value, so `thinking_levels` can hand back a slice of it or an empty one.
+static OFF_LEVEL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| "off".to_owned());
+
 /// Every level a settings file may legally name. `on` belongs to a model that thinks and has no
 /// efforts to name; the rest belong to one that has. Which of them a given model actually offers is
 /// `thinking_levels`, and this is only what is not a typo.
@@ -167,6 +170,13 @@ pub(crate) struct ModelChoice {
     /// other two with HTTP 500 on every request of the turn.
     #[serde(default)]
     thinking_levels: Vec<String>,
+    /// Whether this model refuses to be asked not to think, which is what makes `off` unavailable
+    /// rather than merely unhelpful. See `OpenrouterReasoning::mandatory`.
+    ///
+    /// Defaulted, so a settings file written before this field reads as "not mandatory" — which is
+    /// what every local server is, and what a hosted model is until its catalogue is read again.
+    #[serde(default)]
+    reasoning_mandatory: bool,
     #[serde(default = "default_model_input")]
     input: Vec<String>,
     #[serde(default = "default_thinking_level")]
@@ -370,6 +380,9 @@ impl ModelChoiceFile {
                 max_tokens: self.max_tokens.unwrap_or_else(default_max_tokens),
                 reasoning: self.reasoning.unwrap_or_default(),
                 supports_reasoning_effort: self.supports_reasoning_effort.unwrap_or_default(),
+                // A file written before the field. Nothing in that shape ever named a hosted
+                // catalogue, so nothing it can hold refuses to stop thinking.
+                reasoning_mandatory: false,
                 thinking_levels: self.thinking_levels.unwrap_or_default(),
                 input: self.input.unwrap_or_else(default_model_input),
                 thinking_level: self.thinking_level.unwrap_or_else(default_thinking_level),
@@ -564,6 +577,9 @@ pub(crate) struct AiModelOption {
     max_tokens: u64,
     reasoning: bool,
     supports_reasoning_effort: bool,
+    /// Whether `off` is a level this model has. See `OpenrouterReasoning::mandatory`.
+    #[serde(default)]
+    reasoning_mandatory: bool,
     /// The efforts this model's own server named, or empty when nothing named any. See
     /// `AiSettings::thinking_levels` — this is the same list, on its way to the settings page.
     #[serde(default)]
@@ -626,6 +642,14 @@ struct OpenrouterTopProvider {
 struct OpenrouterReasoning {
     #[serde(default)]
     supported_efforts: Vec<String>,
+    /// Whether this model refuses to be asked not to think.
+    ///
+    /// 90 of the 287 reasoning models the catalogue listed on 2026-08-25 set this, and they are not
+    /// the obscure ones: GPT-5, Gemini 3.x, Grok 4.x, Claude Fable 5, DeepSeek R1, gpt-oss. Sent
+    /// `reasoning: {enabled: false}` — which is what the `off` level resolves to — every one of them
+    /// answers HTTP 400 `Reasoning is mandatory for this endpoint and cannot be disabled`.
+    #[serde(default)]
+    mandatory: bool,
 }
 
 #[derive(Deserialize)]
@@ -808,6 +832,7 @@ fn default_local_profile() -> AiConnectionProfile {
             max_tokens: default_max_tokens(),
             reasoning: false,
             supports_reasoning_effort: false,
+            reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: default_model_input(),
             thinking_level: default_thinking_level(),
@@ -835,6 +860,9 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
             max_tokens: 128_000,
             reasoning: true,
             supports_reasoning_effort: true,
+            // The Codex driver owns its own reasoning field; nothing here resolves to
+            // `reasoning: {enabled: false}` on the wire.
+            reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: vec!["text".to_owned(), "image".to_owned()],
             thinking_level: "high".to_owned(),
@@ -872,6 +900,9 @@ fn default_openrouter_profile() -> AiConnectionProfile {
             max_tokens: 1_000_000,
             reasoning: false,
             supports_reasoning_effort: false,
+            // A seed, replaced by the first catalogue read. The model it names does not reason at
+            // all, so it cannot be one that refuses to stop.
+            reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: vec!["text".to_owned()],
             thinking_level: "off".to_owned(),
@@ -928,6 +959,7 @@ pub(crate) fn docs_expansion_connection(
         max_tokens: model.max_tokens,
         reasoning: model.reasoning,
         supports_reasoning_effort: model.supports_reasoning_effort,
+        reasoning_mandatory: model.reasoning_mandatory,
         thinking_levels: model.thinking_levels.clone(),
         // The connection's, never the child's: the child borrows an address, and how thinking is
         // turned on is a fact about the server at that address.
@@ -988,6 +1020,7 @@ fn model_facts(catalog: &PiCatalog, base_url: &str, model_id: &str) -> Option<Mo
 fn thinking_levels(
     reasoning: bool,
     supports_reasoning_effort: bool,
+    mandatory: bool,
     levels: &[String],
 ) -> Vec<String> {
     // Reasoning first, and it is not redundant: a model can be marked as taking an effort and as
@@ -995,35 +1028,55 @@ fn thinking_levels(
     if !reasoning {
         return vec!["off".to_owned()];
     }
+    // And then whether it may be turned off at all. `off` resolves to `reasoning: {enabled: false}`
+    // on the wire, which a model whose reasoning is mandatory answers with HTTP 400. The same rule
+    // as `thinkingLevelsFor` in `src/models/settings.ts`; the two are one rule in two languages.
+    let off: &[String] = if mandatory {
+        &[]
+    } else {
+        std::slice::from_ref(&OFF_LEVEL)
+    };
     if !levels.is_empty() {
-        return std::iter::once("off".to_owned())
-            .chain(levels.iter().cloned())
-            .collect();
+        return off.iter().cloned().chain(levels.iter().cloned()).collect();
     }
     if supports_reasoning_effort {
         return EFFORT_LEVELS
             .iter()
+            .filter(|level| !mandatory || **level != "off")
             .map(|level| (*level).to_owned())
             .collect();
     }
-    vec!["off".to_owned(), "on".to_owned()]
+    off.iter()
+        .cloned()
+        .chain(std::iter::once("on".to_owned()))
+        .collect()
 }
 
-/// The stored level, kept if the model still offers it and dropped to `off` if it does not.
+/// The stored level, kept if the model still offers it and replaced by the cheapest one it does.
+///
+/// Cheapest by `EFFORT_LEVELS`, which is ascending and begins with `off` — so wherever `off` is
+/// offered this is the answer it always gave. Never by the model's own list, which is the
+/// provider's order: OpenRouter answers `["max", "high", "low"]`, and taking the first of that
+/// would answer a stored request for no thinking with the most expensive setting there is.
+/// `keepThinkingLevel` in `src/models/settings.ts` makes the same choice for the same reason.
 fn keep_level(
     level: &str,
     reasoning: bool,
     supports_reasoning_effort: bool,
+    mandatory: bool,
     levels: &[String],
 ) -> String {
-    if thinking_levels(reasoning, supports_reasoning_effort, levels)
-        .iter()
-        .any(|offered| offered == level)
-    {
-        level.to_owned()
-    } else {
-        "off".to_owned()
+    let offered = thinking_levels(reasoning, supports_reasoning_effort, mandatory, levels);
+    if offered.iter().any(|one| one == level) {
+        return level.to_owned();
     }
+    EFFORT_LEVELS
+        .iter()
+        .find(|cheapest| offered.iter().any(|one| one == *cheapest))
+        .map_or_else(
+            || offered.first().cloned().unwrap_or_else(|| "off".to_owned()),
+            |cheapest| (*cheapest).to_owned(),
+        )
 }
 
 /// Re-derives every model-owned fact in a settings file, from the catalogue and from the server.
@@ -1148,6 +1201,7 @@ fn resolve_model(
         &choice.thinking_level,
         choice.reasoning,
         choice.supports_reasoning_effort,
+        choice.reasoning_mandatory,
         &choice.thinking_levels,
     );
 }
@@ -1435,6 +1489,9 @@ fn local_model_options(
                     || known.map_or(server_reasoning, |model| model.supports_reasoning_effort),
                     |model| !model.efforts.is_empty(),
                 ),
+                // A local server is never one of these. `off` is how a chat template is told not
+                // to think, and a template that has a switch has both of its positions.
+                reasoning_mandatory: false,
                 thinking_levels: loaded
                     .map(|model| model.efforts.clone())
                     .unwrap_or_default(),
@@ -1506,6 +1563,10 @@ fn openrouter_model_options(remote: Vec<OpenrouterModel>) -> Vec<AiModelOption> 
                 // Named efforts are the only evidence that an effort field will be read. A model
                 // that reasons without naming any takes no effort, which is the `on`/`off` case.
                 supports_reasoning_effort: !thinking_levels.is_empty(),
+                reasoning_mandatory: model
+                    .reasoning
+                    .as_ref()
+                    .is_some_and(|reasoning| reasoning.mandatory),
                 thinking_levels,
                 // Never empty: `validate_settings` refuses an empty input list, and every model in
                 // the catalogue takes text.
@@ -1559,6 +1620,7 @@ fn chatgpt_models() -> Result<Vec<AiModelOption>, String> {
                     max_tokens: model.max_tokens,
                     reasoning: model.reasoning,
                     supports_reasoning_effort: !model.thinking_level_map.is_empty(),
+                    reasoning_mandatory: false,
                     // ChatGPT names no efforts of its own — the seven Gofer knows are what it
                     // takes, which is what an empty list here means.
                     thinking_levels: Vec::new(),
@@ -1733,6 +1795,8 @@ fn pi_model_option(provider: &PiProvider, model: &PiModel) -> AiModelOption {
         max_tokens: model.max_tokens,
         reasoning,
         supports_reasoning_effort: reasoning && provider.compat.supports_reasoning_effort,
+        // The catalogue is a file, and no file has ever carried this. Only a live catalogue says.
+        reasoning_mandatory: false,
         // The catalogue is a file. Only the server that has the model loaded can name its efforts.
         thinking_levels: Vec::new(),
         input: model.input.clone(),
@@ -1766,6 +1830,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
                     max_tokens: model.max_tokens,
                     reasoning: known.reasoning,
                     supports_reasoning_effort: known.supports_reasoning_effort,
+                    reasoning_mandatory: known.reasoning_mandatory,
                     thinking_levels: Vec::new(),
                     input: model.input.clone(),
                     thinking_level: default_thinking_level(),
@@ -1940,6 +2005,7 @@ fn validate_model_choice(choice: &mut ModelChoice, id_name: &str) -> Result<(), 
         &choice.thinking_level,
         choice.reasoning,
         choice.supports_reasoning_effort,
+        choice.reasoning_mandatory,
         &choice.thinking_levels,
     );
     Ok(())
@@ -3160,6 +3226,7 @@ mod tests {
                 max_tokens: 4_096,
                 reasoning: true,
                 supports_reasoning_effort: true,
+                reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: default_model_input(),
                 thinking_level: "low".to_owned(),
@@ -3271,6 +3338,7 @@ mod tests {
                 max_tokens: 128_000,
                 reasoning: true,
                 supports_reasoning_effort: true,
+                reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: default_model_input(),
                 thinking_level: "low".to_owned(),
@@ -3345,6 +3413,7 @@ mod tests {
                 max_tokens: default_context_window(),
                 reasoning: false,
                 supports_reasoning_effort: false,
+                reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: default_model_input(),
                 thinking_level: "off".to_owned(),
@@ -3680,6 +3749,46 @@ mod tests {
         );
     }
 
+    /// One rule in three languages, held to itself here.
+    ///
+    /// `thinking_levels` and `keep_level` are the Rust copies of `thinkingLevelsFor` and
+    /// `keepThinkingLevel` in `src/models/settings.ts`, and they run on every read and every save.
+    /// Left un-taught about `reasoning_mandatory`, this copy went on offering `off` for a model
+    /// that answers HTTP 400 to it and went on preserving a stored `off` the settings page would
+    /// no longer show — three copies of one rule, one of them quietly disagreeing.
+    #[test]
+    fn a_model_that_cannot_stop_thinking_is_never_offered_off() {
+        let named = ["max".to_owned(), "high".to_owned(), "low".to_owned()];
+
+        assert_eq!(
+            thinking_levels(true, true, false, &named),
+            ["off", "max", "high", "low"]
+        );
+        assert_eq!(
+            thinking_levels(true, true, true, &named),
+            ["max", "high", "low"]
+        );
+        // And with nothing named, the whole scale minus the one position it does not have.
+        assert!(
+            !thinking_levels(true, true, true, &[])
+                .iter()
+                .any(|l| l == "off")
+        );
+        assert_eq!(thinking_levels(true, false, true, &[]), ["on"]);
+        // A model that does not reason at all is `off` and nothing else, mandatory or not: there
+        // is no reasoning for the flag to be about.
+        assert_eq!(thinking_levels(false, true, true, &named), ["off"]);
+
+        // The stored level a mandatory model cannot use becomes the cheapest one it can — `low`,
+        // not `max`, which is what its own list happens to put first.
+        assert_eq!(keep_level("off", true, true, true, &named), "low");
+        assert_eq!(keep_level("medium", true, true, true, &named), "low");
+        assert_eq!(keep_level("high", true, true, true, &named), "high");
+        // Wherever `off` is offered, this is the answer it always gave.
+        assert_eq!(keep_level("medium", true, true, false, &named), "off");
+        assert_eq!(keep_level("off", true, true, false, &named), "off");
+    }
+
     /// Every rule in `openrouter_model_options`, against the shapes the live catalogue really has.
     ///
     /// The fixture is trimmed from a real response. Each model in it is one of the cases that was
@@ -3778,12 +3887,19 @@ mod tests {
             mandatory.thinking_levels,
             ["xhigh", "high", "medium", "low", "minimal"]
         );
+        // And it says so, which is the whole difference between `off` being a quieter setting and
+        // `off` being a connection that answers HTTP 400 to every request it makes.
+        assert!(mandatory.reasoning_mandatory);
 
         // `none` is OpenRouter's word for "can be switched off", not an effort. `off` is prepended
         // by the menu itself, and passing `none` through would put a level in the settings file
         // that `EVERY_LEVEL` does not contain.
         let optional = &options[3];
         assert_eq!(optional.thinking_levels, ["max", "high", "low"]);
+        assert!(!optional.reasoning_mandatory);
+        // A model with no reasoning block at all is not mandatory either — the field is read off
+        // the block, and `is_some_and` on an absent one is false rather than a panic.
+        assert!(!plain.reasoning_mandatory);
         // Pi types a model's input as text or image and nothing else. Video and file have nowhere
         // to go, and an empty list would fail validation.
         assert_eq!(optional.input, ["text"]);
@@ -3836,6 +3952,7 @@ mod tests {
                 max_tokens: 8_000,
                 reasoning: true,
                 supports_reasoning_effort: true,
+                reasoning_mandatory: false,
                 thinking_levels: vec!["xhigh".to_owned(), "high".to_owned()],
                 input: vec!["text".to_owned()],
                 thinking_level: "high".to_owned(),
@@ -4053,6 +4170,7 @@ mod tests {
                 max_tokens: 200_000,
                 reasoning: true,
                 supports_reasoning_effort: true,
+                reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: vec!["text".to_owned(), "image".to_owned()],
                 thinking_level: "high".to_owned(),

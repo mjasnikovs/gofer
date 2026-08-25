@@ -34,6 +34,7 @@ const settingsResponse: SettingsResponse = {
                         maxTokens: 128_000,
                         reasoning: true,
                         supportsReasoningEffort: true,
+                        reasoningMandatory: false,
                         thinkingLevels: [],
                         input: ['text', 'image'],
                         thinkingLevel: 'high'
@@ -58,6 +59,7 @@ const serverModels = [
         maxTokens: 32_768,
         reasoning: true,
         supportsReasoningEffort: true,
+        reasoningMandatory: false,
         thinkingLevels: [],
         input: ['text']
     }

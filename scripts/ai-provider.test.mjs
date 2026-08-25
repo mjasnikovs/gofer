@@ -12,7 +12,13 @@ import {readdir, rm} from 'node:fs/promises'
 import {createServer} from 'node:http'
 import test from 'node:test'
 import {createToolHost} from './ai-host.mjs'
-import {createAgentTools, createModelContext, retryDelay, runAgent} from './ai-provider.mjs'
+import {
+    createAgentTools,
+    createModelContext,
+    readableProviderError,
+    retryDelay,
+    runAgent
+} from './ai-provider.mjs'
 import {
     MODEL_ID,
     NO_USAGE,
@@ -1248,6 +1254,208 @@ test('a turn gives up once its retry budget is spent', async context => {
     assert.deepEqual(timers.waited, [5_000, 10_000])
 })
 
+/**
+ * OpenRouter's free pool, as it answered on 2026-08-25: HTTP 429, no `Retry-After`, and a body
+ * whose `metadata` holds both the real cause and the one thing the user can do about it.
+ */
+const RATE_LIMITED = {
+    status: 429,
+    body: {
+        error: {
+            message: 'Provider returned error',
+            code: 429,
+            metadata: {
+                raw: 'stealth/ox-alpha is temporarily rate-limited upstream. Please retry shortly.',
+                provider_name: 'Stealth',
+                limit_source: 'upstream_provider_shared_pool',
+                remedy_hint: 'Retry shortly, or add your own provider key.'
+            }
+        },
+        user_id: 'user_3IJE3NGNCSCGpZVhEluB5fQ6ck5'
+    }
+}
+
+/*
+ * A refusal that is about this second, waited on like one.
+ *
+ * Four live turns against that pool spent their whole ten-attempt budget — about nine minutes each
+ * — being refused, and died. Sampled back to back in the same state the refusals cleared within a
+ * second and never ran more than three deep, so the budget was not too small; the waits in front of
+ * it were too long. The first five attempts now land inside 31 seconds rather than 155.
+ */
+test('a rate-limited turn is asked again in a second, not five', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {error: RATE_LIMITED},
+        {error: RATE_LIMITED},
+        {text: 'Through on the third ask'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const timers = instantTimers()
+
+    const completion = await runAgent({
+        settings: servedBy(url, impatient),
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        timers,
+        emit: () => {}
+    })
+
+    assert.equal(completion.text, 'Through on the third ask')
+    // The shipped curve for a rate limit: one second, doubling. Not the five-second one, which
+    // would have put these same two attempts 15 seconds apart.
+    assert.deepEqual(timers.waited, [1_000, 2_000])
+})
+
+/*
+ * OpenRouter reports one refusal two ways: HTTP 429 with its body, and an in-band stream error
+ * whose text is the four words `Provider returned error` with the code stripped. A live turn
+ * alternated between them, and reading the base off each failure made the waits climb 4 s, 40 s,
+ * 16 s — the exponent kept counting while the base flipped. Being rate-limited is the turn's state.
+ */
+test('a turn that has been rate-limited keeps the short curve when the wording changes', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {error: RATE_LIMITED},
+        {error: {status: 503, message: 'Provider returned error'}},
+        {error: RATE_LIMITED},
+        {text: 'Through'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const timers = instantTimers()
+
+    const completion = await runAgent({
+        settings: servedBy(url, impatient),
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        timers,
+        emit: () => {}
+    })
+
+    assert.equal(completion.text, 'Through')
+    // Doubling from one second all the way, rather than jumping to 20 for the middle attempt.
+    assert.deepEqual(timers.waited, [1_000, 2_000, 4_000])
+})
+
+/*
+ * An outage is still waited out at five seconds. A model server that was killed is being restarted,
+ * and asking again in a second is asking a socket that is not listening.
+ */
+test('a failure that is not a rate limit keeps the five-second curve', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {error: {status: 503, message: 'upstream connect error: connection refused'}},
+        {text: 'Back online'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const timers = instantTimers()
+
+    const completion = await runAgent({
+        settings: servedBy(url, impatient),
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+        agentMessages: [],
+        workspacePath: workspace.path,
+        timers,
+        emit: () => {}
+    })
+
+    assert.equal(completion.text, 'Back online')
+    assert.deepEqual(timers.waited, [5_000])
+})
+
+/*
+ * What the user is told when the budget really is spent.
+ *
+ * The turn used to end on 400 characters of the provider's JSON, with the only actionable line in
+ * it — OpenRouter's `remedy_hint` — buried in the middle. The status stays in the sentence so a bug
+ * report still names it.
+ */
+test('a spent rate-limit budget ends the turn in a sentence, not in JSON', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([{error: RATE_LIMITED}])
+    const url = await baseUrl(context, mock.server)
+
+    await assert.rejects(
+        runAgent({
+            settings: servedBy(url, {...impatient, retryAttempts: 1}),
+            messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+            agentMessages: [],
+            workspacePath: workspace.path,
+            timers: instantTimers(),
+            emit: () => {}
+        }),
+        error => {
+            assert.equal(
+                error.message,
+                'The provider refused this request (429): stealth/ox-alpha is temporarily '
+                    + 'rate-limited upstream. Please retry shortly. Retry shortly, or add your own '
+                    + 'provider key.'
+            )
+            assert.ok(!error.message.includes('{'), 'no JSON reaches the user')
+            return true
+        }
+    )
+})
+
+/*
+ * A spent quota is still a spent quota after the sentence is written.
+ *
+ * The readable form keeps the status and the provider's own detail and drops everything else — and
+ * `GoUsageLimitError` lives in `error.type`, which is one of the markers Pi's classifier reads to
+ * decide a failure will never fix itself. Classified on the readable form, this 429 kept its number,
+ * matched the retryable pattern, and burned all ten attempts against an account with nothing left.
+ */
+test('a quota that will never clear is not retried, however it is worded', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {
+            error: {
+                status: 429,
+                body: {
+                    error: {
+                        type: 'GoUsageLimitError',
+                        code: 429,
+                        message: 'You have reached your plan limit.'
+                    }
+                }
+            }
+        }
+    ])
+    const url = await baseUrl(context, mock.server)
+    const events = []
+    const timers = instantTimers()
+
+    await assert.rejects(
+        runAgent({
+            settings: servedBy(url, impatient),
+            messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
+            agentMessages: [],
+            workspacePath: workspace.path,
+            timers,
+            emit: event => events.push(event)
+        }),
+        /plan limit/u
+    )
+
+    assert.equal(mock.bodies.length, 1, 'the provider was asked once and not again')
+    assert.ok(!events.some(event => event.type === 'retry-scheduled'))
+    assert.deepEqual(timers.waited, [])
+})
+
+/* A body this cannot read is handed back exactly as it came, rather than replaced by a guess. */
+test('a provider error that is not JSON is left alone', () => {
+    assert.equal(readableProviderError('fetch failed'), 'fetch failed')
+    assert.equal(readableProviderError('429: not json at all'), '429: not json at all')
+    assert.equal(readableProviderError(undefined), undefined)
+})
+
 test('a failure that will not fix itself is not waited on', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1771,6 +1979,80 @@ test('the off level reaches a chat-template server as thinking disabled', async 
         })
 
         assert.equal(mock.request().body.chat_template_kwargs?.enable_thinking, false)
+    } finally {
+        mock.server.close()
+    }
+})
+
+/*
+ * A model that refuses to be asked not to think, with `off` still in its settings file.
+ *
+ * This is the failure a live turn hit: the sub-agent was left at `off` against `stealth/ox-alpha`,
+ * every `godot_docs_search ask` went out as `reasoning: {enabled: false}`, and OpenRouter answered
+ * HTTP 400 `Reasoning is mandatory for this endpoint and cannot be disabled` to all of them. The
+ * settings page no longer offers `off` for such a model, but a file written before that still holds
+ * it, so the request itself has to be the thing that never disables reasoning.
+ *
+ * The body is what is asserted, not the level: pi-ai rewrites a level on the way past.
+ */
+test('a stored off never disables reasoning on a model that requires it', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const {port} = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`, {
+                model: {
+                    reasoning: true,
+                    supportsReasoningEffort: true,
+                    reasoningMandatory: true,
+                    thinkingLevels: ['max', 'high', 'low'],
+                    thinkingLevel: 'off'
+                }
+            }),
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        const {body} = mock.request()
+        assert.notEqual(body.reasoning_effort, 'none')
+        assert.notEqual(body.reasoning?.enabled, false)
+        // The least effort it named, which is the nearest thing it has to the setting that was made.
+        assert.equal(body.reasoning_effort, 'low')
+    } finally {
+        mock.server.close()
+    }
+})
+
+/** And a model that may be turned off still is. The rule is narrow on purpose. */
+test('a stored off still disables reasoning where off is allowed', async context => {
+    const mock = startServer()
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
+    const {port} = mock.server.address()
+
+    try {
+        await runAgent({
+            settings: servedBy(`http://127.0.0.1:${String(port)}/v1`, {
+                model: {
+                    reasoning: true,
+                    supportsReasoningEffort: true,
+                    reasoningMandatory: false,
+                    thinkingLevels: ['max', 'high', 'low'],
+                    thinkingLevel: 'off'
+                }
+            }),
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => undefined
+        })
+
+        assert.notEqual(mock.request().body.reasoning_effort, 'low')
     } finally {
         mock.server.close()
     }

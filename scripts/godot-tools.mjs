@@ -27,6 +27,12 @@ import {jsonSchemaOfEntry, signatureOf} from './tool-schema.mjs'
  */
 export function createGodotTools(domains, host) {
     if (!Array.isArray(domains)) return []
+    // Which other tools have an operation, so a call sent to the wrong one is told where it lives
+    // rather than only that it is not here. See `refuseUnknownOperation`.
+    const elsewhere = op =>
+        domains
+            .filter(other => other.operations.some(operation => operation.op === op))
+            .map(other => other.name)
     return domains.map(domain => {
         // Two narrowings, and they read differently to a caller. `exclusive` is an operation that
         // cannot share a call at all; `repeat` is one that may sit beside anything and may not
@@ -81,7 +87,7 @@ export function createGodotTools(domains, host) {
             // has already been refused. `prepareArguments` is the one hook that runs before it: a
             // model that wrote the parameters under a wrapper now passes validation instead of
             // spending a round trip on a bracket.
-            prepareArguments: args => normalizeToolCalls(domain.operations, args),
+            prepareArguments: args => normalizeToolCalls(domain.operations, args, elsewhere),
             execute: async (_toolCallId, args, signal) => {
                 const result = await host.call(domain.name, args, signal)
                 return toolResult(result)

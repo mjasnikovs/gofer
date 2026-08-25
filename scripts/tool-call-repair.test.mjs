@@ -104,6 +104,189 @@ function sortedKeys(value) {
     )
 }
 
+/*
+ * `{"op": "save"}` sent to `godot_node`, twice across two live turns on 2026-08-25, batched beside
+ * `connect_signal`. The generated enum refused the whole batch with `ops.2.op: must be equal to one
+ * of the allowed values` — no value, no allowed list, and no word about `save` being one tool away.
+ */
+test('an operation this tool does not have is refused by name, with a signpost', () => {
+    const tools = createGodotTools(catalog, {call: async () => ({})})
+    const node = tools.find(tool => tool.name === 'godot_scene')
+    assert.throws(
+        () => node.prepareArguments({ops: [{op: 'get_tree'}, {op: 'capture'}]}),
+        error => {
+            assert.match(error.message, /no 'capture' operation/u)
+            // What it does have, so the next call has somewhere to go.
+            assert.match(error.message, /get_tree, save/u)
+            // And where that operation really lives.
+            assert.match(error.message, /godot_runtime/u)
+            return true
+        }
+    )
+})
+
+/* An operation nothing has is refused the same way, minus a signpost it cannot honestly give. */
+test('an operation no tool has is refused without inventing a signpost', () => {
+    const tools = createGodotTools(catalog, {call: async () => ({})})
+    const scene = tools.find(tool => tool.name === 'godot_scene')
+    assert.throws(
+        () => scene.prepareArguments({ops: [{op: 'levitate'}]}),
+        error => {
+            assert.match(error.message, /no 'levitate' operation/u)
+            assert.ok(!error.message.includes('is an operation of'), 'no signpost was invented')
+            return true
+        }
+    )
+})
+
+/* And a call whose operations are all real is prepared exactly as before. */
+test('a call naming only real operations is left alone', () => {
+    const tools = createGodotTools(catalog, {call: async () => ({})})
+    const scene = tools.find(tool => tool.name === 'godot_scene')
+    assert.deepEqual(scene.prepareArguments({ops: [{op: 'get_tree'}, {op: 'save'}]}), {
+        ops: [{op: 'get_tree'}, {op: 'save'}]
+    })
+})
+
+/*
+ * The one entry of a list, written flat on the operation. Three times across two live turns, and
+ * the router's own refusal — which prints the whole `{files: [{path, edits}]}` shape — was resent
+ * in the same shape once. Same mistake `foldStrayEntries` repairs, one bracket earlier.
+ */
+test('a single list entry written flat on the operation is folded into its list', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script')
+    const repaired = normalizeToolCalls(script.operations, {
+        ops: [
+            {
+                op: 'edit',
+                path: 'scripts/player.gd',
+                edits: [{oldText: 'var coins := 0', newText: 'var coins := 1'}]
+            }
+        ]
+    })
+    assert.deepEqual(repaired.ops[0], {
+        op: 'edit',
+        files: [
+            {
+                path: 'scripts/player.gd',
+                edits: [{oldText: 'var coins := 0', newText: 'var coins := 1'}]
+            }
+        ]
+    })
+})
+
+/*
+ * Both mistakes at once, which is what a model writes when it flattens the first file and then
+ * keeps going. The stray fold needs the list to exist before it can add to it, so the flat fold has
+ * to run first — the other way round, `b.gd` stays an entry with no `op` and the batch is refused.
+ */
+test('a flattened first file and a stray second one are folded into one list', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script')
+    const repaired = normalizeToolCalls(script.operations, {
+        ops: [
+            {op: 'edit', path: 'a.gd', edits: [{oldText: '1', newText: '2'}]},
+            {path: 'b.gd', edits: [{oldText: '3', newText: '4'}]}
+        ]
+    })
+    assert.equal(repaired.ops.length, 1)
+    assert.deepEqual(repaired.ops[0].files, [
+        {path: 'a.gd', edits: [{oldText: '1', newText: '2'}]},
+        {path: 'b.gd', edits: [{oldText: '3', newText: '4'}]}
+    ])
+})
+
+/* An operation that really does take its parameters flat keeps them flat. */
+test('an operation that declares its own parameters is not folded', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script')
+    const written = {op: 'open', path: 'scripts/player.gd'}
+    assert.deepEqual(normalizeToolCalls(script.operations, {ops: [written]}).ops[0], written)
+})
+
+/* And a call that already carries the list is left alone rather than given a second entry. */
+test('a list that is already there is not given the operation as a second entry', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script')
+    const written = {op: 'edit', files: [{path: 'a.gd', edits: []}]}
+    assert.deepEqual(normalizeToolCalls(script.operations, {ops: [written]}).ops[0], written)
+})
+
+/*
+ * The other half of the tagged-value split: the payload wrapper left out rather than written twice.
+ *
+ * Eight of these across two live turns against `stealth/ox-alpha` on 2026-08-25, in two
+ * `set_properties` calls that were each refused whole — `set_properties` writes nothing unless
+ * every entry is accepted, so one flattened tag costs the other six. The schema requires `value`,
+ * so this one never reaches `tool_params::check` and its sentence is never written; it has to be
+ * repaired before validation or not at all.
+ */
+test('a resource written straight into a tagged value is put back inside it', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node')
+    const repaired = normalizeToolCalls(node.operations, {
+        ops: [
+            {
+                op: 'set_properties',
+                properties: [
+                    {
+                        node: '/Coin',
+                        property: 'script',
+                        value: {type: 'resource', path: 'res://scripts/coin.gd'}
+                    },
+                    {
+                        node: '/Coin/Sprite',
+                        property: 'texture',
+                        value: {type: 'resource', value: {path: 'res://assets/coin.png'}}
+                    },
+                    {node: '/Coin', property: 'position', value: {type: 'vector2', value: [8, 8]}}
+                ]
+            }
+        ]
+    })
+    const [written, already, untagged] = repaired.ops[0].properties
+    assert.deepEqual(written.value, {
+        type: 'resource',
+        value: {path: 'res://scripts/coin.gd'}
+    })
+    // The one that was already right is not wrapped a second time, and a tag that is not a
+    // resource is not touched at all.
+    assert.deepEqual(already.value, {type: 'resource', value: {path: 'res://assets/coin.png'}})
+    assert.deepEqual(untagged.value, {type: 'vector2', value: [8, 8]})
+})
+
+/* `set_property` carries its tagged value directly rather than inside a list. Same repair. */
+test('the same repair reaches a tagged value that is not inside a list', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node')
+    const repaired = normalizeToolCalls(node.operations, {
+        ops: [
+            {
+                op: 'set_property',
+                node: '/Main/Player',
+                property: 'script',
+                value: {type: 'resource', path: 'res://scripts/player.gd'}
+            }
+        ]
+    })
+    assert.deepEqual(repaired.ops[0].value, {
+        type: 'resource',
+        value: {path: 'res://scripts/player.gd'}
+    })
+})
+
+/* Narrow on purpose: a second key beside `path` is not something this can read, so it is left. */
+test('a resource tag carrying more than a path is left for the router to refuse', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node')
+    const written = {type: 'resource', path: 'res://a.tres', subresource: 'Shape'}
+    const repaired = normalizeToolCalls(node.operations, {
+        ops: [{op: 'set_property', node: '/A', property: 'shape', value: written}]
+    })
+    assert.deepEqual(repaired.ops[0].value, written)
+})
+
 // Every call below was written by a model in a recorded turn and refused. The op is real, the
 // parameters are real, and only the wrapper was in the wrong place.
 test('the wrapper a model got wrong is repaired rather than refused', () => {

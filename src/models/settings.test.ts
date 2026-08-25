@@ -1,6 +1,8 @@
 import {describe, expect, it} from 'vitest'
 import {
     adoptModelReasoning,
+    adoptSubagentReasoning,
+    keepThinkingLevel,
     thinkingLevelsFor,
     activeConnection,
     apiKeyUpdate,
@@ -19,7 +21,7 @@ import {
     startSubagentConnection
 } from './settings'
 import {DEFAULT_SUBAGENT_SETTINGS, DEFAULT_WEB_SETTINGS} from './settings'
-import type {AiConnectionProfile, AiModelOption, GoferSettings} from './settings'
+import type {AiConnectionProfile, AiModelOption, GoferSettings, ThinkingLevel} from './settings'
 
 /** What a ChatGPT connection is, as the backend sends it. Never invented in the renderer. */
 const chatgptConnection: AiConnectionProfile = {
@@ -34,6 +36,7 @@ const chatgptConnection: AiConnectionProfile = {
         maxTokens: 128_000,
         reasoning: true,
         supportsReasoningEffort: true,
+        reasoningMandatory: false,
         thinkingLevels: [],
         input: ['text', 'image'],
         thinkingLevel: 'high'
@@ -52,6 +55,7 @@ const localConnection: AiConnectionProfile = {
         maxTokens: 120_064,
         reasoning: false,
         supportsReasoningEffort: false,
+        reasoningMandatory: false,
         thinkingLevels: [],
         input: ['text'],
         thinkingLevel: 'off'
@@ -79,6 +83,7 @@ function option(facts: Partial<AiModelOption> = {}): AiModelOption {
         maxTokens: 4_096,
         reasoning: false,
         supportsReasoningEffort: false,
+        reasoningMandatory: false,
         thinkingLevels: [],
         input: ['text'],
         ...facts
@@ -177,6 +182,76 @@ describe('the sub-agent connection', () => {
     })
 })
 
+describe('adoptSubagentReasoning', () => {
+    /*
+     * The sub-agent is stored beside the connections rather than inside one, so the re-read that
+     * keeps the parent's facts current never reached it. It is what `godot_docs_search ask` and
+     * every delegation run on, and one left at `off` against a mandatory-reasoning model answers
+     * HTTP 400 to every call it makes — which is what a live turn did, all run long.
+     */
+    const listed = {
+        id: 'stealth/ox-alpha',
+        name: 'Ox Alpha',
+        contextWindow: 1048576,
+        maxTokens: 131072,
+        reasoning: true,
+        supportsReasoningEffort: true,
+        reasoningMandatory: true,
+        thinkingLevels: ['max' as const, 'high' as const, 'low' as const],
+        input: ['text']
+    }
+    const base = {
+        connectionType: 'openrouter' as const,
+        connections: {},
+        maxRetries: 2,
+        timeoutMs: 120_000,
+        compactionPercent: 85,
+        subagent: DEFAULT_SUBAGENT_SETTINGS,
+        web: DEFAULT_WEB_SETTINGS
+    }
+    const withChild = (overrides: Partial<typeof listed>, level: ThinkingLevel) => ({
+        ...base,
+        subagent: {
+            ...DEFAULT_SUBAGENT_SETTINGS,
+            connection: {
+                connectionType: 'openrouter' as const,
+                model: {...listed, ...overrides, thinkingLevel: level}
+            }
+        }
+    })
+
+    it('re-reads the sub-agent model and moves it off a level it cannot use', () => {
+        const ai = withChild({reasoningMandatory: false}, 'off')
+        const adopted = adoptSubagentReasoning(ai, 'openrouter', [listed])
+        expect(adopted.subagent.connection?.model.reasoningMandatory).toBe(true)
+        expect(adopted.subagent.connection?.model.thinkingLevel).toBe('low')
+    })
+
+    it('leaves the sub-agent alone when it is on another connection', () => {
+        const ai = {
+            ...withChild({reasoningMandatory: false}, 'off'),
+            subagent: {
+                ...DEFAULT_SUBAGENT_SETTINGS,
+                connection: {
+                    connectionType: 'openai-compatible' as const,
+                    model: {...listed, reasoningMandatory: false, thinkingLevel: 'off' as const}
+                }
+            }
+        }
+        expect(adoptSubagentReasoning(ai, 'openrouter', [listed])).toBe(ai)
+    })
+
+    it('costs no write when the catalogue says what the file already said', () => {
+        const ai = withChild({}, 'low')
+        expect(adoptSubagentReasoning(ai, 'openrouter', [listed])).toBe(ai)
+    })
+
+    it('leaves a model the catalogue did not name alone', () => {
+        const ai = withChild({reasoningMandatory: false}, 'off')
+        expect(adoptSubagentReasoning(ai, 'openrouter', [{...listed, id: 'someone/else'}])).toBe(ai)
+    })
+})
+
 describe('thinkingLevelsFor', () => {
     /*
      * All four cases are real, and all four were measured against one machine running two Qwen
@@ -188,9 +263,71 @@ describe('thinkingLevelsFor', () => {
             thinkingLevelsFor({
                 reasoning: true,
                 supportsReasoningEffort: true,
+                reasoningMandatory: false,
                 thinkingLevels: ['low', 'medium', 'xhigh']
             })
         ).toEqual(['off', 'low', 'medium', 'xhigh'])
+    })
+
+    /*
+     * OpenRouter's `reasoning.mandatory`, which 90 of the 287 reasoning models it listed on
+     * 2026-08-25 set — GPT-5, Gemini 3.x, Grok 4.x, Claude Fable 5, DeepSeek R1, gpt-oss. `off`
+     * resolves to `reasoning: {enabled: false}`, and every one of them answers that with HTTP 400
+     * `Reasoning is mandatory for this endpoint and cannot be disabled`. Measured against
+     * `stealth/ox-alpha`, where it took out `godot_docs_search ask` for a whole live turn.
+     */
+    it('does not offer off to a model that refuses to stop thinking', () => {
+        expect(
+            thinkingLevelsFor({
+                reasoning: true,
+                supportsReasoningEffort: true,
+                reasoningMandatory: true,
+                thinkingLevels: ['max', 'high', 'low']
+            })
+        ).toEqual(['max', 'high', 'low'])
+    })
+
+    it('does not offer off to a mandatory model that named no efforts either', () => {
+        expect(
+            thinkingLevelsFor({
+                reasoning: true,
+                supportsReasoningEffort: true,
+                reasoningMandatory: true,
+                thinkingLevels: []
+            })
+        ).not.toContain('off')
+    })
+
+    /*
+     * Switching to one of those models is how the broken value used to be reached: nothing was
+     * typed, the fallback was `off`, and every request the connection then made failed.
+     */
+    it('falls back to a level the model has, not to off', () => {
+        const mandatory = {
+            reasoning: true,
+            supportsReasoningEffort: true,
+            reasoningMandatory: true,
+            thinkingLevels: ['max' as const, 'high' as const, 'low' as const]
+        }
+        // The cheapest it offers, by Gofer's scale — not `thinkingLevels[0]`, which is the
+        // provider's own order and puts the most expensive effort first.
+        expect(keepThinkingLevel(mandatory, 'off')).toBe('low')
+        expect(keepThinkingLevel(mandatory, 'medium')).toBe('low')
+        expect(keepThinkingLevel(mandatory, 'low')).toBe('low')
+    })
+
+    it('still falls back to off wherever off is a level', () => {
+        expect(
+            keepThinkingLevel(
+                {
+                    reasoning: true,
+                    supportsReasoningEffort: true,
+                    reasoningMandatory: false,
+                    thinkingLevels: ['low', 'medium']
+                },
+                'max'
+            )
+        ).toBe('off')
     })
 
     it('offers on and off to a model that thinks without named efforts', () => {
@@ -198,6 +335,7 @@ describe('thinkingLevelsFor', () => {
             thinkingLevelsFor({
                 reasoning: true,
                 supportsReasoningEffort: false,
+                reasoningMandatory: false,
                 thinkingLevels: []
             })
         ).toEqual(['off', 'on'])
@@ -208,6 +346,7 @@ describe('thinkingLevelsFor', () => {
             thinkingLevelsFor({
                 reasoning: true,
                 supportsReasoningEffort: true,
+                reasoningMandatory: false,
                 thinkingLevels: []
             })
         ).toHaveLength(7)
@@ -218,6 +357,7 @@ describe('thinkingLevelsFor', () => {
             thinkingLevelsFor({
                 reasoning: false,
                 supportsReasoningEffort: true,
+                reasoningMandatory: false,
                 thinkingLevels: ['low']
             })
         ).toEqual(['off'])
@@ -270,6 +410,7 @@ describe('adoptModelReasoning', () => {
             ...localConnection.model,
             reasoning: true,
             supportsReasoningEffort: true,
+            reasoningMandatory: false,
             thinkingLevel: 'high'
         } as const
         const model = option({reasoning: true, supportsReasoningEffort: false})

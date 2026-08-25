@@ -425,8 +425,14 @@ impl JobContext {
     /// The suites used to build the request by hand, and were the only callers that ever left the
     /// system prompt unset — so the branch they took was one nothing in the application took. They
     /// compose a turn here the way the application composes one; what a suite still chooses for
-    /// itself is where the model is, that none of this machine's credentials are sent, and which
-    /// checkout the editor it started is bound to.
+    /// itself is where the model is, which credential — if any — is sent, and which checkout the
+    /// editor it started is bound to.
+    ///
+    /// The keyring is never read here. `GOFER_LIVE_API_KEY` is the only credential a suite can
+    /// send, it has to be named on the command line, and it fills the OpenAI-compatible slot —
+    /// which is the one `AiSettings::served_by` configures. That is what lets a live turn be put
+    /// to a hosted OpenAI-compatible endpoint (OpenRouter) rather than only to a local server.
+    /// Unset, the suite sends nothing, which is what a run against `127.0.0.1` wants.
     // Gated exactly where its callers are: the two acceptance harnesses are `cfg(all(test,
     // feature = "godot-acceptance"))` modules, and a build without the engine has no suite to
     // build a context for.
@@ -445,7 +451,12 @@ impl JobContext {
         )?);
         Ok(Self {
             ai,
-            credentials: Credentials::default(),
+            credentials: Credentials {
+                api_key: std::env::var("GOFER_LIVE_API_KEY")
+                    .ok()
+                    .filter(|key| !key.is_empty()),
+                ..Credentials::default()
+            },
             storage,
             workspace_path,
             system_prompt,

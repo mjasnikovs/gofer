@@ -536,6 +536,11 @@ pub struct RetrieveConnection {
     pub max_tokens: u64,
     pub reasoning: bool,
     pub supports_reasoning_effort: bool,
+    /// Whether this model refuses to be asked not to think. Carried for the same reason as the two
+    /// above: this is a second copy of the worker's model builder, and without it a sub-agent left
+    /// at `off` sends `reasoning: {enabled: false}` to a model that answers HTTP 400 to it.
+    #[serde(default)]
+    pub reasoning_mandatory: bool,
     /// The efforts this model's server named, or empty when nothing has. Carried for the same
     /// reason as the flag above: this is a second copy of the worker's model builder, and without
     /// the list pi-ai clamps a level the server named onto one it did not — `xhigh` goes out as

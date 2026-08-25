@@ -94,9 +94,80 @@ const DEFAULT_RETRY_ATTEMPTS = 10
 const DEFAULT_RETRY_BASE_DELAY_MS = 5_000
 const DEFAULT_RETRY_MAX_DELAY_MS = 60_000
 
+/*
+ * The first wait for a refusal that is about this second rather than this machine.
+ *
+ * Five seconds is the right patience for a model server that died: it is being restarted, and
+ * asking again before it is back is asking a socket that is not listening. A shared-pool rate
+ * limit is the opposite failure. Nothing is down, the request was turned away because someone
+ * else's was being served, and the provider's own body says so — measured against OpenRouter's
+ * free pool on 2026-08-25, which answers `limit_source: upstream_provider_shared_pool` and
+ * `remedy_hint: "Retry shortly"`, sends no `Retry-After`, and clears within about a second.
+ *
+ * Sampled thirty times back to back in that state, 11 requests were refused and the longest run of
+ * consecutive refusals was three. So ten attempts are ten samples of a coin, and what decides
+ * whether a turn survives is how quickly they are taken, not how patiently. On the five-second
+ * curve the first five attempts land across 155 seconds and four live turns spent their whole
+ * budget — about nine minutes each — being refused and died. From one second they land across 31
+ * seconds, and the same ten attempts still stretch to five and a half minutes, so a genuine
+ * outage is waited out exactly as before.
+ *
+ * `Math.min` against the configured base, never a replacement for it: a user who asked for a
+ * shorter wait than this is not overruled.
+ */
+const RATE_LIMIT_BASE_DELAY_MS = 1_000
+
 /** `base * 2^(attempt-1)`, held at the cap. Pi's curve, with a ceiling Pi does not need. */
 export function retryDelay(attempt, {baseDelayMs, maxDelayMs}) {
     return Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs)
+}
+
+/**
+ * Whether the provider turned this request away for the moment.
+ *
+ * Read off the wording, because that is all a failure carries by the time it reaches the loop. It
+ * is only ever asked about failures the classifier has already called worth retrying, so a spent
+ * quota — which is also a 429, and which Pi refuses to retry by name — never reaches it.
+ */
+export function isRateLimited(errorMessage) {
+    return typeof errorMessage === 'string' && /(?:^|[^\w])429(?:[^\w]|$)/u.test(errorMessage)
+}
+
+/** The configured backoff with the rate-limit base, which is never longer than the configured one. */
+function rateLimitedBackoff(retry) {
+    return {...retry, baseDelayMs: Math.min(retry.baseDelayMs, RATE_LIMIT_BASE_DELAY_MS)}
+}
+
+/**
+ * A provider's refusal as a sentence, rather than as the JSON body it arrived in.
+ *
+ * Pi hands over `"<status>: <body>"` whenever the SDK error carries both, so what the user was
+ * shown for a rate-limited turn was 400 characters of JSON with the one actionable line —
+ * OpenRouter's `remedy_hint` — buried in the middle of it. The body is the right thing to have
+ * kept; it is the wrong thing to have shown.
+ *
+ * Every part is optional because no two providers fill the same fields: OpenRouter states the real
+ * cause in `metadata.raw` and the fix in `metadata.remedy_hint`, llama.cpp and OpenAI state both in
+ * `error.message`, and anything this cannot read is handed back exactly as it came. The status is
+ * kept in the sentence so a bug report still names it.
+ */
+export function readableProviderError(errorMessage) {
+    if (typeof errorMessage !== 'string') return errorMessage
+    const framed = /^(?<status>\d{3}): (?<body>[[{].*)$/su.exec(errorMessage)
+    if (!framed?.groups) return errorMessage
+    let body
+    try {
+        body = JSON.parse(framed.groups.body)
+    } catch {
+        return errorMessage
+    }
+    const error = body?.error ?? body
+    const metadata = error?.metadata ?? {}
+    const detail = metadata.raw ?? error?.message ?? body?.message
+    if (typeof detail !== 'string' || detail === '') return errorMessage
+    const remedy = typeof metadata.remedy_hint === 'string' ? ` ${metadata.remedy_hint}` : ''
+    const stop = /[.!?]$/u.test(detail.trim()) ? '' : '.'
+    return `The provider refused this request (${framed.groups.status}): ${detail.trim()}${stop}${remedy}`
 }
 
 /**
@@ -326,7 +397,7 @@ function connectionProfile(settings, connectionType) {
 function subagentModelFor(settings, models, parent) {
     const chosen = settings.subagent?.connection
     if (!chosen) return {model: parent, thinkingLevel: parentThinkingLevel(settings)}
-    const thinkingLevel = piThinkingLevel(chosen.model?.thinkingLevel)
+    const thinkingLevel = piThinkingLevel(chosen.model?.thinkingLevel, chosen.model)
     if (chosen.connectionType === 'openai-codex') {
         const model = models.getModel('openai-codex', chosen.model?.id)
         if (!model)
@@ -356,9 +427,8 @@ function subagentModelFor(settings, models, parent) {
 
 /** The level the parent is asked at, which is the live connection's model's. */
 function parentThinkingLevel(settings) {
-    return piThinkingLevel(
-        connectionProfile(settings, settings.connectionType)?.model?.thinkingLevel
-    )
+    const model = connectionProfile(settings, settings.connectionType)?.model
+    return piThinkingLevel(model?.thinkingLevel, model)
 }
 
 function imageBlocks(images) {
@@ -851,6 +921,16 @@ export async function runAgent({
         finalMessage: undefined,
         /** How many transient failures have been waited out. */
         attempt: 0,
+        /**
+         * Whether this turn has been rate-limited yet, which decides how long it waits.
+         *
+         * The turn, not the failure. OpenRouter reports the same refusal two ways — HTTP 429 with
+         * its body, and an in-band stream error whose text is the four words `Provider returned
+         * error` with the code stripped — and one live turn alternated between them. Read per
+         * failure, the base flipped between 1 s and 5 s while the exponent went on climbing, and
+         * the waits came out 4 s, 40 s, 16 s. Being rate-limited is a state the turn is in.
+         */
+        rateLimited: false,
         /** How many times the model has been handed its own red verify report. Once, at most. */
         verifyAttempt: 0,
         verifyResults: undefined,
@@ -1040,10 +1120,19 @@ export async function runAgent({
      */
     const classifyAndBackoff = async attemptState => {
         const failure = turnFailure(attemptState.finalMessage, agent)
+        // Classified on the wording the provider sent, and only then made readable. The classifier
+        // is Pi's list of provider markers, and several of them — `GoUsageLimitError`,
+        // `insufficient_quota` in `error.type` — live in fields the readable sentence drops. Read
+        // in the other order, a spent quota stops being a spent quota: it keeps its `429`, matches
+        // the retryable pattern, and burns all ten attempts against an account that has none left.
         if (attemptState.attempt >= retry.attempts || !isWorthRetrying(failure, model))
-            throw new Error(failure.errorMessage)
+            throw new Error(readableProviderError(failure.errorMessage))
         attemptState.attempt += 1
-        const delayMs = retryDelay(attemptState.attempt, retry)
+        attemptState.rateLimited ||= isRateLimited(failure.errorMessage)
+        const delayMs = retryDelay(
+            attemptState.attempt,
+            attemptState.rateLimited ? rateLimitedBackoff(retry) : retry
+        )
         // Two events, not one, because the wait is the part the user is watching: the first says how
         // long and why, the second says the wait is over and the model is being asked again. A
         // single event would leave the countdown reading "in 60s" while the retry ran.
@@ -1052,7 +1141,7 @@ export async function runAgent({
                 attempt: attemptState.attempt,
                 maxAttempts: retry.attempts,
                 delayMs,
-                errorMessage: failure.errorMessage
+                errorMessage: readableProviderError(failure.errorMessage)
             })
         )
         // A stop landing in the countdown is the same stop as one landing in the request, and only
