@@ -244,6 +244,28 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         });
     assert_eq!(paused.reason, "paused");
 
+    // A pause is not a break, and this is what that costs. Both are the engine's own behaviour on
+    // the pinned 4.7.2, and both are why `why_there_are_no_frames` and
+    // `what_a_timed_out_evaluate_usually_means` exist: a live turn paused to look at a collision it
+    // could not see, read an empty stack twice, waited out the evaluate, and abandoned the
+    // debugger.
+    assert!(
+        client
+            .stack_trace(MAIN_THREAD_ID)
+            .expect("a stack trace answer")
+            .is_empty(),
+        "a paused game has no frame to describe; if this answers with one, the two explanations in \
+         debug.rs describe something that no longer happens"
+    );
+    let refused = client
+        .evaluate("1 + 1", None)
+        .expect_err("an evaluate with no frame cannot be answered");
+    assert!(
+        refused.message.contains("Timeout reached"),
+        "{}",
+        refused.message
+    );
+
     // Terminate stops the game and ends the debug session but keeps the adapter. Stopping a
     // game mid-break can report one last stray stop before the termination events, so the wait
     // loops until the terminated/exited events actually arrive.

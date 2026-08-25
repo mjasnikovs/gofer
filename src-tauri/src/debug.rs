@@ -175,6 +175,9 @@ pub enum DebugResponse {
     },
     StackTrace {
         frames: Vec<DebugFrame>,
+        /// Why the list is empty, when it is. See [`why_there_are_no_frames`].
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<&'static str>,
     },
     Scopes {
         scopes: Vec<Scope>,
@@ -265,6 +268,48 @@ pub fn pretend_it_holds_a_game(holds: bool) {
     DEBUGGER_HOLDS_A_GAME.store(holds, Ordering::Relaxed);
 }
 
+/// What an empty stack means, said where the empty list is.
+///
+/// A `pause` stops the game between frames rather than inside a script, and Godot's debug adapter
+/// then has no frame to describe. Measured on the pinned 4.7.2, in the acceptance suite that drives
+/// a real game: after `pause` answered `stopped` with `reason: "paused"`, `stackTrace` answered
+/// `[]` and `evaluate` answered a timeout.
+///
+/// A live turn building a shooter met both. It paused to look at a collision that was not
+/// happening, read `frames: []` twice, waited out the evaluate, and gave up on the debugger — its
+/// own compaction summary records "Pause + evaluate failed (empty frames, timeout)". Nothing it
+/// read said that a pause is not a break.
+fn why_there_are_no_frames(frames: &[DebugFrame]) -> Option<&'static str> {
+    if !frames.is_empty() {
+        return None;
+    }
+    Some(
+        "The debuggee has no frame to describe. A pause stops the game between frames rather than \
+         inside a script, so there is nothing to read until it stops at a breakpoint: set one with \
+         set_breakpoints, continue, and wait for it with await_stop.",
+    )
+}
+
+/// The same fact, on the error an `evaluate` without a frame answers with.
+///
+/// Godot's adapter does not refuse it — it waits, and answers `Timeout reached while processing a
+/// request`, which reads as a slow machine. The clause says what a timeout here usually is, and
+/// says it as a likelihood rather than a diagnosis, because a genuinely slow adapter answers the
+/// same way.
+fn what_a_timed_out_evaluate_usually_means(failure: DapError) -> DapError {
+    if !failure.message.contains("Timeout reached") {
+        return failure;
+    }
+    let mut failure = failure;
+    failure.message = format!(
+        "{} An evaluate times out like this when the game is paused rather than stopped at a \
+         breakpoint: a pause gives the debugger no frame to evaluate in. Read stack_trace first — \
+         an empty one says the same thing.",
+        failure.message
+    );
+    failure
+}
+
 /// Answers one debugger request, and notices in the answer that the game it was holding is gone.
 pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
     let answered = answer(request);
@@ -322,13 +367,17 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
         DebugRequest::Threads => Ok(DebugResponse::Threads {
             threads: client.threads()?,
         }),
-        DebugRequest::StackTrace { thread_id } => Ok(DebugResponse::StackTrace {
-            frames: client
+        DebugRequest::StackTrace { thread_id } => {
+            let frames: Vec<DebugFrame> = client
                 .stack_trace(thread_id.unwrap_or(MAIN_THREAD_ID))?
                 .into_iter()
                 .map(|frame| to_debug_frame(&workspace, frame))
-                .collect(),
-        }),
+                .collect();
+            Ok(DebugResponse::StackTrace {
+                note: why_there_are_no_frames(&frames),
+                frames,
+            })
+        }
         DebugRequest::Scopes { frame_id } => Ok(DebugResponse::Scopes {
             scopes: client.scopes(frame_id)?,
         }),
@@ -341,7 +390,9 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             expression,
             frame_id,
         } => Ok(DebugResponse::Evaluate {
-            result: client.evaluate(&expression, frame_id)?,
+            result: client
+                .evaluate(&expression, frame_id)
+                .map_err(what_a_timed_out_evaluate_usually_means)?,
         }),
         DebugRequest::Continue { thread_id } => Ok(DebugResponse::Continued {
             all_threads: client.continue_execution(thread_id.unwrap_or(MAIN_THREAD_ID))?,
@@ -713,6 +764,46 @@ fn poisoned() -> DapError {
 
 #[cfg(test)]
 mod tests {
+
+    /// A pause is not a break, and both answers say so.
+    ///
+    /// Measured against the pinned 4.7.2 in `godot_dap_acceptance`, which drives a real game:
+    /// after a pause, `stackTrace` answers `[]` and `evaluate` answers a timeout. A live turn met
+    /// both, read nothing into either, and abandoned the debugger.
+    #[test]
+    fn an_empty_stack_and_a_timed_out_evaluate_both_say_a_pause_is_not_a_break() {
+        assert!(
+            why_there_are_no_frames(&[])
+                .unwrap_or_default()
+                .contains("A pause stops the game between frames")
+        );
+
+        let frame = DebugFrame {
+            id: 1,
+            name: "_process".to_owned(),
+            path: Some("scripts/player.gd".to_owned()),
+            line: 12,
+            column: 1,
+        };
+        assert_eq!(why_there_are_no_frames(&[frame]), None);
+
+        let timed_out = what_a_timed_out_evaluate_usually_means(DapError::new(
+            "dap_server_error",
+            "Timeout reached while processing a request. (timeout)",
+        ));
+        assert!(
+            timed_out.message.contains("no frame to evaluate in"),
+            "{}",
+            timed_out.message
+        );
+
+        // Anything else the adapter says is left exactly as it said it.
+        let other = what_a_timed_out_evaluate_usually_means(DapError::new(
+            "dap_server_error",
+            "Parse error in expression",
+        ));
+        assert_eq!(other.message, "Parse error in expression");
+    }
     /// A launch on top of a live game is refused, and the refusal names every way onward.
     ///
     /// One live debugging turn made seven launches with no terminate between them. Each new game

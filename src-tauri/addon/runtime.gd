@@ -75,6 +75,16 @@ var _tree_budget: int = MAX_TREE_NODES
 var _tree_depth: int = MAX_TREE_DEPTH
 
 func _ready() -> void:
+    # The helper has to answer while the game it is inside is paused, which is the whole point of
+    # `pause`: a caller freezes the game precisely so it can look at it.
+    #
+    # Measured: it answers without this line too. The editor's messages arrive through
+    # `EngineDebugger`, which the main loop polls whether or not the tree is paused, and
+    # `SceneTree.process_frame` — which `wait` and `capture` await — is emitted either way. So this
+    # is a guard on the invariant rather than what makes it hold today: an op written later that
+    # uses `_process` would otherwise stop answering the moment somebody paused, and the failure
+    # would look like a hung game.
+    process_mode = Node.PROCESS_MODE_ALWAYS
     print("GOFER_RUNTIME_READY:%d" % PROTOCOL_VERSION)
     if not EngineDebugger.is_active():
         return
@@ -120,6 +130,10 @@ func _serve(request: Dictionary) -> void:
             result = await _op_capture()
         "monitors":
             result = _op_monitors(params)
+        "pause":
+            result = _op_pause(true)
+        "resume":
+            result = _op_pause(false)
         "wait":
             result = await _op_wait(params)
         _:
@@ -146,8 +160,29 @@ func _failure(code: String, message: String) -> Dictionary:
 ## message and drops `details`, so the corrected call is a sentence rather than a field. The
 ## parameter is named because the two callers spell it differently — `root` for the tree walk,
 ## `path` for the inspection — and a corrected call that names the wrong key is not one.
+## Whether this is a name the engine made up, rather than one anybody wrote.
+##
+## Godot names an unnamed child `@ClassName@ID`, where the id counts instances for the whole run.
+## A bullet or an enemy `add_child`ed by a spawner has one, and it belongs to that one instance:
+## the next run gives it a different number, and freeing the node takes it away entirely.
+func _is_an_engine_name(segment: String) -> bool:
+    if not segment.begins_with("@"):
+        return false
+    var parts := segment.split("@", false)
+    return parts.size() == 2 and parts[1].is_valid_int()
+
 func _node_not_found(parameter: String, path: String) -> Dictionary:
     var plain := "No running node at '%s'" % path
+    # A path read out of `get_tree` and used on the next call is the ordinary way to reach a node,
+    # and it is exactly wrong for a node that lives for a moment. One live turn building a shooter
+    # met this four times, always on a bullet or an enemy the spawner had never named.
+    if _is_an_engine_name(path.get_file()):
+        plain += (
+            ". A name like that is the engine's own for a node nobody named: it belongs to one "
+            + "instance, is numbered differently every run, and goes when that node is freed — "
+            + "which is what a bullet or an enemy does between one call and the next. Watch "
+            + "something that outlives it, or name the node where it is created"
+        )
     if path.begins_with("/root/"):
         return _failure("node_not_found", plain)
     var spelled := "/root/" + path.trim_prefix("/")
@@ -254,6 +289,23 @@ func _runtime_icon_class(node: Node) -> String:
         if not global_name.is_empty():
             return global_name
     return node.get_class()
+
+## Freezes the running game, or lets it go again.
+##
+## `SceneTree.paused` is the game's own pause — the one a pause menu sets — so a node that opted out
+## of pausing keeps running, exactly as it would for a player.
+##
+## It exists because a path into a running game goes stale. A live turn building a shooter read the
+## tree, inspected what it found, and was answered `No running node at '/root/Main/@Area2D@19'` six
+## times: bullets and enemies are freed between one call and the next. It reached for the debugger
+## to freeze the game instead, found that a pause there is not a break and gives no stack, and in
+## the end **added a debug property to its own game** so it would have something that stood still.
+## That is a tool gap solved in the product being built, which is the wrong place for it.
+func _op_pause(paused: bool) -> Dictionary:
+    get_tree().paused = paused
+    # Read back rather than asserted: `paused` is a plain setter today, and a reply that says what
+    # the tree answers is the reply that stays true if it stops being one.
+    return _succeed({"paused": get_tree().paused})
 
 ## Reads named properties off one live node. Property values cross the wire tagged through the
 ## same encoder the editor plugin uses, so the renderer sees one representation.

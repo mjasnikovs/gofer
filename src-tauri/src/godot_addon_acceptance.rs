@@ -1440,6 +1440,15 @@ fn the_addon_refuses_wiring_that_would_never_fire() {
 }
 
 /// Finds the one entry in a `{"settings": [...]}`-style result array whose `name` matches.
+/// The same lookup, for asserting that something is *not* listed.
+fn find_named_or_none<'a>(result: &'a Value, field: &str, name: &str) -> Option<&'a Value> {
+    result[field]
+        .as_array()
+        .unwrap_or_else(|| panic!("{field} must be an array in {result}"))
+        .iter()
+        .find(|entry| entry["name"] == name)
+}
+
 fn find_named<'a>(result: &'a Value, field: &str, name: &str) -> &'a Value {
     result[field]
         .as_array()
@@ -1721,9 +1730,46 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             find_named(&actions, "actions", "acceptance_jump")["builtIn"],
             false
         );
+        // A built-in nobody has touched is named rather than written out. Godot registers 72 of
+        // them and four recorded live runs each read all 72, none of which the project had chosen.
+        let untouched: Vec<&str> = actions["atEngineDefault"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no atEngineDefault: {actions}"))
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(untouched.contains(&"ui_accept"), "{actions}");
+        assert!(untouched.len() > 40, "{actions}");
+        assert!(
+            find_named_or_none(&actions, "actions", "ui_accept").is_none(),
+            "{actions}"
+        );
+        // And naming it answers it in full, which is how its events are read.
+        let asked = session.call(
+            "project.list_input_actions",
+            json!({"names": ["ui_accept", "acceptance_jump"]}),
+        );
+        assert_eq!(find_named(&asked, "actions", "ui_accept")["builtIn"], true);
+        assert!(
+            !find_named(&asked, "actions", "ui_accept")["events"]
+                .as_array()
+                .expect("events")
+                .is_empty(),
+            "{asked}"
+        );
         assert_eq!(
-            find_named(&actions, "actions", "ui_accept")["builtIn"],
-            true
+            asked["actions"].as_array().expect("two").len(),
+            2,
+            "{asked}"
+        );
+        assert!(
+            session
+                .error(
+                    "project.list_input_actions",
+                    json!({"names": ["never_bound"]}),
+                    None
+                )
+                .starts_with("action_not_found")
         );
         assert!(
             session

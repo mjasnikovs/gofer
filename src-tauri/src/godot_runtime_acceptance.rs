@@ -823,6 +823,89 @@ fn a_launch_that_outlives_its_deadline_while_playing_says_the_game_is_up() {
     session.call("runtime.stop", json!({}));
 }
 
+/// A probe that moves every frame, so a frozen game is one whose position stops changing.
+const MOVING_PROBE_SCRIPT: &str =
+    "extends Node2D\n\n\nfunc _process(delta: float) -> void:\n\tposition.x += 240.0 * delta\n";
+
+/// The scene for it.
+const MOVING_PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://scripts/runtime_probe.gd\" id=\"1_probe\"]\n\n[node name=\"RuntimeProbe\" type=\"Node2D\"]\nscript = ExtResource(\"1_probe\")\n";
+
+/// A running game can be frozen and read, and the helper keeps answering while it is.
+///
+/// The gap this closes was found by a live turn building a shooter. A path into a running game is
+/// stale as soon as the node it names is freed, and a bullet is freed within a frame or two of the
+/// `get_tree` that reported it: the turn was answered `No running node at '/root/Main/@Area2D@19'`
+/// six times. It reached for the debugger to freeze the game instead, and a `pause` there is not a
+/// break — no stack, and an `evaluate` that times out. So it **added a debug property to the game
+/// it was building** to have something that stood still, which is a tool gap solved in the wrong
+/// place.
+///
+/// The two halves that make this work at all are asserted, not assumed: that the tree really stops
+/// moving, and that `wait` and `inspect_node` still answer while it is stopped — the helper sets
+/// its own `process_mode` to `ALWAYS` for exactly that reason, and a pause that silenced it would
+/// look like a hung game.
+#[test]
+fn a_running_game_can_be_frozen_and_read_and_let_go_again() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        MOVING_PROBE_SCRIPT,
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), MOVING_PROBE_SCENE).expect("write the scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| panic!("runtime.run failed: {error}\n{}", session.output()));
+
+    let where_it_is = |session: &Session| -> f64 {
+        session.call(
+            "runtime.inspect_node",
+            json!({"path": "/root/RuntimeProbe", "properties": ["position"]}),
+        )["properties"]["position"]["value"][0]
+            .as_f64()
+            .expect("an x")
+    };
+
+    // It moves.
+    let started = where_it_is(&session);
+    session.call("runtime.wait", json!({"frames": 20}));
+    let moved = where_it_is(&session);
+    assert!(
+        moved > started,
+        "the probe must be moving: {started} {moved}"
+    );
+
+    // Frozen, and the helper still answers — both the wait and the inspection below run while the
+    // tree is paused.
+    let stopped = session.call("runtime.pause", json!({}));
+    assert_eq!(stopped["paused"], true, "{stopped}");
+    let held = where_it_is(&session);
+    session.call("runtime.wait", json!({"frames": 20}));
+    assert!(
+        (where_it_is(&session) - held).abs() < 0.001,
+        "a paused game must not move: {held}"
+    );
+    assert_eq!(
+        session.call("runtime.get_tree", json!({"limit": 4}))["paused"],
+        true
+    );
+
+    // And let go again.
+    assert_eq!(session.call("runtime.resume", json!({}))["paused"], false);
+    session.call("runtime.wait", json!({"frames": 20}));
+    assert!(
+        where_it_is(&session) > held,
+        "a resumed game must move again: {held}"
+    );
+
+    session.call("runtime.stop", json!({}));
+}
+
 /// A probe that joins a group in `_ready`, which is how half of a game's groups are joined.
 const GROUPING_PROBE_SCRIPT: &str = "extends Node2D\n\nfunc _ready() -> void:\n\tadd_to_group(\"coins\")\n\tadd_to_group(\"_private\")\n";
 
@@ -839,8 +922,12 @@ const GROUPING_PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_res
 /// The two sides genuinely disagree, which is why reading the scene instead is not the answer: a
 /// script's `add_to_group` in `_ready` is invisible to the edited scene and is how half of a game's
 /// groups are joined. Both halves are asserted here, on the same node at the same moment.
+///
+/// The refusal at the end of it is the other half of the same question — what a path into a running
+/// game means. A node the engine named itself is one instance of something a spawner made, and a
+/// path to one is stale as soon as it is freed.
 #[test]
-fn a_running_node_answers_the_groups_it_joined_after_the_scene_was_written() {
+fn a_running_node_answers_its_groups_and_a_path_the_engine_named_says_why_it_is_gone() {
     let directory = TempDir::new().expect("temporary directory");
     let worktree = godot_editor_harness::fixture_worktree(&directory);
     std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
@@ -879,6 +966,32 @@ fn a_running_node_answers_the_groups_it_joined_after_the_scene_was_written() {
     // reason this cannot be answered from the file.
     let authored = session.call("node.inspect", json!({"node": "/RuntimeProbe"}));
     assert_eq!(authored["groups"], json!([]), "{authored}");
+
+    // A path to a node the engine named itself says what such a name is. A spawner's bullet has
+    // one, and it is gone between the `get_tree` that reported it and the `inspect_node` that
+    // names it — which one live turn building a shooter met four times.
+    let refused = session
+        .try_call(
+            "runtime.inspect_node",
+            json!({"path": "/root/RuntimeProbe/@Area2D@19", "properties": ["position"]}),
+            None,
+        )
+        .expect_err("a node that is not there must be refused");
+    assert!(refused.contains("node_not_found"), "{refused}");
+    assert!(
+        refused.contains("the engine's own for a node nobody named"),
+        "{refused}"
+    );
+
+    // A name somebody wrote gets the plain refusal, with nothing invented about it.
+    let plain = session
+        .try_call(
+            "runtime.inspect_node",
+            json!({"path": "/root/RuntimeProbe/Bullet", "properties": ["position"]}),
+            None,
+        )
+        .expect_err("a node that is not there must be refused");
+    assert!(!plain.contains("the engine's own"), "{plain}");
 
     session.call("runtime.stop", json!({}));
 }

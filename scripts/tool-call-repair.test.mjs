@@ -854,6 +854,21 @@ test('a refused list says that none of it ran, and a refused single call does no
             return true
         }
     )
+
+    // The clause is a sentence, not a run-on. Both refusals thrown here end in a full stop and are
+    // not given a second one; the router's own `node_not_found` ends on the path it could not find,
+    // and gets one — `said_that_none_of_it_ran` holds that side.
+    assert.throws(
+        () =>
+            normalizeToolCalls(operations, {
+                ops: [{op: 'create', parent: '/Main'}, {op: 'save'}]
+            }),
+        error => {
+            assert.match(error.message, /inspect\. None of the 2/u)
+            assert.doesNotMatch(error.message, /\.\. None of/u)
+            return true
+        }
+    )
 })
 
 /*

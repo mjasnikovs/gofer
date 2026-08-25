@@ -43,7 +43,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:6feaf4c99fc07744
+// GENERATED-BEGIN command-names sha256:b0ace3bed55f2487
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -110,6 +110,8 @@ export type GodotCommandName =
     | 'runtime.capture'
     | 'runtime.get_monitors'
     | 'runtime.wait'
+    | 'runtime.pause'
+    | 'runtime.resume'
 // GENERATED-END command-names
 
 /**

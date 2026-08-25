@@ -182,7 +182,7 @@ static func _configured_launch_timeout_ms() -> int:
 const LAUNCH_KINDS: Array[String] = ["run", "run_frame"]
 
 ## The commands `_handle_request` routes to the runtime bridge instead of answering synchronously.
-# GENERATED-BEGIN runtime-commands sha256:38d2a42461c858c7
+# GENERATED-BEGIN runtime-commands sha256:b96ac9e0ddcf0feb
 const RUNTIME_COMMANDS: Array[String] = [
     "runtime.run",
     "runtime.stop",
@@ -194,6 +194,8 @@ const RUNTIME_COMMANDS: Array[String] = [
     "runtime.capture",
     "runtime.get_monitors",
     "runtime.wait",
+    "runtime.pause",
+    "runtime.resume",
 ]
 # GENERATED-END runtime-commands
 
@@ -321,7 +323,7 @@ const MUTATING_COMMANDS: Array[String] = [
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:3a698c27e8a3de50
+# GENERATED-BEGIN command-params sha256:0a07efc9e3c87b98
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.answer_dialog": {"required": ["button"], "optional": []},
@@ -358,7 +360,7 @@ const COMMAND_PARAMS: Dictionary = {
     "project.list_autoloads": {"required": [], "optional": []},
     "project.set_autoload": {"required": ["name", "path"], "optional": ["enabled"]},
     "project.remove_autoload": {"required": ["name"], "optional": []},
-    "project.list_input_actions": {"required": [], "optional": []},
+    "project.list_input_actions": {"required": [], "optional": ["names"]},
     "project.set_input_action": {"required": ["name", "events"], "optional": ["deadzone"]},
     "project.remove_input_action": {"required": ["name"], "optional": []},
     "project.reset_input_action": {"required": ["name"], "optional": []},
@@ -381,6 +383,8 @@ const COMMAND_PARAMS: Dictionary = {
     "runtime.input": {"required": ["events"], "optional": []},
     "runtime.capture": {"required": [], "optional": ["source"]},
     "runtime.wait": {"required": [], "optional": ["frames", "ms"]},
+    "runtime.pause": {"required": [], "optional": []},
+    "runtime.resume": {"required": [], "optional": []},
     "runtime.get_monitors": {"required": [], "optional": ["monitors"]},
 }
 # GENERATED-END command-params
@@ -681,7 +685,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
     if declared.has("_gofer_error"):
         return declared
 
-# GENERATED-BEGIN dispatch-table sha256:7975d13daf2bf083
+# GENERATED-BEGIN dispatch-table sha256:8dc0df69720ff5c2
     match command:
         "session.get_state":
             return _session_state()
@@ -716,7 +720,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
         "project.remove_autoload":
             return _project_remove_autoload(params)
         "project.list_input_actions":
-            return _project_list_input_actions()
+            return _project_list_input_actions(params)
         "project.set_input_action":
             return _project_set_input_action(params)
         "project.remove_input_action":
@@ -1069,6 +1073,10 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
             _runtime_forward(id, "monitors", params)
         "runtime.wait":
             _runtime_forward(id, "wait", params)
+        "runtime.pause":
+            _runtime_forward(id, "pause", params)
+        "runtime.resume":
+            _runtime_forward(id, "resume", params)
         _:
             # `RUNTIME_COMMANDS` and this match are two lists of the same commands. A command in
             # one and not the other would leave its caller waiting out the whole timeout for a
@@ -2204,8 +2212,27 @@ func _project_remove_autoload(params: Dictionary) -> Dictionary:
         )
     return {"name": name, "removed": true}
 
-func _project_list_input_actions() -> Dictionary:
+## The Input Map, with the actions this project chose written out and the engine's own named.
+##
+## Godot registers all 72 of its `ui_*` actions as project settings, events and all, so the whole
+## list is 8,909 characters. Four recorded live runs asked for it and **every one of them got 72
+## actions of which none was the project's** — about 2,200 tokens each of a constant table, for the
+## one fact that the project had declared nothing.
+##
+## What tells them apart is the settings inspector's own revert arrow, and unlike `Node`'s it works:
+## measured on the pinned 4.7.2 against a project declaring `move_left` and overriding `ui_accept`,
+## `property_can_revert` with a value differing from `property_get_revert` named exactly those two
+## of 73. So an overridden built-in is one the project chose and is written out with the rest.
+##
+## `names` answers exactly what it lists, chosen or not, which is how the events of an untouched
+## built-in are read. A name that is not there is refused rather than left out, the rule
+## `node.inspect` and `runtime.inspect_node` both follow.
+func _project_list_input_actions(params: Dictionary) -> Dictionary:
+    var wanted: Array[String] = []
+    for name in params.get("names", []) as Array:
+        wanted.append(str(name))
     var actions: Array = []
+    var untouched: Array[String] = []
     for info in ProjectSettings.get_property_list():
         var setting := str(info.get("name", ""))
         if not setting.begins_with("input/"):
@@ -2217,6 +2244,12 @@ func _project_list_input_actions() -> Dictionary:
         if typeof(data) != TYPE_DICTIONARY:
             continue
         var name := setting.trim_prefix("input/")
+        if not wanted.is_empty():
+            if not wanted.has(name):
+                continue
+        elif _is_at_its_engine_default(setting):
+            untouched.append(name)
+            continue
         actions.append(
             {
                 "name": name,
@@ -2226,7 +2259,26 @@ func _project_list_input_actions() -> Dictionary:
                 "builtIn": name.begins_with("ui_")
             }
         )
-    return {"actions": actions}
+    if not wanted.is_empty():
+        var answered: Array[String] = []
+        for action in actions:
+            answered.append(str((action as Dictionary)["name"]))
+        for name in wanted:
+            if not answered.has(name):
+                return Params.error(
+                    "action_not_found",
+                    "There is no input action named '%s'. list_input_actions with no names says "
+                    % name
+                    + "which there are.",
+                    {"name": name}
+                )
+    return {"actions": actions, "atEngineDefault": untouched}
+
+## Whether a setting still holds what Godot ships it with.
+func _is_at_its_engine_default(setting: String) -> bool:
+    if not ProjectSettings.property_can_revert(setting):
+        return false
+    return ProjectSettings.get_setting(setting) == ProjectSettings.property_get_revert(setting)
 
 func _project_set_input_action(params: Dictionary) -> Dictionary:
     var name := str(params.get("name", ""))

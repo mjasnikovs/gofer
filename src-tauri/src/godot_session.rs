@@ -49,8 +49,14 @@ const MAX_LOG_ENTRIES: usize = 4_000;
 /// One log line is truncated past this many characters: a single engine error can carry a whole
 /// stack trace, and the 1 MiB envelope is shared with every other line in the page.
 const MAX_LOG_LINE_CHARS: usize = 4_000;
-const DEFAULT_LOG_PAGE: usize = 200;
-const MAX_LOG_PAGE: usize = 1_000;
+/// How many lines a read answers with when the caller names no limit.
+///
+/// `pub(crate)` because `ai_tools` fills a page to this number after taking the editor's own
+/// terminal output out of it — see `logs_domain`, which would otherwise read the whole buffer
+/// whenever a caller named no limit.
+pub(crate) const DEFAULT_LOG_PAGE: usize = 200;
+/// The most a read answers with, however large a limit is asked for.
+pub(crate) const MAX_LOG_PAGE: usize = 1_000;
 
 static ACTIVE_SESSION: Mutex<Option<GodotSession>> = Mutex::new(None);
 static SESSION_STARTING: AtomicBool = AtomicBool::new(false);

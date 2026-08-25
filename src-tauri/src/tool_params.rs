@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:da382af0a017045b
+// GENERATED-BEGIN operations sha256:90d9d371aaa7c647
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1015,16 +1015,15 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
         Answers::Addon("project.remove_autoload"),
         &[need("name", Text)],
     ),
-    alone(
-        op(
-            "godot_project",
-            "list_input_actions",
-            "Lists the Input Map actions.",
-            Answers::Addon("project.list_input_actions"),
-            &[],
-        ),
-        Sharing::Repeat,
-        "It takes no parameters, so a second one in the same call is the first one again.",
+    op(
+        "godot_project",
+        "list_input_actions",
+        "Lists the Input Map actions this project chose — its own, and the built-ins it overrode — with their events. The engine's untouched built-ins are named, without their events, in `atEngineDefault`: Godot registers 72 of them and writing them out is about 2,200 tokens of its own constant table. `names` answers exactly what it lists, chosen or not, which is how the events of an untouched built-in are read.",
+        Answers::Addon("project.list_input_actions"),
+        &[noted(
+            opt("names", Kind::ListOf(&Text)),
+            "The action names to read, like [\"ui_left\", \"jump\"]. Without it the project's own are answered and the rest are named.",
+        )],
     ),
     op(
         "godot_project",
@@ -1622,7 +1621,7 @@ pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
     op(
         "godot_debug",
         "stack_trace",
-        "Returns the stopped stack.",
+        "Returns the stopped stack, which is empty unless the game is stopped at a breakpoint or a step — a pause leaves it with no frame at all.",
         Answers::Rust,
         &[opt("threadId", Int)],
     ),
@@ -1662,7 +1661,7 @@ pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
         op(
             "godot_debug",
             "pause",
-            "Pauses the debuggee.",
+            "Pauses the debuggee between frames. It is not a break: a paused game has no stack to read and nothing to evaluate in. To look inside a script, set a breakpoint, continue, and wait for it with await_stop.",
             Answers::Rust,
             &[opt("threadId", Int)],
         ),
@@ -1876,6 +1875,28 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
             ),
         ],
     ),
+    alone(
+        op(
+            "godot_runtime",
+            "pause",
+            "Freezes the running game where it stands, the way its own pause menu would: `SceneTree.paused`, so a node that opted out of pausing keeps running. Use it before reading a game that moves — a path to a node a spawner made is stale as soon as that node is freed, and a frozen tree is one you can read twice. `resume` lets it go again. Gofer's own helper keeps answering either way.",
+            Answers::Addon("runtime.pause"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
+    ),
+    alone(
+        op(
+            "godot_runtime",
+            "resume",
+            "Lets a paused game run on again.",
+            Answers::Addon("runtime.resume"),
+            &[],
+        ),
+        Sharing::Repeat,
+        "It takes no parameters, so a second one in the same call is the first one again.",
+    ),
     op(
         "godot_runtime",
         "get_monitors",
@@ -1888,7 +1909,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
 pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
     "godot_logs",
     "read",
-    "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse.",
+    "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse. Terminal colour is taken out, and the editor's own progress bar — `[  16% ] first_scan_filesystem | …` — is left out and counted in `terminalLinesOmitted`, because a terminal drawing itself is a fifth of this output and none of it is about the project.",
     Answers::Rust,
     &[
         opt("after", Int),

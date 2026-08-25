@@ -936,12 +936,16 @@
         {
             "tool": "godot_project",
             "op": "list_input_actions",
-            "summary": "Lists the Input Map actions.",
-            "alone": {
-                "scope": "repeat",
-                "why": "It takes no parameters, so a second one in the same call is the first one again."
-            },
-            "params": [],
+            "summary": "Lists the Input Map actions this project chose — its own, and the built-ins it overrode — with their events. The engine's untouched built-ins are named, without their events, in `atEngineDefault`: Godot registers 72 of them and writing them out is about 2,200 tokens of its own constant table. `names` answers exactly what it lists, chosen or not, which is how the events of an untouched built-in are read.",
+            "params": [
+                {
+                    "name": "names",
+                    "kind": "listOf",
+                    "of": {"kind": "text"},
+                    "required": false,
+                    "note": "The action names to read, like [\"ui_left\", \"jump\"]. Without it the project's own are answered and the rest are named."
+                }
+            ],
             "command": "project.list_input_actions"
         },
         {
@@ -2013,7 +2017,7 @@
         {
             "tool": "godot_debug",
             "op": "stack_trace",
-            "summary": "Returns the stopped stack.",
+            "summary": "Returns the stopped stack, which is empty unless the game is stopped at a breakpoint or a step — a pause leaves it with no frame at all.",
             "params": [
                 {
                     "name": "threadId",
@@ -2087,7 +2091,7 @@
         {
             "tool": "godot_debug",
             "op": "pause",
-            "summary": "Pauses the debuggee.",
+            "summary": "Pauses the debuggee between frames. It is not a break: a paused game has no stack to read and nothing to evaluate in. To look inside a script, set a breakpoint, continue, and wait for it with await_stop.",
             "alone": {
                 "scope": "exclusive",
                 "why": "One debuggee, driven in order: each answer decides what the next call means."
@@ -2403,6 +2407,28 @@
         },
         {
             "tool": "godot_runtime",
+            "op": "pause",
+            "summary": "Freezes the running game where it stands, the way its own pause menu would: `SceneTree.paused`, so a node that opted out of pausing keeps running. Use it before reading a game that moves — a path to a node a spawner made is stale as soon as that node is freed, and a frozen tree is one you can read twice. `resume` lets it go again. Gofer's own helper keeps answering either way.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
+            "params": [],
+            "command": "runtime.pause"
+        },
+        {
+            "tool": "godot_runtime",
+            "op": "resume",
+            "summary": "Lets a paused game run on again.",
+            "alone": {
+                "scope": "repeat",
+                "why": "It takes no parameters, so a second one in the same call is the first one again."
+            },
+            "params": [],
+            "command": "runtime.resume"
+        },
+        {
+            "tool": "godot_runtime",
             "op": "get_monitors",
             "summary": "Reads engine performance monitors. Without a list it answers with fps, memory_static and object_node_count. The rest are process_time, physics_time, memory_message_buffer, object_count, object_resource_count, object_orphan_node_count, render_objects_in_frame, render_primitives_in_frame, render_draw_calls_in_frame, render_video_memory, render_texture_memory and render_buffer_memory; any other name is an error.",
             "params": [
@@ -2417,7 +2443,7 @@
         {
             "tool": "godot_logs",
             "op": "read",
-            "summary": "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse.",
+            "summary": "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse. Terminal colour is taken out, and the editor's own progress bar — `[  16% ] first_scan_filesystem | …` — is left out and counted in `terminalLinesOmitted`, because a terminal drawing itself is a fifth of this output and none of it is about the project.",
             "params": [
                 {
                     "name": "after",

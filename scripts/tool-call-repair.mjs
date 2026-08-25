@@ -466,9 +466,12 @@ export function dropEmptyEntries(entries) {
  */
 function sayingNoneOfItRan(listed, refusal) {
     if (listed < 2) return refusal
-    const said = refusal instanceof Error ? refusal.message : String(refusal)
+    const said = (refusal instanceof Error ? refusal.message : String(refusal)).trimEnd()
+    // A full stop first when the sentence it joins did not end in one, which the router's own
+    // `node_not_found` does not: it ends on the path it could not find.
+    const stop = /[.!?]$/u.test(said) ? '' : '.'
     return new Error(
-        `${said} None of the ${String(listed)} operations in this call ran.`
+        `${said}${stop} None of the ${String(listed)} operations in this call ran.`
             + ` A list is refused as one, so send all ${String(listed)} again with this one corrected.`
     )
 }

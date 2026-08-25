@@ -80,6 +80,17 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
     worktree
 }
 
+/// `[   0% ]` through `[ 100% ]`, the eight characters the editor opens a progress line with.
+fn is_a_percentage(opening: &str) -> bool {
+    opening.starts_with('[')
+        && opening.ends_with("% ]")
+        && opening[1..5]
+            .trim()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        && !opening[1..5].trim().is_empty()
+}
+
 /// One editor session with every transport open and bound, so a tool call from the worker reaches
 /// this editor exactly as it would reach a supervised one.
 ///
@@ -634,6 +645,31 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         "{}",
         quote("the editor's own banner must be in the captured output")
     );
+    // And what the editor wrote for a terminal does not reach the model. A real import prints a
+    // progress bar in colour, which is a fifth of everything this domain has ever answered with.
+    assert!(
+        entries.iter().all(|entry| !entry["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(char::from(27))),
+        "{}",
+        quote("no terminal escape code may reach the model")
+    );
+    assert!(
+        entries.iter().all(|entry| {
+            let message = entry["message"].as_str().unwrap_or_default().trim_start();
+            // The editor writes its progress in a fixed six-character field: `[   0% ]`,
+            // `[ DONE ]`. Anything else that opens with a bracket is somebody's own print.
+            !(message.starts_with("[ DONE ]") || message.get(..8).is_some_and(is_a_percentage))
+        }),
+        "{}",
+        quote("no line of the editor's progress bar may reach the model")
+    );
+    assert!(
+        results[17]["terminalLinesOmitted"].as_u64().unwrap_or(0) > 0,
+        "{}",
+        quote("a real import writes a progress bar, and the count has to say so")
+    );
 
     // The project domain, and with it the router's own rewrite: `search_editor_settings` is not a
     // `project.` command at all, it is the addon's `editor.search_settings`, and the mapping lives
@@ -926,6 +962,72 @@ fn a_handler_the_editor_cannot_compile_says_so_rather_than_blaming_the_script() 
 /// that verdict off its cache. A live turn wrote a `Score` autoload, registered it, and was told
 /// `Identifier "Score" not declared in the current scope` on three separate calls; it recovered by
 /// closing the file and opening it again, which is this, done by hand and three calls later.
+/// A `class_name` written this session is a type the next script can name.
+///
+/// `godot_script` writes through the language server, which is a different door from every other
+/// write in this router, and the file was never named to the editor's filesystem. The server read
+/// it back perfectly well; nothing else knew it existed. Two live runs met that as
+/// `Could not find type "Coin" in the current scope.` and `Could not find type "Player"`, six
+/// occurrences between them, against classes they had written minutes earlier — and with strict
+/// typing on, a warning like that is an error and the script does not load.
+///
+/// Measured before it was changed: reopening the dependent script does not fix it, and neither
+/// does a whole-project `rescan` with no path. Naming the file does. See `told_the_editor_about`.
+#[test]
+fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
+    let session = start_session();
+    let app = mock_app();
+    std::fs::create_dir_all(session.worktree.join("scripts")).expect("create scripts");
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+        .unwrap_or_else(|failure| {
+            panic!("{tool} was refused: {} {}", failure.code, failure.message)
+        })
+    };
+    let complaints = |answer: &Value| -> Vec<String> {
+        answer["ops"][0]["result"]["diagnostics"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|one| one["message"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let declared = call(
+        "godot_script",
+        json!({"ops": [{"op": "save", "path": "scripts/coin.gd",
+                        "text": "class_name Coin\nextends Area2D\n\n\nfunc value() -> int:\n\treturn 1\n"}]}),
+    );
+    assert!(complaints(&declared).is_empty(), "{declared}");
+
+    // The everyday next call: another script that names the class as a type.
+    let user = call(
+        "godot_script",
+        json!({"ops": [{"op": "save", "path": "scripts/holder.gd",
+                        "text": "extends Node\n\nvar held: Coin = null\n"}]}),
+    );
+    assert!(
+        complaints(&user).is_empty(),
+        "a class declared a moment ago must be a type the next script can name: {user}"
+    );
+
+    // And the language server agrees when it is asked again, rather than only at the moment of
+    // writing: this is the answer a later `diagnostics` gives the model.
+    let asked = call(
+        "godot_script",
+        json!({"ops": [{"op": "diagnostics", "path": "scripts/holder.gd"}]}),
+    );
+    assert!(complaints(&asked).is_empty(), "{asked}");
+}
+
 #[test]
 fn a_script_is_read_again_once_an_autoload_declares_the_name_it_uses() {
     let session = start_session();

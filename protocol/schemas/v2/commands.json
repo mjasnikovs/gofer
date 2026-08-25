@@ -11,7 +11,9 @@
         "runtime.input",
         "runtime.capture",
         "runtime.get_monitors",
-        "runtime.wait"
+        "runtime.wait",
+        "runtime.pause",
+        "runtime.resume"
     ],
     "commands": [
         {"command": "session.get_state", "handler": "_session_state"},

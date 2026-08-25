@@ -308,10 +308,18 @@ fn said_that_none_of_it_ran(listed: usize, failure: ToolFailure) -> ToolFailure 
         return failure;
     }
     let mut failure = failure;
+    // A full stop first when the sentence it is joining did not end in one. `node_not_found: No
+    // running node at '/root/Main/@Area2D@19'` ends on the path, and the clause ran straight into
+    // it — measured on a live turn, four times in one run.
+    let stop = if failure.message.trim_end().ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
     failure.message = format!(
-        "{} None of the {listed} operations in this call ran. A list is refused as one, so send \
-         all {listed} again with this one corrected.",
-        failure.message
+        "{}{stop} None of the {listed} operations in this call ran. A list is refused as one, so \
+         send all {listed} again with this one corrected.",
+        failure.message.trim_end()
     );
     failure
 }
@@ -433,6 +441,46 @@ fn route<R: Runtime>(
             },
         )
     })
+}
+
+/// Tells the editor's filesystem about GDScript this call just wrote.
+///
+/// `godot_script` writes through the language server, which is a different door from every other
+/// write in this router: `create_texture`, `create_shape` and the scene commands all end in
+/// `EditorFileSystem.update_file`, and a script never did. The consequence is not the file being
+/// invisible — the server reads it perfectly well — it is that **a `class_name` written this
+/// session does not exist for anything else**.
+///
+/// Measured against the pinned 4.7.2, in this order:
+///
+/// * save `coin.gd` declaring `class_name Coin`, then save a script typing `Coin` →
+///   `Could not find type "Coin" in the current scope.`
+/// * reopen the second script, which re-reads it from disk and re-parses → still refused.
+/// * a whole-project `rescan` with no path → still refused, and it reported no paths at all.
+/// * `rescan` naming `coin.gd` → the next script typing `Coin` saves with **no diagnostics**.
+///
+/// So the missing step is naming the file, and `resource.rescan` is where that already lives. It
+/// is `update_file` for a `.gd`: nothing about a script is importable, so `_import_batch` registers
+/// it and returns without waiting for anything.
+///
+/// The failure is swallowed on purpose. The write has already happened and is already answered; a
+/// caller told the save failed would write it again, and the thing that went wrong is a
+/// registration it cannot do anything about. What it costs is the state this function exists to
+/// prevent, which is where the project was before it.
+fn told_the_editor_about<R: Runtime>(app: &AppHandle<R>, paths: Vec<String>) {
+    if paths.is_empty() {
+        return;
+    }
+    let _ = godot_session_api::call_godot(
+        app,
+        CallGodotRequest {
+            command: "resource.rescan".to_owned(),
+            params: json!({"path": paths}),
+            expected_revision: None,
+            expected_scene: None,
+            timeout_ms: None,
+        },
+    );
 }
 
 /// Runs one operation, and starts the editor session if the only thing wrong was that there is
@@ -1503,7 +1551,13 @@ fn script_domain<R: Runtime>(
         // `through_the_read_ledger` and `crate::read_ledger`.
         "save" => {
             require_script_path(&params)?;
-            Ok(to_value(script::save_and_publish(from_params(params)?)?))
+            let path = params
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let saved = to_value(script::save_and_publish(from_params(params)?)?);
+            told_the_editor_about(app, path.into_iter().collect());
+            Ok(saved)
         }
         "close" => {
             let (paths, batched) = named_scripts(&params)?;
@@ -1531,7 +1585,10 @@ fn script_domain<R: Runtime>(
             for file in &request.files {
                 require_script_path(&json!({"path": file.path}))?;
             }
-            Ok(json!({"files": to_value(script::edit_documents(request)?)}))
+            let written: Vec<String> = request.files.iter().map(|file| file.path.clone()).collect();
+            let edited = json!({"files": to_value(script::edit_documents(request)?)});
+            told_the_editor_about(app, written);
+            Ok(edited)
         }
         "apply_rename" => {
             let request: script::ApplyRenameRequest = from_params(params)?;
@@ -1545,7 +1602,10 @@ fn script_domain<R: Runtime>(
             // out. Renaming rewrites the files it names, so the hashes recorded for them are claims
             // about text that is gone: the next save over one was refused `file_conflict`, and the
             // model cannot clear a hash it is never shown.
-            Ok(json!({"files": to_value(script::apply_rename(request)?)}))
+            let written: Vec<String> = request.files.iter().map(|file| file.path.clone()).collect();
+            let renamed = json!({"files": to_value(script::apply_rename(request)?)});
+            told_the_editor_about(app, written);
+            Ok(renamed)
         }
         // A list here shares one wait for the whole batch; a single path keeps the answer it has
         // always had, and both read the diagnostics through the same function.
@@ -1594,9 +1654,149 @@ fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
     Ok(to_value(debug::call(request)?))
 }
 
+/// Reads log lines until the caller's limit is filled with lines a model can read.
+///
+/// The page is filtered after the buffer applies the limit, so one page of two hundred can come
+/// back as forty once the editor's own terminal output is out of it — and forty lines where two
+/// hundred were asked for reads as "there is no more", which is the one thing it must not mean.
+/// So the pages are read forward until the limit is met or the buffer runs out.
+///
+/// The cursor answered is the one that continues from the last line actually handed over, never
+/// from a line read past it: `after` takes a sequence, and every entry carries its own.
 fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
-    let query: LogQuery = from_params(params)?;
-    Ok(to_value(godot_session::read_logs(&query)?))
+    let mut query: LogQuery = from_params(params)?;
+    // The buffer's own defaults, applied here as well: without them a call naming no limit would
+    // read the whole buffer rather than a page of it.
+    let wanted = query
+        .limit
+        .unwrap_or(godot_session::DEFAULT_LOG_PAGE)
+        .clamp(1, godot_session::MAX_LOG_PAGE);
+    // Read in whole pages whatever the caller asked for, and take `wanted` readable lines out of
+    // them. A `limit: 5` over a stretch of import output would otherwise take a lock per five
+    // lines walked; the buffer is scanned in memory, so a page costs the same as five.
+    query.limit = Some(godot_session::MAX_LOG_PAGE);
+    let mut kept: Vec<Value> = Vec::new();
+    let mut omitted = 0;
+    let first = godot_session::read_logs(&query)?;
+    let dropped = first.dropped;
+    let mut cursor = first.cursor;
+    let mut page = first;
+    loop {
+        let counted = page.entries.len();
+        for entry in page.entries {
+            if kept.len() >= wanted {
+                break;
+            }
+            cursor = entry.sequence;
+            match a_line_a_model_can_read(&entry) {
+                Some(line) => kept.push(line),
+                None => omitted += 1,
+            }
+        }
+        if counted == 0 || kept.len() >= wanted {
+            break;
+        }
+        query.after = Some(cursor);
+        page = godot_session::read_logs(&query)?;
+    }
+    Ok(json!({
+        "entries": kept,
+        "cursor": cursor,
+        "dropped": dropped,
+        "terminalLinesOmitted": omitted,
+    }))
+}
+
+/// One line with the terminal's own control codes taken out of it.
+///
+/// The editor writes to a terminal and colours what it writes. `\u{1b}[90m\u{1b}[1mfirst_scan…`
+/// is one line of Godot's import progress, and a third of that line is the escapes. Written
+/// without the `regex` crate, which this binary does not carry: an escape here is always
+/// `ESC [ … letter`, the CSI form, which is all a terminal colour is.
+fn without_terminal_colour(line: &str) -> String {
+    let mut plain = String::with_capacity(line.len());
+    let mut rest = line.chars();
+    while let Some(character) = rest.next() {
+        if character != '\u{1b}' {
+            plain.push(character);
+            continue;
+        }
+        // `ESC [` then the parameters, then the letter that ends it. An `ESC` that begins nothing
+        // is dropped on its own, which is what a terminal does with it.
+        if rest.next() != Some('[') {
+            continue;
+        }
+        for parameter in rest.by_ref() {
+            if parameter.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    plain
+}
+
+/// Whether this line is the editor's own progress bar rather than anything about the project.
+///
+/// `EditorProgress` prints `[  16% ] first_scan_filesystem | Scanning file structure...` and
+/// `[ DONE ] save` to standard output, and both are a terminal drawing itself. **159 of the 655 log
+/// entries in the recorded corpus are these**, 22,653 characters of 102,196 — more than a fifth of
+/// everything `godot_logs read` has ever handed a model. Nothing in one is actionable: an import
+/// that fails prints an `ERROR`, and a save that worked is answered by the save.
+fn is_the_editors_progress_bar(line: &str) -> bool {
+    let Some(bracketed) = line.strip_prefix('[') else {
+        return false;
+    };
+    let Some((inside, _)) = bracketed.split_once(']') else {
+        return false;
+    };
+    // Godot right-aligns the number in a fixed field, so the brackets always hold exactly six
+    // characters: `[   0% ]`, `[  16% ]`, `[ 100% ]`, `[ DONE ]`. Held to that width so a game
+    // printing `[ 50% ] loading` of its own is not read as the editor's.
+    if inside.chars().count() != 6 {
+        return false;
+    }
+    let inside = inside.trim();
+    inside == "DONE"
+        || inside
+            .strip_suffix('%')
+            .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The log page, with what only a terminal can use taken out of it, and a count of what went.
+///
+/// Three things, measured over the 655 entries the recorded live runs read back: the escape codes
+/// are 7.5% of them, the lines that are nothing but escape codes are 3.7%, and the editor's own
+/// progress bar is 22%. Together they are a third of every character `godot_logs read` answers
+/// with, and `godot_logs read` is 18% of everything the model reads back from any tool.
+///
+/// Counted rather than silently dropped, and only here: the renderer reads the same buffer through
+/// [`godot_session::read_logs`] and shows the user their editor's output as their editor wrote it.
+fn a_line_a_model_can_read(entry: &godot_session::LogEntry) -> Option<Value> {
+    let message = without_terminal_colour(&entry.message);
+    if message.trim().is_empty() || is_the_editors_progress_bar(message.trim()) {
+        return None;
+    }
+    Some(json!({
+        "sequence": entry.sequence,
+        "source": entry.source,
+        "severity": entry.severity,
+        "message": message,
+        "timestamp": entry.timestamp,
+    }))
+}
+
+/// The same question asked of a whole page, which is what the tests drive.
+#[cfg(test)]
+fn what_a_model_can_read(entries: Vec<godot_session::LogEntry>) -> (Vec<Value>, usize) {
+    let mut kept = Vec::with_capacity(entries.len());
+    let mut omitted = 0;
+    for entry in entries {
+        match a_line_a_model_can_read(&entry) {
+            Some(line) => kept.push(line),
+            None => omitted += 1,
+        }
+    }
+    (kept, omitted)
 }
 
 /// Answers a documentation search, telling the sidecar which model to reach for.
@@ -2642,6 +2842,105 @@ mod tests {
             refusal(json!({"ops": [{"op": "detonate"}]})).code,
             "unknown_operation"
         );
+    }
+
+    /// The editor's terminal drawing itself is not something a model can read.
+    ///
+    /// Measured over the 655 log entries the recorded live runs read back: the escape codes are
+    /// 7.5% of them, the lines that are nothing but escape codes are 3.7%, and the progress bar is
+    /// 22%. The lines below are real ones out of `logs/oxloop`.
+    #[test]
+    fn the_editors_terminal_colour_and_progress_bar_do_not_reach_the_model() {
+        let escape = char::from(27);
+        let line = |sequence: u64, message: &str| godot_session::LogEntry {
+            sequence,
+            source: godot_session::LogSource::Editor,
+            severity: godot_session::LogSeverity::Info,
+            message: message.to_owned(),
+            timestamp: 1_787_680_547_282,
+        };
+        let (kept, omitted) = what_a_model_can_read(vec![
+            line(
+                1,
+                &format!(
+                    "[  16% ] {escape}[90m{escape}[1mfirst_scan_filesystem{escape}[22m | Scanning \
+                     file structure...{escape}[39m{escape}[0m"
+                ),
+            ),
+            line(
+                2,
+                &format!("{escape}[92m[ DONE ]{escape}[39m {escape}[1msave{escape}[22m"),
+            ),
+            line(3, &format!("{escape}[0m")),
+            line(4, ""),
+            line(
+                5,
+                &format!("{escape}[1mSCRIPT ERROR:{escape}[0m Parse Error: Identifier not found"),
+            ),
+            line(6, "[player] hit right window edge after 580.1 px"),
+            // A game printing its own progress in the same shape, but not in the editor's fixed
+            // six-character field. Kept.
+            line(7, "[ 50% ] loading the level"),
+        ]);
+
+        assert_eq!(omitted, 4, "{kept:?}");
+        assert_eq!(kept.len(), 3, "{kept:?}");
+        assert_eq!(kept[2]["message"], "[ 50% ] loading the level");
+        // The colour is gone and the sentence is whole.
+        assert_eq!(
+            kept[0]["message"],
+            "SCRIPT ERROR: Parse Error: Identifier not found"
+        );
+        // A game's own print that merely opens with a bracket is not a progress bar.
+        assert_eq!(
+            kept[1]["message"],
+            "[player] hit right window edge after 580.1 px"
+        );
+        assert_eq!(kept[0]["sequence"], json!(5));
+    }
+
+    /// A page asked for `limit` lines comes back with `limit` lines a model can read.
+    ///
+    /// The buffer applies the limit and the filter runs after it, so one page of two hundred can
+    /// come back as forty once the editor's own terminal output is out of it — and forty where two
+    /// hundred were asked for reads as "there is no more", which is the one thing it must not mean.
+    #[test]
+    fn a_page_is_filled_to_the_limit_with_lines_that_survive_the_filter() {
+        let _test = godot_session::SESSION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        godot_session::clear_logs();
+        let escape = char::from(27);
+        // Nine lines the model cannot read for every one it can, which is the shape of a real
+        // import: the corpus's own ratio is closer to one in three.
+        for index in 0..30 {
+            for step in 0..9 {
+                godot_session::append_log(
+                    godot_session::LogSource::Editor,
+                    &format!("[  {step}0% ] {escape}[90mimport{escape}[0m | step {step}\n"),
+                );
+            }
+            godot_session::append_log(
+                godot_session::LogSource::Editor,
+                &format!("[player] line {index}\n"),
+            );
+        }
+
+        let answered = logs_domain(json!({"limit": 12})).expect("the logs read");
+        let entries = answered["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 12, "{answered}");
+        assert_eq!(entries[0]["message"], "[player] line 0", "{answered}");
+        assert_eq!(entries[11]["message"], "[player] line 11", "{answered}");
+        assert!(
+            answered["terminalLinesOmitted"].as_u64().unwrap_or(0) >= 108,
+            "{answered}"
+        );
+
+        // And the cursor continues from the last line handed over, not from one read past it.
+        let next = logs_domain(json!({"limit": 3, "after": answered["cursor"].clone()}))
+            .expect("the next page");
+        assert_eq!(next["entries"][0]["message"], "[player] line 12", "{next}");
+        godot_session::clear_logs();
     }
 
     /// A parameter mistake in the fourth entry has to name the fourth entry.
