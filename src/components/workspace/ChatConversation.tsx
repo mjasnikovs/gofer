@@ -48,6 +48,29 @@ const SENT_TEXT_STYLE = {whiteSpace: 'pre-wrap'} as const
 // The conversation sits in a centre-aligned column: without an explicit width it
 // would shrink to the widest message and grow as the reply streams in.
 const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex', width: '100%'} as const
+/**
+ * A message off the top of the viewport is not laid out until it is scrolled to.
+ *
+ * The composer is a `contenteditable` and this list is its sibling inside one full-height column,
+ * so a typed character dirties the column and the browser lays every message in it out again.
+ * Measured on a four-hundred-message conversation, one keystroke cost 2.2ms of layout against
+ * 0.4ms on a short one, and it grew with the conversation — which is a chat window that types
+ * slower the longer you have been working in it.
+ *
+ * `auto` on the intrinsic size means the remembered height of a row that has been drawn once,
+ * falling back to this estimate for one that has not. The estimate only has to be close: it is what
+ * the scrollbar is sized from until the row is reached, and a row corrects it the moment it is.
+ *
+ * `flexShrink` is not a tweak. A skipped row has no content, so its automatic minimum size is zero
+ * and the list — a flex column taller than its viewport — shrinks every one of them away: measured,
+ * a twenty-message conversation collapsed from 6194px of scroll to 1875px and the rows off screen
+ * had no height at all. A message never gives ground anyway; saying so is what keeps the estimate.
+ */
+const MESSAGE_SKIP_STYLE = {
+    contentVisibility: 'auto',
+    containIntrinsicSize: 'auto 240px',
+    flexShrink: 0
+} as const
 /*
  * A conversation is a column and never scrolls sideways, which takes both of these.
  *
@@ -608,6 +631,7 @@ const ConversationMessage = memo(
             return (
                 <ChatMessage
                     sender='assistant'
+                    style={MESSAGE_SKIP_STYLE}
                     /*
                      * The footer is the turn's closing line, so a turn still running does not get
                      * one. `usage` arrives once per step, not once per turn, so a running turn drew
@@ -629,7 +653,10 @@ const ConversationMessage = memo(
             )
         }
         return (
-            <ChatMessage sender='user'>
+            <ChatMessage
+                sender='user'
+                style={MESSAGE_SKIP_STYLE}
+            >
                 <ChatMessageBubble variant='filled'>
                     <VStack
                         gap={2}
