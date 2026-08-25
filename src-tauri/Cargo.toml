@@ -29,7 +29,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 base64 = "0.22"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["devtools"] }
 dirs = "6"
 dunce = "1"
 keyring = "4"
