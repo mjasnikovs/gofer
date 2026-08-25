@@ -823,6 +823,66 @@ fn a_launch_that_outlives_its_deadline_while_playing_says_the_game_is_up() {
     session.call("runtime.stop", json!({}));
 }
 
+/// A probe that joins a group in `_ready`, which is how half of a game's groups are joined.
+const GROUPING_PROBE_SCRIPT: &str = "extends Node2D\n\nfunc _ready() -> void:\n\tadd_to_group(\"coins\")\n\tadd_to_group(\"_private\")\n";
+
+/// The scene for it, with nothing in the file about any group.
+const GROUPING_PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"Script\" path=\"res://scripts/runtime_probe.gd\" id=\"1_probe\"]\n\n[node name=\"RuntimeProbe\" type=\"Node2D\"]\nscript = ExtResource(\"1_probe\")\n";
+
+/// `runtime.inspect_node` answers the groups a running node is in, without being asked.
+///
+/// A live turn wanted to know whether a coin it had put in `coin` was still in it once the game was
+/// up. It wrote `inspect_node {properties: ["groups"]}` — `groups` is the word `node.inspect`
+/// answers with — and was told `Node '/root/Main/Coin' has no property 'groups'`. True, and
+/// useless: a group is not a property, and there was no way to ask for one.
+///
+/// The two sides genuinely disagree, which is why reading the scene instead is not the answer: a
+/// script's `add_to_group` in `_ready` is invisible to the edited scene and is how half of a game's
+/// groups are joined. Both halves are asserted here, on the same node at the same moment.
+#[test]
+fn a_running_node_answers_the_groups_it_joined_after_the_scene_was_written() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        GROUPING_PROBE_SCRIPT,
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), GROUPING_PROBE_SCENE).expect("write the scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| panic!("runtime.run failed: {error}\n{}", session.output()));
+
+    let inspected = session.call(
+        "runtime.inspect_node",
+        json!({"path": "/root/RuntimeProbe", "properties": ["position"]}),
+    );
+    let groups: Vec<&str> = inspected["groups"]
+        .as_array()
+        .unwrap_or_else(|| panic!("runtime.inspect_node answered no groups: {inspected}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(groups, vec!["coins"], "{inspected}");
+
+    // The named property is still answered beside them, and nothing was asked for `groups`.
+    assert_eq!(
+        inspected["properties"]["position"]["type"], "vector2",
+        "{inspected}"
+    );
+
+    // And the edited scene, read at the same moment, knows nothing about it — which is the whole
+    // reason this cannot be answered from the file.
+    let authored = session.call("node.inspect", json!({"node": "/RuntimeProbe"}));
+    assert_eq!(authored["groups"], json!([]), "{authored}");
+
+    session.call("runtime.stop", json!({}));
+}
+
 /// An autoload that kills its own process the moment it is added, which is what a game that
 /// crashes during boot looks like from the editor: a process that was there and then was not,
 /// with nothing said and nothing announced.

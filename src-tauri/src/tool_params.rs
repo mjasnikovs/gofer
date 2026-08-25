@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:5c785fce92acd20c
+// GENERATED-BEGIN operations sha256:da382af0a017045b
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1808,7 +1808,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "inspect_node",
-        "Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap.",
+        "Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap. The groups it is in come back whether or not anything was named, because a group is not a property and a script joining one at run time is how half of them are joined.",
         Answers::Addon("runtime.inspect_node"),
         &[need("path", Text), opt("properties", List)],
     ),

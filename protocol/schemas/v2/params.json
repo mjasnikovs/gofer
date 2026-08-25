@@ -2271,7 +2271,7 @@
         {
             "tool": "godot_runtime",
             "op": "inspect_node",
-            "summary": "Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap.",
+            "summary": "Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap. The groups it is in come back whether or not anything was named, because a group is not a property and a script joining one at run time is how half of them are joined.",
             "params": [
                 {
                     "name": "path",

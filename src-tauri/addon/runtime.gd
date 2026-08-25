@@ -285,7 +285,27 @@ func _op_inspect(params: Dictionary) -> Dictionary:
         "name": node.name,
         "type": node.get_class(),
         "properties": properties,
+        "groups": _authored_groups(node),
     })
+
+## The groups a person put a node in, which is not everything `get_groups` answers.
+##
+## The same filter `node.inspect` applies on the editor side, and the same reason: the engine keeps
+## its own groups on a node behind a leading underscore, named after object ids that change every
+## run, and a caller reading one it never added has no way to know it is not its own.
+##
+## Answered without being asked for, because a group is not a property and there was no way to ask.
+## A live turn wanted to know whether a coin it had put in `coin` was still in it once the game was
+## up, wrote `inspect_node {properties: ["groups"]}` — the word `node.inspect` answers with — and
+## was told `Node '/root/Main/Coin' has no property 'groups'`, which is true and useless. Group
+## membership is the one part of a node that the running game and the edited scene disagree about
+## most, since `add_to_group` in a script is how half of them are joined.
+func _authored_groups(node: Node) -> Array:
+    var authored: Array = []
+    for group in node.get_groups():
+        if not str(group).begins_with("_"):
+            authored.append(str(group))
+    return authored
 
 ## The property nearest a name this node does not have, as a clause, or "".
 ##
