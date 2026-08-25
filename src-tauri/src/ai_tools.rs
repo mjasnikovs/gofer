@@ -268,12 +268,56 @@ pub fn dispatch<R: Runtime>(
     dispatch_under(app, request, &rules)
 }
 
-/// The router proper, with the user's Godot rules passed in rather than read.
+/// The router, with the user's Godot rules passed in rather than read.
 ///
 /// Separate so the tests can state the rules they are testing. Read inside, every assertion about a
 /// refusal would be an assertion about whichever `settings.json` the machine running the test
 /// happens to hold — which on a developer's machine is a real one they may have edited.
+///
+/// It counts the list before routing, because that is the one fact every refusal below needs and
+/// none of them carries: see [`said_that_none_of_it_ran`].
 fn dispatch_under<R: Runtime>(
+    app: &AppHandle<R>,
+    request: ToolRequest,
+    rules: &crate::settings::GodotSettings,
+) -> Result<Value, ToolFailure> {
+    let listed = request
+        .params
+        .get("ops")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    route(app, request, rules).map_err(|failure| said_that_none_of_it_ran(listed, failure))
+}
+
+/// Says that a refused list left nothing behind, for a model that would otherwise assume it did.
+///
+/// Every refusal above `run_in_order` happens before any entry runs, and `run_in_order` itself
+/// fails only when nothing in it worked — so a call answered with a bare failure applied none of
+/// its operations. Nothing in the failure says so, and a live turn shows what that costs: a model
+/// sent `godot_scene [create, create_nodes, set_properties, connect_signal, connect_signal, save]`,
+/// was refused for `create_nodes` belonging to another tool, and wrote "The scene is created and
+/// open — the node-level ops belong to `godot_node`. Continuing there:". It was not created. Four
+/// calls went on discovering that.
+///
+/// Only a list. A call of one operation that is refused has plainly not run, and the sentence would
+/// be a line of noise on every single-operation refusal in the session. A stopped turn is excluded
+/// for the same reason it is excluded from the repetition guard: the caller wrote nothing wrong and
+/// has no turn left to send anything again.
+fn said_that_none_of_it_ran(listed: usize, failure: ToolFailure) -> ToolFailure {
+    if listed < 2 || failure.code == "cancelled" || failure.code == "unknown_tool" {
+        return failure;
+    }
+    let mut failure = failure;
+    failure.message = format!(
+        "{} None of the {listed} operations in this call ran. A list is refused as one, so send \
+         all {listed} again with this one corrected.",
+        failure.message
+    );
+    failure
+}
+
+/// The router proper: everything that answers a call, or refuses it.
+fn route<R: Runtime>(
     app: &AppHandle<R>,
     request: ToolRequest,
     rules: &crate::settings::GodotSettings,
@@ -2634,6 +2678,17 @@ mod tests {
         );
         assert_eq!(failure.details["opIndex"], json!(2));
 
+        // And it has to say that the two entries before it did not run. A live turn read a refusal
+        // of this shape as having applied the entry before the mistake, and spent four calls
+        // finding out otherwise.
+        assert!(
+            failure
+                .message
+                .contains("None of the 3 operations in this call ran"),
+            "{}",
+            failure.message
+        );
+
         // A call of one says nothing about a list, because there is no list to point into.
         let failure = dispatch(
             app.handle(),
@@ -2641,6 +2696,11 @@ mod tests {
         )
         .expect_err("one entry with no type cannot be run either");
         assert!(!failure.message.contains("ops["), "{}", failure.message);
+        assert!(
+            !failure.message.contains("None of the"),
+            "{}",
+            failure.message
+        );
         assert_eq!(failure.details["opIndex"], Value::Null);
     }
 

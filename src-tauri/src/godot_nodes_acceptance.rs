@@ -210,12 +210,51 @@ fn a_node_reports_its_property_values() {
         .iter()
         .filter_map(|property| property["name"].as_str())
         .collect();
-    for wanted in ["position", "texture", "modulate"] {
+    let defaulted: Vec<&str> = inspected["atClassDefault"]
+        .as_array()
+        .unwrap_or_else(|| panic!("node.inspect answered without atClassDefault: {inspected}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+
+    // A property the class has no default for is answered with its value, whether or not it holds
+    // one: `ClassDB` knows nothing about a texture that was never assigned.
+    assert!(
+        named.contains(&"texture"),
+        "node.inspect must report texture, answered {named:?}"
+    );
+
+    // A fresh sprite sits at the origin and is unmodulated, so both of those are the class's own
+    // answer restated. They are named rather than valued.
+    for shipped in ["position", "modulate"] {
         assert!(
-            named.contains(&wanted),
-            "node.inspect must report {wanted}, answered {named:?}"
+            defaulted.contains(&shipped) && !named.contains(&shipped),
+            "{shipped} is at its class default and must be named, not valued: {inspected}"
         );
     }
+
+    // And naming one answers it in full. This is the whole of what makes the narrowing safe.
+    let asked = session.call(
+        "node.inspect",
+        json!({"node": "/read/Sprite", "properties": ["position", "modulate"]}),
+    );
+    let answered: Vec<&str> = asked["properties"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an inspect that named two properties answered none: {asked}"))
+        .iter()
+        .filter_map(|property| property["name"].as_str())
+        .collect();
+    let mut answered = answered;
+    answered.sort_unstable();
+    assert_eq!(answered, vec!["modulate", "position"], "{asked}");
+    assert!(
+        asked["properties"]
+            .as_array()
+            .expect("two properties")
+            .iter()
+            .all(|property| property["value"]["type"].is_string()),
+        "{asked}"
+    );
 }
 
 /// Inspecting three named properties answers with three, and with nothing else.
@@ -242,10 +281,19 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         .as_array()
         .unwrap_or_else(|| panic!("node.inspect answered without any properties: {whole}"))
         .len();
+    let defaulted = whole["atClassDefault"]
+        .as_array()
+        .unwrap_or_else(|| panic!("node.inspect answered without atClassDefault: {whole}"))
+        .len();
+    // A Label declares 119 of them here. What comes back with a value is what a caller could not
+    // have known; the rest are named. Both halves are asserted, because the answer is only cheap
+    // if the names are still there to ask for.
     assert!(
-        all > 20,
-        "an inspect that names nothing must still answer with the whole list, answered {all}"
+        all > 8 && all < 40,
+        "answered {all} valued properties: {whole}"
     );
+    assert!(defaulted > 60, "answered {defaulted} names: {whole}");
+    assert!(all + defaulted > 100, "{all} + {defaulted}: {whole}");
 
     let narrowed = session.call(
         "node.inspect",

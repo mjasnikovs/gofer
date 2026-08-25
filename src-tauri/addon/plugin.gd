@@ -230,9 +230,17 @@ const MAX_ICON_BASE_DEPTH := 32
 
 ## The atlas a tileset command will cut up, and the cells one paint may write, both capped so a
 ## mistyped tile size or a runaway rectangle cannot spend minutes inside the editor's main loop.
-## A texture no larger than this on a side. A tile is 16 and a sprite sheet is a few hundred; a
-## caller asking for more than this wanted a photograph, and this operation draws rectangles.
-const MAX_TEXTURE_EDGE := 1024
+## A texture no larger than this on a side, and no more than this many pixels in it. A tile is 16
+## and a sprite sheet is a few hundred; a caller asking for more than this wanted a photograph, and
+## this operation draws rectangles.
+##
+## The two numbers, rather than one per side, because the cost this guards is area and a ground
+## strip is not square. Two recorded live runs asked for a floor as wide as the window — 1152x64 and
+## 1280x40 — and a per-side cap of 1024 refused both, though each draws a twelfth of the pixels the
+## 1024x1024 square it allowed does. The default project window is wider than 1024, so the shape the
+## cap refused first was the most ordinary one there is.
+const MAX_TEXTURE_EDGE := 4096
+const MAX_TEXTURE_PIXELS := 1048576
 
 ## How many rectangles one texture is painted with. Enough for a sprite sheet drawn a tile at a
 ## time; past it the caller wanted an image editor.
@@ -3263,6 +3271,18 @@ func _texture_size(raw: Variant) -> Dictionary:
             ),
             {"limit": MAX_TEXTURE_EDGE}
         )
+    if width * height > MAX_TEXTURE_PIXELS:
+        return Params.error(
+            "invalid_params",
+            (
+                (
+                    "A texture holds at most %d pixels, and %dx%d holds %d. Draw it smaller and "
+                    + "scale the node up, or tile a small one with texture_repeat."
+                )
+                % [MAX_TEXTURE_PIXELS, width, height, width * height]
+            ),
+            {"limit": MAX_TEXTURE_PIXELS}
+        )
     return {"value": Vector2i(width, height)}
 
 ## What the image starts as. Transparent without a `background`, so a sprite has no square round it.
@@ -5150,15 +5170,55 @@ func _node_inspect(params: Dictionary) -> Dictionary:
         for name in wanted:
             if not answered.has(name):
                 return _property_not_found_error(node, node_path_str, name)
+    var untouched: Array[String] = []
+    if wanted.is_empty():
+        var split := _split_off_class_defaults(node, properties)
+        properties = split["properties"]
+        untouched = split["atClassDefault"]
     return {
         "name": node.name,
         "type": node.get_class(),
         "path": _node_path(node),
         "properties": properties,
+        "atClassDefault": untouched,
         "groups": _authored_groups(node),
         "signals": _node_signals(node),
         "connections": _node_connections(node),
     }
+
+## The properties worth values, and the names of the ones still holding what the class ships with.
+##
+## Only for an answer nobody narrowed. A caller that named properties has chosen, and gets every one
+## it named.
+##
+## Measured on the pinned 4.7.2, against a Label carrying a text and a size: **4 of its 129
+## properties differ from `ClassDB.class_get_property_default_value`**, and a CharacterBody2D fresh
+## out of `create` has none that do. The values of the rest are the class reference restated once
+## per call — 15,885 characters in one recorded live turn, 81% of everything twelve tool calls
+## returned, of which the four the caller could not have known were about 400.
+##
+## A property the class has no default for is kept with its value, whatever it holds. That is the
+## whole of what makes this safe rather than a second `stored` filter: `script`, `owner`, `name`,
+## `global_position`, `theme_override_*` and every variable a script declares answer `null` here,
+## because `ClassDB` describes engine classes and knows nothing of any of them — so the half of the
+## inspector that laying out and styling a UI needs is exactly the half this cannot drop.
+##
+## `property_can_revert` is the inspector's own version of this question and is not the answer: on
+## the same Label it was true for 2 names of 129, measured, so it detects a default override rather
+## than a value equal to its default.
+func _split_off_class_defaults(node: Node, properties: Array) -> Dictionary:
+    var kept: Array = []
+    var untouched: Array[String] = []
+    var class_name_of := node.get_class()
+    for entry: Variant in properties:
+        var property: Dictionary = entry
+        var property_name := str(property["name"])
+        var shipped: Variant = ClassDB.class_get_property_default_value(class_name_of, property_name)
+        if shipped == null or node.get(property_name) != shipped:
+            kept.append(property)
+            continue
+        untouched.append(property_name)
+    return {"properties": kept, "atClassDefault": untouched}
 
 ## Every property the editor would show for a node, tagged for the wire.
 ##

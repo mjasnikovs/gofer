@@ -1,0 +1,242 @@
+/**
+ * An interleaved A/B of one clause in `godot_node`'s description, against a local model.
+ *
+ * The question. Across 26 recorded live turns, the most common shape that still reaches a refusal
+ * before the router is `{"op": "save"}` batched onto `godot_node` — six calls in five runs, each
+ * one taking a whole batch of good work down with it, because a list is refused as one. The
+ * refusal names `godot_scene` and `godot_script`, so the model recovers; what it costs is the
+ * round trip and everything the batch was carrying.
+ *
+ * `godot_node`'s description says how mutations are revisioned and what a path looks like. It has
+ * never said that none of them writes the file. This measures whether saying so stops the call.
+ *
+ * The one rule that makes the numbers mean anything is `bench-prompt-line.mjs`'s: score every arm
+ * inside one process, alternating, and read the sign of the gap.
+ *
+ *   GOFER_DUMP_CATALOG=/tmp/catalog.json GOFER_DUMP_PROMPT=/tmp/prompt.txt \
+ *     cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib \
+ *     -- dump_catalog_and_prompt --test-threads=1
+ *
+ *   GOFER_BENCH_CATALOG=/tmp/catalog.json GOFER_BENCH_PROMPT=/tmp/prompt.txt \
+ *     node scripts/bench-where-save-lives.mjs 20
+ *
+ * Unmeasured as it stands: the day this was written, OpenRouter's free stealth tier ran out and
+ * the local model was busy with a live turn. The arms and the priming are the question, ready to
+ * be asked.
+ */
+
+import {readFile} from 'node:fs/promises'
+import {createGodotTools} from './godot-tools.mjs'
+
+const ENDPOINT = process.env.GOFER_BENCH_ENDPOINT ?? 'http://127.0.0.1:8080/v1/chat/completions'
+
+const named = variable => {
+    const path = process.env[variable]
+    if (path) return path
+    throw new Error(`${variable} names the file the Rust dump wrote. See the header of this file.`)
+}
+const catalog = JSON.parse(await readFile(named('GOFER_BENCH_CATALOG'), 'utf8'))
+const prompt = await readFile(named('GOFER_BENCH_PROMPT'), 'utf8')
+
+/** The clause under test, appended to `godot_node`'s description. */
+const ARMS = {
+    shipped: '',
+    saidSo: ' Nothing here writes the file. The scene is saved with godot_scene save.'
+}
+
+const asSchema = tool => ({
+    type: 'function',
+    function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters ?? tool.inputSchema
+    }
+})
+
+/** The real catalogue, with one domain's description extended. */
+function toolsFor(clause) {
+    const extended = catalog.map(domain =>
+        domain.name === 'godot_node' ?
+            {...domain, description: `${domain.description}${clause}`}
+        :   domain
+    )
+    return createGodotTools(extended, {call: async () => ({})}).map(asSchema)
+}
+
+/*
+ * The moment `r12-ui` and `t12-ui` both reached, primed to the call before the mistake: the scene
+ * exists, the nodes are in it, and the two buttons still need their handlers. Both runs answered
+ * this with `[connect_signal, connect_signal, save]` and lost all three.
+ */
+const ASK =
+    'Add a pause menu to this game. Escape shows a CanvasLayer with a Resume button and a Quit '
+    + 'button and pauses the game; Resume unpauses. Wire both buttons to a script.'
+
+const PRIMING = [
+    {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+            {
+                id: 'call-1',
+                type: 'function',
+                function: {
+                    name: 'godot_scene',
+                    arguments: JSON.stringify({
+                        ops: [
+                            {
+                                op: 'create',
+                                path: 'res://scenes/pause_menu.tscn',
+                                rootType: 'CanvasLayer',
+                                rootName: 'PauseMenu'
+                            }
+                        ]
+                    })
+                }
+            }
+        ]
+    },
+    {
+        role: 'tool',
+        tool_call_id: 'call-1',
+        content: JSON.stringify({
+            ops: [
+                {
+                    op: 'create',
+                    result: {dirty: false, revision: 0, scene: 'res://scenes/pause_menu.tscn'}
+                }
+            ]
+        })
+    },
+    {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+            {
+                id: 'call-2',
+                type: 'function',
+                function: {
+                    name: 'godot_node',
+                    arguments: JSON.stringify({
+                        ops: [
+                            {
+                                op: 'create_nodes',
+                                nodes: [
+                                    {parent: '/PauseMenu', name: 'Box', type: 'VBoxContainer'},
+                                    {parent: '/PauseMenu/Box', name: 'Resume', type: 'Button'},
+                                    {parent: '/PauseMenu/Box', name: 'Quit', type: 'Button'}
+                                ]
+                            },
+                            {
+                                op: 'set_properties',
+                                properties: [
+                                    {
+                                        node: '/PauseMenu',
+                                        property: 'script',
+                                        value: {
+                                            type: 'resource',
+                                            value: {path: 'res://scripts/pause_menu.gd'}
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    })
+                }
+            }
+        ]
+    },
+    {
+        role: 'tool',
+        tool_call_id: 'call-2',
+        content: JSON.stringify({
+            ops: [
+                {
+                    op: 'create_nodes',
+                    result: {
+                        created: 3,
+                        nodes: ['/PauseMenu/Box', '/PauseMenu/Box/Resume', '/PauseMenu/Box/Quit'],
+                        revision: 1
+                    }
+                },
+                {op: 'set_properties', result: {revision: 2}}
+            ]
+        })
+    }
+]
+
+async function ask(clause, seed) {
+    const response = await fetch(ENDPOINT, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+            model: 'local',
+            messages: [
+                {role: 'system', content: `${prompt}\n\nEditor session: ready. Godot 4.7.2.`},
+                {role: 'user', content: ASK},
+                ...PRIMING
+            ],
+            tools: toolsFor(clause),
+            tool_choice: 'auto',
+            temperature: 0.7,
+            seed
+        })
+    })
+    if (!response.ok) throw new Error(`${response.status} ${await response.text()}`)
+    const body = await response.json()
+    return body.choices?.[0]?.message ?? {}
+}
+
+/**
+ * What the router would do with what the model wrote.
+ *
+ * `GOFER_BENCH_PEEK=1` prints every call instead of only the counts, which is how the priming
+ * above was aimed: the first draft stopped a step early and neither arm ever reached a save.
+ */
+function score(message) {
+    if (process.env.GOFER_BENCH_PEEK)
+        for (const call of message.tool_calls ?? [])
+            process.stdout.write(
+                `    ${call.function?.name} ${call.function?.arguments?.slice(0, 200)}\n`
+            )
+    let savedOnNode = 0
+    let savedOnScene = 0
+    let entries = 0
+    for (const call of message.tool_calls ?? []) {
+        let args
+        try {
+            args = JSON.parse(call.function?.arguments ?? '{}')
+        } catch {
+            continue
+        }
+        const ops = Array.isArray(args.ops) ? args.ops : []
+        entries += ops.length
+        for (const entry of ops) {
+            if (entry?.op !== 'save') continue
+            if (call.function?.name === 'godot_node') savedOnNode += 1
+            if (call.function?.name === 'godot_scene') savedOnScene += 1
+        }
+    }
+    return {savedOnNode, savedOnScene, entries}
+}
+
+const seeds = Number(process.argv[2] ?? 20)
+const totals = Object.fromEntries(
+    Object.keys(ARMS).map(name => [name, {onNode: 0, onScene: 0, entries: 0, turns: 0}])
+)
+for (let seed = 1; seed <= seeds; seed += 1) {
+    for (const [name, clause] of Object.entries(ARMS)) {
+        const scored = score(await ask(clause, seed))
+        totals[name].onNode += scored.savedOnNode > 0 ? 1 : 0
+        totals[name].onScene += scored.savedOnScene > 0 ? 1 : 0
+        totals[name].entries += scored.entries
+        totals[name].turns += 1
+    }
+}
+console.log('\n--- turns where it happened at least once ---')
+for (const [name, held] of Object.entries(totals))
+    console.log(
+        `${name.padEnd(8)} saveOnNode ${held.onNode}/${held.turns}`
+            + `  saveOnScene ${held.onScene}/${held.turns}`
+            + `  opsWritten ${held.entries}`
+    )

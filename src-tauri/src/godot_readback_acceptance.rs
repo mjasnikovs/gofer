@@ -585,6 +585,58 @@ fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
     assert!(!worktree.join("art/bad.png").exists(), "{refused}");
 }
 
+/// The ground strip a game actually wants, and the runaway the cap is for.
+///
+/// The cap used to be one number per side, 1024. Two recorded live turns asked for a floor as wide
+/// as the window — 1152x64 and 1280x40 — and both were refused, though each draws a twelfth of the
+/// pixels a 1024x1024 square does and the square was allowed. The default Godot project window is
+/// 1152 wide, so the first shape the cap refused was the most ordinary one a 2D game has.
+///
+/// Both halves are here because moving a limit is only safe if the thing it was guarding is still
+/// guarded: the cost of drawing is area, and area is what is capped now.
+#[test]
+fn a_floor_wider_than_the_window_is_drawn_and_a_runaway_is_still_refused() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    let drawn = session.call(
+        "resource.create_texture",
+        json!({
+            "path": "res://art/floor.png",
+            "size": [1152, 64],
+            "background": "#8b5a2b",
+            "rects": [{"x": 0, "y": 0, "width": 1152, "height": 8, "color": "forestgreen"}]
+        }),
+    );
+    assert_eq!(drawn["width"], 1152, "{drawn}");
+    assert_eq!(drawn["height"], 64, "{drawn}");
+    assert!(worktree.join("art/floor.png").exists(), "{drawn}");
+
+    // Past the area, and the refusal says what it counted rather than what one side measured.
+    let refused = session
+        .try_call(
+            "resource.create_texture",
+            json!({"path": "res://art/huge.png", "size": [2048, 2048], "background": "red"}),
+            None,
+        )
+        .expect_err("four million pixels must be refused");
+    assert!(refused.contains("holds at most"), "{refused}");
+    assert!(!worktree.join("art/huge.png").exists(), "{refused}");
+
+    // And a side past the edge is still refused by the edge, whatever its area comes to.
+    let refused = session
+        .try_call(
+            "resource.create_texture",
+            json!({"path": "res://art/thin.png", "size": [8192, 2], "background": "red"}),
+            None,
+        )
+        .expect_err("a side past the edge must be refused");
+    assert!(refused.contains("on a side"), "{refused}");
+    assert!(!worktree.join("art/thin.png").exists(), "{refused}");
+}
+
 /// A path that climbs out of the project is refused by the addon, not followed.
 ///
 /// `res://../` is a real path to Godot: `globalize_path` resolves it out of the project and every

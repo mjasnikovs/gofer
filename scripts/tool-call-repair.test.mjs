@@ -815,3 +815,38 @@ test('a call is a list, and a bare operation is a list of one', async () => {
     assert.deepEqual(scene.parameters.required, ['ops'])
     assert.deepEqual(docs.parameters.required, ['ops'])
 })
+
+/*
+ * A refusal thrown here has run none of the list, and used to say nothing about it.
+ *
+ * `r08-coin`, live, 2026-08-25: `godot_scene [create, create_nodes, set_properties,
+ * connect_signal, connect_signal, save]`, refused because `create_nodes` is `godot_node`'s. The
+ * model then wrote "The scene is created and open — the node-level ops belong to `godot_node`.
+ * Continuing there:" and sent the rest of the batch. `create` had not run, so every path in it was
+ * `node_not_found`, and four calls went on establishing what the refusal could have said.
+ */
+test('a refused list says that none of it ran, and a refused single call does not', () => {
+    const operations = [
+        {op: 'create', signature: '{parent: text}', params: [{name: 'parent', kind: 'text'}]},
+        {op: 'inspect', signature: '{node: text}', params: [{name: 'node', kind: 'text'}]}
+    ]
+    assert.throws(
+        () =>
+            normalizeToolCalls(operations, {
+                ops: [{op: 'create', parent: '/Main'}, {op: 'save'}]
+            }),
+        error => {
+            assert.match(error.message, /This tool has no 'save' operation/u)
+            assert.match(error.message, /None of the 2 operations in this call ran\./u)
+            assert.match(error.message, /send all 2 again with this one corrected/u)
+            return true
+        }
+    )
+    assert.throws(
+        () => normalizeToolCalls(operations, {ops: [{op: 'save'}]}),
+        error => {
+            assert.doesNotMatch(error.message, /None of the/u)
+            return true
+        }
+    )
+})

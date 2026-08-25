@@ -432,6 +432,27 @@ export function dropEmptyEntries(entries) {
     return written.length > 0 ? written : entries
 }
 
+/**
+ * The same refusal, saying that the list it refused left nothing behind.
+ *
+ * These two throw before the router is reached, so no entry of the call has run — and nothing in
+ * either sentence says so. A live turn sent `godot_scene [create, create_nodes, set_properties,
+ * connect_signal, connect_signal, save]`, was refused because `create_nodes` lives on `godot_node`,
+ * and then wrote "The scene is created and open — the node-level ops belong to `godot_node`.
+ * Continuing there:". The scene did not exist. It took four more calls to find that out.
+ *
+ * The same sentence the router appends, in the same words, because a model that meets one of them
+ * meets the other. Only a list: a refused call of one has plainly not run.
+ */
+function sayingNoneOfItRan(listed, refusal) {
+    if (listed < 2) return refusal
+    const said = refusal instanceof Error ? refusal.message : String(refusal)
+    return new Error(
+        `${said} None of the ${String(listed)} operations in this call ran.`
+            + ` A list is refused as one, so send all ${String(listed)} again with this one corrected.`
+    )
+}
+
 export function normalizeToolCalls(operations, args, elsewhere) {
     const raw = isObject(args) ? args : {}
     const listed = Array.isArray(raw.ops) ? raw.ops : [raw]
@@ -450,13 +471,17 @@ export function normalizeToolCalls(operations, args, elsewhere) {
         ops: entries
             .map(entry => nameTheOperation(operations, entry))
             .map(entry => {
-                refuseUnknownOperation(operations, entry, elsewhere)
-                const params = operations.find(operation => operation.op === entry.op)?.params
-                // After the repairs, so a padded key that was about to be renamed onto a real
-                // parameter is never refused as one belonging somewhere else.
-                const shaped = wrapBareResource(params, trimPaddedKeys(params, entry))
-                refuseSiblingParameter(operations, shaped)
-                return shaped
+                try {
+                    refuseUnknownOperation(operations, entry, elsewhere)
+                    const params = operations.find(operation => operation.op === entry.op)?.params
+                    // After the repairs, so a padded key that was about to be renamed onto a real
+                    // parameter is never refused as one belonging somewhere else.
+                    const shaped = wrapBareResource(params, trimPaddedKeys(params, entry))
+                    refuseSiblingParameter(operations, shaped)
+                    return shaped
+                } catch (refusal) {
+                    throw sayingNoneOfItRan(entries.length, refusal)
+                }
             })
     }
 }

@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:4e0b39c522016141
+// GENERATED-BEGIN operations sha256:5c785fce92acd20c
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -668,7 +668,7 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
     op(
         "godot_node",
         "inspect",
-        "Inspects a node. Answers with its type, every property with its current value, its groups, every signal it can emit, and the connections it already has. `properties` narrows that to the names you list, exactly as runtime.inspect_node does for the running game: a Label answers with 119 properties and about four thousand tokens of them, so name the ones you came for. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
+        "Inspects a node. Answers with its type, its groups, every signal it can emit, the connections it already has, and every property whose value is not still the one its class ships with. The rest are named, without their values, in `atClassDefault` — a Label has 129 properties and four of them differ, so this is most of the node. `properties` narrows the answer to the names you list and answers every one of them in full, at their default or not, exactly as runtime.inspect_node does for the running game. Read a property here before setting it rather than guessing what it holds; `stored` is false for properties the scene recomputes, like a Control's position and size and every theme_override_*, and those are set the same way as any other.",
         Answers::Addon("node.inspect"),
         &[
             need("node", Text),
