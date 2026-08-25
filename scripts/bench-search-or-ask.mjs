@@ -28,6 +28,12 @@ import {readFile} from 'node:fs/promises'
 import {createGodotTools} from './godot-tools.mjs'
 
 const ENDPOINT = process.env.GOFER_BENCH_ENDPOINT ?? 'http://127.0.0.1:8080/v1/chat/completions'
+/** The model to ask, and the key it needs. Both default to the local server, which wants neither. */
+const MODEL = process.env.GOFER_BENCH_MODEL ?? 'local'
+const AUTHORIZATION =
+    process.env.OPENROUTER_API_KEY ?
+        {authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`}
+    :   {}
 
 const named = variable => {
     const path = process.env[variable]
@@ -79,9 +85,9 @@ const ASKS = [
 async function ask(clause, question, seed) {
     const response = await fetch(ENDPOINT, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: {'content-type': 'application/json', ...AUTHORIZATION},
         body: JSON.stringify({
-            model: 'local',
+            model: MODEL,
             messages: [
                 {role: 'system', content: `${prompt}\n\nEditor session: ready. Godot 4.7.2.`},
                 {role: 'user', content: question}

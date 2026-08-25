@@ -895,6 +895,39 @@ fn a_running_game_can_be_frozen_and_read_and_let_go_again() {
         true
     );
 
+    // A frozen game is still a game to look at: rendering does not stop with processing, so a
+    // capture answers with pixels. Asserted because a pause a caller cannot photograph would be a
+    // poor place to have led one.
+    let photographed = session.call("runtime.capture", json!({}));
+    assert_eq!(
+        photographed["frame"]["encoding"], "png-base64",
+        "{photographed}"
+    );
+    // The probe draws nothing, so the picture is a blank window and its PNG is small — what is
+    // asserted is that there is one, with the window's own size on it.
+    assert!(
+        photographed["frame"]["data"]
+            .as_str()
+            .is_some_and(|data| !data.is_empty()),
+        "a paused game still renders: {photographed}"
+    );
+    assert!(
+        photographed["frame"]["width"].as_u64().unwrap_or(0) > 0,
+        "{photographed}"
+    );
+
+    // And input reaches a frozen game and changes nothing, which is what a pause means: the events
+    // are applied, and the node they would have moved does not move.
+    let injected = session.call(
+        "runtime.input",
+        json!({"events": [{"kind": "key", "key": "Right", "pressed": true}]}),
+    );
+    assert_eq!(injected["applied"], 1, "{injected}");
+    assert!(
+        (where_it_is(&session) - held).abs() < 0.001,
+        "a paused game must not move for input either: {held}"
+    );
+
     // And let go again.
     assert_eq!(session.call("runtime.resume", json!({}))["paused"], false);
     session.call("runtime.wait", json!({"frames": 20}));

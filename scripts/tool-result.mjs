@@ -30,6 +30,17 @@ function withoutPixels(answer) {
  * A call is a list, so a capture can sit in any entry of it and a call may hold several — a run and
  * a capture, or one capture of the game beside one of the editor. Each becomes its own image part,
  * and the JSON keeps the frame's shape where the bytes were so the entry still reads as an answer.
+ *
+ * An `input` frame that another frame in the same call replaces is dropped instead. `runtime.input`
+ * renders before it answers, so a batch that presses a key, waits, releases it and captures comes
+ * back with a picture of every one of those moments: **58 of the 168 frames in the recorded live
+ * runs are an input frame with another frame later in the same call**, a third of every picture the
+ * loop has ever sent. The key-up frame shows what the key-down frame showed. The last frame is
+ * never one of them, by construction — a model that wants an intermediate moment asks for it with
+ * `capture`, which is always kept, and the `input` summary says so.
+ *
+ * Only the model's view. `toolResult` answers `details: result` — the original, every frame in it —
+ * so the desktop still has the pictures to show the user.
  */
 function withoutTheirPixels(result) {
     const entries = result?.ops
@@ -37,10 +48,18 @@ function withoutTheirPixels(result) {
         const image = pictureOf(result)
         return {described: image ? withoutPixels(result) : result, images: image ? [image] : []}
     }
+    const last = entries.reduce(
+        (found, entry, index) => (pictureOf(entry?.result) ? index : found),
+        -1
+    )
     const images = []
-    const described = entries.map(entry => {
+    const described = entries.map((entry, index) => {
         const image = pictureOf(entry?.result)
         if (!image) return entry
+        if (entry.op === 'input' && index < last) {
+            const {frame, ...rest} = entry.result
+            return {...entry, result: rest}
+        }
         images.push(image)
         return {...entry, result: withoutPixels(entry.result)}
     })

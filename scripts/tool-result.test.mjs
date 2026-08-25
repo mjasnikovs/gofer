@@ -290,3 +290,66 @@ test('the two decorators stack in either order', async () => {
         assert.match(said[2], /refused this exact call 3 times/u)
     }
 })
+
+/*
+ * A key sequence is one picture, not four.
+ *
+ * `runtime.input` renders before it answers, so a batch that presses a key, waits, releases it and
+ * captures comes back with a frame from every one of those moments. Across the recorded live runs,
+ * **58 of 168 frames are an input frame with another frame later in the same call** — a third of
+ * every picture the loop has ever sent, and the key-up frame shows what the key-down frame showed.
+ */
+test('an input frame another frame in the same call replaces is not sent', () => {
+    const frame = data => ({encoding: 'png-base64', width: 640, height: 360, data})
+    const stepped = toolResult({
+        ops: [
+            {op: 'input', result: {applied: 1, frame: frame('down')}},
+            {op: 'wait', result: {frames: 6, ms: 100}},
+            {op: 'input', result: {applied: 1, frame: frame('up')}},
+            {op: 'capture', result: {frame: frame('after')}}
+        ]
+    })
+    const images = stepped.content.filter(part => part.type === 'image')
+    assert.deepEqual(
+        images.map(part => part.data),
+        ['after']
+    )
+
+    // The entries that lost theirs still answer, and say what they did.
+    const answered = JSON.parse(stepped.content[0].text)
+    assert.equal(answered.ops[0].result.applied, 1)
+    assert.equal(answered.ops[0].result.frame, undefined)
+    assert.equal(answered.ops[2].result.frame, undefined)
+    // And the one that was kept keeps its shape where the bytes were.
+    assert.equal(answered.ops[3].result.frame.width, 640)
+
+    // The last frame is never dropped, whatever attached it — an input with nothing after it is
+    // the picture of what the input did.
+    const alone = toolResult({
+        ops: [
+            {op: 'input', result: {applied: 1, frame: frame('only')}},
+            {op: 'inspect_node', result: {name: 'Player'}}
+        ]
+    })
+    assert.deepEqual(
+        alone.content.filter(part => part.type === 'image').map(part => part.data),
+        ['only']
+    )
+
+    // And the desktop still has every frame: only the model's view loses one.
+    assert.equal(stepped.details.ops[0].result.frame.data, 'down')
+    assert.equal(stepped.details.ops[2].result.frame.data, 'up')
+
+    // And a run or a restart keeps its frame even when a capture follows: that one is the
+    // evidence the game launched at all, which is a different fact from what it looks like now.
+    const launched = toolResult({
+        ops: [
+            {op: 'run', result: {running: true, frame: frame('launch')}},
+            {op: 'capture', result: {frame: frame('later')}}
+        ]
+    })
+    assert.deepEqual(
+        launched.content.filter(part => part.type === 'image').map(part => part.data),
+        ['launch', 'later']
+    )
+})
