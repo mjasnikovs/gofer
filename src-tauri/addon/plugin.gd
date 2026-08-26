@@ -170,11 +170,32 @@ const RUNTIME_LAUNCH_TIMEOUT_MS := 30000
 ## between the launch and the stop is a different bug to debug.
 var _runtime_launch_timeout_ms: int = _configured_launch_timeout_ms()
 
+## The forwarded-request deadline this editor actually waits out.
+##
+## Read from the environment for the same reason the launch one is: the acceptance suite has to
+## watch a request expire, and twenty seconds a time is the whole cost of the test. Nothing ships
+## with anything but the constant.
+var _runtime_request_timeout_ms: int = _configured_request_timeout_ms()
+
 static func _configured_launch_timeout_ms() -> int:
     var value := OS.get_environment("GOFER_RUNTIME_LAUNCH_TIMEOUT_MS")
     if value.is_empty():
         return RUNTIME_LAUNCH_TIMEOUT_MS
     return maxi(1, value.to_int())
+
+static func _configured_request_timeout_ms() -> int:
+    var value := OS.get_environment("GOFER_RUNTIME_REQUEST_TIMEOUT_MS")
+    if value.is_empty():
+        return RUNTIME_REQUEST_TIMEOUT_MS
+    return maxi(1, value.to_int())
+
+## The runtime operations that cannot answer until the game has drawn a frame.
+##
+## `input` waits two process frames and then a `frame_post_draw`, `capture` waits a
+## `frame_post_draw`, and waiting is all `wait` does. Every other operation answers straight out of
+## the debugger message pump, which the main loop polls whether or not the game is drawing — which
+## is why a halted game answers `inspect_node` in milliseconds and leaves these three to expire.
+const FRAME_AWAITING_OPS: Array[String] = ["input", "capture", "wait"]
 
 ## The pending kinds that are waiting on a game the editor has already been told to start, and so
 ## are ended by that game dying. `restart` is not one of them: it is waiting for the *previous*
@@ -1214,7 +1235,13 @@ func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
     if _runtime_broke:
         _respond_error(id, "runtime_broke", "The game is paused at an error in the debugger and cannot answer; read the error in the session output, then fix it and run again", true)
         return
-    _runtime_pending.append({"id": id, "kind": "game", "deadline": _runtime_deadline(RUNTIME_REQUEST_TIMEOUT_MS)})
+    # The op travels with the pending entry so the sweep can say what the call was waiting for.
+    _runtime_pending.append({
+        "id": id,
+        "kind": "game",
+        "op": op,
+        "deadline": _runtime_deadline(_runtime_request_timeout_ms),
+    })
     _send_runtime_message({"id": id, "op": op, "params": params})
 
 func _runtime_deadline(budget_ms: int) -> int:
@@ -1397,6 +1424,20 @@ func _sweep_runtime_pending() -> void:
                     "The game is running and its helper has not answered yet. Read godot_runtime get_state rather than running it again; stopping it now would throw away a game that is still starting",
                     true,
                     {"running": true}
+                )
+            elif FRAME_AWAITING_OPS.has(str(pending.get("op", ""))):
+                # A timeout is the only answer these three had, and it is the one that reads as a
+                # slow game. Measured on a live turn: nine of them, twenty seconds each, against a
+                # game whose `get_state` said `broke: false, running: true, runtimeReady: true` and
+                # whose `inspect_node` answered in 49ms between two of them. The game was alive and
+                # not drawing, which is a different thing from slow, and nothing said so — both
+                # agents that met it worked the asymmetry out for themselves and spent the turn
+                # doing it.
+                _respond_error(
+                    pending["id"],
+                    "runtime_timeout",
+                    "The game did not answer in time. This call cannot answer until the game draws a frame. A game halted in the debugger draws none while still answering godot_runtime inspect_node and get_tree, which need no frame - so ask one of those to tell a halted game from a wedged one, and godot_debug stack_trace to say where it is stopped",
+                    true
                 )
             else:
                 _respond_error(pending["id"], "runtime_timeout", "The game did not answer in time", true)

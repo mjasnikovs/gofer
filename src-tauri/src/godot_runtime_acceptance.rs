@@ -609,6 +609,88 @@ fn quitting_the_editor_takes_the_game_with_it() {
     );
 }
 
+/// A call that was waiting for a frame says so, instead of blaming the clock.
+///
+/// The failure this pins cost one live turn **nine timeouts of twenty seconds each** — 180 seconds
+/// of a 1468-second run — against a game its own `get_state` described as
+/// `broke: false, running: true, runtimeReady: true`, and whose `inspect_node` answered in 49ms
+/// between two of them. The game was alive and not drawing. `input`, `capture` and `wait` are the
+/// three operations that cannot answer until it does; every other one is served straight out of
+/// the debugger message pump, which the main loop polls whether the game is drawing or not.
+///
+/// "The game did not answer in time" reads as a slow game, and two separate live turns worked the
+/// asymmetry out for themselves — "`input`/`wait` timed out while `inspect` kept answering" — at
+/// the cost of the turn. The sentence now names it, and names the two calls that tell a halted
+/// game from a wedged one rather than asserting which this is.
+///
+/// The probe spins its main thread, so nothing in the game can answer and the deadline is the only
+/// way out. That deadline is four seconds here rather than twenty, for the reason the launch one
+/// is shortened the same way: watching a request expire is the whole cost of the test.
+#[test]
+fn a_call_that_was_waiting_for_a_frame_says_so() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    let port = free_port();
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        unkillable_probe_script(port),
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), PROBE_SCENE).expect("write the probe scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree_with(
+        worktree,
+        ledger,
+        Some(directory),
+        Transports {
+            request_timeout_ms: Some(4_000),
+            ..Transports::default()
+        },
+    );
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .expect("the game must launch");
+    // Long enough that the spin has started, so the deadline is what answers.
+    std::thread::sleep(Duration::from_secs(6));
+
+    let refused = session
+        .try_call(
+            "runtime.input",
+            json!({"events": [{"kind": "key", "key": "A", "pressed": true}]}),
+            None,
+        )
+        .expect_err("a game that cannot draw cannot answer an input");
+    assert!(
+        refused.starts_with("runtime_timeout"),
+        "the deadline is what must answer, not the transport: {refused}"
+    );
+    assert!(
+        refused.contains("draws a frame") || refused.contains("draw a frame"),
+        "a frame-awaiting call must say what it was waiting for: {refused}"
+    );
+    // The two that need no frame are named, because trying one is how the caller tells a halted
+    // game from a wedged one. Naming them is the whole point; asserting which this game is would
+    // be asserting something the addon cannot know.
+    assert!(
+        refused.contains("inspect_node") && refused.contains("get_tree"),
+        "the refusal must name the calls that answer without a frame: {refused}"
+    );
+
+    // And the asymmetry the sentence describes, on the very same game, so it can never become a
+    // lie: the call that needs no frame answers while the one that needs a frame cannot. This is
+    // what both live turns worked out for themselves, and it is a property of where each op is
+    // served from — `get_tree` off the debugger message pump the main loop polls regardless,
+    // `input` off two process frames and a `frame_post_draw` that a game like this never reaches.
+    let answered = session
+        .try_call("runtime.get_tree", json!({}), None)
+        .expect("a call that needs no frame answers even here");
+    assert_eq!(
+        answered["root"]["name"], "root",
+        "the frame-free call must answer with the real tree: {answered}"
+    );
+}
+
 /// `runtime.stop` answers `running: false`, and the game really is gone by then.
 ///
 /// This is the one command in the addon that used to *assert* its answer rather than read one

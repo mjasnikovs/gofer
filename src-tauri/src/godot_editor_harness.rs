@@ -302,6 +302,7 @@ pub(crate) struct Launch<'a> {
     tee_session_logs: bool,
     config_home: Option<&'a Path>,
     launch_timeout_ms: Option<u64>,
+    request_timeout_ms: Option<u64>,
 }
 
 impl<'a> Launch<'a> {
@@ -315,6 +316,7 @@ impl<'a> Launch<'a> {
             tee_session_logs: false,
             config_home: None,
             launch_timeout_ms: None,
+            request_timeout_ms: None,
         }
     }
 
@@ -331,6 +333,11 @@ impl<'a> Launch<'a> {
     /// Left unset the editor uses the thirty seconds it ships with. A test asserting what happens
     /// *after* the deadline has to sit through it, and thirty seconds of sitting was the whole
     /// acceptance suite's floor. Four seconds proves the same thing.
+    pub(crate) fn request_timeout_ms(mut self, milliseconds: u64) -> Self {
+        self.request_timeout_ms = Some(milliseconds);
+        self
+    }
+
     pub(crate) fn launch_timeout_ms(mut self, milliseconds: u64) -> Self {
         self.launch_timeout_ms = Some(milliseconds);
         self
@@ -393,6 +400,12 @@ impl<'a> Launch<'a> {
         if let Some(milliseconds) = self.launch_timeout_ms {
             environment.push((
                 OsString::from("GOFER_RUNTIME_LAUNCH_TIMEOUT_MS"),
+                OsString::from(milliseconds.to_string()),
+            ));
+        }
+        if let Some(milliseconds) = self.request_timeout_ms {
+            environment.push((
+                OsString::from("GOFER_RUNTIME_REQUEST_TIMEOUT_MS"),
                 OsString::from(milliseconds.to_string()),
             ));
         }
@@ -482,6 +495,7 @@ pub(crate) struct Transports {
     pub(crate) editor_config_home: Option<PathBuf>,
     /// A shorter launch deadline, for the one test whose subject is the deadline expiring.
     pub(crate) launch_timeout_ms: Option<u64>,
+    pub(crate) request_timeout_ms: Option<u64>,
 }
 
 /// A staged addon inside a launched editor, answering over the wire the desktop app uses.
@@ -561,6 +575,9 @@ impl Session {
         }
         if let Some(home) = transports.editor_config_home.as_deref() {
             launch = launch.config_home(home);
+        }
+        if let Some(milliseconds) = transports.request_timeout_ms {
+            launch = launch.request_timeout_ms(milliseconds);
         }
         if let Some(milliseconds) = transports.launch_timeout_ms {
             launch = launch.launch_timeout_ms(milliseconds);
