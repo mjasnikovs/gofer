@@ -753,6 +753,27 @@ fn default_max_tokens() -> u64 {
     16_384
 }
 
+/// The same ceiling, for a window this build did not pick.
+///
+/// [`default_max_tokens`] is one number chosen for one window. A remote catalogue names hundreds of
+/// windows and names its own ceilings beside them, and those ceilings are not ceilings: measured
+/// across OpenRouter's 348 tool-capable models on 2026-08-26, **188** name an output ceiling larger
+/// than the room compaction leaves above its own line, and three name the whole window.
+///
+/// Taken as written they are the runaway that doc comment describes, and one more that only a paid
+/// endpoint has: OpenRouter reserves credit for `max_tokens` before it generates anything, so the
+/// ceiling alone decides whether the request is affordable. `x-ai/grok-4.6` at its declared 450,000
+/// is *"you requested up to 449998 tokens, but can only afford 5295"*. The same model asked for a
+/// sentence would have cost a fraction of a cent.
+///
+/// So a declared ceiling is honoured only as far as it fits: never past the compaction reserve,
+/// never past a quarter of the window, and never zero, which [`validate_settings`] refuses.
+fn ceiling_within(context_window: u64, declared: Option<u64>) -> u64 {
+    let reserve = context_window - (context_window * u64::from(default_compaction_percent())) / 100;
+    let cap = reserve.min(context_window / 4);
+    declared.unwrap_or(cap).min(cap).max(1)
+}
+
 fn default_model_input() -> Vec<String> {
     vec!["text".to_owned(), "image".to_owned()]
 }
@@ -910,7 +931,10 @@ fn default_openrouter_profile() -> AiConnectionProfile {
             id: "nvidia/nemotron-3.5-lightning:free".to_owned(),
             name: "NVIDIA: Nemotron 3.5 Lightning".to_owned(),
             context_window: 1_000_000,
-            max_tokens: 1_000_000,
+            // A seed the first catalogue read replaces, so it is the safe one rather than the
+            // model's own: this connection is billed, and OpenRouter reserves credit for the
+            // ceiling before it generates a token. See `ceiling_within`.
+            max_tokens: default_max_tokens(),
             reasoning: false,
             supports_reasoning_effort: false,
             // A seed, replaced by the first catalogue read. The model it names does not reason at
@@ -1524,8 +1548,9 @@ fn local_model_options(
 ///
 /// * Models without `tools` are dropped. 70 of 422 have no tool support, and a model that cannot
 ///   call a tool cannot run Gofer at all — offering it is offering a broken choice.
-/// * `max_completion_tokens` is null on 52 models, so the context window stands in. The same
-///   fallback `local_model_options` makes, for the same reason: a zero there fails validation.
+/// * Every ceiling goes through `ceiling_within`, declared or not. `max_completion_tokens` is null
+///   on 52 models, and larger than the compaction reserve on 188 more; neither may become the
+///   window, and neither may become zero, which fails validation.
 /// * Efforts are kept only if `NAMED_EFFORTS` knows them, rather than dropping the one word that
 ///   is known not to be an effort. `supported_efforts` carries `none` today, which is OpenRouter's
 ///   word for "thinking can be switched off" — `thinking_levels_for` prepends `off` on its own, so
@@ -1568,10 +1593,12 @@ fn openrouter_model_options(remote: Vec<OpenrouterModel>) -> Vec<AiModelOption> 
                 name: model.name.unwrap_or_else(|| model.id.clone()),
                 id: model.id,
                 context_window,
-                max_tokens: model
-                    .top_provider
-                    .and_then(|provider| provider.max_completion_tokens)
-                    .unwrap_or(context_window),
+                max_tokens: ceiling_within(
+                    context_window,
+                    model
+                        .top_provider
+                        .and_then(|provider| provider.max_completion_tokens),
+                ),
                 reasoning: model.reasoning.is_some(),
                 // Named efforts are the only evidence that an effort field will be read. A model
                 // that reasons without naming any takes no effort, which is the `on`/`off` case.
@@ -2748,6 +2775,62 @@ mod tests {
                 .max_tokens,
             120_064
         );
+    }
+
+    /// And the shipped OpenRouter connection obeys the same rule as the shipped local one.
+    ///
+    /// It did not. It shipped `max_tokens: 1_000_000` against a `context_window: 1_000_000`, which
+    /// is the failure the test above exists to prevent, plus one that only a paid endpoint has:
+    /// OpenRouter reserves credit for the ceiling before it generates a token, so the first live
+    /// turn on a fresh OpenRouter connection was answered HTTP 402 — *"You requested up to 978938
+    /// tokens, but can only afford 63556"* — on a balance that would have paid for the real answer
+    /// many times over. Measured, not argued: the same prompt to the same model in the same minute
+    /// was refused at `max_tokens: 1000000` and answered at `max_tokens: 16384`.
+    ///
+    /// The ChatGPT profile is deliberately not here. Its numbers never reach the wire — the Codex
+    /// driver takes the model out of Pi's own catalogue and ignores the profile's ceiling.
+    #[test]
+    fn the_openrouter_connection_ships_a_ceiling_too() {
+        let shipped = default_openrouter_profile().model;
+        let reserve = shipped.context_window
+            - (shipped.context_window * u64::from(default_compaction_percent())) / 100;
+        assert!(
+            shipped.max_tokens <= reserve,
+            "the seed ceiling has to fit the compaction reserve: {} in {reserve}",
+            shipped.max_tokens
+        );
+        assert!(
+            shipped.max_tokens < shipped.context_window / 4,
+            "the output ceiling has to be a ceiling: {} of {}",
+            shipped.max_tokens,
+            shipped.context_window
+        );
+        assert!(
+            shipped.max_tokens >= 8_192,
+            "and still hold a whole file in one write: {}",
+            shipped.max_tokens
+        );
+    }
+
+    /// A ceiling the catalogue names is taken only as far as it fits.
+    ///
+    /// Measured against the live catalogue on 2026-08-26: of the 348 tool-capable models, **188**
+    /// name an output ceiling larger than the room compaction leaves above its own line, and three
+    /// name the whole window. Adopted as written, `x-ai/grok-4.6` sends `max_tokens: 450000` and is
+    /// answered *"you requested up to 449998 tokens, but can only afford 5295"* — a refusal
+    /// produced by the ceiling alone, before the model is asked for anything.
+    #[test]
+    fn a_catalog_ceiling_is_taken_only_as_far_as_it_fits() {
+        // window 262,144 -> reserve 36,701. A declared 32,000 is under it and survives whole.
+        assert_eq!(ceiling_within(262_144, Some(32_000)), 32_000);
+        // The same window, a ceiling the model would be glad to fill: cut to the reserve.
+        assert_eq!(ceiling_within(262_144, Some(235_929)), 36_701);
+        // Nothing declared is not licence to use the window. 52 models declare nothing.
+        assert_eq!(ceiling_within(256_000, None), 35_840);
+        // A window small enough that a quarter of it is the tighter of the two.
+        assert_eq!(ceiling_within(8_000, Some(8_000)), 1_120);
+        // And a window of zero cannot underflow into a ceiling of zero, which fails validation.
+        assert_eq!(ceiling_within(0, Some(4_096)), 1);
     }
 
     #[test]
@@ -3936,14 +4019,16 @@ mod tests {
         let plain = &options[0];
         assert_eq!(plain.name, "NVIDIA: Nemotron 3.5 Lightning");
         assert_eq!(plain.context_window, 1_000_000);
+        // Under the reserve its window leaves, so the catalogue's own number stands.
         assert_eq!(plain.max_tokens, 131_072);
         assert!(!plain.reasoning);
         assert!(!plain.supports_reasoning_effort);
         assert!(plain.thinking_levels.is_empty());
         assert_eq!(plain.input, ["text"]);
 
-        // A null ceiling falls back to the window rather than to zero, which would fail validation.
-        assert_eq!(options[1].max_tokens, 256_000);
+        // A null ceiling falls back to what the window leaves, not to the window — and never to
+        // zero, which would fail validation. See `ceiling_within`.
+        assert_eq!(options[1].max_tokens, 35_840);
         assert_eq!(options[1].input, ["text", "image"]);
 
         // A mandatory reasoner names its efforts and never names `none`.
