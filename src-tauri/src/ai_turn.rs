@@ -335,6 +335,28 @@ impl Credentials {
             oauth_credential: crate::settings::stored_chatgpt_credential()?,
         })
     }
+
+    /// The one credential a suite was handed, in the slot the driver it names actually reads.
+    ///
+    /// A suite is given a single key on the command line and the host looks one up per provider,
+    /// so a key in the wrong slot is no key at all — `scripts/ai-provider.mjs` resolves the
+    /// OpenRouter connection from `openrouterApiKey` and every other one from `apiKey`. Filling
+    /// both would authenticate a local server with an OpenRouter key, which is the mistake in the
+    /// other direction.
+    #[cfg(all(test, feature = "godot-acceptance"))]
+    fn for_driver(
+        driver: crate::settings::AiConnectionType,
+        api_key: Option<String>,
+        oauth_credential: Option<serde_json::Value>,
+    ) -> Self {
+        let openrouter = driver == crate::settings::AiConnectionType::Openrouter;
+        Self {
+            api_key: if openrouter { None } else { api_key.clone() },
+            openrouter_api_key: if openrouter { api_key } else { None },
+            oauth_credential,
+            ..Self::default()
+        }
+    }
 }
 
 /// The prompt this project sends: its own text where it stored one, the shipped one where it did
@@ -455,21 +477,22 @@ impl JobContext {
                 .unwrap_or_default()
                 .strict_typing,
         )?);
+        let driver = ai.connection_type;
         Ok(Self {
             ai,
-            credentials: Credentials {
-                api_key: std::env::var("GOFER_LIVE_API_KEY")
+            credentials: Credentials::for_driver(
+                driver,
+                std::env::var("GOFER_LIVE_API_KEY")
                     .ok()
                     .filter(|key| !key.is_empty()),
-                oauth_credential: std::env::var("GOFER_LIVE_OAUTH")
+                std::env::var("GOFER_LIVE_OAUTH")
                     .ok()
                     .filter(|stored| !stored.is_empty())
                     .map(|stored| {
                         serde_json::from_str(&stored)
                             .expect("GOFER_LIVE_OAUTH holds the JSON the keyring stores")
                     }),
-                ..Credentials::default()
-            },
+            ),
             storage,
             workspace_path,
             system_prompt,
@@ -2123,6 +2146,46 @@ mod tests {
 
     use std::sync::atomic::Ordering as AtomicOrdering;
     use tempfile::TempDir;
+
+    /// One key on the command line has to land in the slot its driver reads.
+    ///
+    /// The failure this pins ran four live turns into `No API key for provider: openrouter` in
+    /// 0.6 seconds each. Naming the OpenRouter driver became possible before the credential
+    /// followed it, so `GOFER_LIVE_API_KEY` kept filling the OpenAI-compatible slot and the host
+    /// looked up a slot nothing had written.
+    #[cfg(feature = "godot-acceptance")]
+    #[test]
+    fn a_suite_key_fills_the_slot_its_driver_reads() {
+        use crate::settings::AiConnectionType;
+
+        let openrouter = Credentials::for_driver(
+            AiConnectionType::Openrouter,
+            Some("or-key".to_owned()),
+            None,
+        );
+        assert_eq!(openrouter.openrouter_api_key.as_deref(), Some("or-key"));
+        // Not both: filling the default slot too would authenticate a local server with a key
+        // meant for OpenRouter.
+        assert_eq!(openrouter.api_key, None);
+
+        let local = Credentials::for_driver(
+            AiConnectionType::OpenaiCompatible,
+            Some("local-key".to_owned()),
+            None,
+        );
+        assert_eq!(local.api_key.as_deref(), Some("local-key"));
+        assert_eq!(local.openrouter_api_key, None);
+
+        // ChatGPT carries an OAuth blob rather than a key, and it travels whatever the driver.
+        let chatgpt = Credentials::for_driver(
+            AiConnectionType::OpenaiCodex,
+            None,
+            Some(serde_json::json!({"access_token": "t"})),
+        );
+        assert_eq!(chatgpt.api_key, None);
+        assert_eq!(chatgpt.openrouter_api_key, None);
+        assert!(chatgpt.oauth_credential.is_some());
+    }
 
     /// The turn's statics are process-wide, so the tests that move them take turns.
     static AI_TEST_LOCK: Mutex<()> = Mutex::new(());
