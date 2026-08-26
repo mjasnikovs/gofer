@@ -1,0 +1,14 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/fighter.gd" id="1_fighter"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_fighter")
+armour = 10.0
+resistance = 0.2
+minimum_damage = 1
+
+[node name="Label" type="Label" parent="."]
+offset_right = 320.0
+offset_bottom = 40.0
+text = "Gofer live test"
