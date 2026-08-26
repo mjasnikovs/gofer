@@ -469,9 +469,19 @@ func _apply_debug_port() -> void:
     var value := OS.get_environment("GOFER_DEBUG_PORT")
     if value.is_empty():
         return
-    EditorInterface.get_editor_settings().set_setting(
-        "network/debug/remote_port", maxi(1, value.to_int())
-    )
+    var name := "network/debug/remote_port"
+    var settings := EditorInterface.get_editor_settings()
+    # Guarded and read back, like `editor.set_setting`. `set_setting` on a name the editor does not
+    # have declares a new custom one instead of failing, and a value of the wrong type is dropped
+    # in silence — either way the editor keeps 6007 and the only symptom is the suite going flaky.
+    if not settings.has_setting(name):
+        push_error("GOFER_DEBUG_PORT: this editor has no setting '%s'" % name)
+        return
+    var wanted := maxi(1, value.to_int())
+    settings.set_setting(name, wanted)
+    var stored: Variant = settings.get_setting(name)
+    if stored != wanted:
+        push_error("GOFER_DEBUG_PORT: %s kept %s, not %d" % [name, stored, wanted])
 
 func _enter_tree() -> void:
     print("GOFER_ADDON_READY:%d" % PROTOCOL_VERSION)

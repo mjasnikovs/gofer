@@ -32,8 +32,8 @@ import {reexecUnderVirtualDisplay} from './virtual-display.mjs'
 //
 // Eight is what this file picks on its own, for a lane run by hand. `npm run check` sets
 // `GOFER_GODOT_JOBS` to ten and gets the same green: the reds that used to arrive above eight were
-// never the core count, they were ten editors sharing Godot's one debugger port. See the
-// `--debug-server` comment in `godot_editor_harness.rs`.
+// never the core count, they were ten editors sharing Godot's one debugger port. See `debug_port`
+// in `godot_editor_harness.rs`.
 
 const MANIFEST = 'src-tauri/Cargo.toml'
 const FEATURE = 'godot-acceptance'
@@ -179,13 +179,16 @@ function reap(child) {
     }
 }
 
-function run(name) {
+function run(name, worker) {
     const began = Date.now()
     return new Promise(settle => {
         const child = spawn(binary, [name, '--exact', '--test-threads=1'], {
             encoding: 'utf8',
             cwd: PACKAGE,
-            detached: true
+            detached: true,
+            // Which lane of debugger ports this process deals from. See `debug_port` in
+            // `godot_editor_harness.rs`.
+            env: {...process.env, GOFER_GODOT_WORKER: String(worker)}
         })
         running.add(child)
         let output = ''
@@ -216,7 +219,7 @@ const measured = {}
 const workers = Array.from({length: Math.min(jobs, queue.length)}, async (_unused, index) => {
     await sleep(index * STAGGER_MS)
     for (let name = queue.shift(); name !== undefined; name = queue.shift()) {
-        const result = await run(name)
+        const result = await run(name, index)
         measured[name] = result.seconds
         if (result.status === 0) {
             process.stdout.write(`ok   ${result.seconds.toFixed(1)}s ${name}\n`)

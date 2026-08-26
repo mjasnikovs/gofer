@@ -44,8 +44,8 @@ const script = name => [name, `npm run --silent ${name}`]
 // moment, and pretending they are left two cores idle for a minute.
 //
 // Ten later read as flaky — five of five runs red — and the count was not why. Ten editors shared
-// Godot's one debugger port and games connected to the wrong editor; the fix is the
-// `--debug-server` argument in `godot_editor_harness.rs`, and ten is green again.
+// Godot's one debugger port and games connected to the wrong editor; the fix is the per-worker
+// `debug_port` in `godot_editor_harness.rs`, and ten is green again.
 const CORES = Math.max(4, cpus().length)
 const GODOT_JOBS = Math.floor((CORES * 5) / 8)
 const CARGO_JOBS = Math.floor(CORES / 4)

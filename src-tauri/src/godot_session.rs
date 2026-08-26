@@ -534,6 +534,14 @@ fn start_with(
                     OsString::from("GOFER_RPC_TOKEN"),
                     OsString::from(token.clone()),
                 ),
+                // Cleared rather than left alone. A child inherits this process's environment, and
+                // the addon reads this variable to write `network/debug/remote_port` into the
+                // machine-wide EditorSettings — permanently, because stopping quits the editor
+                // from the inside. A developer whose shell exports it while running the acceptance
+                // suite would otherwise have their own remote debugging rewritten by a Gofer they
+                // started from that shell. Only the acceptance harness may set it, and it launches
+                // its editors itself.
+                (OsString::from("GOFER_DEBUG_PORT"), OsString::new()),
             ],
         )
         .map_err(|error| {

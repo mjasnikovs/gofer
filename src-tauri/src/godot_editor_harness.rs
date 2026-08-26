@@ -25,6 +25,7 @@ use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -189,6 +190,36 @@ pub(crate) fn free_port() -> u16 {
     let port = listener.local_addr().expect("probe address").port();
     drop(listener);
     port
+}
+
+/// The first port of the band this editor's debug server is dealt out of.
+///
+/// Below Linux's ephemeral range, so nothing a `bind("127.0.0.1:0")` probe returns is ever in it.
+const DEBUG_PORT_BASE: u16 = 20_000;
+/// How many live editors one acceptance worker can hold before its lane wraps.
+const DEBUG_PORTS_PER_WORKER: u16 = 64;
+
+/// A loopback port for this editor's debug server.
+///
+/// Dealt rather than probed, because [`free_port`] cannot help here. That probe releases its
+/// socket, and the only thing stopping the kernel handing the same number to the next caller is
+/// somebody holding it. Every other transport is bound within a second of the probe. This one is
+/// bound by Godot's debug server the first time somebody presses play — seconds later, or never —
+/// so between probe and bind the number is free for a second test process to be handed, and the
+/// collision this port exists to prevent comes straight back.
+///
+/// So each acceptance worker gets a lane of its own instead. `GOFER_GODOT_WORKER` is its index,
+/// set by `scripts/godot-acceptance.mjs`; a run without that variable is one process, and the
+/// counter alone keeps its editors apart.
+pub(crate) fn debug_port() -> u16 {
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let worker = std::env::var("GOFER_GODOT_WORKER")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(0)
+        % 128;
+    let slot = NEXT.fetch_add(1, Ordering::Relaxed) % DEBUG_PORTS_PER_WORKER;
+    DEBUG_PORT_BASE + worker * DEBUG_PORTS_PER_WORKER + slot
 }
 
 /// The process-wide editor binding, for exactly as long as this value is alive.
@@ -370,7 +401,7 @@ impl<'a> Launch<'a> {
         // addon applies it, and the reason is written where it is read.
         environment.push((
             OsString::from("GOFER_DEBUG_PORT"),
-            OsString::from(free_port().to_string()),
+            OsString::from(debug_port().to_string()),
         ));
 
         // Every editor gets a throwaway config home, because `editor.set_setting` writes to the
