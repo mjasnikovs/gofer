@@ -290,22 +290,54 @@ fn why_there_are_no_frames(frames: &[DebugFrame]) -> Option<&'static str> {
     )
 }
 
-/// The same fact, on the error an `evaluate` without a frame answers with.
+/// What an `evaluate` timeout is, and it is not one thing.
 ///
-/// Godot's adapter does not refuse it — it waits, and answers `Timeout reached while processing a
-/// request`, which reads as a slow machine. The clause says what a timeout here usually is, and
-/// says it as a likelihood rather than a diagnosis, because a genuinely slow adapter answers the
-/// same way.
-fn what_a_timed_out_evaluate_usually_means(failure: DapError) -> DapError {
+/// Godot's adapter does not refuse either of these — it waits, and answers `Timeout reached while
+/// processing a request`, which reads as a slow machine.
+///
+/// **A pause is one cause.** A pause stops the game between frames, so there is no frame to
+/// evaluate in and the request is never answered. That is what this clause used to say, on its own.
+///
+/// **Re-entering a function that has a breakpoint in it is the other**, and saying only the first
+/// sent a model to re-read a stack it already had. Measured against a real 4.7.2 adapter, stopped
+/// at a breakpoint on the one line inside `_tick`, with a one-frame stack the same call had just
+/// read:
+///
+/// ```text
+/// evaluate("counter")          ->    34 ms  Ok(0)
+/// evaluate("label.length()")   ->    34 ms  Ok(5)
+/// evaluate("_double(2)")       ->    34 ms  Ok(4)        a script function with no breakpoint
+/// evaluate("_bump()")          ->    27 ms  Ok(1)        …that mutates a member, even
+/// evaluate("_tick(1)")         -> 5,009 ms  Timeout      the function the stop is inside
+/// ```
+///
+/// The debuggee would have to stop again while it is already stopped, so it never comes back. A
+/// live turn met this twice in one run — `stack_trace, evaluate` batched together, the stack
+/// answering with a frame and the evaluate timing out beside it — and was told to go and read the
+/// stack.
+///
+/// Which cause is named first is decided by the expression, because that is the only evidence this
+/// layer has: a call can deadlock and a bare name cannot. Both are named either way, and both as
+/// likelihoods, because a genuinely slow adapter answers exactly the same.
+fn what_a_timed_out_evaluate_usually_means(expression: &str, failure: DapError) -> DapError {
     if !failure.message.contains("Timeout reached") {
         return failure;
     }
     let mut failure = failure;
     failure.message = format!(
-        "{} An evaluate times out like this when the game is paused rather than stopped at a \
-         breakpoint: a pause gives the debugger no frame to evaluate in. Read stack_trace first — \
-         an empty one says the same thing.",
-        failure.message
+        "{} {}",
+        failure.message,
+        if expression.contains('(') {
+            "An evaluate that calls a function never answers if that function has a breakpoint in \
+             it — including the one the game is stopped inside. Evaluate the values instead, or \
+             clear that breakpoint with set_breakpoints first. If the game was paused rather than \
+             stopped at a breakpoint, that gives the debugger no frame to evaluate in either, and \
+             stack_trace answering [] says so."
+        } else {
+            "An evaluate times out like this when the game is paused rather than stopped at a \
+             breakpoint: a pause gives the debugger no frame to evaluate in, and stack_trace \
+             answering [] says the same thing."
+        }
     );
     failure
 }
@@ -392,7 +424,7 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
         } => Ok(DebugResponse::Evaluate {
             result: client
                 .evaluate(&expression, frame_id)
-                .map_err(what_a_timed_out_evaluate_usually_means)?,
+                .map_err(|failure| what_a_timed_out_evaluate_usually_means(&expression, failure))?,
         }),
         DebugRequest::Continue { thread_id } => Ok(DebugResponse::Continued {
             all_threads: client.continue_execution(thread_id.unwrap_or(MAIN_THREAD_ID))?,
@@ -787,21 +819,45 @@ mod tests {
         };
         assert_eq!(why_there_are_no_frames(&[frame]), None);
 
-        let timed_out = what_a_timed_out_evaluate_usually_means(DapError::new(
-            "dap_server_error",
-            "Timeout reached while processing a request. (timeout)",
-        ));
+        let timed_out = what_a_timed_out_evaluate_usually_means(
+            "counter",
+            DapError::new(
+                "dap_server_error",
+                "Timeout reached while processing a request. (timeout)",
+            ),
+        );
         assert!(
             timed_out.message.contains("no frame to evaluate in"),
             "{}",
             timed_out.message
         );
 
+        // A call is the other cause, and it is the one that costs a turn: a live run was stopped
+        // at a breakpoint, read a one-frame stack in the same call, and was told the game must be
+        // paused. See the measurements on the function.
+        let called = what_a_timed_out_evaluate_usually_means(
+            "_tick(1)",
+            DapError::new(
+                "dap_server_error",
+                "Timeout reached while processing a request. (timeout)",
+            ),
+        );
+        assert!(
+            called.message.contains("has a breakpoint in it"),
+            "an evaluate that calls a function was told it must be paused: {}",
+            called.message
+        );
+        assert!(
+            called.message.contains("set_breakpoints"),
+            "and was offered no way onward: {}",
+            called.message
+        );
+
         // Anything else the adapter says is left exactly as it said it.
-        let other = what_a_timed_out_evaluate_usually_means(DapError::new(
-            "dap_server_error",
-            "Parse error in expression",
-        ));
+        let other = what_a_timed_out_evaluate_usually_means(
+            "counter",
+            DapError::new("dap_server_error", "Parse error in expression"),
+        );
         assert_eq!(other.message, "Parse error in expression");
     }
     /// A launch on top of a live game is refused, and the refusal names every way onward.
