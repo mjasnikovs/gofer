@@ -938,8 +938,20 @@ fn every_configuration_command_answers_from_godot() {
     assert!(project().contains("knob=7"), "{}", project());
 
     // reset_setting
+    //
+    // The answer has to say what it did. It used to answer `{name, exists}`, and `exists` is
+    // `has_setting`, which is true of every setting that ships a default — so for anything but an
+    // invented name it read `true` before the call and `true` after it, and told the caller only
+    // that they had spelled a real name. A live turn reset `rendering/renderer/rendering_method`,
+    // was answered `exists: true`, and had no way to tell that from a reset that had not happened;
+    // the two calls beside it in the same batch answered `removed: true`.
     let reset = session.call("project.reset_setting", json!({"name": "readback/knob"}));
-    assert_eq!(reset["exists"], false);
+    assert_eq!(reset["changed"], true, "{reset}");
+    assert_eq!(
+        reset["previous"],
+        json!({"type": "int", "value": 7}),
+        "{reset}"
+    );
     assert!(
         session
             .error(
@@ -950,6 +962,35 @@ fn every_configuration_command_answers_from_godot() {
             .starts_with("setting_not_found"),
         "a setting reported reset must be gone"
     );
+
+    // And a setting that ships a default goes back to it rather than out of the file, which is the
+    // shape the live turn actually met: still there afterwards, with a different value.
+    session.call(
+        "project.set_setting",
+        json!({"name": "physics/2d/default_gravity", "value": {"type": "float", "value": 1400.0}}),
+    );
+    let reverted = session.call(
+        "project.reset_setting",
+        json!({"name": "physics/2d/default_gravity"}),
+    );
+    assert_eq!(reverted["changed"], true, "{reverted}");
+    assert_eq!(
+        reverted["previous"],
+        json!({"type": "float", "value": 1400.0}),
+        "{reverted}"
+    );
+    assert_ne!(
+        reverted["value"], reverted["previous"],
+        "a reverted setting must answer with the value it now reads as: {reverted}"
+    );
+
+    // Resetting what is already at its default changes nothing, and says so rather than claiming
+    // a write. This is the one case the old `exists` field could not express at all.
+    let again = session.call(
+        "project.reset_setting",
+        json!({"name": "physics/2d/default_gravity"}),
+    );
+    assert_eq!(again["changed"], false, "{again}");
 
     // set_autoload
     let autoload = session.call(

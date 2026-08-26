@@ -2198,6 +2198,8 @@ func _project_reset_setting(params: Dictionary) -> Dictionary:
             "'%s' has a typed command; use %s instead" % [name, typed],
             {"name": name, "command": typed}
         )
+    # Read before the write, because what this answers with is the difference.
+    var before: Variant = ProjectSettings.get_setting(name)
     var wanted: Variant = null
     if ProjectSettings.property_can_revert(name):
         wanted = ProjectSettings.property_get_revert(name)
@@ -2209,7 +2211,20 @@ func _project_reset_setting(params: Dictionary) -> Dictionary:
     var stored: Variant = ProjectSettings.get_setting(name)
     if not _same_value(wanted, stored):
         return _readback_error("project.reset_setting %s" % name, wanted, stored, {"name": name})
-    return {"name": name, "exists": ProjectSettings.has_setting(name)}
+    # What it did, not merely that the name is real.
+    #
+    # This used to answer `{name, exists}`, and `exists` is `has_setting`, which is true of every
+    # setting that has a default — so it was true before the call and true after it, and said only
+    # that the caller had spelled a real name. A live turn read it beside `remove_autoload`'s
+    # `removed: true` and `remove_input_action`'s `removed: true` and had nothing to compare.
+    # Worse, "exists: true" reads as though the setting were still set and the reset had failed.
+    return {
+        "name": name,
+        "value": Protocol.encode(stored),
+        "previous": Protocol.encode(before),
+        "changed": not _same_value(before, stored),
+        "restartRequired": _restart_required(name)
+    }
 
 func _project_list_autoloads() -> Dictionary:
     var autoloads: Array = []

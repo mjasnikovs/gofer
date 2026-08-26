@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:b53c7dbf73391070
+// GENERATED-BEGIN operations sha256:c01363070f803149
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -984,7 +984,7 @@ pub const GODOT_PROJECT_OPERATIONS: &[Operation] = &[
         op(
             "godot_project",
             "reset_setting",
-            "Resets a project setting to its default.",
+            "Resets a project setting to its default, and answers what that did: `changed`, the `previous` value and the `value` it reads as now. A setting already at its default answers `changed: false` rather than reporting a write. A setting Godot ships a default for goes back to that default; one the project invented leaves the file.",
             Answers::Addon("project.reset_setting"),
             &[need("name", Text)],
         ),

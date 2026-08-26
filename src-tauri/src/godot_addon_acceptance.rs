@@ -1554,7 +1554,15 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "project.reset_setting",
             json!({"name": "gofer_acceptance/temporary"}),
         );
-        assert_eq!(reset["exists"], false);
+        // `changed` and `previous` rather than `exists`: the field that used to be here was
+        // `has_setting`, true of everything Godot ships a default for, so it could not tell a
+        // reset that happened from one that had nothing to do.
+        assert_eq!(reset["changed"], true, "{reset}");
+        assert_eq!(
+            reset["previous"],
+            json!({"type": "int", "value": 7}),
+            "{reset}"
+        );
         assert!(
             session
                 .error(

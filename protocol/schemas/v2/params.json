@@ -875,7 +875,7 @@
         {
             "tool": "godot_project",
             "op": "reset_setting",
-            "summary": "Resets a project setting to its default.",
+            "summary": "Resets a project setting to its default, and answers what that did: `changed`, the `previous` value and the `value` it reads as now. A setting already at its default answers `changed: false` rather than reporting a write. A setting Godot ships a default for goes back to that default; one the project invented leaves the file.",
             "params": [
                 {
                     "name": "name",

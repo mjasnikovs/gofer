@@ -1,0 +1,69 @@
+; Engine configuration file.
+; The workspace for a task about taking things away.
+;
+; Every fixture before this one asks for something to be added, and no live run has ever reached an
+; inverse operation as a result: `remove_autoload`, `reset_setting`, `remove_input_action`,
+; `reset_input_action`, `disconnect_signal` and `remove_from_group` were all unreached across 45
+; recorded turns. Nothing reaches them while building.
+;
+; So this project is cluttered on purpose, and every piece of clutter is provably dead:
+;   * `OldSaveSystem` is an autoload no script mentions.
+;   * `debug_noclip` and `old_jump` are Input Map actions no script reads.
+;   * `physics/2d/default_gravity` is 1400 where Godot's default is 980, and no script reads it.
+;   * `application/config/use_custom_user_dir` is on for no reason.
+; The scene carries the rest: a Timer wired to a handler that does nothing, and the Player in a
+; `pickups` group it has no business being in.
+;
+; What must survive: `move_left`/`move_right`, which `player.gd` really uses, and the window and
+; rendering settings the other fixtures explain.
+config_version=5
+
+[application]
+
+config/name="Gofer Live Sweep - Clutter"
+config/use_custom_user_dir=true
+run/max_fps=60
+run/main_scene="res://scenes/main.tscn"
+
+[autoload]
+
+OldSaveSystem="*res://scripts/old_save_system.gd"
+
+[display]
+
+window/size/viewport_width=640
+window/size/viewport_height=360
+window/size/no_focus=true
+window/vsync/vsync_mode=0
+
+[input]
+
+move_left={
+"deadzone": 0.5,
+"events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":4194319,"physical_keycode":0,"key_label":0,"unicode":0,"location":0,"echo":false,"script":null)
+]
+}
+move_right={
+"deadzone": 0.5,
+"events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":4194321,"physical_keycode":0,"key_label":0,"unicode":0,"location":0,"echo":false,"script":null)
+]
+}
+debug_noclip={
+"deadzone": 0.5,
+"events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":78,"physical_keycode":0,"key_label":0,"unicode":0,"location":0,"echo":false,"script":null)
+]
+}
+old_jump={
+"deadzone": 0.5,
+"events": [Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,"keycode":74,"physical_keycode":0,"key_label":0,"unicode":0,"location":0,"echo":false,"script":null)
+]
+}
+
+[physics]
+
+2d/default_gravity=1400.0
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+textures/canvas_textures/default_texture_filter=0
