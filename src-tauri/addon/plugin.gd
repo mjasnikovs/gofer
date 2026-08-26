@@ -448,8 +448,34 @@ class GoferDebuggerBridge extends EditorDebuggerPlugin:
         if plugin != null:
             plugin._on_runtime_debugger_session_continued(session_id)
 
+## Points this editor's debug server at a port of its own, when the environment names one.
+##
+## Godot binds `network/debug/remote_port` — 6007 unless told otherwise — and tells the game it
+## plays to connect to that number. A second editor playing at the same time finds 6007 taken,
+## steps to 6008, and still sends its game to 6007: the game connects to the wrong editor. Nothing
+## errors on either side, so the editor that launched it sits on a session that never becomes
+## active until its launch deadline expires. One editor never meets this, which is why it is the
+## environment that asks and the acceptance suite that sets it.
+##
+## `--debug-server` names the same port and was tried first. It also keeps the debug server open
+## across stops, and `runtime.restart` then answered `runtime_timeout` on the CI runner in both
+## jobs that run this suite — including the one that runs it a single editor at a time, where
+## nothing is contending — while the two pushes before it were green. The setting alone is the
+## part that was wanted.
+##
+## Read before the debugger is registered, because the server is started from this value the first
+## time somebody presses play.
+func _apply_debug_port() -> void:
+    var value := OS.get_environment("GOFER_DEBUG_PORT")
+    if value.is_empty():
+        return
+    EditorInterface.get_editor_settings().set_setting(
+        "network/debug/remote_port", maxi(1, value.to_int())
+    )
+
 func _enter_tree() -> void:
     print("GOFER_ADDON_READY:%d" % PROTOCOL_VERSION)
+    _apply_debug_port()
     _debugger_bridge = GoferDebuggerBridge.new(self)
     add_debugger_plugin(_debugger_bridge)
     # The one thing the editor says out loud when a project scan is over. Polling `is_scanning`

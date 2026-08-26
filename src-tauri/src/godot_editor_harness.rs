@@ -346,17 +346,6 @@ impl<'a> Launch<'a> {
             arguments.push(OsString::from("--dap-port"));
             arguments.push(OsString::from(port.to_string()));
         }
-        // A debugger port of this editor's own, because the one Godot ships with is shared.
-        //
-        // The editor's debug server binds `network/debug/remote_port` — 6007 unless told
-        // otherwise — and tells the game it plays to connect to that number. A second editor
-        // playing at the same time finds 6007 taken, steps to 6008, and still sends its game to
-        // 6007: the game connects to the wrong editor. Nothing errors on either side, so the
-        // editor that launched it waits out its whole launch deadline on a session that never
-        // becomes active.
-        arguments.push(OsString::from("--debug-server"));
-        arguments.push(OsString::from(format!("tcp://127.0.0.1:{}", free_port())));
-
         let mut environment: Vec<(OsString, OsString)> = self
             .rpc
             .map(|(port, token)| {
@@ -376,6 +365,13 @@ impl<'a> Launch<'a> {
                 OsString::from(milliseconds.to_string()),
             ));
         }
+
+        // A debugger port of this editor's own, because the one Godot ships with is shared. The
+        // addon applies it, and the reason is written where it is read.
+        environment.push((
+            OsString::from("GOFER_DEBUG_PORT"),
+            OsString::from(free_port().to_string()),
+        ));
 
         // Every editor gets a throwaway config home, because `editor.set_setting` writes to the
         // machine-wide EditorSettings the developer running this suite uses for their own work. A
