@@ -483,11 +483,15 @@ fn install(
         .map(|_| ())
 }
 
-/// Replaces a Gofer-owned file. The old file is removed first so content Gofer did not write —
-/// a hand-edited addon script — is replaced rather than reported as a conflict.
+/// Replaces a Gofer-owned file, over whatever is there — a hand-edited addon script is a thing to
+/// replace, not a conflict to report.
+///
+/// It used to delete and then write, which is the same thing right up until `Workspace::delete`
+/// learned to take Godot's sidecars with it. Staging the addon then removed every
+/// `<script>.gd.uid` beside it, on every install, for files that existed again immediately with
+/// fresh ids.
 fn install_file(workspace: &Workspace, path: &str, text: &str) -> Result<(), FileError> {
-    ignore_missing(workspace.delete(path, None))?;
-    workspace.write(path, text, None).map(|_| ())
+    workspace.replace(path, text).map(|_| ())
 }
 
 fn ignore_missing(result: Result<(), FileError>) -> Result<(), FileError> {
@@ -502,11 +506,11 @@ fn revert(entry: &LedgerEntry, remaining: &[LedgerEntry]) -> Result<(), FileErro
     if let Ok(workspace) = Workspace::open(Path::new(&entry.worktree)) {
         restore_project_file(&workspace, entry)?;
         for path in &entry.files {
+            // Godot 4.4+ writes a `<file>.uid` sidecar next to every script it imports, and it
+            // leaves with the file — otherwise the addon directory survives unstage as what looks
+            // like a foreign leftover. `Workspace::delete` takes it, so there is no second call
+            // here any more.
             ignore_missing(workspace.delete(path, None))?;
-            // Godot 4.4+ writes a `<file>.uid` sidecar next to every script it imports. The
-            // sidecar belongs to the Gofer-owned file and must leave with it, or the addon
-            // directory survives unstage as what looks like a foreign leftover.
-            ignore_missing(workspace.delete(&format!("{path}.uid"), None))?;
         }
         for directory in &entry.directories {
             // A directory the user filled with their own files stays.

@@ -417,21 +417,37 @@ impl Workspace {
         expected_hash: Option<&str>,
     ) -> Result<FileStamp, FileError> {
         let path = self.resolve(relative)?;
-        if text.len() as u64 > MAX_FILE_BYTES {
-            return Err(FileError::new(
-                "file_too_large",
-                format!("{relative} would exceed {MAX_FILE_BYTES} bytes"),
-            )
-            .with_details(json!({"path": relative, "bytes": text.len()})));
-        }
+        // Before the hash check, because a file too large to write is refused on its size whatever
+        // the caller believed was there.
+        refuse_if_too_large(relative, text)?;
         let current = self.current_hash(relative, &path)?;
         match (expected_hash, current.as_deref()) {
             (None, None) => (),
             (Some(expected), Some(actual)) if expected == actual => (),
             (expected, actual) => return Err(FileError::conflict(relative, expected, actual)),
         }
-        write_atomically(&path, text.as_bytes())
-            .map_err(|error| FileError::io(relative, &error))?;
+        self.put(relative, &path, text)
+    }
+
+    /// Writes a file Gofer owns, over whatever is there.
+    ///
+    /// The hash check [`Self::write`] makes is for files a caller has read. These are files Gofer
+    /// wrote and is about to write again — a hand-edited addon script is a thing to replace, not a
+    /// conflict to report.
+    ///
+    /// It used to be [`Self::delete`] and then [`Self::write`], and that stopped being only those
+    /// two the moment `delete` learned to take [`SIDECARS`] with it: staging the addon then threw
+    /// away every `<script>.gd.uid` in it, on every install, for files that existed again a
+    /// millisecond later with new ids.
+    pub fn replace(&self, relative: &str, text: &str) -> Result<FileStamp, FileError> {
+        let path = self.resolve(relative)?;
+        refuse_if_too_large(relative, text)?;
+        self.put(relative, &path, text)
+    }
+
+    /// The write itself, once the caller's right to make it has been settled.
+    fn put(&self, relative: &str, path: &Path, text: &str) -> Result<FileStamp, FileError> {
+        write_atomically(path, text.as_bytes()).map_err(|error| FileError::io(relative, &error))?;
         Ok(FileStamp {
             path: relative.to_owned(),
             hash: hash_text(text),
@@ -473,10 +489,29 @@ impl Workspace {
         self.write(relative, &updated, Some(&contents.hash))
     }
 
+    /// Moves one path, and Godot's record of it with the path. See [`SIDECARS`].
+    ///
+    /// Every path is resolved before anything is renamed, both ends and both sidecars. A resolution
+    /// that fails halfway is the realistic way to end up with a file moved and its `.uid` stranded:
+    /// `MAX_RELATIVE_PATH_BYTES` is 1024 and `.import` adds seven, so a long enough `from` used to
+    /// pass its own check and then refuse the sidecar's — leaving exactly the breakage the sidecars
+    /// exist to prevent, reported as a failure. A rename that still fails after that puts the main
+    /// file back, so either both ends moved or neither did.
     pub fn move_path(&self, from: &str, to: &str) -> Result<(), FileError> {
         self.reject_live_sidecar(from)?;
+        // And the destination, for the same reason from the other side: landing on
+        // `player.gd.uid` plants a file Godot reads as `player.gd`'s identity.
+        self.reject_live_sidecar(to)?;
         let source = self.resolve(from)?;
         let destination = self.resolve(to)?;
+        let mut carrying = Vec::new();
+        for suffix in SIDECARS {
+            let carried = self.resolve(&format!("{from}.{suffix}"))?;
+            let landing = self.resolve(&format!("{to}.{suffix}"))?;
+            if carried.exists() {
+                carrying.push((carried, landing));
+            }
+        }
         if !source.exists() {
             return Err(FileError::not_found(from));
         }
@@ -490,14 +525,13 @@ impl Workspace {
             fs::create_dir_all(parent).map_err(|error| FileError::io(to, &error))?;
         }
         fs::rename(&source, &destination).map_err(|error| FileError::io(to, &error))?;
-        for suffix in SIDECARS {
-            let carried = self.resolve(&format!("{from}.{suffix}"))?;
-            if carried.exists() {
-                let landing = self.resolve(&format!("{to}.{suffix}"))?;
-                // Renamed over whatever is there. A sidecar at the destination with no file of its
-                // own is metadata for something that does not exist, and leaving it would give the
-                // moved file that dead file's uid.
-                fs::rename(&carried, &landing).map_err(|error| FileError::io(to, &error))?;
+        for (carried, landing) in carrying {
+            // Renamed over whatever is there. A sidecar at the destination with no file of its
+            // own is metadata for something that does not exist, and leaving it would give the
+            // moved file that dead file's uid.
+            if let Err(error) = fs::rename(&carried, &landing) {
+                let _ = fs::rename(&destination, &source);
+                return Err(FileError::io(to, &error));
             }
         }
         Ok(())
@@ -528,10 +562,15 @@ impl Workspace {
             }
         }
         fs::remove_file(&path).map_err(|error| FileError::io(relative, &error))?;
+        // Best effort, and after the file itself, in that order for one reason each. After,
+        // because a sidecar removed while its file is still there is the breakage this exists to
+        // prevent. Best effort, because the file the caller named is gone either way, and an
+        // orphaned `.uid` harms nothing — Godot ignores it and [`Self::reject_live_sidecar`] lets
+        // anyone take it away later. Reporting `Err` here told the caller the delete had failed
+        // about a file that was no longer there.
         for suffix in SIDECARS {
-            let carried = self.resolve(&format!("{relative}.{suffix}"))?;
-            if carried.exists() {
-                fs::remove_file(&carried).map_err(|error| FileError::io(relative, &error))?;
+            if let Ok(carried) = self.resolve(&format!("{relative}.{suffix}")) {
+                let _ = fs::remove_file(&carried);
             }
         }
         Ok(())
@@ -547,7 +586,14 @@ impl Workspace {
         let Some((owner, suffix)) = relative.rsplit_once('.') else {
             return Ok(());
         };
-        if !SIDECARS.contains(&suffix) || !self.resolve(owner)?.exists() {
+        // The dot has to end a filename, not begin one. `.uid` splits to an empty owner, and
+        // `assets/.import` to `assets/` — a real directory, which made a dotfile look like the
+        // sidecar of the folder it sits in and refused a move nobody should have been stopped from
+        // making.
+        if owner.is_empty() || owner.ends_with('/') {
+            return Ok(());
+        }
+        if !SIDECARS.contains(&suffix) || !self.resolve(owner).is_ok_and(|path| path.exists()) {
             return Ok(());
         }
         Err(FileError::new(
@@ -632,6 +678,19 @@ fn hash_bytes(bytes: &[u8]) -> String {
 /// Writes through a sibling temporary file so a crash or a concurrent reader never observes a
 /// half-written file. Renaming over a symlink replaces the link with a regular file, which is the
 /// safe outcome: the worktree keeps the content it was asked to store.
+/// Typed writes are for text, and this is the ceiling on it. Asked before the hash check, so a
+/// file too large to write is refused on its size whatever the caller believed was there.
+fn refuse_if_too_large(relative: &str, text: &str) -> Result<(), FileError> {
+    if text.len() as u64 > MAX_FILE_BYTES {
+        return Err(FileError::new(
+            "file_too_large",
+            format!("{relative} would exceed {MAX_FILE_BYTES} bytes"),
+        )
+        .with_details(json!({"path": relative, "bytes": text.len()})));
+    }
+    Ok(())
+}
+
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path
         .parent()
@@ -1431,6 +1490,123 @@ mod tests {
                 .expect_err("refused")
                 .code,
             "sidecar_path"
+        );
+        // And from the destination side. Landing on `main.gd.uid` plants a file Godot reads as
+        // `main.gd`'s identity, which is the same corruption written rather than taken away.
+        workspace.write("stray.txt", "three", None).expect("plain");
+        assert_eq!(
+            workspace
+                .move_path("stray.txt", "scripts/main.gd.uid")
+                .expect_err("refused")
+                .code,
+            "sidecar_path"
+        );
+
+        // A dot that begins a filename is not a suffix on one. `.uid` has no owner, and
+        // `assets/.import` is a dotfile in a directory rather than that directory's sidecar —
+        // splitting on the last dot alone made both look like live sidecars.
+        workspace
+            .write(".uid", "not a sidecar", None)
+            .expect("dotfile");
+        workspace
+            .write("assets/.import", "not a sidecar", None)
+            .expect("dotfile");
+        workspace.delete(".uid", None).expect("a dotfile is a file");
+        workspace
+            .move_path("assets/.import", "assets/moved.txt")
+            .expect("a dotfile in a directory is a file");
+
+        // An orphan is metadata for something that is gone, and taking one away is a tidy-up.
+        workspace
+            .write("gone.gd.uid", "uid://y", None)
+            .expect("orphan");
+        workspace
+            .delete("gone.gd.uid", None)
+            .expect("an orphan may be removed");
+    }
+
+    /// Replacing a file Gofer owns leaves Godot's record of it alone.
+    ///
+    /// `install_file` deleted each addon file before rewriting it, purely to get past the hash
+    /// check. That stopped being only a delete the moment [`Workspace::delete`] learned to take
+    /// [`SIDECARS`] with it: the `.uid` of a file that was about to exist again went with it, for
+    /// nothing. `replace` is the write that was meant all along.
+    #[test]
+    fn replacing_a_file_gofer_owns_keeps_godots_record_of_it() {
+        let (_directory, workspace) = workspace();
+        workspace
+            .write("addons/gofer/plugin.gd", "old", None)
+            .expect("staged");
+        workspace
+            .write("addons/gofer/plugin.gd.uid", "uid://kept", None)
+            .expect("the editor's record of it");
+
+        workspace
+            .replace("addons/gofer/plugin.gd", "new")
+            .expect("a file Gofer owns is replaced, not conflicted over");
+
+        assert_eq!(
+            workspace.read("addons/gofer/plugin.gd").expect("read").text,
+            "new"
+        );
+        assert_eq!(
+            workspace
+                .read("addons/gofer/plugin.gd.uid")
+                .expect("the record stays")
+                .text,
+            "uid://kept"
+        );
+        // And a hand-edited file is replaced rather than reported as a conflict, which is the whole
+        // reason the delete was there.
+        workspace
+            .replace("addons/gofer/plugin.gd", "newer")
+            .expect("replace again");
+        // A path this workspace refuses is still refused, and a file too large still is.
+        assert_eq!(
+            workspace
+                .replace("../escape.gd", "x")
+                .expect_err("outside")
+                .code,
+            "invalid_path"
+        );
+    }
+
+    /// A move that cannot carry the sidecar moves nothing at all.
+    ///
+    /// `MAX_RELATIVE_PATH_BYTES` is 1024 and `.import` adds seven, so a `from` between those two
+    /// lengths passed its own resolution and failed the sidecar's — after the rename. The caller
+    /// was told the move failed, about a file that had moved, with its `.uid` left behind: exactly
+    /// the state `SIDECARS` exists to prevent, reached by the code that prevents it.
+    #[test]
+    fn a_move_that_cannot_carry_the_sidecar_leaves_the_file_where_it_was() {
+        let (_directory, workspace) = workspace();
+        // Deep rather than long: every component stays under the filesystem's own 255-byte limit,
+        // so the only thing that refuses this path is Gofer's.
+        let directories = vec!["d".repeat(200); 5].join("/");
+        let long = format!("{directories}/{}.gd", "a".repeat(15));
+        assert!(
+            (MAX_RELATIVE_PATH_BYTES
+                - SIDECARS
+                    .iter()
+                    .map(|suffix| suffix.len() + 1)
+                    .max()
+                    .unwrap_or(0)..=MAX_RELATIVE_PATH_BYTES)
+                .contains(&long.len()),
+            "the path has to fit and its sidecar has not to: {}",
+            long.len()
+        );
+        workspace.write(&long, "one", None).expect("a legal path");
+        assert_eq!(
+            workspace
+                .move_path(&long, "moved.gd")
+                .expect_err("refused")
+                .code,
+            "invalid_path"
+        );
+        assert_eq!(
+            workspace.read(&long).expect("still where it was").text,
+            "one",
+            "the move was refused, so nothing may have moved"
         );
     }
 

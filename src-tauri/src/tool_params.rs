@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:2db990680bafe291
+// GENERATED-BEGIN operations sha256:f177d1669e6503b7
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1242,7 +1242,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         op(
             "godot_resource",
             "delete",
-            "Deletes a file or directory, and Godot's own record of it — its `.uid`, an asset's `.import` — with it. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
+            "Deletes a file or directory, and Godot's own record of it — its `.uid`, an asset's `.import` — with it. Never name one of those on its own. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
             Answers::Rust,
             &[
                 need("path", Text),

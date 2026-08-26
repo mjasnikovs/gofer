@@ -770,7 +770,15 @@ fn default_max_tokens() -> u64 {
 /// never past a quarter of the window, and never zero, which [`validate_settings`] refuses.
 fn ceiling_within(context_window: u64, declared: Option<u64>) -> u64 {
     let reserve = context_window - (context_window * u64::from(default_compaction_percent())) / 100;
-    let cap = reserve.min(context_window / 4);
+    // The reserve is 14% of the window, and below about 117,000 that is less than one whole
+    // GDScript file — a `godot_script save` cut off mid-file for want of a ceiling nobody chose.
+    // So the cap is raised to what [`default_max_tokens`] holds, as far as a quarter of the window
+    // allows: past that the ceiling stops being a ceiling, which is the failure this exists for.
+    // The floor lifts the *cap*, never a declared ceiling: a model that really stops at 4,096 is
+    // one whose 4,096 has to survive, or every answer from it is an HTTP 400.
+    let cap = reserve
+        .min(context_window / 4)
+        .max(default_max_tokens().min(context_window / 4));
     declared.unwrap_or(cap).min(cap).max(1)
 }
 
@@ -1215,9 +1223,11 @@ fn resolve_model(
         }
         if let Some(window) = model.context_window {
             choice.context_window = window;
-            // The output ceiling cannot outlive the window it is spent inside. Clamped rather than
-            // replaced, so a user who chose a smaller one keeps it.
-            choice.max_tokens = choice.max_tokens.min(window);
+            // The output ceiling cannot outlive the window it is spent inside, and it may not be
+            // the whole of it either — a server that answers `/props` with a window smaller than
+            // the stored ceiling used to turn that ceiling into the window exactly. Clamped rather
+            // than replaced, so a user who chose a smaller one keeps it.
+            choice.max_tokens = ceiling_within(window, Some(choice.max_tokens));
         }
         choice.reasoning = model.reasoning;
         choice.supports_reasoning_effort = !model.efforts.is_empty();
@@ -1515,9 +1525,11 @@ fn local_model_options(
                     .map(|model| model.name.clone())
                     .unwrap_or_else(|| remote.id.clone()),
                 context_window,
-                max_tokens: known
-                    .map(|model| model.max_tokens)
-                    .unwrap_or(context_window),
+                // Through the same clamp OpenRouter's rows take. A model Pi's catalogue does
+                // not know used to be given the whole window as its ceiling, which is the runaway
+                // `default_max_tokens` was written for — and that runaway was measured *here*, on
+                // the local Qwen3.6-27B, not on a billed endpoint.
+                max_tokens: ceiling_within(context_window, known.map(|model| model.max_tokens)),
                 reasoning: loaded.map_or_else(
                     || known.map_or(server_reasoning, |model| model.reasoning),
                     |model| model.reasoning,
@@ -1548,9 +1560,10 @@ fn local_model_options(
 ///
 /// * Models without `tools` are dropped. 70 of 422 have no tool support, and a model that cannot
 ///   call a tool cannot run Gofer at all — offering it is offering a broken choice.
-/// * Every ceiling goes through `ceiling_within`, declared or not. `max_completion_tokens` is null
-///   on 52 models, and larger than the compaction reserve on 188 more; neither may become the
-///   window, and neither may become zero, which fails validation.
+/// * Every ceiling here goes through `ceiling_within`, declared or not — as `local_model_options`'
+///   do, for the same reason. `max_completion_tokens` is null on 52 models, and larger than the
+///   compaction reserve on 188 more; neither may become the window, and neither may become zero,
+///   which fails validation.
 /// * Efforts are kept only if `NAMED_EFFORTS` knows them, rather than dropping the one word that
 ///   is known not to be an effort. `supported_efforts` carries `none` today, which is OpenRouter's
 ///   word for "thinking can be switched off" — `thinking_levels_for` prepends `off` on its own, so
@@ -2012,6 +2025,19 @@ fn validate_connection(connection: &mut AiConnectionProfile) -> Result<(), Strin
 /// written against the flat settings and the sub-agent's against its own shape — and the only thing
 /// they differed in is what a missing model id is called on screen, which is the argument.
 fn validate_model_choice(choice: &mut ModelChoice, id_name: &str) -> Result<(), String> {
+    // A ceiling that is the whole window is not a ceiling, and it is not a choice either: no field
+    // in the app offers one, and the only way a settings file holds one is that a shipped default
+    // put it there. `default_openrouter_profile` did, `max_tokens: 1_000_000` against a
+    // `context_window: 1_000_000`, and every file written while it did still holds it — OpenRouter
+    // reserves credit for the ceiling before it generates anything, so those users go on being
+    // answered HTTP 402 whatever this build ships.
+    //
+    // Repaired rather than refused, and only in this one shape. A stored ceiling that is a ceiling
+    // is the user's and is left exactly as they set it, which is what `default_max_tokens` says
+    // and what `a_response_may_not_be_as_long_as_the_whole_window` holds this to.
+    if choice.max_tokens >= choice.context_window && choice.context_window > 0 {
+        choice.max_tokens = ceiling_within(choice.context_window, None);
+    }
     choice.id = required_value(id_name, std::mem::take(&mut choice.id))?;
     if choice.id.len() > 512 {
         return Err("Model IDs cannot exceed 512 bytes".to_owned());
@@ -2812,6 +2838,57 @@ mod tests {
         );
     }
 
+    /// A settings file already holding the ceiling that could not be afforded is repaired.
+    ///
+    /// Shipping a better seed fixes nobody's file. `max_tokens` is `#[serde(default)]`, so it
+    /// defaults only when absent, and every file written while `default_openrouter_profile` said
+    /// `1_000_000` still holds `1_000_000` — HTTP 402 on every turn, whatever this build ships.
+    ///
+    /// The repair is narrow on purpose: only a ceiling that is the whole window, which no field in
+    /// the app can produce and only a shipped default ever wrote. A stored ceiling that is a
+    /// ceiling is the user's and is left exactly as they set it.
+    #[test]
+    fn a_stored_ceiling_that_is_the_whole_window_is_repaired_and_a_real_one_is_not() {
+        let mut settings = GoferSettings::default();
+        let openrouter = settings
+            .ai
+            .connections
+            .get_mut(&AiConnectionType::Openrouter)
+            .expect("the OpenRouter connection");
+        openrouter.model.context_window = 1_000_000;
+        openrouter.model.max_tokens = 1_000_000;
+        let local = settings
+            .ai
+            .connections
+            .get_mut(&AiConnectionType::OpenaiCompatible)
+            .expect("the local connection");
+        local.model.context_window = 120_064;
+        local.model.max_tokens = 32_768;
+
+        let saved = validate_settings(settings).expect("valid");
+
+        assert_eq!(
+            saved
+                .ai
+                .connection_for(AiConnectionType::Openrouter)
+                .expect("openrouter")
+                .model
+                .max_tokens,
+            140_000,
+            "a ceiling that is the whole window is not a ceiling and was never a choice"
+        );
+        assert_eq!(
+            saved
+                .ai
+                .connection_for(AiConnectionType::OpenaiCompatible)
+                .expect("local")
+                .model
+                .max_tokens,
+            32_768,
+            "and one the user really set is theirs"
+        );
+    }
+
     /// A ceiling the catalogue names is taken only as far as it fits.
     ///
     /// Measured against the live catalogue on 2026-08-26: of the 348 tool-capable models, **188**
@@ -2827,8 +2904,13 @@ mod tests {
         assert_eq!(ceiling_within(262_144, Some(235_929)), 36_701);
         // Nothing declared is not licence to use the window. 52 models declare nothing.
         assert_eq!(ceiling_within(256_000, None), 35_840);
-        // A window small enough that a quarter of it is the tighter of the two.
-        assert_eq!(ceiling_within(8_000, Some(8_000)), 1_120);
+        // A window small enough that a quarter of it is the tighter of the two — and it is a
+        // quarter, not the 14% reserve, because 14% of a window this size is not one whole file.
+        assert_eq!(ceiling_within(8_000, Some(8_000)), 2_000);
+        assert_eq!(ceiling_within(32_768, None), 8_192);
+        // The floor lifts the cap, never a ceiling the model declared for itself. A model that
+        // really stops at 4,096 keeps its 4,096, or every answer from it is an HTTP 400.
+        assert_eq!(ceiling_within(32_768, Some(4_096)), 4_096);
         // And a window of zero cannot underflow into a ceiling of zero, which fails validation.
         assert_eq!(ceiling_within(0, Some(4_096)), 1);
     }
@@ -4361,7 +4443,10 @@ mod tests {
                 model.context_window, 120_064,
                 "the window the host was started with"
             );
-            assert_eq!(model.max_tokens, 120_064, "clamped into it");
+            assert_eq!(
+                model.max_tokens, 16_809,
+                "and a ceiling inside it — clamping to the window itself is no ceiling at all"
+            );
             assert_eq!(model.input, ["text".to_owned()], "and no pictures");
         }
         assert!(
@@ -4700,7 +4785,9 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "custom");
         assert_eq!(models[0].context_window, 4_096);
-        assert_eq!(models[0].max_tokens, 4_096);
+        // And not 4,096. A ceiling equal to the window is no ceiling, and this is the endpoint the
+        // runaway was measured on.
+        assert_eq!(models[0].max_tokens, 1_024);
         assert_eq!(models[1].name, "plain");
 
         let (base_url, server) = mock_server("500 Internal Server Error", "{}");

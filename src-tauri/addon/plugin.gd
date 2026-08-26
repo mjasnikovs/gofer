@@ -3750,9 +3750,13 @@ func _scene_save(_params: Dictionary) -> Dictionary:
     # script. Every node also gained a `unique_id` and the scene a `uid` of its own: a diff nobody
     # asked for, on a call that was told nothing had changed.
     #
-    # Verified rather than trusted, because `save_scene` returning OK for a save that wrote nothing
-    # is the reason `_saved_scene_holds` exists at all: the file is read back and compared to the
-    # tree, and only a file that already matches lets the write be skipped.
+    # `_scene_is_dirty` is the guard, and it is Godot's own answer rather than any bookkeeping of
+    # ours. The readback beside it is a second opinion and not more than one: `_saved_scene_holds`
+    # compares the node paths in the file against the node paths in the tree, and nothing else — a
+    # file whose structure matches while a property or an `ext_resource` does not would satisfy it.
+    # It is here because `save_scene` returning OK for a save that wrote nothing is the reason that
+    # function exists at all, so a file that does not even hold the right nodes is worth catching
+    # before the write is skipped.
     if not _scene_is_dirty():
         var unchanged := _saved_scene_holds(_current_scene_path, root)
         if unchanged.is_empty():

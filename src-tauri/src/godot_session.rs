@@ -1603,10 +1603,10 @@ fn is_the_engines_own_epilogue(message: &str) -> bool {
 /// A line the engine prints about the editor's own machinery, rather than about the project.
 ///
 /// The sibling of [`is_the_engines_own_epilogue`], one level up: that one is the engine taking
-/// itself apart, this one is the engine running an editor in an environment it was not built for.
-/// Counted across every recorded live trace, **28 of the 35 carried tails held nothing but these
-/// two lines**, in eight runs — `R01-backwards` was handed them eleven times, attached to "The game
-/// did not answer in time".
+/// itself apart, this one is the editor's own bookkeeping. Counted across every recorded live
+/// trace, **28 of the 35 carried tails held nothing but engine chatter**, in eight runs, and 19 of
+/// those 28 occurrences were the one line below — `R01-backwards` was handed it eleven times,
+/// attached to "The game did not answer in time".
 ///
 /// ```text
 /// ERROR: Couldn't find the given section "res://scripts/player.gd" and key "state", …
@@ -1618,28 +1618,25 @@ fn is_the_engines_own_epilogue(message: &str) -> bool {
 /// the error that ended one. In the recorded trace it sits four lines under `[ DONE ]
 /// loading_editor_layout` and above the first game's own banner.
 ///
+/// It is matched on the engine's own words and on the key only this cache uses, so nothing a
+/// project prints can be mistaken for it. Dropped from the *carried tail* only — `godot_logs read`
+/// still answers with every line.
+///
+/// ### The second line, and why it is not here
 /// ```text
 /// ERROR: Parameter "t" is null.
 ///    at: texture_2d_get (./servers/rendering/dummy/storage/texture_storage.h:110)
 ///    [0] _scene_save (res://addons/gofer/plugin.gd:…)
 /// ```
-///
 /// That is the "Creating Thumbnail" step of a scene save asking the **dummy** rendering server for
-/// a texture. Reproduced on demand under the acceptance harness, backtrace and all: every recorded
-/// run that saved a scene has it, and every run that did not has none.
-///
-/// Both are matched on the engine's own words rather than on the caller's, so nothing a project
-/// prints can be mistaken for either. Dropped from the *carried tail* only — `godot_logs read`
-/// still answers with every line.
-///
-/// One knowing cost. [`editor_crashed`] quotes a four-line crash signature that has `Parameter "t"
-/// is null` in it. That branch finds its crash by [`CRASH_MARKER`] and not through here, and the
-/// three lines that say anything — the parse error, the script that failed to load, and
-/// `handle_crash` itself — still travel. What is lost is the one line of the four that names
-/// nothing.
+/// a texture, reproduced on demand under the acceptance harness. It was filtered here too, and it
+/// is not any more: `Parameter "t" is null` is `ERR_FAIL_NULL`'s generic wording, several
+/// `RenderingServer` entry points emit it, and a *game* that hands one of them a null texture would
+/// have had its only diagnostic line dropped. The `at:` line that tells the two apart is a separate
+/// entry in the buffer, so this function cannot see it. Four occurrences of noise across the whole
+/// corpus is not worth one game's error going missing.
 fn is_the_editor_talking_to_itself(message: &str) -> bool {
-    (message.contains("Couldn't find the given section") && message.contains("key \"state\""))
-        || message.contains("Parameter \"t\" is null")
+    message.contains("Couldn't find the given section") && message.contains("key \"state\"")
 }
 
 #[cfg(test)]
@@ -2996,14 +2993,11 @@ mod tests {
     #[test]
     fn the_editors_own_startup_chatter_is_not_carried_as_the_cause() {
         let _test = session_test_lock();
-        given_the_session_printed(&[
-            (
-                LogSource::EditorError,
-                "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \
+        given_the_session_printed(&[(
+            LogSource::EditorError,
+            "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \
                  \"state\", and no default was given.",
-            ),
-            (LogSource::EditorError, "ERROR: Parameter \"t\" is null."),
-        ]);
+        )]);
 
         let carried = carrying_the_error_that_ended_the_game(addon_failure(
             "runtime_timeout",
@@ -3013,6 +3007,20 @@ mod tests {
         assert_eq!(
             carried.message, "The game did not answer in time",
             "the editor's own chatter was carried as the cause"
+        );
+
+        // And `ERR_FAIL_NULL`'s generic wording is *not* filtered, however often a headless scene
+        // save prints it: a game that hands RenderingServer a null texture says the same words, and
+        // that game's only diagnostic line has to reach the model.
+        given_the_session_printed(&[(LogSource::EditorError, "ERROR: Parameter \"t\" is null.")]);
+        assert!(
+            carrying_the_error_that_ended_the_game(addon_failure(
+                "runtime_timeout",
+                "The game did not answer in time",
+            ))
+            .message
+            .contains("Parameter"),
+            "a line only the engine can disambiguate must not be guessed at"
         );
     }
 
@@ -3030,7 +3038,6 @@ mod tests {
                 LogSource::EditorError,
                 "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
             ),
-            (LogSource::EditorError, "ERROR: Parameter \"t\" is null."),
         ]);
 
         let carried = carrying_the_error_that_ended_the_game(addon_failure(
