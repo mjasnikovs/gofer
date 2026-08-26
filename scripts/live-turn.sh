@@ -3,7 +3,7 @@
 # Usage: live-turn.sh <name> <task>
 #
 #   GOFER_LIVE_CONNECTION=openai-codex   GOFER_LIVE_MODEL=gpt-5.6-luna   ./scripts/live-turn.sh …
-#   GOFER_LIVE_CONNECTION=openrouter     GOFER_LIVE_MODEL=stealth/ox-alpha
+#   GOFER_LIVE_CONNECTION=openrouter     GOFER_LIVE_MODEL=z-ai/glm-5.3-flash
 #   GOFER_LIVE_CONNECTION=openai-compatible (the default: the local server)
 #
 # The credential is looked up here, per connection, and named on the command line — the suite never
@@ -34,7 +34,7 @@ case "$GOFER_LIVE_CONNECTION" in
     export GOFER_LIVE_OAUTH="$(secret-tool lookup service com.gofer.desktop username ai-openai-codex)"
     ;;
   openrouter)
-    export GOFER_LIVE_MODEL="${GOFER_LIVE_MODEL:-stealth/ox-alpha}"
+    export GOFER_LIVE_MODEL="${GOFER_LIVE_MODEL:-z-ai/glm-5.3-flash}"
     export GOFER_LIVE_API_KEY="$(secret-tool lookup service com.gofer.desktop username ai-openrouter)"
     ;;
   openai-compatible) : ;;
