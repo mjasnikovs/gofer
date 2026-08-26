@@ -1344,7 +1344,7 @@ func _complete_pending_run() -> void:
         _runtime_pending.append({
             "id": pending["id"],
             "kind": "run_frame",
-            "deadline": _runtime_deadline(RUNTIME_REQUEST_TIMEOUT_MS),
+            "deadline": _runtime_deadline(_runtime_request_timeout_ms),
             # The helper just spoke from inside the game, so this one has certainly played.
             "seen_playing": true,
         })

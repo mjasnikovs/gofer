@@ -689,6 +689,19 @@ fn a_call_that_was_waiting_for_a_frame_says_so() {
         answered["root"]["name"], "root",
         "the frame-free call must answer with the real tree: {answered}"
     );
+
+    // The game goes before the session does, and this test more than most: the probe spins its
+    // main thread, so nothing in it will ever notice a closed socket. Dropping the session kills
+    // the editor and nothing else — which is the orphan `quitting_the_editor_takes_the_game_with_it`
+    // is about, and leaving one here would hold a core and this port for as long as the machine
+    // stays up, with the worktree deleted underneath it.
+    session
+        .try_call("runtime.stop", json!({}), None)
+        .expect("the wedged game must be stopped rather than left running");
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "the spinning probe must be gone, not merely asked to go"
+    );
 }
 
 /// `runtime.stop` answers `running: false`, and the game really is gone by then.

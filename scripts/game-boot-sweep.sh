@@ -40,7 +40,17 @@ for worktree in "${targets[@]}"; do
   cp -r "$worktree" "$copy"
   # Rebuilt from nothing, so a cache the turn left behind cannot answer for the files beside it.
   rm -rf "$copy/.godot"
-  timeout 180 xvfb-run -a godot --headless --editor --quit-after 60 --path "$copy" >/dev/null 2>&1
+  # `--quit-after` counts main-loop iterations, not seconds, and a headless editor's loop is
+  # uncapped, so this number is not a duration — it is "long enough that the scan has finished".
+  # The scan is threaded and reimports across many frames, and an editor that leaves mid-scan
+  # writes a half-built `.godot`; the boot below then reports exactly the stale-UID warnings this
+  # step exists to prevent.
+  #
+  # Waiting for `[ DONE ] first_scan_filesystem` instead was tried and is wrong: that marker is
+  # followed by `update_scripts_classes` and `reimport`, and killing on it left the arena game
+  # reporting 8 errors and 11 warnings where a full scan reports none. The engine has no "now I am
+  # idle" line to wait on, so a generous count it is, with `timeout` as the real ceiling.
+  timeout 180 xvfb-run -a godot --headless --editor --quit-after 3000 --path "$copy" >/dev/null 2>&1
   out="$(timeout 180 xvfb-run -a godot --headless --quit-after 300 --path "$copy" 2>&1)"
   errors="$(printf '%s' "$out" | grep -c '^ERROR:')"
   warnings="$(printf '%s' "$out" | grep -c '^WARNING:')"

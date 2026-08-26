@@ -363,10 +363,28 @@ fn live_agent_acceptance() {
 /// first. Only its contents: the directory itself may be one the caller made, and removing it
 /// would break a path they had already handed to something else.
 fn keep_the_worktree(worktree: &std::path::Path, keep: &std::path::Path) {
-    if let Ok(entries) = std::fs::read_dir(keep) {
+    // Only a directory this function has filled before. `GOFER_LIVE_KEEP` names a path the caller
+    // typed, and one level off — `logs/oxloop` rather than `logs/oxloop/<run>-worktree` — is every
+    // recorded batch in the corpus. A worktree has a `project.godot` in it; anything else is either
+    // empty, or somebody else's, and is merged into rather than emptied.
+    let ours = keep.join("project.godot").exists();
+    if !ours && keep.read_dir().is_ok_and(|mut held| held.next().is_some()) {
+        println!(
+            "GOFER_LIVE_KEEP names {}, which holds something other than a kept worktree — copying \
+             into it rather than emptying it. Name a directory of its own to keep this run alone.",
+            keep.display()
+        );
+    }
+    if let Ok(entries) = std::fs::read_dir(keep)
+        && ours
+    {
         for entry in entries.flatten() {
             let path = entry.path();
-            let removed = if path.is_dir() {
+            // `symlink_metadata`, so a symlink to a directory is unlinked rather than followed into
+            // `remove_dir_all` — which fails with ENOTDIR and leaves the entry to be merged into,
+            // the one thing this exists to prevent.
+            let kind = entry.path().symlink_metadata().map(|held| held.is_dir());
+            let removed = if kind.unwrap_or(false) {
                 std::fs::remove_dir_all(&path)
             } else {
                 std::fs::remove_file(&path)
@@ -406,7 +424,9 @@ fn a_kept_worktree_holds_one_acceptance_run_and_not_two() {
 
     let keep = TempDir::new().expect("a destination");
     // What the run before this one left behind: a file this run also writes, one it does not, and
-    // a directory. All three were merged into before.
+    // a directory. All three were merged into before. The `project.godot` is what marks the
+    // destination as a worktree this function filled, and so as one it may empty.
+    std::fs::write(keep.path().join("project.godot"), "the run that died").expect("stale project");
     std::fs::create_dir_all(keep.path().join("scripts")).expect("stale scripts directory");
     std::fs::write(keep.path().join("scripts/player.gd"), "the run that died")
         .expect("stale script");
@@ -432,6 +452,33 @@ fn a_kept_worktree_holds_one_acceptance_run_and_not_two() {
     assert!(
         keep.path().join("project.godot").exists(),
         "everything this run built must still be copied out"
+    );
+}
+
+/// A destination that is not a kept worktree is copied into, never emptied.
+///
+/// `GOFER_LIVE_KEEP` names a path the caller typed, and one level off — `logs/oxloop` rather than
+/// `logs/oxloop/<run>-worktree` — is every recorded batch in the corpus. Emptying that would erase
+/// the evidence this whole loop is built on, to fix a merge.
+#[test]
+fn a_destination_that_is_not_a_worktree_acceptance_run_is_left_alone() {
+    let source = TempDir::new().expect("a worktree to keep");
+    std::fs::write(source.path().join("project.godot"), "config_version=5\n")
+        .expect("write the project");
+
+    let keep = TempDir::new().expect("a destination");
+    std::fs::write(keep.path().join("batch12.log"), "somebody else's run")
+        .expect("a file that is not a worktree's");
+
+    keep_the_worktree(source.path(), keep.path());
+
+    assert!(
+        keep.path().join("batch12.log").exists(),
+        "a directory holding something other than a worktree must not be emptied"
+    );
+    assert!(
+        keep.path().join("project.godot").exists(),
+        "and the run is still copied into it"
     );
 }
 

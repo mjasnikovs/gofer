@@ -347,19 +347,33 @@ export function splitKeyThatCarriesItsValue(params, entry) {
                     && !(one.name in entry)
             )
             if (!param) return [[key, held]]
-            const tail = key.slice(param.name.length).trim()
+            const rest = key.slice(param.name.length)
+            const tail = rest.trim()
             if (tail === '') return [[key, held]]
-            // The tail is the value when nothing else is, or when the held value is the same thing
-            // said twice. Anything else is a key this cannot name for certain.
+            // Whether the tail is a value at all, and it has to be decided before it is used.
+            //
+            // `{"limit 50": null}` separates the two with a space, and that space is the evidence:
+            // without it `{"afterCursor": null}` reads as `after` carrying `"Cursor"`, which is a
+            // model's guess at a name turned into a value nobody wrote. A guess must reach the
+            // router and be refused by name.
+            //
+            // `{"minSeverityWarning": "warning"}` has no space and needs none, because the held
+            // value says what the tail is: the same thing, twice.
+            const detached = rest !== tail
             const carried =
-                held === null || held === undefined ? tail
+                (held === null || held === undefined) && detached ? tail
                 : typeof held === 'string' && held.toLowerCase() === tail.toLowerCase() ? held
                 : undefined
             if (carried === undefined) return [[key, held]]
+            // An `int` slot takes an integer and nothing else. `{"limit 3.7": null}` repaired to
+            // `3.7` would be refused by the schema on the value having just been accepted on the
+            // name, which is moving a refusal rather than removing one.
+            const shape = param.kind === 'int' ? /^-?\d+$/u : /^-?\d+(?:\.\d+)?$/u
             const numeric =
                 (param.kind === 'int' || param.kind === 'number')
                 && typeof carried === 'string'
-                && /^-?\d+(?:\.\d+)?$/u.test(carried)
+                && shape.test(carried)
+            if (!numeric && (param.kind === 'int' || param.kind === 'number')) return [[key, held]]
             return [[param.name, numeric ? Number(carried) : carried]]
         })
     )

@@ -451,7 +451,8 @@ impl JobContext {
     /// editor it started is bound to.
     ///
     /// The keyring is never read here. A suite's credentials have to be named on the command line:
-    /// `GOFER_LIVE_API_KEY` fills the OpenAI-compatible slot, and `GOFER_LIVE_OAUTH` carries the
+    /// `GOFER_LIVE_API_KEY` fills the slot the named driver reads — see [`Credentials::for_driver`],
+    /// which is where that decision lives — and `GOFER_LIVE_OAUTH` carries the
     /// stored ChatGPT credential as the JSON the keyring holds. That is what lets a live turn be
     /// put to a hosted endpoint — OpenRouter, or a ChatGPT subscription — and not only to a local
     /// server. A credential the run was not given is simply absent, which is what a run against

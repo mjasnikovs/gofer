@@ -4,8 +4,8 @@
 ; entries are swapped. Reading the file is enough to guess; stopping on the line and asking what
 ; the local variable holds is what proves it.
 ;
-; The four Input Map actions are declared here, so a run that reaches for `list_input_actions` gets
-; a real answer rather than an empty project's.
+; `move_left` and `move_right` are declared here, so a run that reaches for `list_input_actions`
+; gets a real answer rather than an empty project's.
 ;
 ; Everything else is `fixtures/live-project`'s, for the reasons its own comments give.
 config_version=5

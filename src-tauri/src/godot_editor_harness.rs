@@ -328,16 +328,21 @@ impl<'a> Launch<'a> {
         self
     }
 
-    /// Shortens the deadline the addon gives a launch, for the one test that has to outlive one.
+    /// Shortens the deadline the addon gives a forwarded *request*, which is twenty seconds.
     ///
-    /// Left unset the editor uses the thirty seconds it ships with. A test asserting what happens
-    /// *after* the deadline has to sit through it, and thirty seconds of sitting was the whole
-    /// acceptance suite's floor. Four seconds proves the same thing.
+    /// For a test that has to watch one expire: `input`, `capture` and `wait` cannot answer until
+    /// the game draws a frame, and a game that never will spends the whole deadline. Waiting it out
+    /// is the entire cost of that test, and four seconds proves the same thing.
     pub(crate) fn request_timeout_ms(mut self, milliseconds: u64) -> Self {
         self.request_timeout_ms = Some(milliseconds);
         self
     }
 
+    /// Shortens the deadline the addon gives a launch, for the one test that has to outlive one.
+    ///
+    /// Left unset the editor uses the thirty seconds it ships with. A test asserting what happens
+    /// *after* the deadline has to sit through it, and thirty seconds of sitting was the whole
+    /// acceptance suite's floor. Four seconds proves the same thing.
     pub(crate) fn launch_timeout_ms(mut self, milliseconds: u64) -> Self {
         self.launch_timeout_ms = Some(milliseconds);
         self
@@ -495,6 +500,7 @@ pub(crate) struct Transports {
     pub(crate) editor_config_home: Option<PathBuf>,
     /// A shorter launch deadline, for the one test whose subject is the deadline expiring.
     pub(crate) launch_timeout_ms: Option<u64>,
+    /// The forwarded-request deadline, for a suite that has to watch one expire.
     pub(crate) request_timeout_ms: Option<u64>,
 }
 

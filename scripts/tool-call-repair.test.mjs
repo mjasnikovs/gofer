@@ -973,6 +973,24 @@ test('a key that swallowed its own value is split back into the two the model me
         ops: [{afterCursor: 37, op: 'read'}]
     })
 
+    // The same guess with nothing held. Without the space that `limit 50` has, `afterCursor` reads
+    // as `after` carrying "Cursor" — a value nobody wrote, into a slot declared `int`. The space is
+    // the evidence that the tail is a value, and it has to be required.
+    assert.deepEqual(normalizeToolCalls(logs, {ops: [{afterCursor: null, op: 'read'}]}), {
+        ops: [{afterCursor: null, op: 'read'}]
+    })
+
+    // An `int` slot takes an integer and nothing else. Repairing this to 3.7 would have the schema
+    // refuse the value having just accepted the name.
+    assert.deepEqual(normalizeToolCalls(logs, {ops: [{'limit 3.7': null, op: 'read'}]}), {
+        ops: [{'limit 3.7': null, op: 'read'}]
+    })
+
+    // And a tail that is not a number at all never reaches a numeric slot.
+    assert.deepEqual(normalizeToolCalls(logs, {ops: [{'limit lots': null, op: 'read'}]}), {
+        ops: [{'limit lots': null, op: 'read'}]
+    })
+
     // A torn structure carries a second entry the caller wrote. Repairing it would invent one:
     // the tail here is not a value, it is the rest of a call.
     const torn = {'contains": "x"}, {"op": "read"': 'read', op: 'read'}
