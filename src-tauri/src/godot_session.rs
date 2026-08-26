@@ -1562,7 +1562,9 @@ fn last_session_errors(wanted: usize) -> Vec<String> {
     )
     .into_iter()
     .map(|entry| entry.message)
-    .filter(|message| !is_the_engines_own_epilogue(message))
+    .filter(|message| {
+        !is_the_engines_own_epilogue(message) && !is_the_editor_talking_to_itself(message)
+    })
     .rev()
     .take(wanted)
     .collect::<Vec<_>>()
@@ -1596,6 +1598,48 @@ fn is_the_engines_own_epilogue(message: &str) -> bool {
         || message.contains("at exit in PagedAllocator")
         || message.contains("still in use at exit")
         || message.contains("leaked at exit")
+}
+
+/// A line the engine prints about the editor's own machinery, rather than about the project.
+///
+/// The sibling of [`is_the_engines_own_epilogue`], one level up: that one is the engine taking
+/// itself apart, this one is the engine running an editor in an environment it was not built for.
+/// Counted across every recorded live trace, **28 of the 35 carried tails held nothing but these
+/// two lines**, in eight runs — `R01-backwards` was handed them eleven times, attached to "The game
+/// did not answer in time".
+///
+/// ```text
+/// ERROR: Couldn't find the given section "res://scripts/player.gd" and key "state", …
+///    at: get_value (core/io/config_file.cpp:60)
+/// ```
+///
+/// That is `loading_editor_layout` restoring which script tabs were open, from a cache written by
+/// some earlier editor. It is printed **before a game can be launched at all**, so it can never be
+/// the error that ended one. In the recorded trace it sits four lines under `[ DONE ]
+/// loading_editor_layout` and above the first game's own banner.
+///
+/// ```text
+/// ERROR: Parameter "t" is null.
+///    at: texture_2d_get (./servers/rendering/dummy/storage/texture_storage.h:110)
+///    [0] _scene_save (res://addons/gofer/plugin.gd:…)
+/// ```
+///
+/// That is the "Creating Thumbnail" step of a scene save asking the **dummy** rendering server for
+/// a texture. Reproduced on demand under the acceptance harness, backtrace and all: every recorded
+/// run that saved a scene has it, and every run that did not has none.
+///
+/// Both are matched on the engine's own words rather than on the caller's, so nothing a project
+/// prints can be mistaken for either. Dropped from the *carried tail* only — `godot_logs read`
+/// still answers with every line.
+///
+/// One knowing cost. [`editor_crashed`] quotes a four-line crash signature that has `Parameter "t"
+/// is null` in it. That branch finds its crash by [`CRASH_MARKER`] and not through here, and the
+/// three lines that say anything — the parse error, the script that failed to load, and
+/// `handle_crash` itself — still travel. What is lost is the one line of the four that names
+/// nothing.
+fn is_the_editor_talking_to_itself(message: &str) -> bool {
+    (message.contains("Couldn't find the given section") && message.contains("key \"state\""))
+        || message.contains("Parameter \"t\" is null")
 }
 
 #[cfg(test)]
@@ -2928,6 +2972,81 @@ mod tests {
             carried.message, "No game with the Gofer runtime helper is running",
             "a game that exited cleanly has no error to carry, and saying nothing is the honest \
              version of that"
+        );
+    }
+
+    /// The editor talking to itself is not the error that ended the game either.
+    ///
+    /// Counted across every recorded live trace: **28 of the 35 carried tails were nothing but
+    /// these two lines**, in eight runs. `R01-backwards` was handed them eleven times.
+    ///
+    /// Both were traced to where they come from rather than guessed at:
+    ///
+    /// * `Couldn't find the given section "res://….gd" and key "state"` is `config_file.cpp:60`,
+    ///   printed once during `loading_editor_layout` while the editor restores which script tabs
+    ///   were open. It is older than any game in the session — it happens before one can be
+    ///   launched — and it was carried as the reason a game did not answer.
+    /// * `Parameter "t" is null` is `texture_2d_get` in the **dummy** rendering server, printed by
+    ///   the "Creating Thumbnail" step of a scene save with no renderer to make one. Reproduced on
+    ///   demand under the acceptance harness, backtrace and all.
+    ///
+    /// Neither can ever be about the project, so neither can ever be the answer this function
+    /// exists to carry. `godot_logs read` still answers with both, which is where a reader who
+    /// wants the engine's own diagnostics goes.
+    #[test]
+    fn the_editors_own_startup_chatter_is_not_carried_as_the_cause() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \
+                 \"state\", and no default was given.",
+            ),
+            (LogSource::EditorError, "ERROR: Parameter \"t\" is null."),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+
+        assert_eq!(
+            carried.message, "The game did not answer in time",
+            "the editor's own chatter was carried as the cause"
+        );
+    }
+
+    /// And a real error printed after that chatter is still the one carried.
+    #[test]
+    fn an_error_after_the_editors_chatter_is_still_the_one_carried() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::EditorError,
+                "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \
+                 \"state\", and no default was given.",
+            ),
+            (
+                LogSource::EditorError,
+                "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+            ),
+            (LogSource::EditorError, "ERROR: Parameter \"t\" is null."),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "No game with the Gofer runtime helper is running",
+        ));
+
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "the parse error is what ended it: {}",
+            carried.message
+        );
+        assert!(
+            !carried.message.contains("given section"),
+            "and the chatter went with it: {}",
+            carried.message
         );
     }
 
