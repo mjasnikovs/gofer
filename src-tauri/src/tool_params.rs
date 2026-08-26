@@ -2680,6 +2680,7 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     fold_a_tag_written_flat(spec, object);
     a_pair_written_as_one_key(spec, object);
     drop_the_empty_claimant(spec, object);
+    drop_the_wreckage_a_complete_call_can_spare(spec, object);
     let wanted: Vec<(String, &'static str)> = object
         .keys()
         .filter(|key| {
@@ -2809,6 +2810,60 @@ fn a_value_out_of(tail: &str) -> Option<Value> {
         one.is_whitespace() || matches!(one, ',' | '"' | '\'' | '{' | '}' | '[' | ']' | ':' | '=')
     });
     plain.then(|| Value::String(tail.to_owned()))
+}
+
+/// Wreckage over a call that is complete without it, taken away so the call can run.
+///
+/// Measured, on a live turn building a Breakout board:
+///
+/// ```text
+/// {"op": "instantiate", "parent": "/Main", "path": "res://scenes/brick.tscn",
+///  "name': null}]_1_1_PLACEHOLDER_1_1'}, {": null}
+/// ```
+///
+/// `parent` and `path` are both there and both right, and `name` is optional — the entry is a
+/// working call with a piece of the model's own wreckage sitting beside it. It was refused, and
+/// the same call came back **eight times**: three plain refusals and then five from the repeat
+/// guard, which says the call cannot succeed and to build it again. The model could not see the
+/// key it had written, so it wrote it again, and the board never got its bricks.
+///
+/// The rule this replaces was deliberate — "dropping it quietly would build a node under a name
+/// nobody asked for" — and it was written without a measurement. Here is one: the caller loses an
+/// optional value it never managed to write, against eight round trips and no instance at all.
+/// Four more refusals in the same turn were the same shape, `{"op": "edit", "files": […],
+/// "op_save": null}` and `"op_note": null`.
+///
+/// Only when the call is otherwise whole and the wreckage is empty. A key holding *something* is a
+/// value the caller wrote and may have meant, and one required parameter missing is a call that
+/// cannot run anyway — both keep the refusal that names them.
+fn drop_the_wreckage_a_complete_call_can_spare(
+    spec: &[Param],
+    object: &mut serde_json::Map<String, Value>,
+) {
+    if spec
+        .iter()
+        .any(|param| param.required && !object.contains_key(param.name))
+    {
+        return;
+    }
+    let unknown: Vec<String> = object
+        .keys()
+        .filter(|key| {
+            !spec.iter().any(|param| param.name == key.as_str())
+                && !UNIVERSAL.contains(&key.as_str())
+                // The router resolves the operation and takes `op` off before the table sees the
+                // entry. A caller holding its own — the desktop client, a test — leaves it on, and
+                // it is the one key here that names something without being a parameter.
+                && !(key.as_str() == "op" && object[key.as_str()].is_string())
+        })
+        .cloned()
+        .collect();
+    if unknown.is_empty() || unknown.iter().any(|key| carries_a_value(object.get(key))) {
+        return;
+    }
+    for key in unknown {
+        object.remove(&key);
+    }
 }
 
 /// A key holding nothing, standing between a key holding the answer and the parameter it names.
@@ -5201,5 +5256,71 @@ mod tests {
             json!({"path": "a.tres", "shapeType": "RectangleShape2D", "size 16": Value::Null});
         repair("godot_resource", "create_shape", &mut wrong);
         assert!(wrong.get("size").is_none(), "{wrong}");
+    }
+
+    /// Wreckage over a call that is complete without it does not stop the call.
+    ///
+    /// The entry a live turn sent eight times running while building a Breakout board. `parent`
+    /// and `path` are both right, `name` is optional, and the only thing wrong is a piece of the
+    /// model's own wreckage beside them. Three plain refusals, then five from the repeat guard,
+    /// and the board never got its bricks.
+    #[test]
+    fn wreckage_over_a_call_that_is_complete_without_it_is_taken_away() {
+        // The entry as the router sees it: the operation is resolved and taken off first.
+        let mut entry = serde_json::Map::new();
+        entry.insert("parent".to_owned(), json!("/Main"));
+        entry.insert("path".to_owned(), json!("res://scenes/brick.tscn"));
+        entry.insert(
+            "name': null}]_1_1_PLACEHOLDER_1_1'}, {".to_owned(),
+            Value::Null,
+        );
+        let mut held = Value::Object(entry);
+        repair("godot_node", "instantiate", &mut held);
+        assert_eq!(held["parent"], json!("/Main"), "{held}");
+        assert_eq!(held["path"], json!("res://scenes/brick.tscn"), "{held}");
+        assert_eq!(
+            held.as_object().expect("an object").len(),
+            2,
+            "the wreckage is gone and nothing else is: {held}"
+        );
+        check_ok("godot_node", "instantiate", held);
+
+        // And a caller that holds its own `op` — the desktop client, a test — is not read as
+        // having written a key with a value in it, which would stop the wreckage being dropped.
+        let mut with_op = json!({
+            "op": "instantiate",
+            "parent": "/Main",
+            "path": "res://scenes/brick.tscn",
+            "name': null}]": Value::Null
+        });
+        repair("godot_node", "instantiate", &mut with_op);
+        assert!(with_op.get("name': null}]").is_none(), "{with_op}");
+
+        // The same shape on `godot_script edit`, four more refusals in the same turn.
+        let mut edited = json!({
+            "files": [{"path": "a.gd", "edits": [{"oldText": "x", "newText": "y"}]}],
+            "op_save": Value::Null
+        });
+        repair("godot_script", "edit", &mut edited);
+        check_ok("godot_script", "edit", edited);
+    }
+
+    /// And a call that is not complete, or wreckage that holds something, keeps its refusal.
+    #[test]
+    fn a_call_short_of_a_required_parameter_still_names_what_is_wrong() {
+        // `path` is required here and absent, so the call cannot run whatever is dropped.
+        let mut short = json!({"parent": "/Main", "namexx": Value::Null});
+        repair("godot_node", "instantiate", &mut short);
+        assert!(short.get("namexx").is_some(), "{short}");
+        check("godot_node", "instantiate", &short).expect_err("still refused");
+
+        // A key holding something is a value the caller wrote and may have meant.
+        let mut noted = json!({
+            "files": [{"path": "a.gd", "edits": [{"oldText": "x", "newText": "y"}]}],
+            "edits_note": "ball keeps wall bounces"
+        });
+        repair("godot_script", "edit", &mut noted);
+        assert!(noted.get("edits_note").is_some(), "{noted}");
+        check("godot_script", "edit", &noted).expect_err("still refused");
     }
 }
