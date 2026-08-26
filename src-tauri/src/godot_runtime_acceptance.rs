@@ -546,6 +546,69 @@ fn unkillable_probe_script(port: u16) -> String {
     )
 }
 
+/// A game that holds a port for as long as its process lives, and nothing else.
+///
+/// The spinning probe above proves a stop is synchronous; this one asks a different question — who
+/// is left running — so it must not be wedged. It binds and waits.
+fn port_holding_probe_script(port: u16) -> String {
+    format!(
+        "extends Node2D\n\nvar server := TCPServer.new()\n\nfunc _ready() -> void:\n\tserver.listen({port}, \"127.0.0.1\")\n"
+    )
+}
+
+/// An editor asked to quit takes the game it launched with it.
+///
+/// The failure this pins was found by two Godot games still running on this machine 4.8 hours
+/// after the acceptance run that started them, holding worktrees that had already been deleted.
+/// `--editor-pid` is a hint about which window to embed in, not a lifetime: measured against the
+/// pinned 4.7.2, a game whose editor had gone was still holding a port it bound in `_ready`
+/// ninety seconds later — on the editor's own `get_tree().quit()`, which is the path
+/// [`crate::godot_session::stop`] takes and the path closing Gofer takes with it.
+///
+/// The port is the question rather than a process table: a listening socket is bound for exactly
+/// as long as the process lives, so binding it here is a direct "is the game gone?".
+///
+/// What this cannot cover is the kill. An editor that will not answer is killed, and an addon in a
+/// killed editor stops nothing; that path needs Gofer to know the game's own pid and is recorded
+/// rather than asserted here.
+#[test]
+fn quitting_the_editor_takes_the_game_with_it() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    let port = free_port();
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        port_holding_probe_script(port),
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), PROBE_SCENE).expect("write the probe scene");
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| {
+            panic!(
+                "runtime.run failed: {error}\n--- editor output ---\n{}",
+                session.output()
+            )
+        });
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+        "the game must be holding its port before the editor is asked to quit"
+    );
+
+    session.quit_editor();
+
+    // No wait: the editor answers `session.quit` before it acts and only leaves a frame later, so
+    // by the time it has actually gone the game it stopped first has been gone longer.
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        "the game outlived the editor that launched it: port {port} is still held"
+    );
+}
+
 /// `runtime.stop` answers `running: false`, and the game really is gone by then.
 ///
 /// This is the one command in the addon that used to *assert* its answer rather than read one

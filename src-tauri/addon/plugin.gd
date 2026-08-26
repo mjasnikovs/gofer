@@ -1566,6 +1566,13 @@ func _session_state() -> Dictionary:
 ## Answers before it acts: the quit takes the socket with it, and a caller that lost its answer
 ## cannot tell an orderly shutdown from a crashed editor.
 func _session_quit() -> Dictionary:
+    # The game goes first. An editor quit does not take the game it launched with it: measured
+    # against the pinned 4.7.2, a game was still holding a port it bound in `_ready` ninety seconds
+    # after its editor had gone, on the editor's own `get_tree().quit()` and on a kill alike.
+    # `--editor-pid` is a hint about which window to embed in, not a lifetime. So the process Gofer
+    # started on the user's behalf outlived the app that started it, with no window in the way of
+    # noticing on a headless run and nothing left to stop it with.
+    _runtime_stop()
     _quit_countdown = 2
     return {"quitting": true}
 
