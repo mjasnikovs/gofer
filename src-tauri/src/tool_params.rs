@@ -2756,9 +2756,9 @@ fn repair_set(spec: &[Param], params: &mut Value) {
 /// nothing the call has not already said, and it is taken away rather than read.
 fn a_pair_written_as_one_key(spec: &[Param], object: &mut serde_json::Map<String, Value>) {
     let torn: Vec<String> = object
-        .iter()
-        .filter(|(key, held)| held.is_null() && !spec.iter().any(|one| one.name == key.as_str()))
-        .map(|(key, _)| key.clone())
+        .keys()
+        .filter(|key| !spec.iter().any(|one| one.name == key.as_str()))
+        .cloned()
         .collect();
     for key in torn {
         let head = the_name_at_the_head(&key).to_owned();
@@ -2771,8 +2771,18 @@ fn a_pair_written_as_one_key(spec: &[Param], object: &mut serde_json::Map<String
         if tail.is_empty() {
             continue;
         }
-        let Some(written) = a_value_out_of(tail) else {
-            continue;
+        // Either half may hold the value. `{"size [16, 16]": null}` wrote it into the key and
+        // left nothing beside it; `{"index 0": 0}` and `{"name: Coin1": "Coin1"}` wrote it into
+        // both, and there the value that arrived is the value — the tail is that same value said
+        // again, which is how this tells the shape apart from a key that merely reads as a name.
+        let beside = object.get(&key).filter(|held| !held.is_null()).cloned();
+        let written = match beside {
+            Some(held) if says_the_same(tail, &held) => held,
+            Some(_) => continue,
+            None => match a_value_out_of(tail) {
+                Some(held) => held,
+                None => continue,
+            },
         };
         // The same pair a second time, torn. Nothing to read, and the refusal it would otherwise
         // earn is about a key the caller cannot see.
@@ -2794,6 +2804,18 @@ fn a_pair_written_as_one_key(spec: &[Param], object: &mut serde_json::Map<String
         }
         object.remove(&key);
         object.insert(head, written);
+    }
+}
+
+/// Whether a torn key's tail is the value beside it, written again.
+///
+/// `"index 0": 0` and `"name: Coin1": "Coin1"` both say the value twice, once in the key and once
+/// where it belongs. That agreement is the evidence: a key that merely *reads* as a name — `pathx`,
+/// `size_list` — says nothing twice, and belongs to the rename rather than here.
+fn says_the_same(tail: &str, held: &Value) -> bool {
+    match held {
+        Value::String(text) => tail == text,
+        other => serde_json::to_string(other).is_ok_and(|written| tail == written),
     }
 }
 
@@ -5221,6 +5243,27 @@ mod tests {
         assert_eq!(worded["shapeType"], json!("RectangleShape2D"), "{worded}");
         assert_eq!(worded["size"], json!([640, 16]), "{worded}");
         check_ok("godot_resource", "create_shape", worded);
+
+        // Both halves holding the value: the key swallowed it and it arrived beside the key too.
+        let mut both = json!({
+            "index 0": 0,
+            "name Coin1": Value::Null,
+            "parent": "/Main",
+            "path": "res://scenes/coin.tscn"
+        });
+        repair("godot_node", "instantiate", &mut both);
+        assert_eq!(both["index"], json!(0), "{both}");
+        assert_eq!(both["name"], json!("Coin1"), "{both}");
+        check_ok("godot_node", "instantiate", both);
+
+        let mut colon = json!({
+            "name: Coin1": "Coin1",
+            "parent": "/Main",
+            "path": "res://scenes/coin.tscn"
+        });
+        repair("godot_node", "instantiate", &mut colon);
+        assert_eq!(colon["name"], json!("Coin1"), "{colon}");
+        check_ok("godot_node", "instantiate", colon);
 
         // The same pair a second time, torn, beside the one that survived. It says nothing the
         // call has not already said.
