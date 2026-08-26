@@ -122,6 +122,59 @@ fn a_tree_past_the_answers_budget_is_bounded_and_says_so() {
     );
 }
 
+/// A save of a scene nobody changed puts nothing on disk.
+///
+/// A live turn moved a script, then opened and saved the scene that referenced it without changing
+/// anything. `open` and `save` both answered `dirty: false, revision: 0` — and the file was rewritten
+/// anyway, losing this line:
+///
+/// ```text
+/// before  [ext_resource type="Script" uid="uid://cbk3p4i4uctns" path="res://scripts/player.gd" …]
+/// after   [ext_resource type="Script"                           path="res://scripts/player.gd" …]
+/// ```
+///
+/// The `uid` is what lets a scene find a script that has moved, so a save that changed nothing threw
+/// away the only reference that still worked. Godot rewrites from the tree in memory, and a resource
+/// it could not resolve at that moment has no id to write.
+///
+/// The rest of what that rewrite did is the everyday cost of the same bug: `load_steps` gone, a
+/// `uid` on `gd_scene` that was not there, a `unique_id` on every node. None of it was asked for, and
+/// all of it lands in the diff a user reads.
+///
+/// Godot's own `get_unsaved_scenes` is the authority here, not any counter of Gofer's: a scene it
+/// does not list is one whose file already matches what the editor holds.
+#[test]
+fn saving_a_scene_nobody_changed_leaves_the_file_alone() {
+    let mut session = Session::start();
+    let scene = session.worktree.join("main.tscn");
+    session.open_scene("res://main.tscn");
+    let before = std::fs::read_to_string(&scene).expect("the fixture scene is on disk");
+
+    let saved = session.mutate("scene.save", json!({}));
+    assert_eq!(saved["dirty"], false);
+    // And it says so, rather than letting `dirty: false` be read as "written and clean".
+    assert_eq!(saved["wrote"], false);
+    let after = std::fs::read_to_string(&scene).expect("the scene is still on disk");
+    assert_eq!(
+        before, after,
+        "a save of a scene nobody changed rewrote the file:\n--- before\n{before}\n--- after\n{after}"
+    );
+
+    // And the skip is a skip, not a refusal: the very next real change still saves.
+    session.mutate(
+        "node.create",
+        json!({"parent": "/ProtocolFixture", "name": "Marker", "type": "Marker2D"}),
+    );
+    let real = session.mutate("scene.save", json!({}));
+    assert_eq!(real["dirty"], false);
+    assert_eq!(real["wrote"], true);
+    let written = std::fs::read_to_string(&scene).expect("the scene is on disk");
+    assert!(
+        written.contains("name=\"Marker\""),
+        "the save after a real change has to reach the disk:\n{written}"
+    );
+}
+
 /// The four scene commands answer from the file they wrote, not from the write they attempted.
 ///
 /// `EditorInterface.save_scene` returns OK for a save that put nothing on disk, which is how a

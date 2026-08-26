@@ -3742,6 +3742,26 @@ func _scene_save(_params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
+    # A scene Godot does not list as unsaved is one whose file already holds what the editor holds.
+    # Saving it anyway is not free. `save_scene` rewrites the file from the tree in memory, so an
+    # `ext_resource` the editor cannot resolve at that moment loses its `uid` — and the uid is the
+    # only reference that survives the file it points at being moved. A live turn moved a script,
+    # saved the scene without changing it, and the `uid` was gone from the line that named the
+    # script. Every node also gained a `unique_id` and the scene a `uid` of its own: a diff nobody
+    # asked for, on a call that was told nothing had changed.
+    #
+    # Verified rather than trusted, because `save_scene` returning OK for a save that wrote nothing
+    # is the reason `_saved_scene_holds` exists at all: the file is read back and compared to the
+    # tree, and only a file that already matches lets the write be skipped.
+    if not _scene_is_dirty():
+        var unchanged := _saved_scene_holds(_current_scene_path, root)
+        if unchanged.is_empty():
+            return {
+                "scene": _current_scene_path,
+                "revision": _scene_revision,
+                "dirty": false,
+                "wrote": false
+            }
     var error := EditorInterface.save_scene()
     if error != OK:
         return {
@@ -3756,7 +3776,12 @@ func _scene_save(_params: Dictionary) -> Dictionary:
     var verified := _saved_scene_holds(_current_scene_path, root)
     if not verified.is_empty():
         return verified
-    return {"scene": _current_scene_path, "revision": _scene_revision, "dirty": _scene_is_dirty()}
+    return {
+        "scene": _current_scene_path,
+        "revision": _scene_revision,
+        "dirty": _scene_is_dirty(),
+        "wrote": true
+    }
 
 func _scene_save_as(params: Dictionary) -> Dictionary:
     # `root.scene_file_path` below is the editor's own `res://…` name for the file, so the request's

@@ -2,6 +2,6 @@
     "protocolVersion": 2,
     "kind": "response",
     "id": "request-scene-save",
-    "result": {"scene": "res://levels/first.tscn", "revision": 3, "dirty": false},
+    "result": {"scene": "res://levels/first.tscn", "revision": 3, "dirty": false, "wrote": true},
     "revision": 3
 }

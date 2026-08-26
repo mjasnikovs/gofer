@@ -228,7 +228,7 @@
         {
             "tool": "godot_scene",
             "op": "save",
-            "summary": "Saves the edited scene.",
+            "summary": "Saves the edited scene. A scene nothing has changed is left exactly as it is and answers `wrote: false`; saving one anyway rewrites it from memory and drops the `uid` of anything the editor cannot resolve right now.",
             "alone": {
                 "scope": "repeat",
                 "why": "One scene is open at a time, so a second one would act on whatever the first left open."

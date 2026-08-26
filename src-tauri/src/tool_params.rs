@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:150e46773f65cebd
+// GENERATED-BEGIN operations sha256:2db990680bafe291
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -621,7 +621,7 @@ pub const GODOT_SCENE_OPERATIONS: &[Operation] = &[
         op(
             "godot_scene",
             "save",
-            "Saves the edited scene.",
+            "Saves the edited scene. A scene nothing has changed is left exactly as it is and answers `wrote: false`; saving one anyway rewrites it from memory and drops the `uid` of anything the editor cannot resolve right now.",
             Answers::Addon("scene.save"),
             &[noted(
                 hidden("expectedRevision", Int),
