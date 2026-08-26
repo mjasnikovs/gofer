@@ -141,6 +141,14 @@ impl FileError {
     /// sent that agent in a circle: it had just re-read the script, held the current hash, passed
     /// none, and was told the file had changed — which it had not. So each case names itself.
     ///
+    /// The first of the three names the call that satisfies it, and names the one that does not.
+    /// "Read the file first" is what it said, and the `read` tool is what a model then reaches for
+    /// — it is the word in the sentence. That read never reaches this ledger: the ledger is filled
+    /// from the `{path, hash}` an answer carries, and the local file tools answer with neither.
+    /// Watched in three of four live runs on the same script, one wasted round trip each, every one
+    /// of them recovered by `godot_script open` — which the operation's own summary already asks
+    /// for, and which the refusal did not.
+    ///
     /// None of them names the hash. The only reader of this prose is a model, because the renderer
     /// drops the text and raises its own out-of-date bar instead, and `expectedHash` is hidden from
     /// the model's signature and filled in by the router from the read ledger. Telling that caller
@@ -151,8 +159,9 @@ impl FileError {
             // Nothing was passed for a file that is already there: the ledger holds no record, so
             // this caller has never been told what the file contains.
             (None, Some(_)) => format!(
-                "{path} exists but has not been read. Nothing was written. Read the file first, \
-                 then save."
+                "{path} exists and this agent has not been shown what it holds. Nothing was \
+                 written. Open it with `godot_script open` — a plain `read` does not record what \
+                 it showed you — then save."
             ),
             // A hash for a file that is not there: the record outlived the file. The router drops
             // the record on this refusal, so saying "save it again" is true rather than a loop.
@@ -1152,8 +1161,16 @@ mod tests {
 
         let omitted = workspace.write("a.gd", "two", None).expect_err("exists");
         assert!(
-            omitted.message.contains("has not been read"),
+            omitted.message.contains("has not been shown what it holds"),
             "an unread file must not be reported as an outside change: {}",
+            omitted.message
+        );
+        // And it names the call that satisfies it. "Read the file first" was the sentence, the
+        // `read` tool is what a model reached for, and that read never reaches this ledger —
+        // three of four live runs on the same script, one wasted round trip each.
+        assert!(
+            omitted.message.contains("godot_script open"),
+            "the way out has to be in the sentence: {}",
             omitted.message
         );
 

@@ -2678,6 +2678,7 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     put_the_pair_back(spec, object);
     drop_the_wreckage_of_a_pair_that_survived(spec, object);
     fold_a_tag_written_flat(spec, object);
+    a_pair_written_as_one_key(spec, object);
     drop_the_empty_claimant(spec, object);
     let wanted: Vec<(String, &'static str)> = object
         .keys()
@@ -2721,6 +2722,93 @@ fn repair_set(spec: &[Param], params: &mut Value) {
             _ => {}
         }
     }
+}
+
+/// A name and its value written as one key, with the colon and the quotes lost between them.
+///
+/// One live turn's `create_shape` calls, six of them in a row, five distinct shapes:
+///
+/// ```text
+/// {"op": "create_shape", "path": …, "shapeType": "RectangleShape2D", "size [16, 16]": null}
+/// {"op": "create_shape", "op create_shape": null, "path shapes/floor_shape.tres": null,
+///  "shapeType RectangleShape2D": null, "size [640, 16]": null}
+/// ```
+///
+/// Every one of them is `"<name> <value>": null`. The pair was written, the separator was not, and
+/// what should have been a value became part of the key — so the parameter is absent and the key
+/// beside it names nothing. Neither existing repair reaches it: the key is not name-shaped, so
+/// `only_one_meaning` needs a value beside it and there is none, and it holds more than punctuation
+/// past its name, so `tore_away_the_value` says no.
+///
+/// Two shapes, and nothing else:
+///
+/// The tail is a whole JSON value — `[16, 16]` — or one plain word with no space, comma, quote or
+/// bracket in it, which is what a path, a class name or a node path looks like. A tail that is
+/// neither is wreckage rather than a value: `"size 16: null}]er_shape.tres, "` is two calls that
+/// ran into each other, and `"path a.tres, b.tres"` is two operations written as one. Both stay for
+/// `check` to name.
+///
+/// And the result has to be one the parameter could hold, which is the rule every rename follows.
+///
+/// A key whose head names something the object already carries, with the same value, is the second
+/// half of a pair that survived — `"op create_shape": null` beside `"op": "create_shape"`. It says
+/// nothing the call has not already said, and it is taken away rather than read.
+fn a_pair_written_as_one_key(spec: &[Param], object: &mut serde_json::Map<String, Value>) {
+    let torn: Vec<String> = object
+        .iter()
+        .filter(|(key, held)| held.is_null() && !spec.iter().any(|one| one.name == key.as_str()))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in torn {
+        let head = the_name_at_the_head(&key).to_owned();
+        if head.is_empty() {
+            continue;
+        }
+        let tail = key[head.len()..].trim_matches(|one: char| {
+            one.is_whitespace() || one == ':' || one == '=' || one == '"' || one == '\''
+        });
+        if tail.is_empty() {
+            continue;
+        }
+        let Some(written) = a_value_out_of(tail) else {
+            continue;
+        };
+        // The same pair a second time, torn. Nothing to read, and the refusal it would otherwise
+        // earn is about a key the caller cannot see.
+        if object.get(&head) == Some(&written) {
+            object.remove(&key);
+            continue;
+        }
+        if object.contains_key(&head) {
+            continue;
+        }
+        let Some(param) = spec
+            .iter()
+            .find(|one| !one.hidden && one.name == head.as_str())
+        else {
+            continue;
+        };
+        if !could_become(param.kind, &written) {
+            continue;
+        }
+        object.remove(&key);
+        object.insert(head, written);
+    }
+}
+
+/// The value half of a key that swallowed one, or nothing when what is there is not a value.
+///
+/// A whole JSON value, or one plain word. `serde_json` stops at the end of the first value it
+/// reads, so the whole tail has to be consumed — otherwise `[32, 32]}]edits`, which is two tool
+/// calls that ran into each other, would read as a size.
+fn a_value_out_of(tail: &str) -> Option<Value> {
+    if let Ok(held) = serde_json::from_str::<Value>(tail) {
+        return Some(held);
+    }
+    let plain = !tail.chars().any(|one| {
+        one.is_whitespace() || matches!(one, ',' | '"' | '\'' | '{' | '}' | '[' | ']' | ':' | '=')
+    });
+    plain.then(|| Value::String(tail.to_owned()))
 }
 
 /// A key holding nothing, standing between a key holding the answer and the parameter it names.
@@ -5047,5 +5135,71 @@ mod tests {
         // 14 seeds interleaved, **0 of 24 against 0 of 27**. It is the second thing measured to
         // make no difference to how this model writes `size` — printing the shape in the signature
         // was the first, 0 of 4 either way. Prose does not reach this field; the repairs do.
+    }
+
+    /// A name and its value written as one key, with the separator lost between them.
+    ///
+    /// One live turn sent `create_shape` six times running and was refused six times. Five distinct
+    /// shapes, every one of them `"<name> <value>": null` — the pair written, the colon and the
+    /// quotes not. Neither existing repair reaches it, so the parameter was simply absent and the
+    /// key beside it named nothing.
+    #[test]
+    fn a_name_and_its_value_written_as_one_key_are_read_as_a_pair() {
+        // The whole recorded entry, wreckage and all.
+        let mut held = json!({
+            "path": "shapes/player_shape.tres",
+            "shapeType": "RectangleShape2D",
+            "size [16, 16]": Value::Null
+        });
+        repair("godot_resource", "create_shape", &mut held);
+        assert_eq!(held["size"], json!([16, 16]), "{held}");
+        check_ok("godot_resource", "create_shape", held);
+
+        // A plain word is a value too: a path, a class name, a node path.
+        let mut worded = json!({
+            "path shapes/floor_shape.tres": Value::Null,
+            "shapeType RectangleShape2D": Value::Null,
+            "size [640, 16]": Value::Null
+        });
+        repair("godot_resource", "create_shape", &mut worded);
+        assert_eq!(worded["path"], json!("shapes/floor_shape.tres"), "{worded}");
+        assert_eq!(worded["shapeType"], json!("RectangleShape2D"), "{worded}");
+        assert_eq!(worded["size"], json!([640, 16]), "{worded}");
+        check_ok("godot_resource", "create_shape", worded);
+
+        // The same pair a second time, torn, beside the one that survived. It says nothing the
+        // call has not already said.
+        let mut twice = json!({
+            "node": "/Main/Player",
+            "node /Main/Player": Value::Null,
+            "group": "player"
+        });
+        repair("godot_node", "add_to_group", &mut twice);
+        assert!(twice.get("node /Main/Player").is_none(), "{twice}");
+        check_ok("godot_node", "add_to_group", twice);
+    }
+
+    /// And what is not a value stays for `check` to name.
+    #[test]
+    fn a_key_that_swallowed_two_calls_is_not_read_as_a_pair() {
+        // Two calls that ran into each other. The tail begins with a list and does not end there.
+        let mut ran_together = json!({
+            "path": "a.tres",
+            "shapeType": "RectangleShape2D",
+            "size [32, 32]}]edits": Value::Null
+        });
+        repair("godot_resource", "create_shape", &mut ran_together);
+        assert!(ran_together.get("size").is_none(), "{ran_together}");
+
+        // Two operations written as one key. A comma is not part of a path.
+        let mut both = json!({"path shapes/a.tres, shapes/b.tres": Value::Null});
+        repair("godot_resource", "rescan", &mut both);
+        assert!(both.get("path").is_none(), "{both}");
+
+        // And a tail the parameter could not hold. `size` takes a list, and this is a number.
+        let mut wrong =
+            json!({"path": "a.tres", "shapeType": "RectangleShape2D", "size 16": Value::Null});
+        repair("godot_resource", "create_shape", &mut wrong);
+        assert!(wrong.get("size").is_none(), "{wrong}");
     }
 }
