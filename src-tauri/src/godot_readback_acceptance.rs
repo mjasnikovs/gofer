@@ -1201,7 +1201,7 @@ fn a_resource_this_tool_wrote_carries_a_uid_the_project_can_resolve() {
     let directory = TempDir::new().expect("temporary directory");
     let worktree = fixture_worktree(&directory);
     let ledger = directory.path().join("ledger.json");
-    let mut session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+    let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
     session.call(
         "resource.create_shape",

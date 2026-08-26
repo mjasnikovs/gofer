@@ -635,3 +635,219 @@ fn the_known_broken_classes_behave() {
         "the refusal has to name what to use instead, answered: {refusal}"
     );
 }
+
+/// A node becomes another class without being rebuilt, and everything it was keeps travelling.
+///
+/// The edit a Godot project needs constantly, and the one this catalogue had no word for. A player
+/// placed as a `Node2D` becomes a `CharacterBody2D` the moment the game needs gravity, and the
+/// editor has "Change Type" on its right-click menu for exactly that. Three live turns on the local
+/// model did it by hand instead — delete, recreate, put the children back, re-attach the script,
+/// re-set every property, re-add every group — and one of them asked outright in its own reasoning:
+/// "Can I change a node's type? The tool list doesn't have a change type op." That turn wrote the
+/// workaround as a single batched call, its JSON tore across the batch, and it spent five refusals
+/// and 3,642 tokens before abandoning the batch.
+///
+/// So the test is everything the workaround had to redo by hand, plus the undo.
+#[test]
+fn a_node_becomes_another_class_and_keeps_what_the_new_one_can_hold() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://level.tscn", "rootType": "Node2D", "rootName": "Level"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Level", "name": "Player", "type": "Node2D"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Level/Player", "name": "Label", "type": "Label"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Level", "name": "After", "type": "Node2D"}),
+    );
+    session.mutate(
+        "node.set_property",
+        json!({
+            "node": "/Level/Player",
+            "property": "position",
+            "value": {"type": "vector2", "value": [64, 200]}
+        }),
+    );
+    session.mutate(
+        "node.add_to_group",
+        json!({"node": "/Level/Player", "group": "player"}),
+    );
+
+    let changed = session.mutate(
+        "node.change_type",
+        json!({"node": "/Level/Player", "type": "CharacterBody2D"}),
+    );
+    assert_eq!(changed["node"], "/Level/Player", "{changed}");
+    assert_eq!(changed["type"], "CharacterBody2D", "{changed}");
+
+    // The name, the class, the child, the group, and the property a Node2D and a CharacterBody2D
+    // both declare. And the place: `After` was created second and has to stay second.
+    let node = session.call("node.inspect", json!({"node": "/Level/Player"}));
+    assert_eq!(node["type"], "CharacterBody2D", "{node}");
+    assert_eq!(node["groups"], json!(["player"]), "{node}");
+    let position = node["properties"]
+        .as_array()
+        .expect("properties")
+        .iter()
+        .find(|entry| entry["name"] == "position")
+        .unwrap_or_else(|| panic!("the position it was given has to travel with it: {node}"));
+    assert_eq!(
+        position["value"],
+        json!({"type": "vector2", "value": [64.0, 200.0]}),
+        "{node}"
+    );
+    let tree = session.call("scene.get_tree", json!({}));
+    assert!(
+        tree.to_string().contains("/Level/Player/Label"),
+        "the child has to travel with the node it hung from: {tree}"
+    );
+    let order: Vec<String> = tree["root"]["children"]
+        .as_array()
+        .expect("children")
+        .iter()
+        .map(|child| child["name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["Player".to_owned(), "After".to_owned()],
+        "{tree}"
+    );
+
+    // And the file, because a node the scene does not own is a node the save writes nothing about.
+    session.mutate("scene.save", json!({}));
+    let saved = std::fs::read_to_string(session.worktree.join("level.tscn")).expect("the scene");
+    assert!(saved.contains("type=\"CharacterBody2D\""), "{saved}");
+    assert!(saved.contains("groups="), "{saved}");
+    assert!(saved.contains("[node name=\"Label\""), "{saved}");
+
+    // One undo, because the change was one action.
+    session.mutate("session.undo", json!({}));
+    let back = session.call("node.inspect", json!({"node": "/Level/Player"}));
+    assert_eq!(back["type"], "Node2D", "{back}");
+    assert_eq!(back["groups"], json!(["player"]), "{back}");
+    let after = session.call("scene.get_tree", json!({}));
+    assert!(
+        after.to_string().contains("/Level/Player/Label"),
+        "the child comes back with it: {after}"
+    );
+}
+
+/// The scene's own root is what the file is of, so it is refused by name rather than replaced.
+#[test]
+fn the_scenes_root_is_not_a_node_whose_type_can_be_changed() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://root.tscn", "rootType": "Node2D", "rootName": "Level"}),
+    );
+    let at = session.call("scene.get_tree", json!({}))["revision"]
+        .as_u64()
+        .expect("the scene reports its revision");
+    let refused = session
+        .try_call(
+            "node.change_type",
+            json!({"node": "/Level", "type": "CharacterBody2D"}),
+            Some(at),
+        )
+        .expect_err("the root is refused");
+    assert!(refused.contains("root"), "{refused}");
+    assert!(refused.contains("scene.create"), "{refused}");
+}
+
+/// The script travels, and a script the new class cannot take is said out loud.
+///
+/// The half that fails silently in Godot: `set_script` on a node whose class the script does not
+/// extend leaves the node without one, says nothing, and every `@export` and every method the
+/// scene relied on is simply gone. A live turn's whole reason for changing a type was to keep the
+/// script it already had.
+#[test]
+fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://scripted.tscn", "rootType": "Node2D", "rootName": "Level"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Level", "name": "Player", "type": "Node2D"}),
+    );
+    // Scripts are Gofer's own commands rather than the addon's, so the file is written the way
+    // anything outside the editor writes one and the editor is told about it.
+    std::fs::write(
+        session.worktree.join("player.gd"),
+        "extends Node2D\n\n@export var speed := 24.0\n",
+    )
+    .expect("write the script");
+    session.call("resource.rescan", json!({"path": "res://player.gd"}));
+    session.mutate(
+        "node.set_property",
+        json!({
+            "node": "/Level/Player",
+            "property": "script",
+            "value": {"type": "resource", "value": {"path": "res://player.gd"}}
+        }),
+    );
+
+    // A CharacterBody2D is a Node2D, so a script extending Node2D attaches to it.
+    session.mutate(
+        "node.change_type",
+        json!({"node": "/Level/Player", "type": "CharacterBody2D"}),
+    );
+    let node = session.call("node.inspect", json!({"node": "/Level/Player"}));
+    assert_eq!(node["type"], "CharacterBody2D", "{node}");
+    // `node.inspect` does not name the script file, and it does not have to: `speed` is the
+    // script's own `@export` and nothing else could put it on a CharacterBody2D.
+    let speed = node["properties"]
+        .as_array()
+        .expect("properties")
+        .iter()
+        .find(|entry| entry["name"] == "speed")
+        .unwrap_or_else(|| panic!("the script has to travel, exports and all: {node}"));
+    assert_eq!(
+        speed["value"],
+        json!({"type": "float", "value": 24.0}),
+        "{node}"
+    );
+    session.mutate("scene.save", json!({}));
+    let saved = std::fs::read_to_string(session.worktree.join("scripted.tscn")).expect("the scene");
+    assert!(saved.contains("player.gd"), "{saved}");
+
+    // A Node2D is not a CharacterBody2D, so the same script cannot go the other way. Godot drops
+    // it without a word; this says so instead of writing a node that lost its behaviour.
+    std::fs::write(
+        session.worktree.join("body.gd"),
+        "extends CharacterBody2D\n",
+    )
+    .expect("write the script");
+    session.call("resource.rescan", json!({"path": "res://body.gd"}));
+    session.mutate(
+        "node.set_property",
+        json!({
+            "node": "/Level/Player",
+            "property": "script",
+            "value": {"type": "resource", "value": {"path": "res://body.gd"}}
+        }),
+    );
+    let at = session.call("scene.get_tree", json!({}))["revision"]
+        .as_u64()
+        .expect("the scene reports its revision");
+    let refused = session
+        .try_call(
+            "node.change_type",
+            json!({"node": "/Level/Player", "type": "Node2D"}),
+            Some(at),
+        )
+        .expect_err("a script the new class cannot take is refused");
+    assert!(refused.contains("script_incompatible"), "{refused}");
+
+    // And nothing changed: the node is still what it was, with the script it had.
+    let unchanged = session.call("node.inspect", json!({"node": "/Level/Player"}));
+    assert_eq!(unchanged["type"], "CharacterBody2D", "{unchanged}");
+}

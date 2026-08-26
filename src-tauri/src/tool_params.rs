@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:f177d1669e6503b7
+// GENERATED-BEGIN operations sha256:7aad2907045aaf9c
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -777,6 +777,21 @@ pub const GODOT_NODE_OPERATIONS: &[Operation] = &[
             need("node", Text),
             need("newParent", Text),
             opt("index", Int),
+            noted(
+                hidden("expectedRevision", Int),
+                "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+            ),
+            hidden("scene", Text),
+        ],
+    ),
+    op(
+        "godot_node",
+        "change_type",
+        "Turns a node into one of another class, keeping its name, its place, its children, its groups, its script, and every stored property the new class also has. This is the editor’s own Change Type: a Node2D placed as a player becomes a CharacterBody2D without being rebuilt node by node. A signal connected to or from the node does not travel — the connection names the node, and the new one is a different object — so put those back with connect_signal. The scene’s own root cannot be changed this way.",
+        Answers::Addon("node.change_type"),
+        &[
+            need("node", Text),
+            need("type", Text),
             noted(
                 hidden("expectedRevision", Int),
                 "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",

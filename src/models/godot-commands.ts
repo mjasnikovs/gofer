@@ -43,7 +43,7 @@ export type GodotCommandSpec<Params extends GodotParams, Result extends GodotRes
     result: Result
 }>
 
-// GENERATED-BEGIN command-names sha256:b0ace3bed55f2487
+// GENERATED-BEGIN command-names sha256:dcb02e6c474a7e5f
 export type GodotCommandName =
     | 'session.get_state'
     | 'session.cancel'
@@ -84,6 +84,7 @@ export type GodotCommandName =
     | 'node.duplicate'
     | 'node.rename'
     | 'node.reparent'
+    | 'node.change_type'
     | 'node.delete'
     | 'node.set_property'
     | 'node.set_properties'

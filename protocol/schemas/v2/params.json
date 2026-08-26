@@ -509,6 +509,32 @@
         },
         {
             "tool": "godot_node",
+            "op": "change_type",
+            "summary": "Turns a node into one of another class, keeping its name, its place, its children, its groups, its script, and every stored property the new class also has. This is the editor’s own Change Type: a Node2D placed as a player becomes a CharacterBody2D without being rebuilt node by node. A signal connected to or from the node does not travel — the connection names the node, and the new one is a different object — so put those back with connect_signal. The scene’s own root cannot be changed this way.",
+            "params": [
+                {
+                    "name": "node",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "type",
+                    "kind": "text",
+                    "required": true
+                },
+                {
+                    "name": "expectedRevision",
+                    "kind": "int",
+                    "required": false,
+                    "note": "Supplied by the router from the last answer that reported it, so a call never carries one. It stays accepted for a caller that holds its own.",
+                    "hidden": true
+                }
+            ],
+            "command": "node.change_type",
+            "accepts": ["scene"]
+        },
+        {
+            "tool": "godot_node",
             "op": "delete",
             "summary": "Deletes a node.",
             "params": [

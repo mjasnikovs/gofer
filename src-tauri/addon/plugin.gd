@@ -309,7 +309,7 @@ const SHAPE_TYPES := {
     "WorldBoundaryShape2D": "nothing",
 }
 
-# GENERATED-BEGIN mutating-commands sha256:cff35d5510fe56d3
+# GENERATED-BEGIN mutating-commands sha256:801d6dbcf7784bd2
 const MUTATING_COMMANDS: Array[String] = [
     "session.undo",
     "session.redo",
@@ -323,6 +323,7 @@ const MUTATING_COMMANDS: Array[String] = [
     "node.duplicate",
     "node.rename",
     "node.reparent",
+    "node.change_type",
     "node.delete",
     "node.set_property",
     "node.set_properties",
@@ -344,7 +345,7 @@ const MUTATING_COMMANDS: Array[String] = [
 ## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
 ## the caller, so a handler that looked for them among its parameters would refuse every call that
 ## was actually well formed.
-# GENERATED-BEGIN command-params sha256:0a07efc9e3c87b98
+# GENERATED-BEGIN command-params sha256:80a058a090ba4b8b
 const COMMAND_PARAMS: Dictionary = {
     "session.get_state": {"required": [], "optional": []},
     "session.answer_dialog": {"required": ["button"], "optional": []},
@@ -364,6 +365,7 @@ const COMMAND_PARAMS: Dictionary = {
     "node.duplicate": {"required": ["node"], "optional": ["name", "scene"]},
     "node.rename": {"required": ["node", "name"], "optional": ["scene"]},
     "node.reparent": {"required": ["node", "newParent"], "optional": ["index", "scene"]},
+    "node.change_type": {"required": ["node", "type"], "optional": ["scene"]},
     "node.delete": {"required": ["node"], "optional": ["scene"]},
     "node.set_property": {"required": ["node", "property", "value"], "optional": ["scene"]},
     "node.set_properties": {"required": ["properties"], "optional": ["scene"]},
@@ -742,7 +744,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
     if declared.has("_gofer_error"):
         return declared
 
-# GENERATED-BEGIN dispatch-table sha256:8dc0df69720ff5c2
+# GENERATED-BEGIN dispatch-table sha256:0562db5e1d01fe9c
     match command:
         "session.get_state":
             return _session_state()
@@ -822,6 +824,8 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
             return _node_rename(params)
         "node.reparent":
             return _node_reparent(params)
+        "node.change_type":
+            return _node_change_type(params)
         "node.delete":
             return _node_delete(params)
         "node.set_property":
@@ -4536,6 +4540,143 @@ func _node_reparent(params: Dictionary) -> Dictionary:
     _bump_revision()
     return {"node": _node_path(node)}
 
+## Turns a node into one of another class, keeping everything about it that the new class can hold.
+##
+## The one edit a Godot project needs constantly and this catalogue had no word for. A `Node2D`
+## placed as a player becomes a `CharacterBody2D` the moment the game needs gravity, and the editor
+## has "Change Type" on the right-click menu for exactly that.
+##
+## Without it a model does it by hand, and three live turns did: delete the node, create the new
+## one, put the children back, re-attach the script, re-set every property, re-add every group. One
+## wrote that as a single `godot_node` call of `delete` + `create_nodes` + three `instantiate`
+## entries, its JSON tore across the batch, and it spent five refusals and 3,642 tokens before
+## giving up on the batch. Another asked the question outright in its own reasoning: "Can I change a
+## node's type? The tool list doesn't have a change type op."
+##
+## What travels: the name, the place under the parent, the children, the groups, the script, and
+## every stored property the new class also declares. What does not: a signal connected to or from
+## this node, because the connection names the node and the new one is a different object — the
+## summary says so, and `node.connect_signal` is the word for putting one back.
+func _node_change_type(params: Dictionary) -> Dictionary:
+    var scene: String = params.get("scene", "")
+    var node_path_str: String = params.get("node", "")
+    var node_type: String = params.get("type", "")
+
+    var scene_check := _require_current_scene(scene)
+    if not scene_check.is_empty():
+        return scene_check
+    if node_path_str.is_empty() or node_type.is_empty():
+        return Params.error("invalid_params", "node.change_type requires node and type")
+    if UNCREATABLE_TYPES.has(node_type):
+        return Params.error(
+            "invalid_node_type", UNCREATABLE_TYPES[node_type], {"type": node_type}
+        )
+
+    var node := _find_node(node_path_str)
+    if node == null:
+        return _node_not_found_error(node_path_str)
+    var root := _edited_root()
+    # The scene's own root is what the file is *of*, so replacing it is a different scene rather
+    # than a changed node — the editor treats it that way too. Refused by name, with the two calls
+    # that do what this was reaching for.
+    if node == root:
+        return Params.error(
+            "invalid_node",
+            "%s is the scene's root, and a scene is of its root — changing it is a different "
+            % node_path_str
+            + "scene. Make one with scene.create and move the nodes over, or put this node under "
+            + "a new root with node.reparent.",
+            {"node": node_path_str}
+        )
+    if node.get_class() == node_type:
+        return Params.error(
+            "invalid_node_type",
+            "%s is already a %s." % [node_path_str, node_type],
+            {"node": node_path_str, "type": node_type}
+        )
+
+    var replacement: Node = ClassDB.instantiate(node_type) as Node
+    if replacement == null:
+        return Params.error(
+            "invalid_node_type", "Could not instantiate %s" % node_type, {"type": node_type}
+        )
+
+    # The script first, so the properties it declares are properties the replacement has by the
+    # time they are copied. A script that extends the class being left behind cannot attach to the
+    # one being moved to, and Godot says nothing about it — the node simply arrives without it, and
+    # every `@export` and every method the scene relied on is gone. So it is checked here.
+    var script := node.get_script()
+    if script != null:
+        # Asked before it is set, because `set_script` is not the thing that refuses. Godot takes a
+        # script whose base the node is not — `get_script` answers with it, the editor shows it, and
+        # the node is simply broken when the scene runs. So the class is compared here.
+        var base := ""
+        if script.has_method("get_instance_base_type"):
+            base = str(script.get_instance_base_type())
+        if (
+            not base.is_empty()
+            and ClassDB.class_exists(base)
+            and node_type != base
+            and not ClassDB.is_parent_class(node_type, base)
+        ):
+            replacement.free()
+            return Params.error(
+                "script_incompatible",
+                "%s carries a script that extends %s, and a %s is not one. Change what the "
+                % [node_path_str, base, node_type]
+                + "script extends first, with godot_script edit, then change the type.",
+                {"node": node_path_str, "type": node_type, "extends": base}
+            )
+        replacement.set_script(script)
+    _carry_the_properties_over(node, replacement)
+    replacement.name = node.name
+    for group in node.get_groups():
+        if not String(group).begins_with("_"):
+            replacement.add_to_group(group, true)
+
+    var parent := node.get_parent()
+    var index := node.get_index()
+    var undo := _begin_action("Change %s to %s" % [node.name, node_type])
+    undo.add_do_method(self, "_do_swap_node", node, replacement, parent, root, index)
+    undo.add_undo_method(self, "_do_swap_node", replacement, node, parent, root, index)
+    undo.add_do_reference(replacement)
+    undo.add_undo_reference(node)
+    undo.commit_action()
+
+    var attached := _attached_node(
+        parent, replacement, root, "node.change_type", {"node": node_path_str}
+    )
+    if attached.has("_gofer_error"):
+        return attached
+    if replacement.get_class() != node_type:
+        return _readback_error(
+            "node.change_type", node_type, replacement.get_class(), {"node": node_path_str}
+        )
+
+    _bump_revision()
+    return {"node": _node_path(replacement), "type": replacement.get_class()}
+
+## Every stored property the outgoing node holds that the incoming one also declares.
+##
+## Named rather than positional: Godot's property names are the contract, and a name two classes
+## share is the same property in both. `name` and `owner` belong to where a node sits rather than to
+## what it is, and the swap sets both; `script` is already on the replacement, and re-setting it
+## from this list would put it back after its own exported values.
+func _carry_the_properties_over(outgoing: Node, incoming: Node) -> void:
+    var takes := {}
+    for entry in incoming.get_property_list():
+        if int(entry.get("usage", 0)) & PROPERTY_USAGE_STORAGE != 0:
+            takes[str(entry.get("name", ""))] = true
+    for entry in outgoing.get_property_list():
+        var name := str(entry.get("name", ""))
+        if name.is_empty() or not takes.has(name):
+            continue
+        if int(entry.get("usage", 0)) & PROPERTY_USAGE_STORAGE == 0:
+            continue
+        if name in ["name", "owner", "script"]:
+            continue
+        incoming.set(name, outgoing.get(name))
+
 func _node_delete(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
     var node_path_str: String = params.get("node", "")
@@ -5546,6 +5687,33 @@ func _do_attach(parent: Node, child: Node, owner: Node, index: int) -> void:
 func _do_detach(parent: Node, child: Node) -> void:
     if child.get_parent() == parent:
         parent.remove_child(child)
+
+## Takes one node out of its place and puts another in it, with the first one's children.
+##
+## The same function both ways: undoing a type change is swapping the pair back, so the do and the
+## undo of `node.change_type` are one method called with its two arguments the other way round.
+##
+## Owners are set again on the way past. A node keeps its owner while it is only moved, and loses it
+## when it leaves the tree and comes back — and a node the edited scene does not own is a node the
+## save writes nothing about.
+func _do_swap_node(outgoing: Node, incoming: Node, parent: Node, owner: Node, index: int) -> void:
+    for child in outgoing.get_children():
+        outgoing.remove_child(child)
+        incoming.add_child(child, true)
+    if outgoing.get_parent() == parent:
+        parent.remove_child(outgoing)
+    parent.add_child(incoming, true)
+    if owner != null:
+        _own_the_whole_branch(incoming, owner)
+    if index >= 0 and index < parent.get_child_count():
+        parent.move_child(incoming, index)
+
+## Gives a node and everything under it to the scene that holds them.
+func _own_the_whole_branch(node: Node, owner: Node) -> void:
+    if node != owner:
+        node.set_owner(owner)
+    for child in node.get_children():
+        _own_the_whole_branch(child, owner)
 
 func _do_reparent(node: Node, new_parent: Node, owner: Node, index: int) -> void:
     var old_parent := node.get_parent()

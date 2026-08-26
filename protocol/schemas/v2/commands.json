@@ -55,6 +55,7 @@
         {"command": "node.duplicate", "handler": "_node_duplicate"},
         {"command": "node.rename", "handler": "_node_rename"},
         {"command": "node.reparent", "handler": "_node_reparent"},
+        {"command": "node.change_type", "handler": "_node_change_type"},
         {"command": "node.delete", "handler": "_node_delete"},
         {"command": "node.set_property", "handler": "_node_set_property"},
         {"command": "node.set_properties", "handler": "_node_set_properties"},

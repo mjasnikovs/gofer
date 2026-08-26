@@ -109,9 +109,9 @@ must carry `expectedRevision`, and a mutating response carries the resulting `re
 expected revision is stale the addon answers `revision_conflict` and changes nothing. The mutating
 commands are `session.undo`, `session.redo`, `scene.create`, `scene.save`, `scene.save_as`,
 `scene.reload`, `node.create`, `node.create_nodes`, `node.instantiate`, `node.duplicate`,
-`node.rename`, `node.reparent`, `node.delete`, `node.set_property`, `node.set_properties`,
-`node.add_to_group`, `node.remove_from_group`, `node.connect_signal`, `node.disconnect_signal`, and
-`node.set_cells`.
+`node.rename`, `node.reparent`, `node.change_type`, `node.delete`, `node.set_property`,
+`node.set_properties`, `node.add_to_group`, `node.remove_from_group`, `node.connect_signal`,
+`node.disconnect_signal`, and `node.set_cells`.
 
 ### Limits
 

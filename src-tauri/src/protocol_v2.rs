@@ -22,8 +22,8 @@ pub const DOMAINS: [&str; 12] = [
     "logs", "files", "docs",
 ];
 
-// GENERATED-BEGIN mutating-commands sha256:74a7fd98704f6434
-pub const MUTATING_COMMANDS: [&str; 20] = [
+// GENERATED-BEGIN mutating-commands sha256:98953c2ac3fdb81e
+pub const MUTATING_COMMANDS: [&str; 21] = [
     "session.undo",
     "session.redo",
     "scene.create",
@@ -36,6 +36,7 @@ pub const MUTATING_COMMANDS: [&str; 20] = [
     "node.duplicate",
     "node.rename",
     "node.reparent",
+    "node.change_type",
     "node.delete",
     "node.set_property",
     "node.set_properties",
