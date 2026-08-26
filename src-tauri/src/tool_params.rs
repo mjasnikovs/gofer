@@ -2096,6 +2096,59 @@ fn check_set(
         format!("{takes} {shape}.")
     };
 
+    let unknown: Vec<&String> = object
+        .keys()
+        .filter(|key| {
+            !spec.iter().any(|param| param.name == *key)
+                && !(where_.is_empty() && UNIVERSAL.contains(&key.as_str()))
+        })
+        .collect();
+    // More than one key it does not take, and at least one of them could never have been a name.
+    //
+    // The loop below answers about the first bad key and returns, which is right when there is one
+    // and costs a round trip per key when there are several. A live turn wrote three coins as three
+    // `instantiate` entries, the JSON tore across all three, and the entry arrived carrying
+    // `nameCoin1`, `name": "Coin1"}, {` and `path": "res://scenes/coin.tscn", ` beside an intact
+    // `op`, `parent` and `path`. Gofer named one key per refusal: `nameCoin1` first, with
+    // `Did you mean \`name\`?`, then the next, then the next. Five round trips and 3.6k tokens
+    // before the repeat guard finally told it to build the call again, which it then did in one.
+    //
+    // Two or more unknown keys with a tear among them is not a vocabulary problem, so the spelling
+    // hint is withheld: it sends a model looking for a better word for wreckage. The wording is the
+    // one measured 15 of 15 on [`torn_object`] — name the intact keys, and ask for the whole call.
+    //
+    // The single-tear branch below is left alone: where a key tore and took its value with it, and
+    // its head names a real parameter, that refusal was measured and this one must not preempt it.
+    let single_tear = unknown.iter().any(|key| {
+        tore_away_the_value(key, object.get(*key))
+            && spec
+                .iter()
+                .any(|param| !param.hidden && param.name == the_name_at_the_head(key))
+    });
+    if !single_tear && unknown.len() > 1 && unknown.iter().any(|key| !could_be_a_name(key)) {
+        // Only the keys the operation declares. The other branch's list is "could be a name",
+        // which is right where one key tore; here a name-shaped piece of wreckage — `nameCoin1`,
+        // the parameter glued to the value it was about to carry — would be read back as a key
+        // that landed, and the whole sentence is about what did not.
+        let intact: serde_json::Map<String, Value> = object
+            .iter()
+            .filter(|(name, _)| spec.iter().any(|param| param.name == name.as_str()))
+            .map(|(name, held)| (name.clone(), held.clone()))
+            .collect();
+        let named = unknown.first().expect("more than one");
+        return Err(failure(
+            "torn_param",
+            format!(
+                "{call}{at} has {} keys it does not take, and the object you wrote came apart \
+                 across them, so none of them is a word you chose wrongly. {takes_shape}{} Write \
+                 the whole call again from what you meant, one operation per entry.",
+                unknown.len(),
+                what_it_carries(&intact)
+            ),
+            json!({"op": op, "param": path(where_, named), "takes": shape}),
+        ));
+    }
+
     for key in object.keys() {
         if spec.iter().any(|param| param.name == key)
             || (where_.is_empty() && UNIVERSAL.contains(&key.as_str()))
@@ -4669,5 +4722,71 @@ mod tests {
                 "{tool} records a repair of a call nothing was going to refuse"
             );
         }
+    }
+
+    /// Three coins written as one torn entry earn one refusal, not one per key.
+    ///
+    /// The exact object a live turn sent, from `runs/coin01`: the model wrote three `instantiate`
+    /// entries, its JSON tore across all three, and what arrived was one entry holding an intact
+    /// `op`, `parent` and `path` beside three keys made of the wreckage. Gofer answered about one
+    /// key per refusal — `nameCoin1` first, with `Did you mean `name`?` — and the model spent five
+    /// round trips and 3.6k tokens peeling them off one at a time, then abandoned the batch and
+    /// instantiated the coins one call at a time, which worked.
+    ///
+    /// A spelling hint is the wrong advice for wreckage, so this refusal withholds it.
+    #[test]
+    fn an_entry_that_came_apart_in_three_places_is_refused_once() {
+        let mut entry = serde_json::Map::new();
+        entry.insert("parent".to_owned(), json!("/Main"));
+        entry.insert("path".to_owned(), json!("res://scenes/coin.tscn"));
+        entry.insert("nameCoin1".to_owned(), Value::Null);
+        entry.insert("name\": \"Coin1\"}, {".to_owned(), Value::Null);
+        entry.insert(
+            "path\": \"res://scenes/coin.tscn\", ".to_owned(),
+            json!(", \"Coin2\"}, {"),
+        );
+        let refused = check("godot_node", "instantiate", &Value::Object(entry))
+            .expect_err("the entry is refused");
+        assert_eq!(refused.code, "torn_param", "{}", refused.message);
+        assert!(
+            refused.message.contains("3 keys it does not take"),
+            "it counts the wreckage rather than naming one piece of it: {}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("came apart"),
+            "it says the object came apart: {}",
+            refused.message
+        );
+        assert!(
+            !refused.message.contains("Did you mean"),
+            "a spelling hint sends a model looking for a better word for wreckage: {}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("carries parent, path"),
+            "it names the keys that survived: {}",
+            refused.message
+        );
+    }
+
+    /// One wrong word is still one wrong word.
+    ///
+    /// The refusal above must not swallow the ordinary case: a single misspelled parameter still
+    /// earns the near-miss hint, which is what a model can act on in one round trip.
+    #[test]
+    fn a_single_misspelled_parameter_still_gets_its_near_miss() {
+        let refused = check(
+            "godot_node",
+            "instantiate",
+            &json!({"parent": "/Main", "pathh": "res://a.tscn"}),
+        )
+        .expect_err("the call is refused");
+        assert_eq!(refused.code, "unknown_param", "{}", refused.message);
+        assert!(
+            refused.message.contains("Did you mean `path`?"),
+            "{}",
+            refused.message
+        );
     }
 }

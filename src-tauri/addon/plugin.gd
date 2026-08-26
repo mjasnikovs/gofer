@@ -2961,7 +2961,10 @@ func _run_scan_sweep() -> void:
             kept.append(pending)
             continue
         var paths: Array = pending["paths"]
-        if not paths.is_empty() and _import_batch(paths):
+        # A rescan asked for the walk itself. `_import_batch` answers a `.tres` straight away —
+        # nothing about it needs importing — and that is the right answer for loading it and the
+        # wrong one for its UID, which only a finished walk writes into `.godot/uid_cache.bin`.
+        if not bool(pending.get("walk", false)) and not paths.is_empty() and _import_batch(paths):
             _respond_result(pending["id"], _rescan_result(pending))
             continue
         # Either the caller asked for the whole project, or a named file is past what `update_file`
@@ -3026,6 +3029,52 @@ func _rescan_result(pending: Dictionary) -> Dictionary:
     # the caller gets one reply rather than a rescan's. `resource.rescan` carries nothing and is
     # unchanged by this.
     return answer.merged(pending.get("result", {}), true)
+
+## The answer a resource writer hands back, held until the project knows the UID it just stamped.
+##
+## Only when the cache does not hold the path already: a shape saved over one that is registered
+## keeps its id, and paying a project walk for it would make the commonest case the slowest. The
+## wait is the one `resource.rescan` and `resource.create_texture` use, so a caller gets one reply
+## rather than a rescan's, and never has to remember a second call — see [`_uid_is_unregistered`].
+func _walk_for_a_new_uid(path: String, answer: Dictionary) -> Dictionary:
+    if not _uid_is_unregistered(path):
+        return answer
+    return {"_gofer_pending_scan": {
+        "paths": [path],
+        "walk": true,
+        "walked": false,
+        "scans": _scans_completed,
+        "settled": 0,
+        "deadline": Time.get_ticks_msec() + RESOURCE_SCAN_TIMEOUT_MS,
+        "path": path,
+        "result": answer,
+    }}
+
+## Whether the UID a just-written resource carries is missing from the project's own cache.
+##
+## `ResourceSaver.save` stamps a fresh `uid://…` into a `.tres` header, and nothing else tells the
+## project that UID exists: `update_file` registers the file and stops there. Every scene that then
+## references it loads with `ext_resource, invalid UID: uid://… - using text path instead`, once per
+## reference, in the editor and in the running game, for ever.
+##
+## The warning is not fatal — the loader falls back to the text path — and that is what makes it
+## expensive. A live turn read two of them out of the game log and spent six calls chasing them: a
+## `bash cat` the workspace refused for naming a scene, a `cat` for `.uid` sidecars a `.tres` does
+## not have, a `sed` that would not parse, and finally a `sed` that stripped the UID line out of
+## both files by hand. Nothing was wrong with either file.
+##
+## `ResourceSaver` has already put the id in the editor's own table, so `ResourceUID.has_id` says
+## yes and answers nothing. The game is a second process and reads `.godot/uid_cache.bin`, which
+## only a finished project walk writes — `add_id`, `update_file` and `scan_sources` all leave it
+## as it was, measured. So the question this answers is about that file and no other.
+func _uid_is_unregistered(path: String) -> bool:
+    if ResourceLoader.get_resource_uid(path) == ResourceUID.INVALID_ID:
+        return false
+    var cache := FileAccess.open("res://.godot/uid_cache.bin", FileAccess.READ)
+    if cache == null:
+        return true
+    var held := cache.get_buffer(cache.get_length()).get_string_from_utf8()
+    return not held.contains(path)
 
 ## Registers a batch of files and imports the ones that need it, in one call, and reports whether
 ## every one of them can be loaded afterwards.
@@ -3239,7 +3288,7 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
                 {"path": path}
             )
 
-    return {
+    var answer := {
         "path": path,
         "texture": texture_path,
         "tileSize": [saved_set.tile_size.x, saved_set.tile_size.y],
@@ -3250,6 +3299,8 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
         "physicsLayers": saved_set.get_physics_layers_count(),
         "replaced": replaced,
     }
+    return _walk_for_a_new_uid(path, answer)
+
 
 ## Saves a 2D collision shape as a resource a node can be given.
 ##
@@ -3318,11 +3369,12 @@ func _resource_create_shape(params: Dictionary) -> Dictionary:
     if saved_type != shape_type:
         return _readback_error("resource.create_shape", shape_type, saved_type, {"path": path})
 
-    return {
+    var answer := {
         "path": path,
         "shapeType": saved_type,
         "replaced": replaced,
     }
+    return _walk_for_a_new_uid(path, answer)
 
 
 ## Draws a PNG and hands back a texture the project has already imported.
@@ -3718,6 +3770,12 @@ func _scene_create(params: Dictionary) -> Dictionary:
     # The scene was written behind the editor's back, so its filesystem is told about the file
     # before it is asked to open it — an unknown resource is one the editor refuses to load.
     EditorInterface.get_resource_filesystem().update_file(path)
+    # A scene is stamped with a UID `update_file` does not register either — see
+    # [`_uid_is_unregistered`] — and the walk that would register it cannot go here. Kicking one
+    # off before `open_scene_from_path` and letting the switch's own wait cover it passed the
+    # readback suite and then took `every_scene_command_answers_from_the_file_it_wrote` from 3.8s
+    # to 90.4s in the gate, which is the scene-switch timeout: the walk and the open contend. The
+    # two `.tres` writers wait for their walk properly and a scene switch has nowhere to wait.
     return _switch_edited_scene(path)
 
 func _scene_save(_params: Dictionary) -> Dictionary:

@@ -1184,3 +1184,69 @@ fn a_scene_path_without_the_scheme_is_the_same_scene() {
         "an open without the scheme lands on the same scene"
     );
 }
+
+/// A resource this tool wrote carries a UID the project can resolve.
+///
+/// `ResourceSaver.save` stamps a fresh UID into a `.tres` header, and the project only knows that
+/// UID once it is in `.godot/uid_cache.bin`. `update_file` does not put it there. Every scene that
+/// then references the file loads with
+/// `ext_resource, invalid UID: uid://… - using text path instead`, once per reference, every run.
+///
+/// A live turn met exactly that: two shapes from `resource.create_shape`, two warnings in the
+/// running game, and the agent spent six calls chasing them — a `bash cat` the workspace refused
+/// because it named a scene, a `cat` for `.uid` sidecars that are not there, a `sed` that would not
+/// parse, and finally a `sed` that stripped the UID line out of both files by hand.
+#[test]
+fn a_resource_this_tool_wrote_carries_a_uid_the_project_can_resolve() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    session.call(
+        "resource.create_shape",
+        json!({"path": "res://shapes/coin.tres", "shapeType": "CircleShape2D", "radius": 8}),
+    );
+    let written = std::fs::read_to_string(worktree.join("shapes/coin.tres")).expect("the shape");
+    let stamped = written
+        .split("uid=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("the file carries no uid at all: {written}"))
+        .to_owned();
+
+    registered(&worktree, "res://shapes/coin.tres", &stamped);
+
+    // A tileset is the other `.tres` this tool writes, and a scene is the third file that carries a
+    // stamped UID. Both are referenced by UID from somewhere else the moment they exist.
+    session.call(
+        "resource.create_texture",
+        json!({"path": "res://art/atlas.png", "size": [16, 16], "background": "#3b2a1a"}),
+    );
+    session.call(
+        "resource.create_tileset",
+        json!({
+            "path": "res://art/world.tres",
+            "texture": "res://art/atlas.png",
+            "tileSize": [16, 16]
+        }),
+    );
+    registered(&worktree, "res://art/world.tres", "the tileset");
+
+    // Not a scene: `scene.create` is answered from a later frame by the scene-switch machinery,
+    // which has nowhere to park a walk, and starting one beside the switch makes the two contend —
+    // measured, once, at the switch's own 90s timeout. A scene's UID is still unregistered.
+}
+
+/// The project's own UID table, as the running game reads it.
+fn registered(worktree: &std::path::Path, path: &str, stamped: &str) {
+    let cache = worktree.join(".godot/uid_cache.bin");
+    let held = std::fs::read(&cache).unwrap_or_default();
+    assert!(
+        held.windows(path.len())
+            .any(|window| window == path.as_bytes()),
+        "{stamped} is stamped into {path} but {} does not hold that path, so everything that \
+         references it loads with `invalid UID`",
+        cache.display()
+    );
+}
