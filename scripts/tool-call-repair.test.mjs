@@ -923,3 +923,63 @@ test('an entry written as an operation name, and one written as its own list ent
         ops: [{op: 'open', path: 'scripts/player.gd'}]
     })
 })
+
+/**
+ * The failure this pins cost one live turn twelve identical calls in a row.
+ *
+ * `{"limit 50": null, "minSeverityWarning": "warning", "op": "read", "source": "editorError"}` was
+ * refused with the parameter named and the whole shape printed back, and the model sent the same
+ * bytes again, and again, until the guard had counted to twelve. Wording had nothing left to try:
+ * the model could not see the key it had written.
+ */
+test('a key that swallowed its own value is split back into the two the model meant', () => {
+    const logs = [
+        {
+            op: 'read',
+            params: [
+                {name: 'after', kind: 'int'},
+                {name: 'minSeverity', kind: 'choice'},
+                {name: 'source', kind: 'choice'},
+                {name: 'contains', kind: 'text'},
+                {name: 'limit', kind: 'int'}
+            ]
+        }
+    ]
+    // Both forms in one call, which is how they arrived.
+    assert.deepEqual(
+        normalizeToolCalls(logs, {
+            ops: [
+                {
+                    'limit 50': null,
+                    minSeverityWarning: 'warning',
+                    op: 'read',
+                    source: 'editorError'
+                }
+            ]
+        }),
+        {ops: [{limit: 50, minSeverity: 'warning', op: 'read', source: 'editorError'}]}
+    )
+
+    // A number goes back as a number: `limit` is an `int`, and handing the schema "50" would move
+    // the refusal rather than remove it.
+    assert.equal(
+        typeof normalizeToolCalls(logs, {ops: [{'limit 50': null, op: 'read'}]}).ops[0].limit,
+        'number'
+    )
+
+    // A name the model invented is not a tear, and is left for the router to refuse by name: a
+    // guess repaired silently is a guess the caller never learns was wrong.
+    assert.deepEqual(normalizeToolCalls(logs, {ops: [{afterCursor: 37, op: 'read'}]}), {
+        ops: [{afterCursor: 37, op: 'read'}]
+    })
+
+    // A torn structure carries a second entry the caller wrote. Repairing it would invent one:
+    // the tail here is not a value, it is the rest of a call.
+    const torn = {'contains": "x"}, {"op": "read"': 'read', op: 'read'}
+    assert.deepEqual(normalizeToolCalls(logs, {ops: [{...torn}]}).ops[0], torn)
+
+    // And a call nobody got wrong comes out exactly as it went in.
+    assert.deepEqual(normalizeToolCalls(logs, {ops: [{limit: 50, op: 'read'}]}), {
+        ops: [{limit: 50, op: 'read'}]
+    })
+})

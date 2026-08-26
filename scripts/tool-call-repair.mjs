@@ -307,6 +307,78 @@ export function trimPaddedKeys(params, entry) {
 }
 
 /**
+ * A key that swallowed its own value, split back into the two the model meant to write.
+ *
+ * Counted across the recorded corpus: **25 keys in 7 runs**, in two forms and no others that can be
+ * named for certain.
+ *
+ * `{"limit 50": null, …}` is the first — the name, a space, the value, and `null` left where the
+ * value should be. Twelve of those in one turn, all identical, sent after the refusal had named
+ * the parameter and printed the whole shape back: `godot_logs read has no 'limit 50' parameter`.
+ * The model could not see the key it had written, so it wrote it again, and the repeat guard
+ * counted to twelve while the turn spent a third of its calls on it.
+ *
+ * `{"minSeverityWarning": "warning"}` is the second — the name with the value concatenated onto
+ * it, capitalised, and the value *also* held. Thirteen of those, and one of them was in the very
+ * same call as a `limit 50`.
+ *
+ * Both are unambiguous, which is the whole reason they are here: the key begins with a name the
+ * operation declares, the operation does not declare the key itself, the entry does not already
+ * carry that name, and the tail either *is* the held value or the held value is nothing at all.
+ * A number is written back as a number when the declared kind says so, because `limit` is an
+ * `int` and a repair that hands the schema `"50"` has moved the refusal rather than removed it.
+ *
+ * What is deliberately left alone, and it is most of what the scan found. A key like
+ * `name": "Coin1"}, {"op": "create",` is a torn *structure*, not a torn name: the tail is a second
+ * entry the caller wrote, and anything this did with it would be inventing one. And `afterCursor`
+ * for `after`, `limit_per_source` for `limit`, `nodePlaceholder` for `node` are not tears at all —
+ * they are a model guessing a name, and the router refusing them by name is the right answer,
+ * because a guess repaired silently is a guess the caller never learns was wrong.
+ */
+export function splitKeyThatCarriesItsValue(params, entry) {
+    if (!Array.isArray(params) || !isObject(entry)) return entry
+    const shaped = Object.fromEntries(
+        Object.entries(entry).flatMap(([key, held]) => {
+            const param = params.find(
+                one =>
+                    key.length > one.name.length
+                    && key.toLowerCase().startsWith(one.name.toLowerCase())
+                    && !params.some(other => other.name === key)
+                    && !(one.name in entry)
+            )
+            if (!param) return [[key, held]]
+            const tail = key.slice(param.name.length).trim()
+            if (tail === '') return [[key, held]]
+            // The tail is the value when nothing else is, or when the held value is the same thing
+            // said twice. Anything else is a key this cannot name for certain.
+            const carried =
+                held === null || held === undefined ? tail
+                : typeof held === 'string' && held.toLowerCase() === tail.toLowerCase() ? held
+                : undefined
+            if (carried === undefined) return [[key, held]]
+            const numeric =
+                (param.kind === 'int' || param.kind === 'number')
+                && typeof carried === 'string'
+                && /^-?\d+(?:\.\d+)?$/u.test(carried)
+            return [[param.name, numeric ? Number(carried) : carried]]
+        })
+    )
+    return params.reduce((walked, param) => {
+        const held = walked[param.name]
+        if (held === undefined || !Array.isArray(param.entry) || param.entry.length === 0)
+            return walked
+        if (param.kind === 'list' && Array.isArray(held))
+            return {
+                ...walked,
+                [param.name]: held.map(one => splitKeyThatCarriesItsValue(param.entry, one))
+            }
+        if (param.kind === 'object')
+            return {...walked, [param.name]: splitKeyThatCarriesItsValue(param.entry, held)}
+        return walked
+    }, shaped)
+}
+
+/**
  * A resource written straight into a tagged value, put back inside the `value` it belongs in.
  *
  * `{"type": "resource", "path": "res://scripts/coin.gd"}` is what two live turns wrote against
@@ -499,7 +571,10 @@ export function normalizeToolCalls(operations, args, elsewhere) {
                     const params = operations.find(operation => operation.op === entry.op)?.params
                     // After the repairs, so a padded key that was about to be renamed onto a real
                     // parameter is never refused as one belonging somewhere else.
-                    const shaped = wrapBareResource(params, trimPaddedKeys(params, entry))
+                    const shaped = wrapBareResource(
+                        params,
+                        splitKeyThatCarriesItsValue(params, trimPaddedKeys(params, entry))
+                    )
                     refuseSiblingParameter(operations, shaped)
                     return shaped
                 } catch (refusal) {
