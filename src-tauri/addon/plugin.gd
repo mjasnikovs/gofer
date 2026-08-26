@@ -5697,6 +5697,8 @@ func _do_detach(parent: Node, child: Node) -> void:
 ## when it leaves the tree and comes back — and a node the edited scene does not own is a node the
 ## save writes nothing about.
 func _do_swap_node(outgoing: Node, incoming: Node, parent: Node, owner: Node, index: int) -> void:
+    var owners := {}
+    _who_owned_what(outgoing, owners)
     for child in outgoing.get_children():
         outgoing.remove_child(child)
         incoming.add_child(child, true)
@@ -5704,16 +5706,29 @@ func _do_swap_node(outgoing: Node, incoming: Node, parent: Node, owner: Node, in
         parent.remove_child(outgoing)
     parent.add_child(incoming, true)
     if owner != null:
-        _own_the_whole_branch(incoming, owner)
+        incoming.set_owner(owner)
+    _give_them_back_their_owners(incoming, owners)
     if index >= 0 and index < parent.get_child_count():
         parent.move_child(incoming, index)
 
-## Gives a node and everything under it to the scene that holds them.
-func _own_the_whole_branch(node: Node, owner: Node) -> void:
-    if node != owner:
-        node.set_owner(owner)
+## Who owned each node under this one, before any of them left the tree.
+##
+## Not "the scene owns everything". A node placed by `node.instantiate` owns its own contents, and
+## handing those to the edited scene writes an instance's insides into the file that instanced it.
+## The owners are read before the move and put back after, so what was there is what comes back.
+func _who_owned_what(node: Node, into: Dictionary) -> void:
     for child in node.get_children():
-        _own_the_whole_branch(child, owner)
+        into[child.name] = child.owner
+        _who_owned_what(child, into)
+
+## The other half of [`_who_owned_what`]. A node keeps its owner while it is only moved and loses it
+## when it leaves the tree and comes back, and a node the edited scene does not own is a node the
+## save writes nothing about.
+func _give_them_back_their_owners(node: Node, owners: Dictionary) -> void:
+    for child in node.get_children():
+        if owners.has(child.name):
+            child.set_owner(owners[child.name])
+        _give_them_back_their_owners(child, owners)
 
 func _do_reparent(node: Node, new_parent: Node, owner: Node, index: int) -> void:
     var old_parent := node.get_parent()

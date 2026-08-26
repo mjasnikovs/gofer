@@ -851,3 +851,54 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
     let unchanged = session.call("node.inspect", json!({"node": "/Level/Player"}));
     assert_eq!(unchanged["type"], "CharacterBody2D", "{unchanged}");
 }
+
+/// An instance under a node that changes type keeps its own insides.
+///
+/// A node placed by `node.instantiate` owns its own contents. The first version of the swap gave
+/// the whole branch to the edited scene on the way past, which writes an instance's insides into
+/// the file that instanced it — the scene stops being an instance and becomes a copy, and a change
+/// to the instanced scene reaches it no more.
+#[test]
+fn an_instance_under_a_node_that_changes_type_is_still_an_instance() {
+    let mut session = Session::start();
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://coin.tscn", "rootType": "Area2D", "rootName": "Coin"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Coin", "name": "Shape", "type": "CollisionShape2D"}),
+    );
+    session.mutate("scene.save", json!({}));
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://level.tscn", "rootType": "Node2D", "rootName": "Level"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Level", "name": "Holder", "type": "Node2D"}),
+    );
+    session.mutate(
+        "node.instantiate",
+        json!({"parent": "/Level/Holder", "path": "res://coin.tscn", "name": "Coin"}),
+    );
+    session.mutate("scene.save", json!({}));
+
+    session.mutate(
+        "node.change_type",
+        json!({"node": "/Level/Holder", "type": "CharacterBody2D"}),
+    );
+    session.mutate("scene.save", json!({}));
+
+    let saved = std::fs::read_to_string(session.worktree.join("level.tscn")).expect("the scene");
+    assert!(saved.contains("type=\"CharacterBody2D\""), "{saved}");
+    // The instance is still one line naming the scene, not the scene's contents copied in.
+    assert!(
+        saved.contains("instance=ExtResource"),
+        "the instance has to stay an instance: {saved}"
+    );
+    assert!(
+        !saved.contains("CollisionShape2D"),
+        "an instance's insides must not be written into the file that instanced it: {saved}"
+    );
+}
