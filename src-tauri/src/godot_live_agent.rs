@@ -336,8 +336,7 @@ fn live_agent_acceptance() {
     // The worktree is a temporary directory the session removes, so anything the agent built has to
     // be copied out before this returns.
     if let Ok(keep) = std::env::var("GOFER_LIVE_KEEP") {
-        let _ = std::fs::create_dir_all(&keep);
-        godot_editor_harness::copy_tree(&session.worktree, &PathBuf::from(&keep));
+        keep_the_worktree(&session.worktree, &PathBuf::from(&keep));
     }
     // The game the turn launched is not the editor's child to reap, and dropping the session kills
     // only the editor. Four runs each left one behind, all of them holding Godot's default remote
@@ -345,6 +344,95 @@ fn live_agent_acceptance() {
     // sitting on. Asking the runtime to stop is the same call the agent would have made.
     let _ = session.try_call("runtime.stop", serde_json::json!({}), None);
     println!("live agent finished in {seconds:.1}s -> {}", out.display());
+}
+
+/// Copies the finished worktree out, into a directory that holds this run and nothing else.
+///
+/// `copy_tree` overwrites the files it finds and deletes none, which is right for its own callers:
+/// they copy a fixture into a fresh temporary directory. `GOFER_LIVE_KEEP` names a path the caller
+/// chose, and a caller reuses one — the same run, retried after a failure, is the everyday case.
+///
+/// What that cost, once, was half an hour of chasing a defect that did not exist. A turn died at
+/// one second on a provider 404 and still copied its untouched worktree out; the retry was pointed
+/// at the same directory and merged into it. The result had one run's script beside the other
+/// run's `project.godot` and `.git`, so it read as an agent whose verified edit was missing from
+/// disk — the worst thing a coding tool can do — with a git status to match. The mtimes were what
+/// gave it away: 17:12:27 on the script, 17:43:48 on everything around it.
+///
+/// So a kept worktree is either this run's or it is not evidence, and the destination is emptied
+/// first. Only its contents: the directory itself may be one the caller made, and removing it
+/// would break a path they had already handed to something else.
+fn keep_the_worktree(worktree: &std::path::Path, keep: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(keep) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(error) = removed {
+                // Said rather than swallowed. A destination that could not be emptied is one the
+                // copy is about to merge into, which is the failure this function exists for.
+                println!(
+                    "GOFER_LIVE_KEEP could not clear {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    let _ = std::fs::create_dir_all(keep);
+    godot_editor_harness::copy_tree(worktree, keep);
+}
+
+/// A kept worktree holds one acceptance run, and never two of them merged.
+///
+/// The failure this pins produced half an hour of chasing a data-loss defect that did not exist.
+/// A turn died at one second on a provider 404 and copied its untouched worktree out anyway; the
+/// retry was pointed at the same `GOFER_LIVE_KEEP` directory, and `copy_tree` overwrites without
+/// deleting. The kept tree then held the dead run's script beside the live run's `project.godot`
+/// and `.git`, which reads exactly like an agent whose verified edit never reached disk.
+#[test]
+fn a_kept_worktree_holds_one_acceptance_run_and_not_two() {
+    let source = TempDir::new().expect("a worktree to keep");
+    std::fs::create_dir_all(source.path().join("scripts")).expect("scripts directory");
+    std::fs::write(
+        source.path().join("scripts/player.gd"),
+        "the run that finished",
+    )
+    .expect("write the script");
+    std::fs::write(source.path().join("project.godot"), "config_version=5\n")
+        .expect("write the project");
+
+    let keep = TempDir::new().expect("a destination");
+    // What the run before this one left behind: a file this run also writes, one it does not, and
+    // a directory. All three were merged into before.
+    std::fs::create_dir_all(keep.path().join("scripts")).expect("stale scripts directory");
+    std::fs::write(keep.path().join("scripts/player.gd"), "the run that died")
+        .expect("stale script");
+    std::fs::write(keep.path().join("stale.txt"), "from the run before").expect("stale file");
+    std::fs::create_dir_all(keep.path().join(".git")).expect("stale git directory");
+    std::fs::write(keep.path().join(".git/HEAD"), "the other run's branch").expect("stale head");
+
+    keep_the_worktree(source.path(), keep.path());
+
+    assert_eq!(
+        std::fs::read_to_string(keep.path().join("scripts/player.gd")).expect("the kept script"),
+        "the run that finished",
+        "the file both runs wrote must be this run's"
+    );
+    assert!(
+        !keep.path().join("stale.txt").exists(),
+        "a file only the dead run wrote must not survive into this run's evidence"
+    );
+    assert!(
+        !keep.path().join(".git").exists(),
+        "the dead run's repository must not sit beside this run's files"
+    );
+    assert!(
+        keep.path().join("project.godot").exists(),
+        "everything this run built must still be copied out"
+    );
 }
 
 /// TEMPORARY: writes what the worker receives, so a harness outside Rust can pose the same turn.
