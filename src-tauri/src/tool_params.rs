@@ -2224,6 +2224,27 @@ fn check_set(
                 json!({"op": op, "param": path(where_, named.name), "takes": shape}),
             ));
         }
+        // A key holding the start of the next operation. Not a word chosen wrongly — the `ops`
+        // list came apart between two of its entries, or the answer was cut off part-way through
+        // writing one, and what should have closed an entry ended up inside a name.
+        //
+        // The commonest tear there is: `name": "Coin1"}, {`, `name': null}]…'}, {`,
+        // `size 16: null}, {`, `name": "Coin1"}, {"op": "instantiate", "parent": "/Main", "p` —
+        // five of nine live runs on the local model, and every one of them was answered
+        // ``Did you mean `name`?``, which is the one thing that is not wrong.
+        if let Some(swallowed) = the_start_of_another_operation(key) {
+            return Err(failure(
+                "torn_param",
+                format!(
+                    "{call}{at} has no `{}` {noun}, and that key carries {swallowed} — so the \
+                     list came apart between two entries rather than a word being wrong. \
+                     {takes_shape} Write the call again, one entry per operation. If the answer \
+                     that wrote it was cut off, send fewer entries in it.",
+                    as_much_of_the_key_as_is_evidence(key)
+                ),
+                json!({"op": op, "param": path(where_, key), "takes": shape}),
+            ));
+        }
         let hint = nearest(key, spec)
             .map(|name| format!(" Did you mean `{name}`?"))
             .unwrap_or_default();
@@ -3238,6 +3259,29 @@ fn describe(value: &Value) -> String {
             }
         }
     }
+}
+
+/// What a key is holding, when what it holds is the edge of another operation.
+///
+/// The two ways an `ops` list comes apart in the recordings, named so the refusal can say which:
+/// a closing brace and an opening one, which is the boundary between two entries, and the word
+/// that starts an entry.
+///
+/// Only these. A key with a stray colon or a swallowed quote is torn a different way, and
+/// [`torn_object`] and the rename between them already say so.
+fn the_start_of_another_operation(key: &str) -> Option<&'static str> {
+    let squashed: String = key.chars().filter(|one| !one.is_whitespace()).collect();
+    if squashed.contains("},{") {
+        return Some("the end of one entry and the start of the next");
+    }
+    if squashed.contains("\"op\"") || squashed.contains("'op'") {
+        return Some("another entry's `op`");
+    }
+    // Not a bare `}]`. `size": [32, 32]}]edits` ends a list too, and it is a different tear — two
+    // whole calls that ran into each other, with the second one's text still attached. The
+    // refusal for that one is measured, 0 of 15 recoveries against 15 of 15, and it works by
+    // quoting the scrap that arrived. See `two_calls_that_ran_into_each_other_are_refused…`.
+    None
 }
 
 /// What to add when the key is not a name at all, but a piece of an object that came apart.
@@ -5365,5 +5409,57 @@ mod tests {
         repair("godot_script", "edit", &mut noted);
         assert!(noted.get("edits_note").is_some(), "{noted}");
         check("godot_script", "edit", &noted).expect_err("still refused");
+    }
+
+    /// A key that swallowed an operation boundary is not a misspelling.
+    ///
+    /// The commonest tear in the recordings, and the one that was always answered with the near
+    /// miss. Every string here is off a live turn: `coin01`, `brick06`, `r2-medium-2` and `grid09`
+    /// between them, five of the night's nine runs.
+    #[test]
+    fn a_key_that_swallowed_the_next_operation_says_the_list_came_apart() {
+        for key in [
+            "name\": \"Coin1\"}, {",
+            "name': null}]_1_1_PLACEHOLDER_1_1'}, {",
+            "name\": \"Coin1\"}, {\"op\": \"instantiate\", \"parent\": \"/Main\", \"p",
+            "name\": \"Coin1\"}]}, {\": {}}]  ",
+        ] {
+            let mut entry = serde_json::Map::new();
+            entry.insert("parent".to_owned(), json!("/Main"));
+            entry.insert("path".to_owned(), json!("res://scenes/coin.tscn"));
+            entry.insert(key.to_owned(), json!("something"));
+            let refused =
+                check("godot_node", "instantiate", &Value::Object(entry)).expect_err("refused");
+            assert_eq!(refused.code, "torn_param", "{key}: {}", refused.message);
+            assert!(
+                refused.message.contains("came apart between two entries"),
+                "{key}: {}",
+                refused.message
+            );
+            assert!(
+                !refused.message.contains("Did you mean"),
+                "the near miss is the one thing that is not wrong here: {}",
+                refused.message
+            );
+            assert!(
+                refused.message.contains("send fewer entries"),
+                "the answer being cut off is what wrote most of these: {}",
+                refused.message
+            );
+        }
+
+        // An ordinary misspelling still gets the near miss.
+        let ordinary = check(
+            "godot_node",
+            "instantiate",
+            &json!({"parent": "/Main", "path": "a.tscn", "namex": "Coin1"}),
+        )
+        .expect_err("refused");
+        assert_eq!(ordinary.code, "unknown_param", "{}", ordinary.message);
+        assert!(
+            ordinary.message.contains("Did you mean `name`?"),
+            "{}",
+            ordinary.message
+        );
     }
 }
