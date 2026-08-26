@@ -2743,7 +2743,7 @@ fn drop_the_empty_claimant(spec: &[Param], object: &mut serde_json::Map<String, 
             (
                 key.clone(),
                 carries_a_value(Some(held)),
-                only_one_meaning(key, Some(held), spec),
+                the_one_it_reads_as(key, spec),
             )
         })
         .collect();
@@ -3238,6 +3238,21 @@ fn a_leading_scalar(text: &str) -> Option<(Value, &str)> {
         .map(|held| (held, tail))
 }
 
+/// The one parameter a key reads as, with no opinion about what sits beside it.
+///
+/// [`only_one_meaning`] answers the question a rename asks — which needs the value, because a
+/// rename that lands a pair on a parameter that takes a number writes a call the caller did not.
+/// Two repairs ask a narrower question: which parameter is this key *about*. An empty key is about
+/// something by its name alone, and what it holds is precisely the thing it does not have.
+fn the_one_it_reads_as(key: &str, spec: &[Param]) -> Option<&'static str> {
+    let mut fitting = spec
+        .iter()
+        .filter(|param| !param.hidden && reads_as(key, param));
+    let first = fitting.next()?;
+    fitting.next().is_none().then_some(())?;
+    Some(first.name)
+}
+
 /// The one parameter a key could have been meant as, or nothing when it could have been two.
 ///
 /// A key that is not shaped like a name has torn out of an object, and then the value beside it
@@ -3261,6 +3276,21 @@ fn only_one_meaning(key: &str, value: Option<&Value>, spec: &[Param]) -> Option<
         .filter(|param| !param.hidden && reads_as(key, param));
     let first = fitting.next()?;
     fitting.next().is_none().then_some(())?;
+    // Never onto a parameter the value could not be, whatever the key looks like. The clause below
+    // has said this for a torn key since a live turn wrote `"size)": false`; a key that is merely
+    // misspelled was exempt, and a live turn found the hole:
+    //
+    //     {"op": "create_shape", "shapeType": "RectangleShape2D",
+    //      "size_list": [16, 16], "height_list": [16, 16]}
+    //
+    // Both keys are name-shaped and each reads as exactly one parameter, so both were renamed.
+    // `size` was right; `height` is a number and now held a pair, and the whole call came back
+    // ``\`height\` takes a number, and this one was an array of 2`` — about a key the model never
+    // wrote, on an operation whose `height` a RectangleShape2D does not read at all. Left unnamed,
+    // `check` refuses `height_list` by its own name and the sentence is at least true.
+    value
+        .is_some_and(|held| could_become(first.kind, held))
+        .then_some(())?;
     // A key that is not shaped like a name at all did not arrive by choosing the wrong word — it
     // arrived torn. Two things have to hold before it is renamed anyway, and both were watched in
     // live turns failing.
@@ -4932,13 +4962,21 @@ mod tests {
         assert_eq!(lone["radius"], json!(8), "{lone}");
 
         // A type half with no value half beside it is not a flattened tag, and nothing here throws
-        // it away: the rename below reads it as `size` the way it always did, and what the caller
-        // wrote is still in the call for `check` to refuse by kind.
+        // it away. It is not renamed either: `size` takes a list and "Vector2" is a word, and a
+        // rename never lands a value on a parameter that could not hold it. So `check` names the
+        // key the caller actually wrote.
         let mut alone = json!({
             "path": "a.tres", "shapeType": "RectangleShape2D", "sizeType": "Vector2"
         });
         repair("godot_resource", "create_shape", &mut alone);
-        assert_eq!(alone["size"], json!("Vector2"), "{alone}");
+        assert_eq!(alone["sizeType"], json!("Vector2"), "{alone}");
+        let refused =
+            check("godot_resource", "create_shape", &alone).expect_err("the key is named");
+        assert!(
+            refused.message.contains("`sizeType`"),
+            "{}",
+            refused.message
+        );
 
         // And a type half carrying a real value is not a type slot. `points` is declared here, so
         // the head reads as one; what sits beside it is a list, which no `{type, value}` pair has
@@ -4977,5 +5015,37 @@ mod tests {
         });
         repair("godot_resource", "create_shape", &mut contested);
         assert!(contested.get("size").is_none(), "{contested}");
+    }
+
+    /// A rename never lands a value on a parameter that could not have held it.
+    ///
+    /// The call a live turn sent while building a platformer, both entries the same shape:
+    /// `{"size_list": [16, 16], "height_list": [16, 16]}`. Both keys are name-shaped and each reads
+    /// as exactly one parameter, so both were renamed — `size` correctly, and `height`, which is a
+    /// number, onto a pair. The whole call came back ``\`height\` takes a number, and this one was
+    /// an array of 2``, about a key the model never wrote, on an operation whose `height` a
+    /// RectangleShape2D does not read at all.
+    #[test]
+    fn a_rename_never_lands_a_value_the_parameter_could_not_hold() {
+        let mut held = json!({
+            "path": "assets/player_shape.tres",
+            "shapeType": "RectangleShape2D",
+            "size_list": [16, 16],
+            "height_list": [16, 16]
+        });
+        repair("godot_resource", "create_shape", &mut held);
+        assert_eq!(held["size"], json!([16, 16]), "{held}");
+        assert!(held.get("height").is_none(), "{held}");
+        let refused = check("godot_resource", "create_shape", &held).expect_err("still refused");
+        assert!(
+            refused.message.contains("`height_list`"),
+            "the refusal names the key the caller wrote: {}",
+            refused.message
+        );
+        // A note on the four dimension parameters, saying which shape reads each, was tried here
+        // and reverted: `bench-size-shape.mjs`, catalogue-with-notes against catalogue-without,
+        // 14 seeds interleaved, **0 of 24 against 0 of 27**. It is the second thing measured to
+        // make no difference to how this model writes `size` — printing the shape in the signature
+        // was the first, 0 of 4 either way. Prose does not reach this field; the repairs do.
     }
 }
