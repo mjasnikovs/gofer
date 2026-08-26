@@ -30,6 +30,16 @@ const MAX_THUMBNAIL_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SVG_BYTES: u64 = 256 * 1024;
 /// Twice the 16px the row draws, so the square stays sharp on a HiDPI screen.
 const THUMBNAIL_EDGE: u32 = 32;
+/// The suffixes Godot appends to a file to hold its own record of that file.
+///
+/// `<script>.gd.uid` carries the stable id a scene refers to the script by, and `<asset>.png.import`
+/// carries how the asset was imported. Both are the file's, not the project's: Godot's own
+/// FileSystem dock moves and deletes them with it, and a move that leaves the `.uid` behind gives
+/// the file a **new** id while the old one stays at the old path — which is a scene that no longer
+/// finds its script. Measured against a real 4.7.2 editor: moving `player.gd` alone produced
+/// `ERROR: Attempt to open script 'res://scripts/player.gd' ... 'File not found'`, and the same
+/// move carrying `player.gd.uid` produced nothing at all.
+const SIDECARS: [&str; 2] = ["uid", "import"];
 pub const MAX_RELATIVE_PATH_BYTES: usize = 1024;
 const MAX_WALK_DEPTH: usize = 32;
 const WATCH_POLL_SLICE: Duration = Duration::from_millis(50);
@@ -464,6 +474,7 @@ impl Workspace {
     }
 
     pub fn move_path(&self, from: &str, to: &str) -> Result<(), FileError> {
+        self.reject_live_sidecar(from)?;
         let source = self.resolve(from)?;
         let destination = self.resolve(to)?;
         if !source.exists() {
@@ -478,11 +489,23 @@ impl Workspace {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|error| FileError::io(to, &error))?;
         }
-        fs::rename(&source, &destination).map_err(|error| FileError::io(to, &error))
+        fs::rename(&source, &destination).map_err(|error| FileError::io(to, &error))?;
+        for suffix in SIDECARS {
+            let carried = self.resolve(&format!("{from}.{suffix}"))?;
+            if carried.exists() {
+                let landing = self.resolve(&format!("{to}.{suffix}"))?;
+                // Renamed over whatever is there. A sidecar at the destination with no file of its
+                // own is metadata for something that does not exist, and leaving it would give the
+                // moved file that dead file's uid.
+                fs::rename(&carried, &landing).map_err(|error| FileError::io(to, &error))?;
+            }
+        }
+        Ok(())
     }
 
     /// Deletes one file or one empty directory. Recursive deletion is deliberately absent.
     pub fn delete(&self, relative: &str, expected_hash: Option<&str>) -> Result<(), FileError> {
+        self.reject_live_sidecar(relative)?;
         let path = self.resolve(relative)?;
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -504,7 +527,34 @@ impl Workspace {
                 ));
             }
         }
-        fs::remove_file(&path).map_err(|error| FileError::io(relative, &error))
+        fs::remove_file(&path).map_err(|error| FileError::io(relative, &error))?;
+        for suffix in SIDECARS {
+            let carried = self.resolve(&format!("{relative}.{suffix}"))?;
+            if carried.exists() {
+                fs::remove_file(&carried).map_err(|error| FileError::io(relative, &error))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuses a path that is one live file's metadata rather than a file of its own.
+    ///
+    /// Naming a sidecar directly is always a mistake while the file it describes is still there:
+    /// taking `player.gd.uid` away from `player.gd` is exactly the breakage [`SIDECARS`] exists to
+    /// prevent, done deliberately. An *orphan* is the opposite — metadata for a file that is gone —
+    /// and removing one is a tidy-up, so it is allowed through.
+    fn reject_live_sidecar(&self, relative: &str) -> Result<(), FileError> {
+        let Some((owner, suffix)) = relative.rsplit_once('.') else {
+            return Ok(());
+        };
+        if !SIDECARS.contains(&suffix) || !self.resolve(owner)?.exists() {
+            return Ok(());
+        }
+        Err(FileError::new(
+            "sidecar_path",
+            format!("{relative} is Godot's own record of {owner} and moves and dies with it"),
+        )
+        .with_details(json!({"path": relative, "owner": owner})))
     }
 
     /// The content hash of one file, or `None` when there is no file there.
@@ -1279,6 +1329,109 @@ mod tests {
         workspace.delete("nested", None).expect("delete directory");
         workspace.delete("a.gd", Some(&stamp.hash)).expect("delete");
         assert!(!workspace.root().join("a.gd").exists());
+    }
+
+    /// Godot's own metadata travels with the file it belongs to.
+    ///
+    /// A `.gd.uid` left behind is not a stray file, it is a broken project. Measured against a real
+    /// 4.7.2 editor on the `C03-clutter` worktree, whose `main.tscn` references its scripts the way
+    /// every scene Gofer saves does — `uid="uid://o323pr5mlvad" path="res://scripts/player.gd"`:
+    ///
+    /// * moving `player.gd` alone and reimporting →
+    ///   `ERROR: Attempt to open script 'res://scripts/player.gd' resulted in error 'File not
+    ///   found'.`
+    /// * moving `player.gd` **and** `player.gd.uid` and reimporting → no errors at all, and the
+    ///   scene file still holds the old path. The uid resolved it. That is what the uid is for.
+    ///
+    /// The delete half is the same file seen from the other side: `old_save_system.gd.uid` outlived
+    /// its script by a whole turn in three recorded live runs.
+    #[test]
+    fn godots_sidecars_move_and_die_with_the_file_they_belong_to() {
+        let (_directory, workspace) = workspace();
+        workspace
+            .write("scripts/player.gd", "one", None)
+            .expect("script");
+        workspace
+            .write("scripts/player.gd.uid", "uid://o323pr5mlvad", None)
+            .expect("uid");
+        workspace
+            .write("assets/tiles.png", "png", None)
+            .expect("asset");
+        workspace
+            .write("assets/tiles.png.import", "[remap]", None)
+            .expect("import");
+
+        workspace
+            .move_path("scripts/player.gd", "entities/player.gd")
+            .expect("move the script");
+        assert_eq!(
+            workspace
+                .read("entities/player.gd.uid")
+                .expect("the uid came too")
+                .text,
+            "uid://o323pr5mlvad"
+        );
+        assert_eq!(
+            workspace
+                .read("scripts/player.gd.uid")
+                .expect_err("nothing left behind")
+                .code,
+            "not_found"
+        );
+
+        workspace
+            .move_path("assets/tiles.png", "art/tiles.png")
+            .expect("move the asset");
+        assert_eq!(
+            workspace
+                .read("art/tiles.png.import")
+                .expect("the import came too")
+                .text,
+            "[remap]"
+        );
+
+        workspace
+            .delete("entities/player.gd", None)
+            .expect("delete the script");
+        assert_eq!(
+            workspace
+                .read("entities/player.gd.uid")
+                .expect_err("the uid went too")
+                .code,
+            "not_found"
+        );
+
+        // A file with no sidecar is the ordinary case and must not become an error.
+        workspace.write("notes.md", "text", None).expect("plain");
+        workspace
+            .move_path("notes.md", "docs/notes.md")
+            .expect("move a bare file");
+        workspace
+            .delete("docs/notes.md", None)
+            .expect("delete a bare file");
+
+        // And a sidecar is not a file a caller may name. Moving one on its own would leave the
+        // script it describes without a uid, which is the bug this test is about, backwards.
+        workspace
+            .write("scripts/main.gd", "two", None)
+            .expect("script");
+        workspace
+            .write("scripts/main.gd.uid", "uid://x", None)
+            .expect("uid");
+        assert_eq!(
+            workspace
+                .move_path("scripts/main.gd.uid", "elsewhere.uid")
+                .expect_err("refused")
+                .code,
+            "sidecar_path"
+        );
+        assert_eq!(
+            workspace
+                .delete("scripts/main.gd.uid", None)
+                .expect_err("refused")
+                .code,
+            "sidecar_path"
+        );
     }
 
     /// A tiny picture in whatever format the test asks for, written into the worktree.

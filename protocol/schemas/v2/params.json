@@ -1318,7 +1318,7 @@
         {
             "tool": "godot_resource",
             "op": "move",
-            "summary": "Moves a file or directory inside the worktree.",
+            "summary": "Moves a file or directory inside the worktree. Godot's own record of a file \u2014 its `.uid`, an asset's `.import` \u2014 travels with it, so a scene that refers to the file by id keeps finding it. Never move one of those on its own.",
             "params": [
                 {
                     "name": "from",
@@ -1337,7 +1337,7 @@
         {
             "tool": "godot_resource",
             "op": "delete",
-            "summary": "Deletes a file or directory. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
+            "summary": "Deletes a file or directory, and Godot's own record of it \u2014 its `.uid`, an asset's `.import` \u2014 with it. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
             "params": [
                 {
                     "name": "path",

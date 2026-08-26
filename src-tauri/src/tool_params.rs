@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:c01363070f803149
+// GENERATED-BEGIN operations sha256:150e46773f65cebd
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1232,7 +1232,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         op(
             "godot_resource",
             "move",
-            "Moves a file or directory inside the worktree.",
+            "Moves a file or directory inside the worktree. Godot's own record of a file — its `.uid`, an asset's `.import` — travels with it, so a scene that refers to the file by id keeps finding it. Never move one of those on its own.",
             Answers::Rust,
             &[need("from", Text), need("to", Text)],
         ),
@@ -1242,7 +1242,7 @@ pub const GODOT_RESOURCE_OPERATIONS: &[Operation] = &[
         op(
             "godot_resource",
             "delete",
-            "Deletes a file or directory. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
+            "Deletes a file or directory, and Godot's own record of it — its `.uid`, an asset's `.import` — with it. A file you have read is deleted as you last read it: the router holds the hash that read answered with and refuses the delete if the file changed since, so read it first when it matters that nothing moved underneath.",
             Answers::Rust,
             &[
                 need("path", Text),

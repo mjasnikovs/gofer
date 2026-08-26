@@ -1,0 +1,36 @@
+; Engine configuration file.
+; The workspace the live sweep drives: a real Godot project small enough to import in seconds, with
+; the scene tree, the script and the output the sweep asserts against.
+config_version=5
+
+[application]
+
+config/name="Gofer Live Sweep"
+; And a cap, so a game left running while the agent thinks does not spin a core at three thousand
+; frames a second. 60 is what the tests around it are pretending to watch.
+run/max_fps=60
+run/main_scene="res://scenes/main.tscn"
+
+[display]
+
+; The sweep asserts the captured frame is this size, so the game window states it rather than
+; inheriting a default that a Godot release is free to change.
+window/size/viewport_width=640
+window/size/viewport_height=360
+; The sweep runs this as a real windowed game on a real desktop. Without this the window takes focus
+; the moment it maps, and the next keystroke goes into the game instead of the editor being driven.
+window/size/no_focus=true
+; And without this it renders at two frames a second. An X11 window that is never focused is never
+; given a vblank, so every frame Godot waits for one and times out at about half a second. The two
+; settings only bite together, which is why neither looks wrong on its own: measured interleaved on
+; this fixture, no_focus alone was 2.0 fps, no_focus off was 1125, and no_focus with vsync off was
+; 3195. Nothing here is looking at a display, so there is nothing to synchronise to - and a runtime
+; wait that advances five frames in four seconds is a game the tests around it are not running.
+window/vsync/vsync_mode=0
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+; The art in assets/ is 16x16 pixel art, and the default filter smears it the moment a tile is drawn
+; at anything but its own size.
+textures/canvas_textures/default_texture_filter=0

@@ -1,0 +1,3 @@
+# Godot's own import cache. The sweep restores the workspace with `git clean`, and an ignored cache
+# is one the next run does not have to spend an import scan rebuilding.
+.godot/
