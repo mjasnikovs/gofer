@@ -13,6 +13,22 @@ import {commandErrorMessage} from '../../utils/command-error'
 import type {InitializationState} from '../../models/chat'
 import {progressLabel, progressValue} from '../../models/settings'
 
+/**
+ * Whether the models are on disk already, and so whether the warmup has anything to do.
+ *
+ * A question that cannot be answered is answered `false`: the point of asking is to skip work that
+ * is already done, and a status read that fails says nothing about whether it is. Initializing
+ * anyway is what this did before the question was asked at all, so the worst case is the old
+ * behaviour rather than a splash that gives up.
+ */
+async function isAlreadyInstalled() {
+    try {
+        return (await invoke('get_rag_cache_status')).state === 'installed'
+    } catch {
+        return false
+    }
+}
+
 export function InitializationSplash({onReady}: {onReady: () => void}) {
     const [state, setState] = useState<InitializationState>({status: 'initializing'})
     const hasStarted = useRef(false)
@@ -34,7 +50,16 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
             unlisten = await listen('rag-download-progress', event => {
                 setState({status: 'initializing', progress: event.payload})
             })
-            await invoke('initialize_rag')
+            // Asked before it is done. `initialize_rag` spawns a sidecar that loads 1.8 GB of
+            // models into a process which then exits, so on a machine that already has them it is
+            // five seconds of splash for a result that is already on disk — measured at 5,088ms
+            // with every file present. `installed` is exactly the state that says so, and it is
+            // the state the Models tab already shows the user.
+            //
+            // A file that is present but corrupt now fails at the first search rather than here.
+            // That trade is deliberate: this check is presence, which is what the warmup's own
+            // status check tests too, and the Models tab can delete and reinstall the cache.
+            if (!(await isAlreadyInstalled())) await invoke('initialize_rag')
             setState({status: 'ready'})
             onReady()
         } catch (error) {

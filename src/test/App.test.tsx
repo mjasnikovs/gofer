@@ -135,8 +135,11 @@ describe('InitializationSplash', () => {
             calls.push('listen')
             return unlisten
         })
-        tauri.invoke.mockImplementation(async () => {
-            calls.push('invoke')
+        tauri.invoke.mockImplementation(async command => {
+            calls.push(command)
+            return command === 'get_rag_cache_status' ?
+                    {path: '/cache', sizeBytes: 0, state: 'not-installed'}
+                :   undefined
         })
 
         render(<InitializationSplash onReady={onReady} />)
@@ -144,8 +147,52 @@ describe('InitializationSplash', () => {
         await flush()
 
         expect(onReady).toHaveBeenCalledOnce()
-        expect(calls).toEqual(['listen', 'invoke'])
+        expect(calls).toEqual(['listen', 'get_rag_cache_status', 'initialize_rag'])
         expect(unlisten).toHaveBeenCalledOnce()
+    })
+
+    /**
+     * The failure this pins is five seconds of splash on every launch, doing work already done.
+     * `initialize_rag` spawns a sidecar that loads 1.8 GB of models into a process which then
+     * exits: measured at 5,088ms with every model file already present, and the memory it loads
+     * is thrown away when the process goes. The splash gates the whole application, so the user
+     * waits it out each time.
+     */
+    it('does not reinstall models that are already installed', async () => {
+        const calls: string[] = []
+        const onReady = vi.fn()
+        tauri.listen.mockResolvedValue(vi.fn())
+        tauri.invoke.mockImplementation(async command => {
+            calls.push(command)
+            return command === 'get_rag_cache_status' ?
+                    {path: '/cache', sizeBytes: 1_823_614_836, state: 'installed'}
+                :   undefined
+        })
+
+        render(<InitializationSplash onReady={onReady} />)
+
+        await flush()
+
+        expect(calls).toEqual(['get_rag_cache_status'])
+        expect(calls).not.toContain('initialize_rag')
+        expect(onReady).toHaveBeenCalledOnce()
+    })
+
+    it('still installs when the cache is half written', async () => {
+        const calls: string[] = []
+        tauri.listen.mockResolvedValue(vi.fn())
+        tauri.invoke.mockImplementation(async command => {
+            calls.push(command)
+            return command === 'get_rag_cache_status' ?
+                    {path: '/cache', sizeBytes: 12, state: 'incomplete'}
+                :   undefined
+        })
+
+        render(<InitializationSplash onReady={vi.fn()} />)
+
+        await flush()
+
+        expect(calls).toContain('initialize_rag')
     })
 
     it('shows listener registration failures and allows retrying', async () => {
