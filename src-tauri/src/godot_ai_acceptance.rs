@@ -467,7 +467,12 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     // a path nothing in the application took.
     let context = JobContext::for_suite(
         app.handle(),
-        AiSettings::served_by(base_url, "gofer-acceptance".to_owned()),
+        AiSettings::served_by(
+            crate::settings::AiConnectionType::OpenaiCompatible,
+            Some(base_url),
+            "gofer-acceptance".to_owned(),
+            None,
+        ),
         session.worktree.display().to_string(),
     )
     .expect("build the job context");

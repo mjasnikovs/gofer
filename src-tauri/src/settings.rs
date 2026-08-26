@@ -194,22 +194,35 @@ impl AiSettings {
         self.connections.get(&driver)
     }
 
-    /// The shipped settings, pointed at one server with one model on it, for a suite that brings
-    /// its own. Where the model is, and that a failed request is not asked again, is all an
-    /// acceptance run chooses; the rest of the turn is the one the application composes.
+    /// The shipped settings, pointed at one connection with one model on it, for a suite that
+    /// brings its own. Which driver answers, where it is, which model, and how hard it is asked to
+    /// think is all an acceptance run chooses; the rest of the turn is the one the application
+    /// composes. A failed request is never asked again, because a suite counts errors.
+    ///
+    /// `base_url` is optional because only one of the three drivers has an address a run picks.
+    /// ChatGPT's is a constant and OpenRouter's is a constant; overwriting either from a default
+    /// meant for a local server is how a run ends up asking `127.0.0.1` for a subscription model.
     #[cfg(all(test, feature = "godot-acceptance"))]
-    pub(crate) fn served_by(base_url: String, model: String) -> Self {
+    pub(crate) fn served_by(
+        driver: AiConnectionType,
+        base_url: Option<String>,
+        model: String,
+        thinking_level: Option<String>,
+    ) -> Self {
         let mut settings = Self {
+            connection_type: driver,
             max_retries: 0,
             ..Self::default()
         };
-        if let Some(local) = settings
-            .connections
-            .get_mut(&AiConnectionType::OpenaiCompatible)
-        {
-            local.base_url = base_url;
-            local.model.name.clone_from(&model);
-            local.model.id = model;
+        if let Some(connection) = settings.connections.get_mut(&driver) {
+            if let Some(base_url) = base_url {
+                connection.base_url = base_url;
+            }
+            if let Some(level) = thinking_level {
+                connection.model.thinking_level = level;
+            }
+            connection.model.name.clone_from(&model);
+            connection.model.id = model;
         }
         settings
     }
@@ -3278,6 +3291,60 @@ mod tests {
             None,
             "a ChatGPT-only install with no credential has no model to reach"
         );
+    }
+
+    /// A suite may drive any of the three drivers, and only the local one takes an address.
+    ///
+    /// The failure this pins is the one the signature used to make unavoidable: `served_by` filled
+    /// the OpenAI-compatible slot whatever it was handed, so a run naming a subscription model
+    /// pointed a ChatGPT model id at a local server and authenticated with nothing. The ChatGPT
+    /// and OpenRouter addresses are constants — a run must not be able to overwrite either from a
+    /// default meant for `127.0.0.1`.
+    #[cfg(feature = "godot-acceptance")]
+    #[test]
+    fn a_suite_can_be_pointed_at_any_of_the_three_connections() {
+        let local = AiSettings::served_by(
+            AiConnectionType::OpenaiCompatible,
+            Some("http://127.0.0.1:9099/v1".to_owned()),
+            "local".to_owned(),
+            None,
+        );
+        assert_eq!(local.connection_type, AiConnectionType::OpenaiCompatible);
+        let profile = local.connection().expect("the local connection is live");
+        assert_eq!(profile.base_url, "http://127.0.0.1:9099/v1");
+        assert_eq!(profile.model.id, "local");
+
+        let chatgpt = AiSettings::served_by(
+            AiConnectionType::OpenaiCodex,
+            None,
+            "gpt-5.6-luna".to_owned(),
+            Some("medium".to_owned()),
+        );
+        assert_eq!(chatgpt.connection_type, AiConnectionType::OpenaiCodex);
+        let profile = chatgpt
+            .connection()
+            .expect("the ChatGPT connection is live");
+        assert_eq!(profile.base_url, default_chatgpt_profile().base_url);
+        assert_eq!(profile.api, ApiDialect::OpenaiCodexResponses);
+        // Id and label both, because a run names one model and the report prints whichever it
+        // reaches for. A suite has no second string to give and no picker to have chosen from.
+        assert_eq!(profile.model.id, "gpt-5.6-luna");
+        assert_eq!(profile.model.name, "gpt-5.6-luna");
+        // Named rather than inherited: the shipped ChatGPT profile asks at `high`, and two runs
+        // are only comparable if the level each was asked at is the level the run wrote down.
+        assert_eq!(profile.model.thinking_level, "medium");
+
+        let openrouter = AiSettings::served_by(
+            AiConnectionType::Openrouter,
+            None,
+            "stealth/ox-alpha".to_owned(),
+            None,
+        );
+        let profile = openrouter
+            .connection()
+            .expect("the OpenRouter connection is live");
+        assert_eq!(profile.base_url, OPENROUTER_BASE_URL);
+        assert_eq!(profile.model.id, "stealth/ox-alpha");
     }
 
     #[test]

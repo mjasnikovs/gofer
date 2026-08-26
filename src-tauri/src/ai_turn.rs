@@ -428,10 +428,16 @@ impl JobContext {
     /// itself is where the model is, which credential — if any — is sent, and which checkout the
     /// editor it started is bound to.
     ///
-    /// The keyring is never read here. `GOFER_LIVE_API_KEY` is the only credential a suite can
-    /// send, it has to be named on the command line, and it fills the OpenAI-compatible slot —
-    /// which is the one `AiSettings::served_by` configures. That is what lets a live turn be put
-    /// to a hosted OpenAI-compatible endpoint (OpenRouter) rather than only to a local server.
+    /// The keyring is never read here. A suite's credentials have to be named on the command line:
+    /// `GOFER_LIVE_API_KEY` fills the OpenAI-compatible slot, and `GOFER_LIVE_OAUTH` carries the
+    /// stored ChatGPT credential as the JSON the keyring holds. That is what lets a live turn be
+    /// put to a hosted endpoint — OpenRouter, or a ChatGPT subscription — and not only to a local
+    /// server. A credential the run was not given is simply absent, which is what a run against
+    /// `127.0.0.1` wants.
+    ///
+    /// A refresh Pi performs mid-run is lost, because there is nowhere here to write it back to.
+    /// A suite is a single turn and the stored access token outlives one, so the cost of that is a
+    /// run started on an expired token failing at its first request rather than silently later.
     /// Unset, the suite sends nothing, which is what a run against `127.0.0.1` wants.
     // Gated exactly where its callers are: the two acceptance harnesses are `cfg(all(test,
     // feature = "godot-acceptance"))` modules, and a build without the engine has no suite to
@@ -455,6 +461,13 @@ impl JobContext {
                 api_key: std::env::var("GOFER_LIVE_API_KEY")
                     .ok()
                     .filter(|key| !key.is_empty()),
+                oauth_credential: std::env::var("GOFER_LIVE_OAUTH")
+                    .ok()
+                    .filter(|stored| !stored.is_empty())
+                    .map(|stored| {
+                        serde_json::from_str(&stored)
+                            .expect("GOFER_LIVE_OAUTH holds the JSON the keyring stores")
+                    }),
                 ..Credentials::default()
             },
             storage,

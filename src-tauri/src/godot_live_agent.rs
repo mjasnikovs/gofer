@@ -184,9 +184,31 @@ fn live_agent_acceptance() {
     let out = PathBuf::from(
         std::env::var("GOFER_LIVE_OUT").expect("GOFER_LIVE_OUT names where the events go"),
     );
-    let base_url = std::env::var("GOFER_LIVE_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080/v1".to_owned());
+    // Which of the three drivers answers this run. `openai-compatible` is the default because a
+    // local server is what a run with nothing named wants; the other two reach a hosted endpoint
+    // and need the credential their own environment variable carries.
+    let driver = match std::env::var("GOFER_LIVE_CONNECTION").as_deref() {
+        Ok("openai-codex") => crate::settings::AiConnectionType::OpenaiCodex,
+        Ok("openrouter") => crate::settings::AiConnectionType::Openrouter,
+        Ok("openai-compatible") | Err(_) => crate::settings::AiConnectionType::OpenaiCompatible,
+        Ok(other) => panic!(
+            "GOFER_LIVE_CONNECTION names {other}, which is not openai-compatible, openai-codex or \
+             openrouter"
+        ),
+    };
+    // Only the local driver gets an address filled in from nothing. ChatGPT's and OpenRouter's are
+    // constants in the shipped connection, and a run that overwrote either with this default would
+    // ask `127.0.0.1` for a hosted model.
+    let base_url = std::env::var("GOFER_LIVE_BASE_URL").ok().or_else(|| {
+        (driver == crate::settings::AiConnectionType::OpenaiCompatible)
+            .then(|| "http://127.0.0.1:8080/v1".to_owned())
+    });
     let model = std::env::var("GOFER_LIVE_MODEL").unwrap_or_else(|_| "local".to_owned());
+    // Named rather than inherited, because how hard a model is asked to think decides what a run
+    // costs and how long it takes — so two runs being comparable depends on it being written down.
+    let thinking_level = std::env::var("GOFER_LIVE_THINKING")
+        .ok()
+        .filter(|l| !l.is_empty());
 
     // The project database is opened before the editor, and this order is the whole run.
     //
@@ -271,7 +293,7 @@ fn live_agent_acceptance() {
     // editor it started is bound to.
     let context = JobContext::for_suite(
         app.handle(),
-        AiSettings::served_by(base_url, model),
+        AiSettings::served_by(driver, base_url, model, thinking_level),
         session.worktree.display().to_string(),
     )
     .expect("build the job context");
