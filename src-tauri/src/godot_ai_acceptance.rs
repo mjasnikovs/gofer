@@ -229,10 +229,21 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             }}),
         ),
         13 => tool("godot_debug", json!({"op": "terminate", "params": {}})),
-        14 => tool("godot_runtime", json!({"op": "run", "params": {}})),
-        15 => tool("godot_runtime", json!({"op": "capture", "params": {}})),
-        16 => tool("godot_runtime", json!({"op": "stop", "params": {}})),
-        17 => tool(
+        // Disarming the breakpoint is part of finishing with the debugger, not tidiness. The
+        // editor holds breakpoints, not the session, so it hands them to the next game it plays —
+        // and the next game here is the one this turn wants a photograph of. Left armed, it stops
+        // on its first `_process` and renders nothing more, and the capture below waits out its
+        // whole twenty seconds against a game that is paused rather than slow. Measured: the
+        // second game's `breaked` arrived every run, and the capture beat it about two runs in
+        // three.
+        14 => tool(
+            "godot_debug",
+            json!({"op": "set_breakpoints", "params": {"path": PROBE_PATH, "lines": []}}),
+        ),
+        15 => tool("godot_runtime", json!({"op": "run", "params": {}})),
+        16 => tool("godot_runtime", json!({"op": "capture", "params": {}})),
+        17 => tool("godot_runtime", json!({"op": "stop", "params": {}})),
+        18 => tool(
             "godot_logs",
             json!({"op": "read", "params": {"limit": 200}}),
         ),
@@ -241,17 +252,17 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
         // and `godot_resource`'s list, move and delete are answered by the desktop out of the
         // workspace rather than by the addon at all. Both were only ever checked by a test that
         // reads strings.
-        18 => tool("godot_resource", json!({"op": "rescan", "params": {}})),
-        19 => tool("godot_project", json!({"op": "get_settings", "params": {}})),
-        20 => tool(
+        19 => tool("godot_resource", json!({"op": "rescan", "params": {}})),
+        20 => tool("godot_project", json!({"op": "get_settings", "params": {}})),
+        21 => tool(
             "godot_project",
             json!({"op": "search_editor_settings", "params": {"query": "font_size"}}),
         ),
-        21 => tool(
+        22 => tool(
             "godot_resource",
             json!({"op": "list", "params": {"hashes": true}}),
         ),
-        22 => tool(
+        23 => tool(
             "godot_resource",
             json!({"op": "create_tileset", "params": {
                 "path": TILESET_PATH,
@@ -260,7 +271,7 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
                 "solid": [[0, 0], [1, 0], [4, 0], [5, 0]],
             }}),
         ),
-        23 => tool(
+        24 => tool(
             "godot_resource",
             json!({"op": "describe_tileset", "params": {"path": TILESET_PATH}}),
         ),
@@ -268,7 +279,7 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
         // in one call rather than two. Everything above is one operation per call because each
         // needs the answer before it; nothing above would catch a list that only works in a unit
         // test.
-        24 => tools(
+        25 => tools(
             "godot_node",
             &[
                 json!({"op": "inspect", "params": {"node": "/AiFixture"}}),
@@ -513,7 +524,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     };
     assert_eq!(
         results.len(),
-        25,
+        26,
         "{}",
         quote("every tool call is answered")
     );
@@ -601,7 +612,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     assert_eq!(amount["value"], "1");
 
     // The capture: a real PNG frame from the running game, both times.
-    for position in [14, 15] {
+    for position in [15, 16] {
         assert_eq!(
             results[position]["frame"]["encoding"],
             "png-base64",
@@ -629,7 +640,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     );
 
     // The logs domain: the editor's own output, captured by the session and paged with a cursor.
-    let entries = results[17]["entries"]
+    let entries = results[18]["entries"]
         .as_array()
         .unwrap_or_else(|| panic!("{}", quote("the logs page must carry entries")));
     assert!(
@@ -638,7 +649,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("the session captured logs")
     );
     assert!(
-        results[17]["cursor"].as_u64().unwrap_or(0) > 0,
+        results[18]["cursor"].as_u64().unwrap_or(0) > 0,
         "{}",
         quote("the logs page must carry a cursor")
     );
@@ -671,7 +682,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("no line of the editor's progress bar may reach the model")
     );
     assert!(
-        results[17]["terminalLinesOmitted"].as_u64().unwrap_or(0) > 0,
+        results[18]["terminalLinesOmitted"].as_u64().unwrap_or(0) > 0,
         "{}",
         quote("a real import writes a progress bar, and the count has to say so")
     );
@@ -680,13 +691,13 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     // `project.` command at all, it is the addon's `editor.search_settings`, and the mapping lives
     // in `project_command` where nothing but a string comparison used to look at it.
     assert_eq!(
-        results[19]["projectName"],
+        results[20]["projectName"],
         "Gofer Protocol Fixture",
         "{}",
         quote("the project domain must answer with this project's own settings")
     );
     assert!(
-        results[20]["settings"]
+        results[21]["settings"]
             .as_array()
             .is_some_and(|settings| !settings.is_empty()),
         "{}",
@@ -696,7 +707,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     // The resource domain, which the desktop answers out of the workspace: the listing records the
     // hash a delete of a non-script file is held to, and it is the file's real hash. It records it
     // rather than reporting it — the ledger holds every hash now, so no answer carries one.
-    let listed = results[21]["files"]
+    let listed = results[22]["files"]
         .as_array()
         .unwrap_or_else(|| panic!("{}", quote("the listing must carry files")));
     let scene = listed
@@ -739,18 +750,18 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
 
     // The tileset pair, through the router this time rather than straight at the addon.
     assert_eq!(
-        results[22]["grid"],
+        results[23]["grid"],
         json!([8, 2]),
         "{}",
         quote("the atlas is eight tiles by two")
     );
     assert_eq!(
-        results[22]["physicsLayers"],
+        results[23]["physicsLayers"],
         1,
         "{}",
         quote("solid tiles need a physics layer")
     );
-    let tiles = results[23]["sources"][0]["tiles"]
+    let tiles = results[24]["sources"][0]["tiles"]
         .as_array()
         .unwrap_or_else(|| panic!("{}", quote("the saved tileset must describe its tiles")));
     assert_eq!(tiles.len(), 16, "{}", quote("every atlas tile is defined"));
@@ -768,7 +779,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     // entries in the order they were written. This is the whole point of the `ops` list — the
     // model that wanted both used to spend a turn on each — so it is proven here rather than only
     // where a fake backend answers.
-    let batched = results[24]["ops"]
+    let batched = results[25]["ops"]
         .as_array()
         .unwrap_or_else(|| panic!("{}", quote("a list of two is answered as a list")));
     assert_eq!(

@@ -30,9 +30,10 @@ import {reexecUnderVirtualDisplay} from './virtual-display.mjs'
 // second of spread inside each setting, twelve between them. So the cap is gone and the formula it
 // was capping stands on its own.
 //
-// Ten is faster still and is not taken: this lane runs beside a Cargo build and thirteen other
-// checks under `npm run check`, and eight is the count that leaves those the cores they were
-// measured with.
+// Eight is what this file picks on its own, for a lane run by hand. `npm run check` sets
+// `GOFER_GODOT_JOBS` to ten and gets the same green: the reds that used to arrive above eight were
+// never the core count, they were ten editors sharing Godot's one debugger port. See the
+// `--debug-server` comment in `godot_editor_harness.rs`.
 
 const MANIFEST = 'src-tauri/Cargo.toml'
 const FEATURE = 'godot-acceptance'

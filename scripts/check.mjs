@@ -39,10 +39,13 @@ const script = name => [name, `npm run --silent ${name}`]
 //
 // The Godot lane gets more than its third because a worker there spends most of its life waiting on
 // an editor that is booting rather than computing. Measured on sixteen cores, alternating whole
-// runs: eight Godot workers gave 63.9s, 63.8s and 64.4s, ten gave 61.6s, 61.9s and 61.1s, all
-// seventeen checks green in every one. Ten and four and four is eighteen on sixteen, which is the
-// point — the lanes are not all busy at the same moment, and pretending they are left two cores
-// idle for a minute.
+// runs: eight Godot workers gave 63.9s, 63.8s and 64.4s, ten gave 61.6s, 61.9s and 61.1s. Ten and
+// four and four is eighteen on sixteen, which is the point — the lanes are not all busy at the same
+// moment, and pretending they are left two cores idle for a minute.
+//
+// Ten later read as flaky — five of five runs red — and the count was not why. Ten editors shared
+// Godot's one debugger port and games connected to the wrong editor; the fix is the
+// `--debug-server` argument in `godot_editor_harness.rs`, and ten is green again.
 const CORES = Math.max(4, cpus().length)
 const GODOT_JOBS = Math.floor((CORES * 5) / 8)
 const CARGO_JOBS = Math.floor(CORES / 4)

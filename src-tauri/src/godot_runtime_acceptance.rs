@@ -530,9 +530,19 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
 /// The script for the game that will not be asked nicely: it binds a port so its liveness is
 /// observable from outside, then spins its main thread solid so the editor's stop request can
 /// never be answered and the process has to be killed instead.
+///
+/// The spin is armed from the scene's own first frame, not from the engine's start. It was
+/// `Time.get_ticks_msec() > 4000`, counted from engine start, so the game's boot was spent against
+/// it: under a second alone and about four beside nine other editors, and the spin then began on
+/// the same frame the helper announced — before the launch's first-frame capture could be served.
+/// Counting frames instead fixed that and broke the other end, because a frame is not a fixed
+/// length either: at ten editors the game drew slowly enough that a hundred and twenty frames
+/// outlasted the six seconds this test waits, and the stop below then reached a game that was
+/// still answering. Two seconds of the scene running is long after the capture and long before the
+/// wait ends, on a loaded machine and an idle one.
 fn unkillable_probe_script(port: u16) -> String {
     format!(
-        "extends Node2D\n\nvar server := TCPServer.new()\n\nfunc _ready() -> void:\n\tserver.listen({port}, \"127.0.0.1\")\n\nfunc _process(_delta: float) -> void:\n\tif Time.get_ticks_msec() > 4000:\n\t\twhile true:\n\t\t\tpass\n"
+        "extends Node2D\n\nvar server := TCPServer.new()\nvar running_since := 0\n\nfunc _ready() -> void:\n\tserver.listen({port}, \"127.0.0.1\")\n\nfunc _process(_delta: float) -> void:\n\tif running_since == 0:\n\t\trunning_since = Time.get_ticks_msec()\n\tif Time.get_ticks_msec() - running_since > 2000:\n\t\twhile true:\n\t\t\tpass\n"
     )
 }
 
@@ -715,7 +725,8 @@ fn a_game_that_stops_at_an_error_ends_the_launch_waiting_on_it() {
     assert!(
         error.starts_with("runtime_broke"),
         "a game paused at an error must say so, because every other answer sends the caller back \
-         to waiting: {error}"
+         to waiting: {error}\n--- editor output ---\n{}",
+        session.output()
     );
     assert!(
         waited < Duration::from_secs(20),
@@ -1069,7 +1080,8 @@ fn a_game_that_dies_before_its_helper_loads_ends_the_launch() {
     );
     assert!(
         error.starts_with("runtime_not_running"),
-        "a game that is gone must answer the retryable no-game error: {error}"
+        "a game that is gone must answer the retryable no-game error: {error}\n--- editor output ---\n{}",
+        session.output()
     );
     assert!(
         waited < Duration::from_secs(20),

@@ -346,6 +346,16 @@ impl<'a> Launch<'a> {
             arguments.push(OsString::from("--dap-port"));
             arguments.push(OsString::from(port.to_string()));
         }
+        // A debugger port of this editor's own, because the one Godot ships with is shared.
+        //
+        // The editor's debug server binds `network/debug/remote_port` — 6007 unless told
+        // otherwise — and tells the game it plays to connect to that number. A second editor
+        // playing at the same time finds 6007 taken, steps to 6008, and still sends its game to
+        // 6007: the game connects to the wrong editor. Nothing errors on either side, so the
+        // editor that launched it waits out its whole launch deadline on a session that never
+        // becomes active.
+        arguments.push(OsString::from("--debug-server"));
+        arguments.push(OsString::from(format!("tcp://127.0.0.1:{}", free_port())));
 
         let mut environment: Vec<(OsString, OsString)> = self
             .rpc
