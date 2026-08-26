@@ -1,0 +1,27 @@
+; Engine configuration file.
+; The workspace for a run that has to answer a dialog. `run/main_scene` names a scene that is not
+; in this project, so pressing Play opens Godot's own "Can't run project" alert — a native window
+; nothing in a screenshot can see and nothing but `godot_session answer_dialog` can dismiss.
+;
+; Everything else is `fixtures/live-project`'s, for the reasons its own comments give: a 60 fps cap,
+; a stated window size, no focus stealing, and vsync off because an unfocused X11 window is never
+; given a vblank.
+config_version=5
+
+[application]
+
+config/name="Gofer Live Sweep - No Main Scene"
+run/max_fps=60
+run/main_scene="res://scenes/level_one.tscn"
+
+[display]
+
+window/size/viewport_width=640
+window/size/viewport_height=360
+window/size/no_focus=true
+window/vsync/vsync_mode=0
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+textures/canvas_textures/default_texture_filter=0
