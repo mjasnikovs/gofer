@@ -19,4 +19,9 @@ run=(cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance
 if [ "${GOFER_GODOT_DISPLAY:-}" = host ]; then
   exec "${run[@]}"
 fi
+# The Wayland session goes with the desktop it belongs to. `xvfb-run` sets DISPLAY and nothing
+# else, Gofer reads WAYLAND_DISPLAY to decide the editor's display driver, and a turn under this
+# wrapper otherwise opens its editor on the developer's own compositor. Same reason, and the same
+# two lines, as `live-turn.sh` and `scripts/virtual-display.mjs`.
+unset WAYLAND_DISPLAY XDG_SESSION_TYPE
 exec xvfb-run -a -s "-screen 0 1920x1080x24" "${run[@]}"
