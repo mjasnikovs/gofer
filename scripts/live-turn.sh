@@ -14,6 +14,11 @@
 # Godot editor and runs a real windowed game, and every one of those windows otherwise lands on the
 # desktop of whoever is running this and takes focus off what they were doing.
 # GOFER_GODOT_DISPLAY=host opts out, for watching what the editor is actually doing.
+#
+# The Wayland session goes with the desktop it belongs to, for the reason that file gives at
+# length: `xvfb-run` sets DISPLAY and nothing else, Gofer reads WAYLAND_DISPLAY to decide the
+# editor's display driver, and a turn under this wrapper was opening its editor on the developer's
+# own compositor regardless.
 set -euo pipefail
 name="$1"; shift
 task="$1"
@@ -46,6 +51,7 @@ run=(cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance
 if [ "${GOFER_GODOT_DISPLAY:-}" = host ]; then
   exec "${run[@]}"
 fi
+unset WAYLAND_DISPLAY XDG_SESSION_TYPE
 # 640x480 is this machine's xvfb-run default, and the fixture game is 640x360 — a game window
 # larger than the screen is one the compositor may clip, so the screen is stated rather than
 # inherited.
