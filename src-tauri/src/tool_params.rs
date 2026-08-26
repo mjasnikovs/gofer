@@ -2662,6 +2662,8 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     // left where it is for `check` to refuse by name, with the hint still saying what to try.
     put_the_pair_back(spec, object);
     drop_the_wreckage_of_a_pair_that_survived(spec, object);
+    fold_a_tag_written_flat(spec, object);
+    drop_the_empty_claimant(spec, object);
     let wanted: Vec<(String, &'static str)> = object
         .keys()
         .filter(|key| {
@@ -2703,6 +2705,95 @@ fn repair_set(spec: &[Param], params: &mut Value) {
             Kind::Object if !param.entry.is_empty() => repair_set(param.entry, held),
             _ => {}
         }
+    }
+}
+
+/// A key holding nothing, standing between a key holding the answer and the parameter it names.
+///
+/// `{"path": …, "shapeType": "RectangleShape2D", "size_list": [16, 16], "size_list_note": null}`
+/// is what a live turn sent `resource.create_shape`. `size_list` alone is repaired to `size` and
+/// the call runs; with the second key beside it both read as `size`, the rename below sees two
+/// answers, and it takes neither — a rename nobody can predict being worse than a refusal that
+/// names both. So the call was refused, and what blocked it was a key with nothing in it.
+///
+/// Only that: the key carries no value at all, another unknown key reads as the same parameter and
+/// does carry one, and neither is a parameter this operation declares. A key holding something is
+/// never dropped, because what it holds is what the caller wrote.
+fn drop_the_empty_claimant(spec: &[Param], object: &mut serde_json::Map<String, Value>) {
+    let unknown: Vec<(String, bool, Option<&'static str>)> = object
+        .iter()
+        .filter(|(key, _)| !spec.iter().any(|param| param.name == key.as_str()))
+        .filter(|(key, _)| !UNIVERSAL.contains(&key.as_str()))
+        .map(|(key, held)| {
+            (
+                key.clone(),
+                carries_a_value(Some(held)),
+                only_one_meaning(key, Some(held), spec),
+            )
+        })
+        .collect();
+    let empty: Vec<String> = unknown
+        .iter()
+        .filter(|(_, carries, reads)| !carries && reads.is_some())
+        .filter(|(key, _, reads)| {
+            unknown.iter().any(|(other, carries, other_reads)| {
+                other != key && *carries && other_reads == reads
+            })
+        })
+        .map(|(key, _, _)| key.clone())
+        .collect();
+    for key in empty {
+        object.remove(&key);
+    }
+}
+
+/// The two halves of a tagged value, written as two flat keys, folded back to one.
+///
+/// `{"path": …, "shapeType": "RectangleShape2D", "sizeType": null, "sizeValue": [24, 48]}` is what
+/// a live turn sent `resource.create_shape`. `size` is a plain list here and nothing about it is
+/// tagged — the model carried the protocol's own `{type, value}` shape over from `set_property`
+/// and flattened it onto the parameter name.
+///
+/// The rename below already turns a lone `sizeValue` into `size`. It cannot turn this one, and
+/// deliberately: `sizeType` and `sizeValue` both read as `size`, that is two answers, and
+/// `wanted` refuses a contested rename rather than picking whichever the map iterated first. So
+/// the call was refused with ``has no `sizeType` parameter … Did you mean `size`?``, which names
+/// the half that was already right.
+///
+/// Measured against the local Qwen3.8-27B at medium, 2 seeds interleaved over two catalogue arms:
+/// **0 of 8 `create_shape` entries carried a two-number `size`**, and every one of the eight wrote
+/// it under `sizeValue`, `size_value`, `sizeValues` or `sizeType` + `sizeValue`. Printing the
+/// shape in the signature — `size?: [width, height]` rather than `size?: list` — changed nothing:
+/// 0 of 4 either way. It is the tagged habit, not the word `list`.
+///
+/// Narrow: the head has to name a declared parameter the object does not already carry, the
+/// object has to hold that head's value half as well, and the type half has to hold what a type
+/// slot holds — a name, or nothing. No operation in the catalogue declares a `<name>Type` beside
+/// a `<name>`, so nothing real is thrown away; `check-command-surface` would have to change for
+/// that to stop being true.
+fn fold_a_tag_written_flat(spec: &[Param], object: &mut serde_json::Map<String, Value>) {
+    const TYPE_HALF: [&str; 2] = ["Type", "_type"];
+    const VALUE_HALF: [&str; 4] = ["Value", "Values", "_value", "_values"];
+    let flattened: Vec<String> = object
+        .iter()
+        .filter(|(_, held)| held.is_null() || held.is_string())
+        .filter_map(|(key, _)| {
+            let head = TYPE_HALF
+                .iter()
+                .find_map(|suffix| key.strip_suffix(suffix))
+                .filter(|head| !head.is_empty())?;
+            spec.iter()
+                .any(|param| !param.hidden && param.name == head)
+                .then_some(())?;
+            (!object.contains_key(head)).then_some(())?;
+            VALUE_HALF
+                .iter()
+                .any(|suffix| object.contains_key(&format!("{head}{suffix}")))
+                .then(|| key.clone())
+        })
+        .collect();
+    for key in flattened {
+        object.remove(&key);
     }
 }
 
@@ -4788,5 +4879,88 @@ mod tests {
             "{}",
             refused.message
         );
+    }
+
+    /// A tagged value written as two flat keys is one value, not two candidate names.
+    ///
+    /// Both shapes a live turn wrote for `create_shape`'s `size`, and both were refused with
+    /// ``has no `sizeType` parameter … Did you mean `size`?`` — a hint naming the half that was
+    /// already right. Nothing about `size` is tagged; the habit came from `set_property`.
+    ///
+    /// Measured against the local Qwen3.8-27B at medium: 0 of 8 entries carried a well-formed
+    /// `size`, over two catalogue arms. See `fold_a_tag_written_flat`.
+    #[test]
+    fn a_tagged_value_flattened_onto_a_parameter_name_is_folded_back() {
+        for written in [
+            json!({
+                "path": "a.tres", "shapeType": "RectangleShape2D",
+                "sizeType": Value::Null, "sizeValue": [24, 48]
+            }),
+            json!({
+                "path": "a.tres", "shapeType": "RectangleShape2D",
+                "sizeType": "Vector2", "sizeValue": [24, 48]
+            }),
+            json!({
+                "path": "a.tres", "shapeType": "RectangleShape2D",
+                "size_type": "Vector2", "size_value": [24, 48]
+            }),
+        ] {
+            let mut held = written.clone();
+            repair("godot_resource", "create_shape", &mut held);
+            assert_eq!(held["size"], json!([24, 48]), "{written} became {held}");
+            check_ok("godot_resource", "create_shape", held);
+        }
+
+        // The value half alone was always repaired and still is.
+        let mut lone = json!({"path": "a.tres", "shapeType": "CircleShape2D", "radiusValue": 8});
+        repair("godot_resource", "create_shape", &mut lone);
+        assert_eq!(lone["radius"], json!(8), "{lone}");
+
+        // A type half with no value half beside it is not a flattened tag, and nothing here throws
+        // it away: the rename below reads it as `size` the way it always did, and what the caller
+        // wrote is still in the call for `check` to refuse by kind.
+        let mut alone = json!({
+            "path": "a.tres", "shapeType": "RectangleShape2D", "sizeType": "Vector2"
+        });
+        repair("godot_resource", "create_shape", &mut alone);
+        assert_eq!(alone["size"], json!("Vector2"), "{alone}");
+
+        // And a type half carrying a real value is not a type slot. `points` is declared here, so
+        // the head reads as one; what sits beside it is a list, which no `{type, value}` pair has
+        // in its type half, and throwing it away would lose what the caller wrote.
+        let mut carried = json!({
+            "path": "a.tres", "shapeType": "SegmentShape2D",
+            "pointsType": [0, 0], "pointsValue": [0, 0, 8, 8]
+        });
+        repair("godot_resource", "create_shape", &mut carried);
+        assert_eq!(carried["pointsType"], json!([0, 0]), "{carried}");
+    }
+
+    /// A key with nothing in it must not block the key that holds the answer.
+    ///
+    /// The call a live turn sent `resource.create_shape` while building a tile level. `size_list`
+    /// alone is renamed to `size` and runs; the empty key beside it made both read as `size`, the
+    /// rename refused a contest it could not resolve, and the call came back
+    /// ``has no `size_list` parameter … Did you mean `size`?`` — about the key that was closest to
+    /// right.
+    #[test]
+    fn an_empty_key_does_not_block_the_one_beside_it() {
+        let mut held = json!({
+            "path": "assets/player_shape.tres",
+            "shapeType": "RectangleShape2D",
+            "size_list": [16, 16],
+            "size_list_note": Value::Null
+        });
+        repair("godot_resource", "create_shape", &mut held);
+        assert_eq!(held["size"], json!([16, 16]), "{held}");
+        check_ok("godot_resource", "create_shape", held);
+
+        // Two keys that both hold something are still two answers, and neither is taken.
+        let mut contested = json!({
+            "path": "a.tres", "shapeType": "RectangleShape2D",
+            "size_a": [16, 16], "size_b": [32, 32]
+        });
+        repair("godot_resource", "create_shape", &mut contested);
+        assert!(contested.get("size").is_none(), "{contested}");
     }
 }
