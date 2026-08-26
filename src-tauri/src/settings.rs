@@ -219,6 +219,30 @@ impl AiSettings {
                 connection.base_url = base_url;
             }
             if let Some(level) = thinking_level {
+                // A named level has to reach the wire, and for a llama.cpp host it only reaches it
+                // as a chat-template argument: the server takes `chat_template_kwargs`, ignores
+                // `reasoning_effort` without a word, and `default_local_profile` starts every flag
+                // that carries one at `false` because the application derives them from `/props`
+                // and a suite has no `/props` read to derive them from.
+                //
+                // Measured through a logging proxy on 2026-08-27: a live turn started with
+                // `GOFER_LIVE_THINKING=medium` sent a request body carrying `model`, `messages`,
+                // `stream`, `stream_options`, `store`, `max_completion_tokens` and `tools`, and no
+                // thinking field of any kind. It thought at whatever the server was started with,
+                // which made the knob look like it worked and made any A/B across levels a
+                // comparison of one level with itself.
+                connection.chat_template_thinking = driver == AiConnectionType::OpenaiCompatible;
+                connection.model.reasoning = true;
+                connection.model.supports_reasoning_effort = true;
+                // The level a run named is the only one it offers, so pi-ai's own clamp cannot
+                // move it: `piThinkingLevelMap` maps a named effort to itself and everything else
+                // to null, and an unmapped level is silently rewritten — `xhigh` went out as
+                // `high` against a template that raises on anything but its own three words. A
+                // level that is not one of the six is left unlisted, because listing a word pi-ai
+                // has no effort for clamps every request to `off`.
+                if NAMED_EFFORTS.contains(&level.as_str()) {
+                    connection.model.thinking_levels = vec![level.clone()];
+                }
                 connection.model.thinking_level = level;
             }
             connection.model.name.clone_from(&model);
@@ -3478,6 +3502,39 @@ mod tests {
         let profile = local.connection().expect("the local connection is live");
         assert_eq!(profile.base_url, "http://127.0.0.1:9099/v1");
         assert_eq!(profile.model.id, "local");
+        // No level named, so nothing is claimed about thinking and the scripted acceptance suite
+        // that passes `None` here sends exactly what it always sent.
+        assert!(!profile.chat_template_thinking);
+        assert!(!profile.model.reasoning);
+
+        // A level named for a local server has to arrive as a chat-template argument, because that
+        // is the only thing llama.cpp reads. A build that left these three flags at their defaults
+        // sent no thinking field at all and the level did nothing — see `served_by`.
+        let asked = AiSettings::served_by(
+            AiConnectionType::OpenaiCompatible,
+            Some("http://127.0.0.1:9099/v1".to_owned()),
+            "local".to_owned(),
+            Some("medium".to_owned()),
+        );
+        let profile = asked.connection().expect("the local connection is live");
+        assert!(profile.chat_template_thinking, "{profile:?}");
+        assert!(profile.model.reasoning, "{profile:?}");
+        assert!(profile.model.supports_reasoning_effort, "{profile:?}");
+        assert_eq!(profile.model.thinking_level, "medium");
+        assert_eq!(profile.model.thinking_levels, vec!["medium".to_owned()]);
+
+        // `on` is Gofer's word for a template that thinks and names no efforts. It is not an
+        // effort, and listing it as one puts every effort out of pi-ai's reach and clamps the
+        // request to `off` — the opposite of what was asked for.
+        let switched = AiSettings::served_by(
+            AiConnectionType::OpenaiCompatible,
+            None,
+            "local".to_owned(),
+            Some("on".to_owned()),
+        );
+        let profile = switched.connection().expect("the local connection is live");
+        assert!(profile.model.thinking_levels.is_empty(), "{profile:?}");
+        assert_eq!(profile.model.thinking_level, "on");
 
         let chatgpt = AiSettings::served_by(
             AiConnectionType::OpenaiCodex,
@@ -3498,6 +3555,8 @@ mod tests {
         // Named rather than inherited: the shipped ChatGPT profile asks at `high`, and two runs
         // are only comparable if the level each was asked at is the level the run wrote down.
         assert_eq!(profile.model.thinking_level, "medium");
+        // A chat template is a llama.cpp mechanism, and there is none behind this address.
+        assert!(!profile.chat_template_thinking);
 
         let openrouter = AiSettings::served_by(
             AiConnectionType::Openrouter,
