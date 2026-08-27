@@ -24,6 +24,7 @@ func _initialize() -> void:
         _test_input_events(params, failures)
         _test_check_declared(params, failures)
         _test_climbing_paths(params, failures)
+        _test_readback(params, failures)
     if failures.is_empty():
         print("Gofer Godot command parameters passed")
         quit(0)
@@ -224,3 +225,54 @@ func _test_climbing_paths(params: GDScript, failures: Array[String]) -> void:
         failures.append("The walk names the climbing path it found: %s" % str(nested))
     if not str(params.call("a_path_that_climbs_out", "", {"text": "../fine"})).is_empty():
         failures.append("Prose under a key that names no file is not a path")
+
+
+## Whether a value read back out of Godot is the value that was written into it, and what to say
+## when it is not.
+##
+## Every fact in here was measured on a real editor and then only ever re-proved by booting one.
+## None of the arithmetic needs an editor to state: a float property stores 32 bits so a double
+## drifts, an integer written to a float reads back as a float, and a cleared object property is a
+## TYPE_OBJECT variant pointing at nothing rather than TYPE_NIL.
+func _test_readback(params: GDScript, failures: Array[String]) -> void:
+    var same: Array = [
+        [5, 5.0],
+        [1.0, 1.0 + 1e-9],
+        [Vector2(1, 2), Vector2(1, 2)],
+        [Color(1, 0, 0), Color(1, 0, 0)],
+        [Transform2D.IDENTITY, Transform2D.IDENTITY]
+    ]
+    for case: Array in same:
+        if not params.call("same_value", case[0], case[1]):
+            failures.append("%s reads back as %s" % [str(case[0]), str(case[1])])
+
+    var differ: Array = [[Vector2(1, 2), Vector2(1, 3)], [1.0, 2.0], ["a", "b"], [1, "1"]]
+    for case: Array in differ:
+        if params.call("same_value", case[0], case[1]):
+            failures.append("%s does not read back as %s" % [str(case[0]), str(case[1])])
+
+    # A number is not a string that looks like one, and a null is not an empty string.
+    if params.call("is_null_object", null) or params.call("is_null_object", 0):
+        failures.append("Only an object variant pointing at nothing is a null object")
+
+    # Godot appends a number rather than refusing a name clash, and only an all-digit tail counts.
+    if not str(params.call("made_unique", "UI", "UI2")).contains("already called UI"):
+        failures.append("A name that came back with a number on it names the clash")
+    if not str(params.call("made_unique", "Player", "PlayerShip")).is_empty():
+        failures.append("A tail that is not digits is not Godot making a name unique")
+    if not str(params.call("made_unique", "UI", "UI")).is_empty():
+        failures.append("A name that came back unchanged is not a clash")
+
+    # A property no scene holds is answered by name; a size is answered by its floor, and only when
+    # the value that came back is the larger one.
+    if not str(params.call("instead_of", "anchors_preset", 3, 0)).contains("anchor_left"):
+        failures.append("anchors_preset names the four properties to write instead")
+    var grew: String = params.call(
+        "grew_to_its_minimum", "size", Vector2(0, 0), Vector2(1, 23)
+    )
+    if not grew.contains("custom_minimum_size"):
+        failures.append("A size held at its floor says how to lower the floor")
+    if not str(params.call("grew_to_its_minimum", "size", Vector2(64, 64), Vector2(8, 8))).is_empty():
+        failures.append("A size that came back smaller is a different thing entirely")
+    if not str(params.call("grew_to_its_minimum", "position", Vector2(0, 0), Vector2(1, 1))).is_empty():
+        failures.append("Only `size` has this floor")

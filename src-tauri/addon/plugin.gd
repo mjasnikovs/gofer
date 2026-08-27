@@ -1731,110 +1731,13 @@ func _readback_error(
                 str(wanted),
                 str(found),
                 (
-                    _instead_of(String(details.get("property", "")), wanted, found)
-                    + _made_unique(wanted, found)
+                    Params.instead_of(String(details.get("property", "")), wanted, found)
+                    + Params.made_unique(wanted, found)
                 )
             ]
         ),
         described
     )
-
-## Whether a name came back with a number on the end, which is Godot making it unique.
-##
-## A node's name is unique among its siblings and Godot does not refuse a clash — it appends a
-## number and carries on. Two live turns in one run renamed a node to `UI` and to `Player` under
-## parents that already had one, and were told only that the write asked for `UI` and Godot holds
-## `UI2`: the mismatch, and not the reason for it.
-##
-## Only a tail that is entirely digits counts, so `Player` answering `PlayerShip` is not this.
-func _made_unique(wanted: Variant, found: Variant) -> String:
-    var asked := str(wanted)
-    var held := str(found)
-    if asked.is_empty() or held == asked or not held.begins_with(asked):
-        return ""
-    if not held.substr(asked.length()).is_valid_int():
-        return ""
-    return (
-        ". A sibling is already called %s, and Godot makes a node's name unique among its siblings "
-        + "rather than refusing the clash. Rename or remove that one first, or choose another name."
-    ) % asked
-
-## The properties a caller reaches for that no scene can hold, and the ones that do the same job.
-##
-## `anchors_preset` is the inspector's own control rather than a value a node stores. Measured on a
-## real 4.7.2 editor: a `Panel` under a `Control`, a `VBoxContainer`, a `Panel` inside one, and a
-## preset out of range — every write reads back 0, and the four anchors under it do not move either.
-## Setting those four directly works exactly as asked. So the write is honestly refused; what was
-## missing is the sentence saying which four to write instead.
-##
-## Watched in three live turns, all of them laying out a UI: a full-screen panel is the commonest
-## thing anyone asks a Control for, and this is the property everybody reaches for to get one.
-const NO_SCENE_HOLDS := {
-    "anchors_preset":
-    (
-        " `anchors_preset` is the editor inspector's own control and no scene stores it, so this"
-        + " write can never take. Set anchor_left, anchor_top, anchor_right and anchor_bottom"
-        + " instead — 0 and 1 are the edges, so 0, 0, 1, 1 is the whole parent — with offset_right"
-        + " and offset_bottom at 0 to sit flush."
-    ),
-}
-
-func _instead_of(property: String, wanted: Variant, found: Variant) -> String:
-    if NO_SCENE_HOLDS.has(property):
-        return String(NO_SCENE_HOLDS[property])
-    return _grew_to_its_minimum(property, wanted, found)
-
-## Whether a `size` that came back larger than it was asked for hit the node's own floor.
-##
-## `Control.size` is clamped to `get_combined_minimum_size()`, and a `Label`'s minimum is the text
-## in it. Measured on a real 4.7.2 editor: a `Panel`, a `ColorRect` and a `Panel` inside a
-## `VBoxContainer` all take a size of (64, 64) exactly, and a `Label` asked for (0, 0) comes back
-## (1, 23). So this is not a property that cannot be written — it is one with a floor, and only a
-## write that lands under the floor is refused.
-##
-## Both live turns that met it asked for a smaller size than the node would take: a `Label` at
-## (0, 0) answering (1, 23), and a body at (64, 64) answering (80, 80). Told apart by the values
-## rather than by the name, because a size that came back *smaller* is a different thing entirely
-## and has no such explanation.
-func _grew_to_its_minimum(property: String, wanted: Variant, found: Variant) -> String:
-    if property != "size":
-        return ""
-    if typeof(wanted) != TYPE_VECTOR2 or typeof(found) != TYPE_VECTOR2:
-        return ""
-    var asked: Vector2 = wanted
-    var held: Vector2 = found
-    if held.x < asked.x or held.y < asked.y:
-        return ""
-    return (
-        " A Control's size is held at its own minimum, which for a Label is the text in it, so a"
-        + " smaller one cannot be written. Set custom_minimum_size to lower that floor, or leave"
-        + " the size alone and place the node with its anchors and offsets."
-    )
-
-## Whether a value read back out of Godot is the value that was written into it.
-##
-## Three things make an exact comparison wrong here, and none of them is a failed write. A property
-## the engine declares as a float stores 32 bits, so a double that goes in comes back a few bits
-## away from itself, and the types built out of floats carry the same drift. A number written as 5
-## and stored as a float reads back as 5.0. And a property that holds no object is not `TYPE_NIL` —
-## it is a `TYPE_OBJECT` variant with a null pointer, so clearing one reads back as a different type
-## than the null that cleared it.
-func _same_value(wanted: Variant, found: Variant) -> bool:
-    var left: Variant = null if _is_null_object(wanted) else wanted
-    var right: Variant = null if _is_null_object(found) else found
-    if typeof(left) in [TYPE_INT, TYPE_FLOAT] and typeof(right) in [TYPE_INT, TYPE_FLOAT]:
-        return is_equal_approx(float(left), float(right))
-    if typeof(left) != typeof(right):
-        return false
-    match typeof(left):
-        TYPE_VECTOR2, TYPE_VECTOR3, TYPE_VECTOR4, TYPE_QUATERNION, TYPE_COLOR, TYPE_PLANE, TYPE_RECT2, TYPE_AABB, TYPE_BASIS, TYPE_TRANSFORM2D, TYPE_TRANSFORM3D:
-            return left.is_equal_approx(right)
-    return left == right
-
-## Whether a value is an object variant pointing at nothing, which is how an empty resource or node
-## property reads.
-func _is_null_object(value: Variant) -> bool:
-    return typeof(value) == TYPE_OBJECT and not is_instance_valid(value)
 
 ## The nodes a save writes: the scene root and every node it owns, by the path the file records.
 ##
@@ -1989,7 +1892,7 @@ func _project_set_setting(params: Dictionary) -> Dictionary:
     # Read-back: the setting as ProjectSettings answers it now. A write the engine declined leaves
     # `get_setting` on the value it always had, or on null for a name it never took.
     var stored: Variant = ProjectSettings.get_setting(name)
-    if not _same_value(fitted["value"], stored):
+    if not Params.same_value(fitted["value"], stored):
         return _readback_error("project.set_setting %s" % name, fitted["value"], stored, {"name": name})
     # `created` is the difference between changing the project and inventing a corner of it. A
     # caller that misspells a built-in setting otherwise gets `saved: true` for a setting nothing
@@ -2048,7 +1951,7 @@ func _project_reset_setting(params: Dictionary) -> Dictionary:
         return failure
     # Read-back: what the setting reads as now, which for a removal is nothing at all.
     var stored: Variant = ProjectSettings.get_setting(name)
-    if not _same_value(wanted, stored):
+    if not Params.same_value(wanted, stored):
         return _readback_error("project.reset_setting %s" % name, wanted, stored, {"name": name})
     # What it did, not merely that the name is real.
     #
@@ -2061,7 +1964,7 @@ func _project_reset_setting(params: Dictionary) -> Dictionary:
         "name": name,
         "value": Protocol.encode(stored),
         "previous": Protocol.encode(before),
-        "changed": not _same_value(before, stored),
+        "changed": not Params.same_value(before, stored),
         "restartRequired": _restart_required(name)
     }
 
@@ -2247,7 +2150,7 @@ func _project_set_input_action(params: Dictionary) -> Dictionary:
         )
     var held: Dictionary = stored
     var held_events: Array = held.get("events", [])
-    if not _same_value(deadzone, float(held.get("deadzone", -1.0))):
+    if not Params.same_value(deadzone, float(held.get("deadzone", -1.0))):
         return _readback_error(
             "project.set_input_action %s deadzone" % name,
             deadzone,
@@ -2457,7 +2360,7 @@ func _editor_set_setting(params: Dictionary) -> Dictionary:
     # Read-back: EditorSettings keeps its own declared types and quietly ignores a value of the
     # wrong one, so the reply reports what the editor holds rather than what it was handed.
     var stored: Variant = settings.get_setting(name)
-    if not _same_value(decoded["value"], stored):
+    if not Params.same_value(decoded["value"], stored):
         return _readback_error("editor.set_setting %s" % name, decoded["value"], stored, {"name": name})
     return {"name": name, "machineWide": true, "value": Protocol.encode(stored)}
 
@@ -4645,7 +4548,7 @@ func _node_set_property(params: Dictionary) -> Dictionary:
     # Read-back: the property as the node answers it now. `Object.set` takes a value a setter then
     # ignores, clamps or replaces, and there is no error when it does.
     var stored: Variant = node.get(property)
-    if not _same_value(new_value, stored):
+    if not Params.same_value(new_value, stored):
         return _readback_error(
             "node.set_property %s.%s" % [node_path_str, property],
             new_value,
@@ -4742,7 +4645,7 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
         var node: Node = wanted[0]
         var property: String = wanted[2]
         var stored: Variant = node.get(property)
-        if not _same_value(wanted[3], stored):
+        if not Params.same_value(wanted[3], stored):
             return _readback_error(
                 "node.set_properties %s.%s" % [wanted[1], property],
                 wanted[3],
