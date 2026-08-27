@@ -637,6 +637,21 @@ export function createModelContext({
     return {isChatGpt, models, model, subagent, streamOptions}
 }
 
+/**
+ * What `runAgent` reaches the outside world through.
+ *
+ * One entry, because one thing out here is a model server. `brief/run.mjs` and `memory-judge.mjs`
+ * already have this and the turn did not, which is why they are tested by handing over a canned
+ * world in a line and the turn is tested by standing up an HTTP listener per case — a port, a
+ * workspace, and SSE frames written by hand, 53 times.
+ *
+ * The seam is real rather than hypothetical: `createModelContext` is the live adapter and
+ * `cannedModels` is the other, and it is the same `cannedModels` the sub-agent probe uses in a
+ * shipped build. What still belongs on the wire stays on the wire — the retry ladder is a policy
+ * about what a server did, and a fake that answers cannot state it.
+ */
+export const LIVE_WORLD = {createModelContext}
+
 export async function runAgent({
     settings,
     systemPrompt = '',
@@ -665,9 +680,10 @@ export async function runAgent({
      * seconds cannot be proved by sitting through it, and a test that instead shortens the delays is
      * proving a different policy from the one that ships. Nothing in the application passes this.
      */
-    timers = realTimers
+    timers = realTimers,
+    world = LIVE_WORLD
 }) {
-    const {isChatGpt, models, model, subagent, streamOptions} = createModelContext({
+    const {isChatGpt, models, model, subagent, streamOptions} = world.createModelContext({
         settings,
         apiKey,
         openrouterApiKey,

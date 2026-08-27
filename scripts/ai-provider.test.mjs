@@ -12,7 +12,9 @@ import {readdir, rm} from 'node:fs/promises'
 import {createServer} from 'node:http'
 import test from 'node:test'
 import {createToolHost} from './ai-host.mjs'
+import {cannedModels} from './ai-subagent.mjs'
 import {
+    LIVE_WORLD,
     createAgentTools,
     createModelContext,
     outOfRoom,
@@ -2502,4 +2504,46 @@ test('a red verify report does not move this turn’s context off the prompt', a
     assert.ok(String(prompt(asked).content).includes('The player is a cat.'))
     // And the report is asked without a second copy of it.
     assert.ok(!String(reasked.messages.at(-1).content).includes('The player is a cat.'))
+})
+
+/// A turn can be driven with no model server at all, which is what the world seam is for.
+///
+/// `brief/run.mjs` and `memory-judge.mjs` have had this since they were written; the turn did not,
+/// so every case here stands up an HTTP listener — a port, a workspace, and SSE frames written by
+/// hand. Most of them should: the retry ladder, the overflow recovery and the prefix stability are
+/// all statements about what a *server* did, and a fake that simply answers cannot make them.
+///
+/// This one is the other kind. It says the turn folds a completed answer into a completion and
+/// emits the events around it, and none of that is about the wire. The adapter is `cannedModels`,
+/// which is not written for this test — it is what the sub-agent probe uses in a shipped build.
+test('a turn runs against a canned world, with no server behind it', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const events = []
+    const model = {id: MODEL_ID, api: 'openai-completions', provider: 'local'}
+
+    const completion = await runAgent({
+        settings: servedBy('http://127.0.0.1:1/v1'),
+        messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+        workspacePath: workspace.path,
+        emit: event => events.push(event),
+        world: {
+            createModelContext: () => ({
+                isChatGpt: false,
+                models: cannedModels(model, 'Hello from nowhere'),
+                model,
+                subagent: {model, thinkingLevel: 'off'},
+                streamOptions: {}
+            })
+        }
+    })
+
+    assert.equal(completion.text, 'Hello from nowhere')
+    assert.equal(completion.stopReason, 'stop')
+    assert.ok(
+        events.some(event => event.type === 'done'),
+        `a finished turn emits done: ${JSON.stringify(events.map(one => one.type))}`
+    )
+    // The live world is still the default, so nothing that does not pass one has changed.
+    assert.equal(typeof LIVE_WORLD.createModelContext, 'function')
 })
