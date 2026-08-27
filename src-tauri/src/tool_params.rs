@@ -2132,6 +2132,13 @@ fn check_set(
     // hint is withheld: it sends a model looking for a better word for wreckage. The wording is the
     // one measured 15 of 15 on [`torn_object`] — name the intact keys, and ask for the whole call.
     //
+    // And it names the cause, because by the time an object has come apart in several places there
+    // is only one. A live turn placing fifteen coins was refused for hitting the output ceiling,
+    // then answered with 30 wreckage keys, then 10, then 10, then 15, then 9 — ten refusals in a
+    // row, each a batch too long to finish writing, salvaged from a truncated answer. Asking for
+    // the call again is no help when the call is what does not fit; asking for fewer operations
+    // in it is the only thing that can succeed.
+    //
     // The single-tear branch below is left alone: where a key tore and took its value with it, and
     // its head names a real parameter, that refusal was measured and this one must not preempt it.
     let single_tear = unknown.iter().any(|key| {
@@ -2155,8 +2162,9 @@ fn check_set(
             "torn_param",
             format!(
                 "{call}{at} has {} keys it does not take, and the object you wrote came apart \
-                 across them, so none of them is a word you chose wrongly. {takes_shape}{} Write \
-                 the whole call again from what you meant, one operation per entry.",
+                 across them, so none of them is a word you chose wrongly. {takes_shape}{} An \
+                 answer cut off part-way through writing a call arrives exactly like this. Write \
+                 it again with fewer operations in it, so the whole call fits in one answer.",
                 unknown.len(),
                 what_it_carries(&intact)
             ),
@@ -5111,6 +5119,14 @@ mod tests {
         assert!(
             refused.message.contains("carries parent, path"),
             "it names the keys that survived: {}",
+            refused.message
+        );
+        // And the cause. Ten refusals in a row on one live turn were a batch the answer was cut
+        // off part-way through writing, and asking for the same call again cannot fix that.
+        assert!(refused.message.contains("cut off"), "{}", refused.message);
+        assert!(
+            refused.message.contains("fewer operations"),
+            "{}",
             refused.message
         );
     }
