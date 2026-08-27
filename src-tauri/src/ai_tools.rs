@@ -2628,7 +2628,7 @@ mod tests {
             );
             // A list is what the check has to let through: the handler never sees a call the
             // parameter contract rejected.
-            crate::tool_params::check(
+            crate::tool_repair::check(
                 "godot_script",
                 op,
                 &json!({"path": ["scripts/a.gd", "scripts/b.gd"]}),
@@ -3446,8 +3446,8 @@ mod tests {
                     object.remove("op");
                 }
                 let op = entry["op"].as_str().expect("an op name");
-                crate::tool_params::repair(tool, op, &mut params);
-                crate::tool_params::check(tool, op, &params).unwrap_or_else(|failure| {
+                crate::tool_repair::repair(tool, op, &mut params);
+                crate::tool_repair::check(tool, op, &params).unwrap_or_else(|failure| {
                     panic!("{tool} {op} was refused: {}", failure.message)
                 });
             }
