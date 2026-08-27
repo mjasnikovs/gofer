@@ -1001,3 +1001,121 @@ test('a key that swallowed its own value is split back into the two the model me
         ops: [{limit: 50, op: 'read'}]
     })
 })
+
+/*
+ * A list handed over as the text of itself.
+ *
+ * A live turn building a Pong board sent `create_shape` `"size": "[16, 32]"` six times in one turn.
+ * Validation answered with three lines about `size` — `must be number`, `must be array`, `must
+ * match a schema in anyOf` — and never mentioned the empty `path` that was the real reason the call
+ * could not run. The model rewrote the same quotes each time.
+ */
+test('a list written as the text of itself is read as the list', () => {
+    const resource = [
+        {
+            op: 'create_shape',
+            params: [
+                {name: 'path', kind: 'text'},
+                {name: 'shapeType', kind: 'choice'},
+                {name: 'size', kind: 'list'},
+                {name: 'radius', kind: 'number'}
+            ]
+        }
+    ]
+    assert.deepEqual(
+        normalizeToolCalls(resource, {
+            ops: [
+                {
+                    op: 'create_shape',
+                    path: 'a.tres',
+                    shapeType: 'RectangleShape2D',
+                    size: '[16, 32]'
+                }
+            ]
+        }),
+        {
+            ops: [
+                {op: 'create_shape', path: 'a.tres', shapeType: 'RectangleShape2D', size: [16, 32]}
+            ]
+        }
+    )
+
+    // A `text` parameter holding the same characters is a caller writing a string, and stays one.
+    assert.deepEqual(
+        normalizeToolCalls(resource, {
+            ops: [{op: 'create_shape', path: '[16, 32]', shapeType: 'RectangleShape2D'}]
+        }),
+        {ops: [{op: 'create_shape', path: '[16, 32]', shapeType: 'RectangleShape2D'}]}
+    )
+
+    // And text that parses to something other than a list is left for the schema to refuse: a
+    // `list` is not what the caller wrote either way.
+    assert.deepEqual(
+        normalizeToolCalls(resource, {
+            ops: [{op: 'create_shape', path: 'a.tres', shapeType: 'CircleShape2D', size: '16'}]
+        }),
+        {ops: [{op: 'create_shape', path: 'a.tres', shapeType: 'CircleShape2D', size: '16'}]}
+    )
+})
+
+/** The same repair inside a declared entry, reached by walking the structure. */
+test('a list written as text inside a declared entry is read there too', () => {
+    const node = [
+        {
+            op: 'set_cells',
+            params: [
+                {name: 'node', kind: 'text'},
+                {
+                    name: 'cells',
+                    kind: 'list',
+                    entry: [
+                        {name: 'x', kind: 'int'},
+                        {name: 'y', kind: 'int'},
+                        {name: 'atlas', kind: 'list'}
+                    ]
+                }
+            ]
+        }
+    ]
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [{op: 'set_cells', node: '/Main/Terrain', cells: [{x: 0, y: 1, atlas: '[2, 3]'}]}]
+        }),
+        {ops: [{op: 'set_cells', node: '/Main/Terrain', cells: [{x: 0, y: 1, atlas: [2, 3]}]}]}
+    )
+})
+
+/** The same mistake under the other two declarations that mean "a list may go here". */
+test('a list written as text is read under listOf and under either', () => {
+    const wider = [
+        {
+            op: 'create_texture',
+            params: [
+                {name: 'path', kind: 'text'},
+                {name: 'size', kind: 'either', of: [{kind: 'number'}, {kind: 'list'}]}
+            ]
+        },
+        {
+            op: 'inspect',
+            params: [
+                {name: 'node', kind: 'text'},
+                {name: 'properties', kind: 'listOf', of: {kind: 'text'}}
+            ]
+        }
+    ]
+    assert.deepEqual(
+        normalizeToolCalls(wider, {ops: [{op: 'create_texture', path: 'a.png', size: '[16, 24]'}]}),
+        {ops: [{op: 'create_texture', path: 'a.png', size: [16, 24]}]}
+    )
+    assert.deepEqual(
+        normalizeToolCalls(wider, {
+            ops: [{op: 'inspect', node: '/Main', properties: '["text", "position"]'}]
+        }),
+        {ops: [{op: 'inspect', node: '/Main', properties: ['text', 'position']}]}
+    )
+    // A path that is text and only text is untouched, whatever it looks like.
+    assert.deepEqual(
+        normalizeToolCalls(wider, {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}),
+        {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}
+    )
+})

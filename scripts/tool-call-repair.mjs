@@ -307,6 +307,81 @@ export function trimPaddedKeys(params, entry) {
 }
 
 /**
+ * A list or an object handed over as the JSON text of itself.
+ *
+ * A live turn building a Pong board sent `godot_resource create_shape` this, six times in one turn,
+ * across two shapes:
+ *
+ * ```text
+ * {"op": "create_shape", "shapeType": "RectangleShape2D", "path": "", "size": "[16, 32]"}
+ * ```
+ *
+ * `size` is `number | array` and what arrived is neither, so validation answered `ops.0.size: must
+ * be number / must be array / must match a schema in anyOf` — three lines about a value the model
+ * had already written correctly, in quotes. It rewrote the same call each time. Nothing else in
+ * that call was ever mentioned, including the empty `path` that was the real reason it could not
+ * run: an incidental refusal hid the one that mattered.
+ *
+ * Only where the declared kind says what shape to expect, and only when the string is exactly that
+ * shape: a `list` parameter given text that parses to an array, an `object` parameter given text
+ * that parses to an object. A `text` parameter holding `"[16, 32]"` is a caller writing a string
+ * and is untouched, and a string that parses to a number or another string is left for the schema,
+ * because a `list` is not what the caller wrote either way.
+ *
+ * Walks the declared structure, so an entry inside `files` or `nodes` is reached the same way
+ * [`trimPaddedKeys`] reaches it.
+ */
+export function readAValueWrittenAsAString(params, entry) {
+    if (!Array.isArray(params) || !isObject(entry)) return entry
+    const shaped = params.reduce((walked, param) => {
+        const held = walked[param.name]
+        if (typeof held !== 'string') return walked
+        const wanted = shapeOfAValue(param)
+        if (wanted === undefined) return walked
+        const parsed = parsedOrNothing(held)
+        const fits = wanted === 'list' ? Array.isArray(parsed) : isObject(parsed)
+        return fits ? {...walked, [param.name]: parsed} : walked
+    }, entry)
+    return params.reduce((walked, param) => {
+        const held = walked[param.name]
+        if (held === undefined || !Array.isArray(param.entry) || param.entry.length === 0)
+            return walked
+        if (param.kind === 'list' && Array.isArray(held))
+            return {
+                ...walked,
+                [param.name]: held.map(one => readAValueWrittenAsAString(param.entry, one))
+            }
+        if (param.kind === 'object')
+            return {...walked, [param.name]: readAValueWrittenAsAString(param.entry, held)}
+        return walked
+    }, shaped)
+}
+
+/**
+ * Which shape a parameter's own kind says a value has, for the two kinds that have one.
+ *
+ * `either` counts when one of its alternatives is a list: `create_texture`'s `size` is
+ * `number | list` and `create_shape`'s is a `list` that also takes a single number, so the same
+ * mistake reaches both under different declarations.
+ */
+function shapeOfAValue(param) {
+    if (param.kind === 'list' || param.kind === 'listOf') return 'list'
+    if (param.kind === 'object') return 'object'
+    if (param.kind === 'either' && Array.isArray(param.of))
+        return param.of.some(one => one?.kind === 'list') ? 'list' : undefined
+    return undefined
+}
+
+/** One string read as JSON, or nothing when it is not JSON at all. */
+function parsedOrNothing(text) {
+    try {
+        return JSON.parse(text)
+    } catch {
+        return undefined
+    }
+}
+
+/**
  * A key that swallowed its own value, split back into the two the model meant to write.
  *
  * Counted across the recorded corpus: **25 keys in 7 runs**, in two forms and no others that can be
@@ -587,7 +662,10 @@ export function normalizeToolCalls(operations, args, elsewhere) {
                     // parameter is never refused as one belonging somewhere else.
                     const shaped = wrapBareResource(
                         params,
-                        splitKeyThatCarriesItsValue(params, trimPaddedKeys(params, entry))
+                        readAValueWrittenAsAString(
+                            params,
+                            splitKeyThatCarriesItsValue(params, trimPaddedKeys(params, entry))
+                        )
                     )
                     refuseSiblingParameter(operations, shaped)
                     return shaped
