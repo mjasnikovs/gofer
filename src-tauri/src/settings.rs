@@ -250,6 +250,28 @@ impl AiSettings {
         }
         settings
     }
+
+    /// The same settings with the active connection's model declared to take text and nothing else.
+    ///
+    /// A local server answers `/props` with what it can take, and `parse_props` believes it — which
+    /// is right, because nothing else knows. A server that advertises `vision` and cannot do it is
+    /// therefore sent a frame, and one llama.cpp build here **dies on every image request**: a
+    /// 16x16 PNG closed the connection and restarted the process, twice out of two, where two
+    /// text requests either side of them answered normally. Inside a turn that is the whole turn —
+    /// `godot_runtime run` answers with a frame, the request carrying it kills the server, and each
+    /// of the ten retries resends the same frame and kills it again.
+    ///
+    /// A suite cannot fix that server, and it should not have to stop measuring everything else
+    /// because of it. `withoutPictures` already exists for a model with no eyes, so saying the
+    /// model has none is all this needs to be — and, unlike the user's settings file, it is written
+    /// down in the run rather than inherited from a machine.
+    #[cfg(all(test, feature = "godot-acceptance"))]
+    pub(crate) fn without_pictures(mut self) -> Self {
+        if let Some(connection) = self.connections.get_mut(&self.connection_type) {
+            connection.model.input = vec!["text".to_owned()];
+        }
+        self
+    }
 }
 
 /// Where the live connection points and which model it names, as one line for a report.

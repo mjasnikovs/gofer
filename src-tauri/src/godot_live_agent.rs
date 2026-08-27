@@ -24,7 +24,8 @@
 //!
 //! with `GOFER_LIVE_TASK` set, `GOFER_LIVE_OUT` naming a file for the events — its `.jsonl` sibling
 //! gets each event as it arrives, so a turn killed on a budget still leaves what it saw — and
-//! `GOFER_LIVE_BASE_URL` / `GOFER_LIVE_MODEL` naming the endpoint, and `GOFER_LIVE_FIXTURE`
+//! `GOFER_LIVE_BASE_URL` / `GOFER_LIVE_MODEL` naming the endpoint, `GOFER_LIVE_IMAGES=off`
+//! saying the model cannot see, and `GOFER_LIVE_FIXTURE`
 //! naming a project to work on other than the bare one — the defaults are a llama.cpp on
 //! `127.0.0.1:8080`. `GOFER_LIVE_KEEP` copies the worktree out before its temporary directory goes,
 //! which is the only way to look at what the agent built.
@@ -209,6 +210,16 @@ fn live_agent_acceptance() {
     let thinking_level = std::env::var("GOFER_LIVE_THINKING")
         .ok()
         .filter(|l| !l.is_empty());
+    // Whether the model is told it can see. `GOFER_LIVE_IMAGES=off` says it cannot, and every
+    // captured frame then costs the turn a sentence instead of a picture — the path
+    // `withoutPictures` already takes for a text-only model.
+    //
+    // It is a knob because one llama.cpp build on this machine advertises `vision` in `/props` and
+    // dies on every image request: a 16x16 PNG closed the connection and restarted the server twice
+    // out of two, with a text request either side of each answering normally. A run that captures
+    // the game then never finishes — the frame kills the server, and each of the ten retries
+    // resends it and kills it again.
+    let sees = std::env::var("GOFER_LIVE_IMAGES").as_deref() != Ok("off");
 
     // The project database is opened before the editor, and this order is the whole run.
     //
@@ -293,7 +304,11 @@ fn live_agent_acceptance() {
     // editor it started is bound to.
     let context = JobContext::for_suite(
         app.handle(),
-        AiSettings::served_by(driver, base_url, model, thinking_level),
+        if sees {
+            AiSettings::served_by(driver, base_url, model, thinking_level)
+        } else {
+            AiSettings::served_by(driver, base_url, model, thinking_level).without_pictures()
+        },
         session.worktree.display().to_string(),
     )
     .expect("build the job context");
