@@ -7,8 +7,8 @@ extends RefCounted
 ## identically lives here instead of being copied into both: a divergence would show up as a value
 ## the renderer draws two ways depending on where it came from.
 ##
-## `decode` lives here for the same reason `encode` does, and for one more: it is the only half of
-## the round trip that can be checked without an editor. Nothing below touches an `EditorInterface`,
+## `decode` lives here for the same reason `encode` does, and for one more: it is the half of the
+## round trip that can be checked without an editor. Nothing below touches an `EditorInterface`,
 ## an `EditorPlugin`, or the edited scene, so `fixtures/godot-project/tests/protocol_test.gd` runs
 ## the whole codec headlessly. The editor-only part — reading the type a *node* declares a property
 ## with — stays in `plugin.gd` and calls `fit_to_declared_type` for the part that is arithmetic.

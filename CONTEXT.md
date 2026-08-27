@@ -70,10 +70,20 @@ the state of. What they share is an order — clients before the process, the ru
 addon out last — and that order is `end_session`, not a habit two functions have.
 
 **Addon** — the GDScript plugin Gofer stages into the project, which answers protocol commands from
-inside the editor. Three scripts: `plugin.gd` in the editor, `runtime.gd` in the running game, and
-`protocol.gd` beside both. The codec is `protocol.gd`'s: `encode` and `decode` are one round trip
-and they live together, which is also what makes them the only part of the addon a headless test can
-reach.
+inside the editor. Four scripts: `plugin.gd` in the editor, `runtime.gd` in the running game, and
+`protocol.gd` and `params.gd` beside both.
+
+`plugin.gd` extends `EditorPlugin`, and that one line is the addon's testability seam: nothing in
+that class can be reached without booting a real editor under xvfb, whether it touches the editor or
+not. `protocol.gd` and `params.gd` are on the other side of it — preloadable, so
+`fixtures/godot-project/tests` drives them from source in about a second each.
+
+What lives there is what an editor cannot answer better: `protocol.gd`'s codec, where `encode` and
+`decode` are one round trip and live together; and in `params.gd`, everything the commands decide
+_before_ they touch the editor. The declared-parameter check and the table behind it, the guard
+against a path that climbs out of the project, the tile and atlas arithmetic, the input-event codec,
+and the readback comparison that knows a 32-bit float drifts and a cleared object property is not
+`TYPE_NIL`. Each of those was measured on a real editor once and is re-proved from source since.
 
 **Command map** — a command name is a key, not a string, and its reply is a type. There are two:
 `DesktopCommandMap` for the backend's commands and `GodotCommandMap` for the addon's. The Godot one
