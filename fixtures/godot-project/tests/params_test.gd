@@ -22,6 +22,7 @@ func _initialize() -> void:
         _test_atlas_coords(params, failures)
         _test_shapes(params, failures)
         _test_input_events(params, failures)
+        _test_check_declared(params, failures)
     if failures.is_empty():
         print("Gofer Godot command parameters passed")
         quit(0)
@@ -138,3 +139,47 @@ func _test_input_events(params: GDScript, failures: Array[String]) -> void:
     var encoded: Variant = params.call("encode_input_events", [event])
     if (encoded as Array).size() != 1 or (encoded as Array)[0]["key"] != "Escape":
         failures.append("An encoded key event names the key the way Godot does: %s" % str(encoded))
+
+
+## The backstop behind the router's own check, which used to cost a booted editor to reach.
+##
+## Every refusal here is arithmetic over `COMMAND_PARAMS`, and the table is generated beside it, so
+## a name no handler reads and a required name left out are both answerable from source. A command
+## the table does not carry is not checked at all — absence is "not declared yet", never "takes
+## nothing" — and that distinction is the one a real editor was previously the only witness to.
+func _test_check_declared(params: GDScript, failures: Array[String]) -> void:
+    if not params.call("check_declared", "scene.open", {"path": "res://a.tscn"}).is_empty():
+        failures.append("A call naming exactly what it declares is not refused")
+
+    var unknown: Dictionary = params.call(
+        "check_declared", "scene.open", {"path": "res://a.tscn", "nope": 1}
+    )
+    if unknown.is_empty():
+        failures.append("A parameter no handler reads must be refused")
+    else:
+        var error: Dictionary = unknown["_gofer_error"]
+        if error["code"] != "unknown_param":
+            failures.append("An unknown name is refused as unknown_param: %s" % str(error))
+        elif not str(error["message"]).contains("nope"):
+            failures.append("A refusal names the parameter: %s" % str(error))
+
+    var missing: Dictionary = params.call("check_declared", "scene.open", {})
+    if missing.is_empty():
+        failures.append("A required parameter left out must be refused")
+    else:
+        var error: Dictionary = missing["_gofer_error"]
+        if error["code"] != "missing_param":
+            failures.append("A required name is refused as missing_param: %s" % str(error))
+        elif not str(error["message"]).contains("path"):
+            failures.append("A refusal names the parameter: %s" % str(error))
+
+    # Absence is not emptiness: an undeclared command is unchecked, so adding one cannot silently
+    # start refusing its own parameters.
+    if not params.call("check_declared", "scene.not_a_command", {"anything": 1}).is_empty():
+        failures.append("A command the table does not carry is not checked")
+
+    # `expectedRevision` and `timeoutMs` ride the envelope, and the table leaves them out on
+    # purpose. A caller that sends one among the parameters instead has made the mistake this
+    # refuses — the field never reaches a handler from there, so accepting it would be silence.
+    if params.call("check_declared", "scene.save", {"expectedRevision": 3}).is_empty():
+        failures.append("An envelope field sent as a parameter must be refused")

@@ -335,83 +335,6 @@ const MUTATING_COMMANDS: Array[String] = [
 ]
 # GENERATED-END mutating-commands
 
-## The parameters each command accepts, as the backstop behind the router's own check.
-##
-## The router refuses a malformed call in Rust before it crosses the socket, which is where a model
-## should learn about one — the answer arrives in microseconds and carries an example. This table is
-## what makes that an optimization rather than the only guard: a call from the renderer, from a
-## test, or from a Gofer whose Rust half is older than this addon is held to the same contract.
-##
-## `expectedRevision` and `timeoutMs` are absent on purpose. Both are lifted onto the envelope by
-## the caller, so a handler that looked for them among its parameters would refuse every call that
-## was actually well formed.
-# GENERATED-BEGIN command-params sha256:80a058a090ba4b8b
-const COMMAND_PARAMS: Dictionary = {
-    "session.get_state": {"required": [], "optional": []},
-    "session.answer_dialog": {"required": ["button"], "optional": []},
-    "session.undo": {"required": [], "optional": []},
-    "session.redo": {"required": [], "optional": []},
-    "scene.list": {"required": [], "optional": []},
-    "scene.open": {"required": ["path"], "optional": []},
-    "scene.create": {"required": ["path", "rootType"], "optional": ["rootName"]},
-    "scene.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
-    "scene.save": {"required": [], "optional": []},
-    "scene.save_as": {"required": ["path"], "optional": []},
-    "scene.reload": {"required": [], "optional": []},
-    "node.inspect": {"required": ["node"], "optional": ["properties", "scene"]},
-    "node.create": {"required": ["parent", "type", "name"], "optional": ["index", "scene"]},
-    "node.create_nodes": {"required": ["nodes"], "optional": ["scene"]},
-    "node.instantiate": {"required": ["parent", "path"], "optional": ["name", "index", "scene"]},
-    "node.duplicate": {"required": ["node"], "optional": ["name", "scene"]},
-    "node.rename": {"required": ["node", "name"], "optional": ["scene"]},
-    "node.reparent": {"required": ["node", "newParent"], "optional": ["index", "scene"]},
-    "node.change_type": {"required": ["node", "type"], "optional": ["scene"]},
-    "node.delete": {"required": ["node"], "optional": ["scene"]},
-    "node.set_property": {"required": ["node", "property", "value"], "optional": ["scene"]},
-    "node.set_properties": {"required": ["properties"], "optional": ["scene"]},
-    "node.add_to_group": {"required": ["node", "group"], "optional": []},
-    "node.remove_from_group": {"required": ["node", "group"], "optional": []},
-    "node.connect_signal": {"required": ["node", "signal", "method"], "optional": ["target", "binds", "deferred", "oneShot"]},
-    "node.disconnect_signal": {"required": ["node", "signal", "method"], "optional": ["target", "binds"]},
-    "node.set_cells": {"required": ["node", "cells"], "optional": []},
-    "node.get_cells": {"required": ["node"], "optional": ["limit"]},
-    "project.get_settings": {"required": [], "optional": []},
-    "project.search_settings": {"required": ["query"], "optional": []},
-    "project.get_setting": {"required": ["name"], "optional": []},
-    "project.set_setting": {"required": ["name", "value"], "optional": []},
-    "project.reset_setting": {"required": ["name"], "optional": []},
-    "project.list_autoloads": {"required": [], "optional": []},
-    "project.set_autoload": {"required": ["name", "path"], "optional": ["enabled"]},
-    "project.remove_autoload": {"required": ["name"], "optional": []},
-    "project.list_input_actions": {"required": [], "optional": ["names"]},
-    "project.set_input_action": {"required": ["name", "events"], "optional": ["deadzone"]},
-    "project.remove_input_action": {"required": ["name"], "optional": []},
-    "project.reset_input_action": {"required": ["name"], "optional": []},
-    "project.list_plugins": {"required": [], "optional": []},
-    "project.set_plugin_enabled": {"required": ["plugin", "enabled"], "optional": []},
-    "editor.search_settings": {"required": ["query"], "optional": []},
-    "editor.get_setting": {"required": ["name"], "optional": []},
-    "editor.set_setting": {"required": ["name", "value"], "optional": []},
-    "resource.rescan": {"required": [], "optional": ["path"]},
-    "resource.create_tileset": {"required": ["path", "texture"], "optional": ["tileSize", "tiles", "solid"]},
-    "resource.create_texture": {"required": ["path", "size"], "optional": ["background", "rects"]},
-    "resource.create_shape": {"required": ["path", "shapeType"], "optional": ["size", "radius", "height", "points"]},
-    "resource.describe_tileset": {"required": ["path"], "optional": []},
-    "runtime.run": {"required": [], "optional": ["scene"]},
-    "runtime.stop": {"required": [], "optional": []},
-    "runtime.restart": {"required": [], "optional": []},
-    "runtime.get_state": {"required": [], "optional": []},
-    "runtime.get_tree": {"required": [], "optional": ["root", "depth", "limit"]},
-    "runtime.inspect_node": {"required": ["path"], "optional": ["properties"]},
-    "runtime.input": {"required": ["events"], "optional": []},
-    "runtime.capture": {"required": [], "optional": ["source"]},
-    "runtime.wait": {"required": [], "optional": ["frames", "ms"]},
-    "runtime.pause": {"required": [], "optional": []},
-    "runtime.resume": {"required": [], "optional": []},
-    "runtime.get_monitors": {"required": [], "optional": ["monitors"]},
-}
-# GENERATED-END command-params
-
 ## The editor half of the debugger channel. Godot calls `_setup_session` as debugger sessions
 ## come up, delivers game messages whose prefix `_has_capture` claims to `_capture`, and the
 ## plugin answers through `get_session(id).send_message`. The plugin itself is held by weak
@@ -740,7 +663,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
         var check := _check_mutation_prerequisites(expected_revision)
         if check.has("_gofer_error"):
             return check
-    var declared := _check_declared_params(command, params)
+    var declared := Params.check_declared(command, params)
     if declared.has("_gofer_error"):
         return declared
 
@@ -1832,39 +1755,6 @@ func _project_settings() -> Dictionary:
         "mainScene": ProjectSettings.get_setting_with_override("application/run/main_scene"),
         "renderingMethod": ProjectSettings.get_setting_with_override("rendering/renderer/rendering_method")
     }
-
-## Builds a structured configuration error. Configuration commands never touch the scene, so their
-## readiness is always ready and their failures are never retryable.
-## Holds one request to the parameters its command declares, for the commands that declare any.
-##
-## A command with no entry in `COMMAND_PARAMS` is not checked here — absence is "not declared yet",
-## never "takes nothing" — so adding a command cannot silently start refusing its own parameters.
-##
-## Names only. What a value has to *be* stays with the handler and with `Protocol.decode`, which is
-## where the engine's own answer lives; this catches the request that named something no handler
-## reads, which used to reach a handler and be quietly ignored.
-func _check_declared_params(command: String, params: Dictionary) -> Dictionary:
-    if not COMMAND_PARAMS.has(command):
-        return {}
-    var declared: Dictionary = COMMAND_PARAMS[command]
-    var required: Array = declared["required"]
-    var accepted: Array = required + (declared["optional"] as Array)
-    for key in params:
-        if not accepted.has(key):
-            return Params.error(
-                "unknown_param",
-                "%s has no `%s` parameter. It takes %s." % [command, key, ", ".join(accepted)],
-                {"param": key, "takes": accepted}
-            )
-    for name in required:
-        if not params.has(name):
-            return Params.error(
-                "missing_param",
-                "%s requires `%s`. It takes %s." % [command, name, ", ".join(accepted)],
-                {"param": name, "takes": accepted}
-            )
-    return {}
-
 
 ## Persists project.godot after a configuration change. Returns an error dictionary on failure and
 ## an empty one on success, matching the `_gofer_error` convention.

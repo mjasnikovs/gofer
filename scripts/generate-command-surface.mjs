@@ -741,9 +741,15 @@ export async function generateSurfaces() {
             regions: [
                 {name: 'mutating-commands', body: gdMutating(mutating)},
                 {name: 'runtime-commands', body: gdRuntimeCommands(runtime)},
-                {name: 'command-params', body: gdCommandParams(parameters)},
                 {name: 'dispatch-table', body: gdDispatch(commands)}
             ]
+        },
+        {
+            // The table lives with the only function that reads it, which is preloadable and so
+            // reachable by `params_test.gd` without booting an editor.
+            path: 'src-tauri/addon/params.gd',
+            comment: '#',
+            regions: [{name: 'command-params', body: gdCommandParams(parameters)}]
         },
         {
             path: 'src-tauri/src/protocol_v2.rs',
