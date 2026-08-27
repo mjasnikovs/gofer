@@ -2710,6 +2710,7 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     a_pair_written_as_one_key(spec, object);
     drop_the_empty_claimant(spec, object);
     drop_the_wreckage_a_complete_call_can_spare(spec, object);
+    drop_a_value_the_call_already_carries(spec, object);
     let wanted: Vec<(String, &'static str)> = object
         .keys()
         .filter(|key| {
@@ -2724,13 +2725,47 @@ fn repair_set(spec: &[Param], params: &mut Value) {
     // Two wrong keys that both read as the same parameter are two answers, so neither is taken.
     // Whichever won would be whichever the map happened to iterate first, and a rename nobody can
     // predict is worse than the refusal that names both.
+    //
+    // Unless they are the same answer. A live turn sent `create_shape` this, in both of its
+    // operations:
+    //
+    //     {"op": "create_shape", "path": …, "shapeType": "RectangleShape2D",
+    //      "size2": [16, 16], "size_value": [16, 16]}
+    //
+    // Both keys read as `size`, so the contest refused the whole call over `size2` and never said
+    // a word about `size_value`. But there is nothing to pick between: every contender holds
+    // `[16, 16]`, so `size` ends up holding `[16, 16]` whichever one wins, and the unpredictability
+    // the rule above exists for is not there. So a contest whose contenders all hold the same value
+    // is settled — the first is renamed and the rest are taken away — and only a contest that
+    // disagrees is left for `check` to refuse by name.
+    let mut rename: Vec<(String, &'static str)> = Vec::new();
+    let mut spare: Vec<String> = Vec::new();
     for (wrong, right) in &wanted {
-        let contested = wanted.iter().filter(|(_, name)| name == right).count() > 1;
-        if contested {
+        let contenders: Vec<&String> = wanted
+            .iter()
+            .filter(|(_, name)| name == right)
+            .map(|(key, _)| key)
+            .collect();
+        let first = contenders[0];
+        if contenders.len() == 1 {
+            rename.push((wrong.clone(), *right));
+        } else if !contenders
+            .iter()
+            .all(|key| object.get(key.as_str()) == object.get(first.as_str()))
+        {
             continue;
+        } else if first == wrong {
+            rename.push((wrong.clone(), *right));
+        } else {
+            spare.push(wrong.clone());
         }
-        if let Some(held) = object.remove(wrong.as_str()) {
-            object.insert((*right).to_owned(), held);
+    }
+    for wrong in spare {
+        object.remove(&wrong);
+    }
+    for (wrong, right) in rename {
+        if let Some(held) = object.remove(&wrong) {
+            object.insert(right.to_owned(), held);
         }
     }
     for param in spec {
@@ -2804,7 +2839,16 @@ fn a_pair_written_as_one_key(spec: &[Param], object: &mut serde_json::Map<String
         // left nothing beside it; `{"index 0": 0}` and `{"name: Coin1": "Coin1"}` wrote it into
         // both, and there the value that arrived is the value — the tail is that same value said
         // again, which is how this tells the shape apart from a key that merely reads as a name.
-        let beside = object.get(&key).filter(|held| !held.is_null()).cloned();
+        //
+        // "Left nothing beside it" is [`carries_a_value`]'s question, not `null`'s. A live
+        // `godot_logs read` wrote `{"limit\":\": 40, ": ""}` — the value is in the key and what is
+        // beside it is an empty string, which is the same nothing a `null` is. Reading that as a
+        // value the caller wrote meant the tail was never looked at, and the call was refused over
+        // a key naming the number it wanted.
+        let beside = object
+            .get(&key)
+            .filter(|held| carries_a_value(Some(held)))
+            .cloned();
         let written = match beside {
             Some(held) if says_the_same(tail, &held) => held,
             Some(_) => continue,
@@ -2855,6 +2899,30 @@ fn says_the_same(tail: &str, held: &Value) -> bool {
 /// calls that ran into each other, would read as a size.
 fn a_value_out_of(tail: &str) -> Option<Value> {
     if let Ok(held) = serde_json::from_str::<Value>(tail) {
+        return Some(held);
+    }
+    // The same tail with the brackets and commas the object lost still trailing it. Three recorded
+    // `godot_logs read` calls end exactly here:
+    //
+    // ```text
+    // {"limit\":\": 40, ": "",     "limit\":\": 60}]": null,     "limit\":\": 30}]": null}
+    // ```
+    //
+    // Each tail is a whole value with the tear's punctuation after it — `40,` and `60}]` — and
+    // `serde_json` refuses both for the trailing bytes. Refusing them cost more than any other
+    // message in the corpus: those calls went round the repeat guard, and `godot_logs`' guard is
+    // the worst-recovering answer measured anywhere in it, **1 of 10**.
+    //
+    // Trimmed from the end only, so a value that opens what it closes is untouched: `[16, 16]`
+    // parses on the line above and never reaches this, and `16, 16]` — a tear that took the
+    // opening bracket — trims to `16, 16`, which still refuses. What this rescues is a scalar with
+    // wreckage behind it, and nothing else.
+    let closed = tail
+        .trim_end_matches(|one: char| one.is_whitespace() || matches!(one, ',' | '}' | ']' | ')'));
+    if closed != tail
+        && !closed.is_empty()
+        && let Ok(held) = serde_json::from_str::<Value>(closed)
+    {
         return Some(held);
     }
     let plain = !tail.chars().any(|one| {
@@ -2913,6 +2981,69 @@ fn drop_the_wreckage_a_complete_call_can_spare(
         return;
     }
     for key in unknown {
+        object.remove(&key);
+    }
+}
+
+/// A key the operation does not take, holding a value the call already carries inside its own list.
+///
+/// Measured across three live turns, all of them `godot_script edit`:
+///
+/// ```text
+/// {"op": "edit", "files": [{"path": "scripts/player.gd", "edits": […]}],
+///  "path": "scripts/player.gd"}
+/// ```
+///
+/// `files` is written correctly and completely. Beside it the model wrote the path a second time,
+/// flat, the way `save` takes it — and `edit` has no `path`, so the whole call was refused over a
+/// key that says nothing the entry inside `files` had not already said. Three of three carried
+/// exactly the path the entry carried.
+///
+/// [`drop_the_wreckage_a_complete_call_can_spare`] cannot reach it, and is right not to: that rule
+/// takes away only a key holding **nothing**, because "a key holding something is a value the
+/// caller wrote and may have meant". This is the one case where that reasoning does not apply. The
+/// value is not merely present, it is the same value — every entry of the declared list already
+/// holds it under the same name — so there is no second meaning to lose.
+///
+/// Narrow on every side: the call has to be whole without the key, the key's name has to be one the
+/// list's own entries declare, the list has to be there, and **every** entry in it has to hold that
+/// name with an equal value. A list whose entries name two different files keeps its refusal,
+/// because then the flat key really is saying something.
+fn drop_a_value_the_call_already_carries(
+    spec: &[Param],
+    object: &mut serde_json::Map<String, Value>,
+) {
+    if spec
+        .iter()
+        .any(|param| param.required && !object.contains_key(param.name))
+    {
+        return;
+    }
+    let said_twice: Vec<String> = object
+        .keys()
+        .filter(|key| {
+            !spec.iter().any(|param| param.name == key.as_str())
+                && !UNIVERSAL.contains(&key.as_str())
+                && key.as_str() != "op"
+        })
+        .filter(|key| {
+            let Some(held) = object.get(key.as_str()) else {
+                return false;
+            };
+            spec.iter()
+                .filter(|param| param.kind == Kind::List && !param.entry.is_empty())
+                .filter(|param| param.entry.iter().any(|inner| inner.name == key.as_str()))
+                .filter_map(|param| object.get(param.name)?.as_array())
+                .any(|entries| {
+                    !entries.is_empty()
+                        && entries
+                            .iter()
+                            .all(|entry| entry.get(key.as_str()) == Some(held))
+                })
+        })
+        .cloned()
+        .collect();
+    for key in said_twice {
         object.remove(&key);
     }
 }
@@ -3958,6 +4089,136 @@ mod tests {
         });
         repair("godot_resource", "create_shape", &mut readable);
         assert_eq!(readable["size"], json!([32, 32]), "{readable}");
+    }
+
+    /// The same value written twice under two wrong names is one answer, not two.
+    ///
+    /// A live turn adding a jump to a platformer sent this to `create_shape`, in both of the
+    /// operations in one call:
+    ///
+    /// ```text
+    /// {"op": "create_shape", "path": "res://shapes/player_shape.tres",
+    ///  "shapeType": "RectangleShape2D", "size2": [16, 16], "size_value": [16, 16]}
+    /// ```
+    ///
+    /// `size2` and `size_value` both read as `size`, so the contested-rename rule took neither and
+    /// the whole call came back ``has no `size2` parameter … Did you mean `size`?`` — a sentence
+    /// about one of the two keys that says nothing about the other. Nothing had to be picked
+    /// between them: both hold `[16, 16]`, and `size` holds `[16, 16]` either way.
+    #[test]
+    fn a_contest_whose_keys_agree_is_settled_rather_than_refused() {
+        let mut said_twice = json!({
+            "path": "res://shapes/player_shape.tres",
+            "shapeType": "RectangleShape2D",
+            "size2": [16, 16],
+            "size_value": [16, 16]
+        });
+        repair("godot_resource", "create_shape", &mut said_twice);
+        assert_eq!(said_twice["size"], json!([16, 16]), "{said_twice}");
+        assert!(
+            said_twice.get("size2").is_none() && said_twice.get("size_value").is_none(),
+            "the keys that were read are taken away: {said_twice}"
+        );
+        check_ok("godot_resource", "create_shape", said_twice);
+
+        // A contest whose keys disagree is still two answers, and still refused by name.
+        let mut disagrees = json!({
+            "path": "res://shapes/player_shape.tres",
+            "shapeType": "RectangleShape2D",
+            "size2": [16, 16],
+            "size_value": [32, 32]
+        });
+        repair("godot_resource", "create_shape", &mut disagrees);
+        assert!(
+            disagrees.get("size").is_none(),
+            "neither of two different answers may be taken: {disagrees}"
+        );
+        let refused = message("godot_resource", "create_shape", disagrees);
+        assert!(refused.contains("`size2`"), "{refused}");
+    }
+
+    /// A path written flat beside the `files` list that already carries it is taken away.
+    ///
+    /// Three live turns sent `godot_script edit` this, each with the same path in both places:
+    ///
+    /// ```text
+    /// {"op": "edit", "files": [{"path": "scripts/player.gd", "edits": […]}],
+    ///  "path": "scripts/player.gd"}
+    /// ```
+    ///
+    /// `edit` has no `path` — `save` does — so the whole call was refused over a key that repeated
+    /// what the entry inside `files` already said.
+    #[test]
+    fn a_value_the_list_already_carries_is_not_written_flat_beside_it() {
+        let mut said_twice = json!({
+            "files": [{
+                "path": "scripts/player.gd",
+                "edits": [{"oldText": "var travelled := 0.0", "newText": "var travelled := 1.0"}]
+            }],
+            "path": "scripts/player.gd"
+        });
+        repair("godot_script", "edit", &mut said_twice);
+        assert!(
+            said_twice.get("path").is_none(),
+            "the flat copy is taken away: {said_twice}"
+        );
+        check_ok("godot_script", "edit", said_twice);
+
+        // A flat key that names a file the list does not is saying something, and keeps its refusal.
+        let mut disagrees = json!({
+            "files": [{
+                "path": "scripts/player.gd",
+                "edits": [{"oldText": "var travelled := 0.0", "newText": "var travelled := 1.0"}]
+            }],
+            "path": "scripts/enemy.gd"
+        });
+        repair("godot_script", "edit", &mut disagrees);
+        assert_eq!(disagrees["path"], json!("scripts/enemy.gd"), "{disagrees}");
+        assert!(message("godot_script", "edit", disagrees).contains("`path`"));
+    }
+
+    /// A value with the tear's own punctuation behind it is still the value.
+    ///
+    /// Three live `godot_logs read` calls tore the same way, and each went round the repeat guard —
+    /// whose answer on `godot_logs` recovered 1 time in 10, the worst measured anywhere:
+    ///
+    /// ```text
+    /// {"afterCursor": 37, "contains\":": "test", "limit\":\": 40, ": "", "op": "read"}
+    /// {"afterSequence": 600, "limit\":\": 60}]": null, "op": "read", "source": "editor"}
+    /// ```
+    #[test]
+    fn a_scalar_with_the_tears_punctuation_behind_it_is_read_as_the_value() {
+        let mut trailing_comma = json!({"limit\":\": 40, ": "", "source": "editor"});
+        repair("godot_logs", "read", &mut trailing_comma);
+        assert_eq!(trailing_comma["limit"], json!(40), "{trailing_comma}");
+        check_ok("godot_logs", "read", trailing_comma);
+
+        let mut trailing_brackets = json!({"limit\":\": 60}]": null, "source": "editor"});
+        repair("godot_logs", "read", &mut trailing_brackets);
+        assert_eq!(trailing_brackets["limit"], json!(60), "{trailing_brackets}");
+        check_ok("godot_logs", "read", trailing_brackets);
+
+        // A tear that took the *opening* bracket is not a value, and stays for `check` to refuse:
+        // trimming the end of `16, 16]` leaves `16, 16`, which is two numbers rather than one.
+        let mut half_a_list = json!({
+            "path": "res://shapes/x.tres",
+            "shapeType": "RectangleShape2D",
+            "size 16, 16]": null
+        });
+        repair("godot_resource", "create_shape", &mut half_a_list);
+        assert!(
+            half_a_list.get("size").is_none(),
+            "half a list is not a size: {half_a_list}"
+        );
+
+        // And a whole list still reads as one, because it parses before any of this.
+        let mut whole = json!({
+            "path": "res://shapes/x.tres",
+            "shapeType": "RectangleShape2D",
+            "size [16, 16]": null
+        });
+        repair("godot_resource", "create_shape", &mut whole);
+        assert_eq!(whole["size"], json!([16, 16]), "{whole}");
     }
 
     /// The erase entry `set_cells` documents is one the gate lets through.
