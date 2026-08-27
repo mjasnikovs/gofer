@@ -14,7 +14,6 @@ import test from 'node:test'
 import {createToolHost} from './ai-host.mjs'
 import {cannedModels} from './ai-subagent.mjs'
 import {
-    LIVE_WORLD,
     createAgentTools,
     createModelContext,
     outOfRoom,
@@ -2544,6 +2543,26 @@ test('a turn runs against a canned world, with no server behind it', async conte
         events.some(event => event.type === 'done'),
         `a finished turn emits done: ${JSON.stringify(events.map(one => one.type))}`
     )
-    // The live world is still the default, so nothing that does not pass one has changed.
-    assert.equal(typeof LIVE_WORLD.createModelContext, 'function')
+})
+
+/// The default is the live world, which the case above cannot say: it passes one.
+///
+/// Asserting that `LIVE_WORLD.createModelContext` is a function says nothing about what `runAgent`
+/// falls back to — the default could be deleted and that assertion would still pass, while every
+/// turn in the app died on `world.createModelContext is not a function`. So this asks for a turn
+/// with no world at all and no connections, and reads back the message only the real adapter
+/// writes. No listener: the throw is the first statement of the turn.
+test('a turn with no world given reaches the live one', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+
+    await assert.rejects(
+        runAgent({
+            settings: {...servedBy('http://127.0.0.1:1/v1'), connections: {}},
+            messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
+            workspacePath: workspace.path,
+            emit: () => {}
+        }),
+        /The selected model .* is unavailable/
+    )
 })
