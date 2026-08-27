@@ -430,8 +430,14 @@ export async function installDesktop(
                             defaultPrompt:
                                 'You are Gofer, a capable local coding agent. Work autonomously toward the user’s goal.'
                         }
+                    // The splash asks this before it installs anything, and only a cache that is
+                    // not already there sends it on to `initialize_rag`. The two scenarios whose
+                    // screens are the install — the first run and its failure — are the two that
+                    // have to answer with an empty one.
                     if (command === 'get_rag_cache_status')
-                        return {path: '/fixture/cache', sizeBytes: 1_024, state: 'installed'}
+                        return currentState === 'first-run' || currentState === 'error' ?
+                                {path: '/fixture/cache', sizeBytes: 0, state: 'not-installed'}
+                            :   {path: '/fixture/cache', sizeBytes: 1_024, state: 'installed'}
                     if (command === 'list_ai_models')
                         return [
                             {
