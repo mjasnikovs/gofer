@@ -95,7 +95,10 @@ const NODE_COVERAGE_EXCLUDES = [
     // measurement away from failing for having measured something.
     'bench-*.mjs',
     // Fixtures for the AI turn tests. Scaffolding, not a module anything ships.
-    'ai-turn-harness.mjs'
+    'ai-turn-harness.mjs',
+    // The declared contract as the worker receives it, for the two test files that need it.
+    // Scaffolding for the same reason.
+    'declared-domains.mjs'
 ]
     .map(name => `--exclude='scripts/${name}'`)
     .join(' ')

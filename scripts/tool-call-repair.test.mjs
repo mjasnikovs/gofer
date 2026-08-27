@@ -3,6 +3,7 @@ import {readFile} from 'node:fs/promises'
 import test from 'node:test'
 import {createGodotTools} from './godot-tools.mjs'
 import {normalizeToolCalls} from './tool-call-repair.mjs'
+import {declaredDomains} from './declared-domains.mjs'
 
 /** The four domains a repaired call is checked against, as the router would send them. */
 const catalog = [
@@ -32,32 +33,6 @@ const catalog = [
         operations: [{op: 'search', summary: 'Retrieves ranked passages: {question}.'}]
     }
 ]
-
-/**
- * The domains as `createGodotTools` receives them, built from the declared parameter contract.
- *
- * The real catalogue is serialized by the Rust crate, which merges prose from `ai_tools.rs` with
- * this file. Only the parameters and the narrowing reach the JSON schema — a summary is a sentence
- * in the description — so reading them here costs no cargo build, and `check:command-surface` is
- * what holds the two halves together.
- */
-async function declaredDomains() {
-    const {operations} = JSON.parse(
-        await readFile(new URL('../protocol/schemas/v2/params.json', import.meta.url), 'utf8')
-    )
-    const domains = new Map()
-    for (const entry of operations) {
-        const operations = domains.get(entry.tool) ?? []
-        operations.push({
-            op: entry.op,
-            summary: `${entry.op}.`,
-            params: entry.params ?? [],
-            alone: entry.alone ?? null
-        })
-        domains.set(entry.tool, operations)
-    }
-    return [...domains].map(([name, operations]) => ({name, description: name, operations}))
-}
 
 /**
  * The calls the router repairs reach it exactly as the model wrote them.
