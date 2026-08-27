@@ -1407,6 +1407,55 @@ fn editor_crashed() -> Option<String> {
 /// How recent a crash line must be to be the crash that ended this call.
 const CRASH_IS_THIS_CALLS_MS: u64 = 60_000;
 
+/// The crash line, when the **game** died of a signal and the editor that launched it did not.
+///
+/// [`editor_crashed`] reads the same marker and deliberately answers nothing while an editor is
+/// still there, because "the marker on its own does not say whose death it is: the game inherits
+/// the editor's pipes, so a segfaulting game writes the same line into the same buffer". That is
+/// the right rule for the question it asks, and it leaves the other case unanswered: an editor that
+/// is up and a game that is gone.
+///
+/// Which is a case that happens. Reproduced outside Gofer on 2026-08-27, with a local model server
+/// holding both GPUs near full:
+///
+/// ```text
+/// handle_crash: Program crashed with signal 11
+/// Engine version: Godot Engine v4.7.2.stable.official
+/// [2] 7fa579af5b7c (libnvidia-glcore.so.610.57.04+af5b7c)
+/// ```
+///
+/// A windowed game cannot get a GL context and dies before its first frame. Inside a turn the
+/// agent was told `The game started and then stopped before it was ready`, three times, with a
+/// carried tail holding one line about a thumbnail and nothing about the crash — because
+/// `handle_crash:` is not classified as an error and the tail reads errors only. It ran the game
+/// again each time.
+///
+/// Guarded from the other side: the editor has to still be there, so a marker this reads cannot be
+/// the editor's own death, and the same sixty seconds decide whether the crash belongs to the call
+/// being answered.
+fn the_game_crashed() -> Option<String> {
+    if !an_editor_is_still_running() {
+        return None;
+    }
+    let entry = newest_logs(
+        &LogQuery {
+            contains: Some(CRASH_MARKER.to_owned()),
+            ..LogQuery::default()
+        },
+        1,
+    )
+    .pop()?;
+    if now_millis().saturating_sub(entry.timestamp) > CRASH_IS_THIS_CALLS_MS {
+        return None;
+    }
+    Some(format!(
+        "The game died of a signal: {}. That is the game process crashing, not this call — \
+         running it again will not help until the cause is gone. The backtrace under it is in \
+         godot_logs read.",
+        entry.message.trim()
+    ))
+}
+
 /// Whether there is still an editor process there, which decides whose crash line that was.
 ///
 /// A game the editor launched writes to the editor's own pipes, so a GDExtension fault or a runaway
@@ -1470,7 +1519,12 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
     // that leaves without it is the defect the crash branch above was just fixed for — a model told
     // the autoload is missing, and not told the parse error sitting under it.
     if failure.code.starts_with("runtime_") {
-        if let Some(missing) = the_helper_is_not_installed() {
+        // The crash first. A game that died of a signal took its helper with it, so the two
+        // checks under this one would both be true and both be the wrong half of the answer:
+        // "the helper is not installed" about a helper that was installed and is now dead.
+        if let Some(crash) = the_game_crashed() {
+            failure.message = format!("{}\n\n{crash}", failure.message.trim_end());
+        } else if let Some(missing) = the_helper_is_not_installed() {
             failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
         } else if let Some(held) = the_debugger_holds_the_game() {
             failure.message = format!("{}\n\n{held}", failure.message.trim_end());
@@ -1561,10 +1615,12 @@ fn last_session_errors(wanted: usize) -> Vec<String> {
         wanted * 4,
     )
     .into_iter()
-    .map(|entry| entry.message)
-    .filter(|message| {
-        !is_the_engines_own_epilogue(message) && !is_the_editor_talking_to_itself(message)
+    .filter(|entry| {
+        !is_the_engines_own_epilogue(&entry.message)
+            && !is_the_editor_talking_to_itself(&entry.message)
+            && !is_a_thumbnail_the_headless_editor_cannot_draw(entry)
     })
+    .map(|entry| entry.message)
     .rev()
     .take(wanted)
     .collect::<Vec<_>>()
@@ -1622,21 +1678,68 @@ fn is_the_engines_own_epilogue(message: &str) -> bool {
 /// project prints can be mistaken for it. Dropped from the *carried tail* only — `godot_logs read`
 /// still answers with every line.
 ///
-/// ### The second line, and why it is not here
+/// ### The second line, and where it went
 /// ```text
 /// ERROR: Parameter "t" is null.
 ///    at: texture_2d_get (./servers/rendering/dummy/storage/texture_storage.h:110)
 ///    [0] _scene_save (res://addons/gofer/plugin.gd:…)
 /// ```
 /// That is the "Creating Thumbnail" step of a scene save asking the **dummy** rendering server for
-/// a texture, reproduced on demand under the acceptance harness. It was filtered here too, and it
-/// is not any more: `Parameter "t" is null` is `ERR_FAIL_NULL`'s generic wording, several
-/// `RenderingServer` entry points emit it, and a *game* that hands one of them a null texture would
-/// have had its only diagnostic line dropped. The `at:` line that tells the two apart is a separate
-/// entry in the buffer, so this function cannot see it. Four occurrences of noise across the whole
-/// corpus is not worth one game's error going missing.
+/// a texture. It was filtered here once and cannot be: `Parameter "t" is null` is `ERR_FAIL_NULL`'s
+/// generic wording, several `RenderingServer` entry points emit it, and a *game* that hands one of
+/// them a null texture would have had its only diagnostic line dropped. The `at:` line that tells
+/// the two apart is a separate entry in the buffer, which this function is not given.
+///
+/// It is [`is_a_thumbnail_the_headless_editor_cannot_draw`] now, which is given the entry and reads
+/// that frame — so the editor's own noise goes and a game's identical sentence stays.
 fn is_the_editor_talking_to_itself(message: &str) -> bool {
     message.contains("Couldn't find the given section") && message.contains("key \"state\"")
+}
+
+/// The line the session printed immediately after one, whatever its severity.
+///
+/// The carried tail reads errors only, and the `at:` frame under an error is classified as info —
+/// so the one line that says which of two identically worded errors this is cannot be seen from
+/// inside that read. Asked for by sequence rather than by paging, and only when a caller has an
+/// entry it cannot tell apart, so the ordinary path pays nothing.
+fn the_line_after(sequence: u64) -> Option<String> {
+    LOGS.lock().ok().and_then(|logs| {
+        logs.read(&LogQuery {
+            after: Some(sequence),
+            limit: Some(1),
+            ..LogQuery::default()
+        })
+        .entries
+        .into_iter()
+        .next()
+        .filter(|entry| entry.sequence == sequence + 1)
+        .map(|entry| entry.message)
+    })
+}
+
+/// A null the **editor** hit drawing a scene thumbnail it has no renderer for.
+///
+/// ```text
+/// [  20% ] save | Creating Thumbnail
+/// ERROR: Parameter "t" is null.
+///    at: texture_2d_get (./servers/rendering/dummy/storage/texture_storage.h:110)
+/// ```
+///
+/// Every acceptance and live session runs the editor `--headless`, so every `scene.save` asks the
+/// **dummy** rendering server for a texture and gets this. It is Godot's own, it is about the
+/// editor rather than the game, and it is the only error most of those sessions ever print — so a
+/// game that stopped for its own reasons had this handed to it as the reason. One live turn ran the
+/// game three times and was given this line, and nothing else, all three.
+///
+/// It was filtered on its message alone once and that was wrong: `Parameter "t" is null` is
+/// `ERR_FAIL_NULL`'s generic wording, several `RenderingServer` entry points emit it, and a *game*
+/// handing one of them a null texture would have had its only diagnostic dropped. What tells them
+/// apart is the frame under it, which is a separate entry — so this reads that entry rather than
+/// guessing from the message, and matches only the dummy driver's own texture storage.
+fn is_a_thumbnail_the_headless_editor_cannot_draw(entry: &LogEntry) -> bool {
+    entry.message.contains("Parameter \"t\" is null")
+        && the_line_after(entry.sequence)
+            .is_some_and(|under| under.contains("texture_2d_get") && under.contains("/dummy/"))
 }
 
 #[cfg(test)]
@@ -2700,6 +2803,104 @@ mod tests {
         );
     }
 
+    /// A game that died of a signal is told so, while the editor that launched it is still there.
+    ///
+    /// Reproduced outside Gofer on 2026-08-27: a windowed Godot 4.7.2 game segfaults inside
+    /// `libnvidia-glcore` before its first frame when a local model server holds both GPUs near
+    /// full. Inside a turn the agent was told `The game started and then stopped before it was
+    /// ready` three times and given nothing about the crash — `handle_crash:` is classified as
+    /// info, so the carried tail, which reads errors only, never sees it, and `editor_crashed`
+    /// deliberately answers nothing while an editor is still running.
+    #[test]
+    fn a_game_that_died_of_a_signal_is_named_as_the_reason_the_call_failed() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (
+                LogSource::Editor,
+                "handle_crash: Program crashed with signal 11",
+            ),
+            (
+                LogSource::Editor,
+                "[2] 7fa579af5b7c (libnvidia-glcore.so.610.57.04+af5b7c)",
+            ),
+        ]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            format!(
+                "config_version=5\n\n[autoload]\n\n{}=\"{}\"\n",
+                crate::addon::AUTOLOAD_NAME,
+                crate::addon::AUTOLOAD_TARGET
+            ),
+        )
+        .expect("a staged project");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game started and then stopped before it was ready",
+        ));
+
+        bind(None);
+        assert!(
+            carried.message.contains("died of a signal")
+                && carried.message.contains("Program crashed with signal 11"),
+            "the crash is what ended the game and has to be named: {}",
+            carried.message
+        );
+        assert!(
+            !carried.message.contains("The Godot editor itself died"),
+            "a live editor was accused of dying: {}",
+            carried.message
+        );
+    }
+
+    /// A runtime failure with no crash line behind it says nothing about one.
+    #[test]
+    fn a_runtime_failure_with_no_crash_behind_it_names_no_crash() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(
+            LogSource::EditorError,
+            "SCRIPT ERROR: Parse Error: Expected expression after \"else\".",
+        )]);
+        let worktree = tempfile::TempDir::new().expect("temporary worktree");
+        std::fs::write(
+            worktree.path().join(crate::addon::PROJECT_FILE),
+            format!(
+                "config_version=5\n\n[autoload]\n\n{}=\"{}\"\n",
+                crate::addon::AUTOLOAD_NAME,
+                crate::addon::AUTOLOAD_TARGET
+            ),
+        )
+        .expect("a staged project");
+        bind(Some(std::sync::Arc::new(ExternalEditor::at(
+            0,
+            0,
+            worktree.path(),
+        ))));
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "The game started and then stopped before it was ready",
+        ));
+
+        bind(None);
+        assert!(
+            !carried.message.contains("died of a signal"),
+            "nothing crashed: {}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("Expected expression after"),
+            "and the parse error still travels: {}",
+            carried.message
+        );
+    }
+
     /// `Error` is not the same as gone: it is also what a live editor with a silent addon reads as.
     ///
     /// `derive_state` answers `Error` for `Readiness::Unavailable`, which is the editor up and the
@@ -3089,6 +3290,64 @@ mod tests {
         assert!(
             !carried.message.contains("Unreferenced static string"),
             "and the epilogue is not beside it: {}",
+            carried.message
+        );
+    }
+
+    /// The thumbnail a headless editor cannot draw is not the reason a game stopped.
+    ///
+    /// Every acceptance and live session runs the editor `--headless`, so every `scene.save` prints
+    /// this pair. One live turn ran the game three times and each `runtime_not_running` carried
+    /// exactly this one line and nothing else — the editor's own noise, offered as the cause.
+    #[test]
+    fn the_headless_editors_thumbnail_null_is_not_carried_as_the_games_error() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (LogSource::Editor, "[  20% ] save | Creating Thumbnail"),
+            (LogSource::EditorError, "ERROR: Parameter \"t\" is null."),
+            (
+                LogSource::EditorError,
+                "   at: texture_2d_get (./servers/rendering/dummy/storage/texture_storage.h:110)",
+            ),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "No game with the Gofer runtime helper is running",
+        ));
+
+        assert_eq!(
+            carried.message, "No game with the Gofer runtime helper is running",
+            "the editor's thumbnail is not the game's error: {}",
+            carried.message
+        );
+    }
+
+    /// The same sentence from a game keeps travelling, because the frame under it is not the
+    /// dummy driver's.
+    ///
+    /// `Parameter "t" is null` is `ERR_FAIL_NULL`'s generic wording and several `RenderingServer`
+    /// entry points emit it, so filtering it by message alone would drop a real game's only
+    /// diagnostic line.
+    #[test]
+    fn a_games_own_null_texture_is_still_the_error_that_is_carried() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[
+            (LogSource::EditorError, "ERROR: Parameter \"t\" is null."),
+            (
+                LogSource::EditorError,
+                "   at: texture_2d_get (servers/rendering/renderer_rd/storage_rd/texture_storage.cpp:1)",
+            ),
+        ]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_not_running",
+            "No game with the Gofer runtime helper is running",
+        ));
+
+        assert!(
+            carried.message.contains("Parameter \"t\" is null"),
+            "a null the game hit is still what ended it: {}",
             carried.message
         );
     }
