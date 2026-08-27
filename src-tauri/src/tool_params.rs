@@ -3394,7 +3394,22 @@ fn describe(value: &Value) -> String {
             if names.is_empty() {
                 "an empty object".to_owned()
             } else {
-                format!("an object holding {}", names.join(", "))
+                // A blank name is written as `""` rather than as nothing. An `AnimationPlayer`'s
+                // default library really is keyed with the empty string, so a live turn sent
+                // `{"type": "dictionary", "value": {"": …}}` and read back `a dictionary value
+                // takes an array of {key, value} tagged pairs, and this one was an object holding
+                // .` — true, and a sentence that stops before it says anything.
+                let written: Vec<String> = names
+                    .iter()
+                    .map(|name| {
+                        if name.trim().is_empty() {
+                            json!(name).to_string()
+                        } else {
+                            (*name).to_owned()
+                        }
+                    })
+                    .collect();
+                format!("an object holding {}", written.join(", "))
             }
         }
     }
@@ -3734,7 +3749,27 @@ fn could_be_a_name(key: &str) -> bool {
         && characters.all(|held| held.is_ascii_alphanumeric() || held == '_')
 }
 
+/// The shortest a key may be before it is allowed to answer for a longer name it merely ends.
+///
+/// Four, which is the floor `_nearest_property` uses in the addon for the same reason: `x` is the
+/// tail of half the names in any table, and a rename nobody can predict is worse than a refusal.
+const ENOUGH_OF_A_NAME: usize = 4;
+
 /// Whether one written key reads as one declared parameter. The rule [`nearest`] offers hints by.
+///
+/// The last clause is a **suffix**, and it is there for one shape the recordings hold and no other.
+/// `godot_scene create` takes `{path, rootType, rootName?}` while `godot_node create` takes
+/// `{parent, type, name, index}`, and models carry the second's words to the first:
+///
+/// ```text
+/// {"op": "create", "path": "res://scenes/x.tscn", "type": "Node2D", "name": "X"}
+/// ```
+///
+/// Scanned across every recorded call, an unknown key that is a case-insensitive suffix of exactly
+/// one declared parameter happens **ten times, and all ten are those two** — `name` for `rootName`
+/// five times and `type` for `rootType` five. No other operation in the catalogue produces one, so
+/// the clause fires where it should and nowhere else. `only_one_meaning` still refuses a contested
+/// one, and still refuses a value the parameter could not hold.
 fn reads_as(key: &str, param: &Param) -> bool {
     let lowered = key.to_lowercase();
     let name = param.name.to_lowercase();
@@ -3742,6 +3777,7 @@ fn reads_as(key: &str, param: &Param) -> bool {
         || name.starts_with(&lowered)
         || lowered.starts_with(&name)
         || lowered.replace('_', "") == name.replace('_', "")
+        || (lowered.len() >= ENOUGH_OF_A_NAME && name.ends_with(&lowered))
 }
 
 /// The accepted name closest to one that was not accepted, when a single edit reaches it. Typos and
@@ -4219,6 +4255,52 @@ mod tests {
         });
         repair("godot_resource", "create_shape", &mut whole);
         assert_eq!(whole["size"], json!([16, 16]), "{whole}");
+    }
+
+    /// The sibling operation's words, put onto the parameters they name.
+    ///
+    /// `godot_scene create` takes `{path, rootType, rootName?}` and `godot_node create` takes
+    /// `{parent, type, name, index}`, so a model writes the second's words into the first. Ten
+    /// times across the recorded corpus — `name` five and `type` five — and those two are the only
+    /// suffix-shaped misses anywhere in it. The cost is not one call each: `create` is what a turn
+    /// reaches for at the *start* of building a scene, so the five `name` misses took **34
+    /// operations** down with them, including a fourteen-entry call and a ten-entry one.
+    #[test]
+    fn a_sibling_operations_word_is_read_as_the_parameter_it_names() {
+        let mut borrowed = json!({
+            "path": "res://scenes/player.tscn",
+            "type": "Node2D",
+            "name": "Player"
+        });
+        repair("godot_scene", "create", &mut borrowed);
+        assert_eq!(borrowed["rootType"], json!("Node2D"), "{borrowed}");
+        assert_eq!(borrowed["rootName"], json!("Player"), "{borrowed}");
+        check_ok("godot_scene", "create", borrowed);
+
+        // The floor. A key shorter than four characters may not answer for a name it merely ends,
+        // which is the rule `_nearest_property` holds to in the addon for the same reason.
+        let mut too_short = json!({"path": "res://scenes/x.tscn", "rootType": "Node2D", "pe": "X"});
+        repair("godot_scene", "create", &mut too_short);
+        assert!(too_short.get("rootType").is_some() && too_short["rootType"] == json!("Node2D"));
+        assert!(
+            too_short.get("pe").is_some(),
+            "two letters may not name a parameter: {too_short}"
+        );
+    }
+
+    /// A blank key is shown as one, rather than as nothing at all.
+    ///
+    /// An `AnimationPlayer`'s default library is keyed with the empty string, so a live turn sent
+    /// `{"type": "dictionary", "value": {"": …}}` and read back ``a dictionary value takes an array
+    /// of {key, value} tagged pairs, and this one was an object holding .`` — true, and a sentence
+    /// that stops before it says anything.
+    #[test]
+    fn an_object_whose_only_name_is_blank_still_says_what_it_held() {
+        let blank = describe(&json!({"": 1}));
+        assert_eq!(blank, "an object holding \"\"", "{blank}");
+        // Named keys are untouched, which is what the older refusals assert.
+        assert_eq!(describe(&json!({"y": 1, "x": 2})), "an object holding x, y");
+        assert_eq!(describe(&json!({})), "an empty object");
     }
 
     /// The erase entry `set_cells` documents is one the gate lets through.
