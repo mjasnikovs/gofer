@@ -17,7 +17,7 @@ export GOFER_BENCH_CATALOG="$dump"
 export GOFER_BENCH_PROMPT="$prompt"
 export GOFER_BENCH_ENDPOINT="https://openrouter.ai/api/v1/chat/completions"
 export OPENROUTER_API_KEY="$(secret-tool lookup service com.gofer.desktop username ai-openrouter)"
-export GOFER_BENCH_MODEL="stealth/ox-alpha"
+export GOFER_BENCH_MODEL="z-ai/glm-5.3-flash"
 
 echo "=== where save lives (iteration 35) ==="
 node scripts/bench-where-save-lives.mjs "${1:-12}" 2>&1 | tail -6

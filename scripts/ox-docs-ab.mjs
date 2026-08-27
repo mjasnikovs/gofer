@@ -25,7 +25,7 @@ const KEY = execFileSync(
 const connection = {
     connectionType: 'openrouter',
     baseUrl: 'https://openrouter.ai/api/v1',
-    model: process.env.OX_MODEL ?? 'stealth/ox-alpha',
+    model: process.env.OX_MODEL ?? 'z-ai/glm-5.3-flash',
     modelName: 'Ox Alpha',
     apiKey: KEY,
     thinkingLevel: process.env.OX_LEVEL ?? 'low',
