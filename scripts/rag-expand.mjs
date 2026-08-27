@@ -21,6 +21,7 @@ import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createCredentialStore} from './ai-credentials.mjs'
 import {piThinkingLevel} from './thinking-level.mjs'
 import {piModel} from './pi-model.mjs'
+import {TUNING_DEFAULTS} from './tuning-defaults.mjs'
 
 const PROVIDER_ID = 'rag'
 export const CODEX_PROVIDER_ID = 'openai-codex'
@@ -144,8 +145,8 @@ export function createCompletion(connection, {models: injected, persistCredentia
             {systemPrompt: system, messages: [{role: 'user', content: user}]},
             {
                 reasoning: piThinkingLevel(connection.thinkingLevel, connection),
-                timeoutMs: connection.timeoutMs ?? 120_000,
-                maxRetries: connection.maxRetries ?? 2
+                timeoutMs: connection.timeoutMs ?? TUNING_DEFAULTS.timeoutMs,
+                maxRetries: connection.maxRetries ?? TUNING_DEFAULTS.maxRetries
             }
         )
         const message = await stream.result()

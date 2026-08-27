@@ -698,6 +698,67 @@ for (const surface of efforts) checkForDuplicates(surface)
 checkAgreement('reasoning effort', efforts)
 checkOrder('the reasoning vocabulary', efforts)
 
+/**
+ * What a turn is tuned to when nothing named it, across the three places that state it.
+ *
+ * Rust owns these as `#[serde(default = "…")]`, the worker carries them because a request that lost
+ * a field arrives as `undefined` rather than as an error, and the renderer fills them into a stored
+ * file written before the section existed. Three copies, each needed where it is.
+ *
+ * A commit that raised one and not the others is the failure — it has happened before, to
+ * `maxTurns`, which was raised in two of its three places. Reading the other two as source text is
+ * ugly and is still the only thing that fails when they disagree.
+ */
+async function tuningDefaults() {
+    const rust = await read('src-tauri/src/settings.rs')
+    const renderer = await read('src/models/settings.ts')
+    const {DEFAULT_SEARCH_PROVIDER, TUNING_DEFAULTS} = await import('./tuning-defaults.mjs')
+
+    /** One `fn default_name() -> T { value }` body, as the number or string it returns. */
+    const rustDefault = name => {
+        const found = new RegExp(`fn ${name}\\(\\) -> [^{]+\\{\\s*"?([\\w_.]+)"?`, 'u').exec(rust)
+        if (!found) fail(`settings.rs declares no ${name}`)
+        return found[1].replaceAll('_', '')
+    }
+
+    const rustTuning = {
+        maxRetries: Number(rustDefault('default_max_retries')),
+        timeoutMs: Number(rustDefault('default_timeout_ms')),
+        compactionPercent: Number(rustDefault('default_compaction_percent'))
+    }
+
+    const literal = /const tuning = \{([^}]*)\}/u.exec(renderer)
+    if (!literal) fail('settings.ts declares no `tuning` literal in normalizeSettings')
+    const rendererTuning = Object.fromEntries(
+        literal[1]
+            .split(',')
+            .map(pair => pair.split(':').map(half => half.trim()))
+            .filter(([name]) => name)
+            .map(([name, value]) => [name, Number(value.replaceAll('_', ''))])
+    )
+
+    for (const [name, value] of Object.entries(rustTuning)) {
+        for (const [where, held] of [
+            ['scripts/tuning-defaults.mjs', TUNING_DEFAULTS[name]],
+            ['src/models/settings.ts', rendererTuning[name]]
+        ]) {
+            if (held !== value) {
+                fail(`${name} is ${String(value)} in settings.rs and ${String(held)} in ${where}`)
+            }
+        }
+    }
+
+    const rustProvider = rustDefault('default_search_provider')
+    if (DEFAULT_SEARCH_PROVIDER !== rustProvider) {
+        fail(
+            `the default search provider is ${rustProvider} in settings.rs and `
+                + `${DEFAULT_SEARCH_PROVIDER} in scripts/tuning-defaults.mjs`
+        )
+    }
+}
+
+await tuningDefaults()
+
 // The two menus a settings file may name a level from, which are the efforts with `off` in front.
 // Checked whole rather than through `withoutOff`, so a copy that lost its `off` is caught too.
 checkOrder('the reasoning menu', [

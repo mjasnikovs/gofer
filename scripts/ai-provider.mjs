@@ -59,6 +59,7 @@ import {confineTool} from './workspace-confinement.mjs'
 import {readableProviderError} from './provider-error.mjs'
 import {piThinkingLevel} from './thinking-level.mjs'
 import {piModel} from './pi-model.mjs'
+import {DEFAULT_SEARCH_PROVIDER, TUNING_DEFAULTS} from './tuning-defaults.mjs'
 
 // Re-exported rather than moved out of reach: this module's own tests and every caller name it
 // here, and where a sentence is written is not something a caller has an opinion about.
@@ -96,14 +97,6 @@ const DRIVER_NAMES = {
     cerebras: 'Cerebras'
 }
 
-/**
- * How full the context may get before the old part of it is summarised away.
- *
- * Pi states the same line as a token reserve — 16,384 of a 120,064-token window — which is 86.4%
- * full. A percentage is the number that survives a change of model, so that is what Gofer stores
- * and what the reserve is derived back from; 86 puts the line within ~400 tokens of Pi's.
- */
-const DEFAULT_COMPACTION_PERCENT = 86
 /** Recent conversation kept verbatim behind the summary. Pi's default, unchanged. */
 const KEEP_RECENT_TOKENS = 20_000
 
@@ -633,8 +626,8 @@ export function createModelContext({
     // Shared by the caller's own requests and by the sub-agent's, so a child never waits on a
     // different clock or gives up after a different number of tries than the thing that asked for it.
     const streamOptions = {
-        timeoutMs: settings.timeoutMs ?? 120_000,
-        maxRetries: settings.maxRetries ?? 2,
+        timeoutMs: settings.timeoutMs ?? TUNING_DEFAULTS.timeoutMs,
+        maxRetries: settings.maxRetries ?? TUNING_DEFAULTS.maxRetries,
         maxRetryDelayMs: 15_000,
         // The sub-agent builds its own `Agent`, so the key the turn's agent carries never reaches
         // it. It goes here instead, where both already share one object: a child's asks are the
@@ -698,7 +691,7 @@ export async function runAgent({
                 settings: settings.subagent
             }),
             createWebSearchTool({
-                provider: settings.web?.searchProvider ?? 'exa',
+                provider: settings.web?.searchProvider ?? DEFAULT_SEARCH_PROVIDER,
                 apiKey: braveApiKey
             }),
             // The page reader borrows the sub-agent's model and its ceilings. Reading one page is the
@@ -797,7 +790,7 @@ export async function runAgent({
     // was already over the line when it was stored — or that grew past it in a build with no
     // compaction at all — is compacted the first time it is picked up again.
     const compaction = compactionSettings(
-        settings.compactionPercent ?? DEFAULT_COMPACTION_PERCENT,
+        settings.compactionPercent ?? TUNING_DEFAULTS.compactionPercent,
         model.contextWindow
     )
     const contextTokens = estimateContextTokens(previousMessages).tokens
