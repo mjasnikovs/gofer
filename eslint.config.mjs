@@ -66,6 +66,28 @@ export default tseslint.config(
     },
     {
         /*
+         * The desktop bridge is faked behind itself, never replaced.
+         *
+         * `services/desktop` is the one file that knows every command's name and payload shape, so
+         * a test that substitutes the module is also a test that cannot notice the command being
+         * renamed — which is the cost ADR 0001 weighed the wrappers against. The module exposes a
+         * driver hook for exactly this, and `src/test/desktop-driver.ts` is how it is installed.
+         */
+        files: ['src/**/*.{ts,tsx}'],
+        rules: {
+            'no-restricted-syntax': [
+                'error',
+                {
+                    selector:
+                        "CallExpression[callee.object.name='vi'][callee.property.name='mock'] > Literal[value=/(^|\\u002f)desktop$/]",
+                    message:
+                        'Install a fake with src/test/desktop-driver.ts. Mocking services/desktop hides a renamed command from the tests that mount the most of the application.'
+                }
+            ]
+        }
+    },
+    {
+        /*
          * The timeline arithmetic belongs to the turn, and only to the turn.
          *
          * Its eight transformers are each simple and only correct in a particular order, and that

@@ -28,8 +28,14 @@ Both halves of that were true when it was written. Neither is true now.
 **A test replacing the IPC module is what the tests already do.** `src/test/backend.ts` is one
 in-memory Gofer backend sitting behind `desktop-driver`, holding a scene the editor has open and a
 script whose hash moves when it is saved. A test that mounts a screen gets a working backend, not a
-`mockResolvedValue`. Nothing stubs a service module — the only `vi.mock` in the suite is
-`monaco-runtime`, which stands in for a browser API rather than for Gofer.
+`mockResolvedValue`. Nothing substitutes the bridge: what `vi.mock` is still used for is standing in
+for a browser API — `monaco-runtime`, `annotation-canvas` — never for a Gofer command.
+
+That last sentence stopped being true once and was put back. Three test files had grown their own
+fake: two replaced `services/desktop` outright, one set the driver hook by hand, and the two
+replacing it were the ones a renamed command was invisible to — the exact cost this decision was
+weighed against. `eslint.config.mjs` now refuses a `vi.mock` of that module, so the claim is checked
+rather than asserted.
 
 **A renamed command is caught by three checks, none of which is a wrapper.**
 `src/services/desktop.contract.test.ts` reads `DesktopCommandMap` against the `generate_handler!`

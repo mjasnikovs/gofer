@@ -6,7 +6,10 @@ import {
     draftKey,
     readProjectState
 } from './ui-state'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 import type {WriteScheduler} from './clock'
+
+const tauri = createDesktopFake()
 
 type Call = Readonly<{command: string; arguments: unknown}>
 
@@ -24,19 +27,16 @@ beforeEach(() => {
     calls.length = 0
     answer = () => null
     rejectWith = undefined
-    window.__GOFER_TEST_DESKTOP__ = {
-        invoke: (command, arguments_) => {
-            calls.push({command, arguments: arguments_})
-            if (rejectWith) return Promise.reject(rejectWith)
-            return Promise.resolve(answer(command, arguments_))
-        },
-        isTauri: () => true,
-        listen: () => Promise.resolve(() => undefined)
-    }
+    installDesktopFake(tauri)
+    tauri.invoke.mockImplementation((command, arguments_) => {
+        calls.push({command, arguments: arguments_})
+        if (rejectWith) return Promise.reject(rejectWith)
+        return Promise.resolve(answer(command, arguments_))
+    })
 })
 
 afterEach(() => {
-    delete window.__GOFER_TEST_DESKTOP__
+    removeDesktopFake()
 })
 
 /** A clock nobody winds: work is held until the test decides time has passed. */
@@ -147,11 +147,7 @@ describe('writing', () => {
     })
 
     it('writes nothing when there is no desktop backend behind it', () => {
-        window.__GOFER_TEST_DESKTOP__ = {
-            invoke: () => Promise.resolve(null),
-            isTauri: () => false,
-            listen: () => Promise.resolve(() => undefined)
-        }
+        tauri.isTauri.mockReturnValue(false)
         const writer = createProjectStateWriter(immediateScheduler)
 
         writer.write(WORKSPACE_LAYOUT_KEY, {centerTab: 'chat'})

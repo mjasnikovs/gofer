@@ -1,21 +1,22 @@
-import {afterEach, describe, expect, it, vi} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import {judgeProjectMemory, sweepProjectMemory} from './project-memory'
 import {clearTurnActivity, isTurnRunning} from './turn-activity'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 
-vi.mock('./desktop', async () => {
-    const actual = await vi.importActual<typeof import('./desktop')>('./desktop')
-    return {
-        ...actual,
-        isTauri: () => true,
-        invoke: (...call: unknown[]) => backend(...call),
-        listen: () => Promise.resolve(() => undefined)
-    }
-})
+const tauri = createDesktopFake()
 
 /** What the fake backend answers, rebuilt per test. */
 let backend: (...call: unknown[]) => Promise<unknown>
 
-afterEach(clearTurnActivity)
+beforeEach(() => {
+    installDesktopFake(tauri)
+    tauri.invoke.mockImplementation((command, arguments_) => backend(command, arguments_))
+})
+
+afterEach(() => {
+    clearTurnActivity()
+    removeDesktopFake()
+})
 
 /**
  * A backend call that does not answer until the test says so, which is the whole of a sweep.

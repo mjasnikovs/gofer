@@ -1,19 +1,11 @@
 import {cleanup, renderHook, waitFor} from '@testing-library/react'
-import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
+import {afterEach, beforeEach, describe, expect, it} from 'vitest'
 import {useAiConnection} from './useAiConnection'
 import {activeConnection} from '../models/settings'
+import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/desktop-driver'
 import type {AiModelOption, GoferSettings, ModelChoice, SettingsResponse} from '../models/settings'
 
-vi.mock('../services/desktop', async () => {
-    const actual =
-        await vi.importActual<typeof import('../services/desktop')>('../services/desktop')
-    return {
-        ...actual,
-        isTauri: () => true,
-        invoke: (...call: unknown[]) => backend(...call),
-        listen: () => Promise.resolve(() => undefined)
-    }
-})
+const tauri = createDesktopFake()
 
 /** What the fake backend answers, rebuilt per test. */
 let backend: (...call: unknown[]) => Promise<unknown>
@@ -98,6 +90,8 @@ describe('useAiConnection', () => {
     beforeEach(() => {
         saved = []
         backend = () => Promise.resolve(undefined)
+        installDesktopFake(tauri)
+        tauri.invoke.mockImplementation((command, arguments_) => backend(command, arguments_))
     })
 
     /*
@@ -109,6 +103,7 @@ describe('useAiConnection', () => {
      */
     afterEach(() => {
         cleanup()
+        removeDesktopFake()
     })
 
     /*
