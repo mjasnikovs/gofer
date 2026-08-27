@@ -475,7 +475,9 @@ test('lets git read a scene it can only ever read', async context => {
         "grep -rln uid --include='*.tscn' scenes",
         'grep -rn Ticker --include=*.tscn .',
         'find . -type f -name "*.tscn" -not -path "./.godot/*"',
-        'find . -name "*.gd" -o -name "*.tscn"'
+        'find . -name "*.gd" -o -name "*.tscn"',
+        // A redirect that names no scene is not this rule's business.
+        'grep -rn X --include="*.tscn" . > matches.txt'
     ])
         assert.deepEqual(await tool.execute('7', {command}), asRun(command))
 

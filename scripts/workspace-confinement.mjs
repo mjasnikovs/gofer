@@ -159,15 +159,18 @@ function readsOnlyThroughGit(command) {
  * a window the agent cannot reach; a pattern raises none.
  *
  * Not when the command can act on what it finds. `-delete` and `-exec` turn a search into a write,
- * and a redirect writes wherever it points — so a command carrying any of them is read whole, with
- * its patterns still in it.
+ * so a command carrying either is read whole with its patterns still in it.
+ *
+ * A redirect needs no clause of its own: what it writes to is a path, not a pattern, so
+ * `grep -rn X --include="*.gd" . > scenes/level_1.tscn` still names a scene and is still refused —
+ * while `> matches.txt` beside the same search names none and is not the rule's business.
  *
  * And only the flag's own value. `grep -c . scenes/level_1.tscn` still names a scene and is still
  * refused: reading one as text is what the read tool is for, which is the line `READS_A_PIPE`
  * already draws by leaving `cat` off it.
  */
 const ACTS_ON_WHAT_IT_FINDS =
-    /(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fprint|fls|fprintf)(?:\s|$)|[<>]/u
+    /(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fprint|fls|fprintf)(?:\s|$)/u
 const SEARCH_PATTERN =
     /(?:--(?:include|exclude)(?:-dir)?|(?:^|\s)-(?:i?name|i?path|wholename|lname|regex))[=\s]+(?:"[^"]*"|'[^']*'|\S+)/gu
 
