@@ -526,6 +526,16 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         nowhere_near.contains("node.inspect"),
         "and with nothing near it, the call that lists them all: {nowhere_near}"
     );
+    // Which call, exactly. `node.inspect` lists everything only when `properties` is left out, and
+    // the sentence used to stop short of saying so — so a live turn read it as "ask inspect about
+    // this property", did that, and met the identical refusal. Five of them in one run, then the
+    // repeat guard, then it restarted the editor.
+    assert!(
+        nowhere_near.contains("with no `properties`")
+            && nowhere_near.contains("refused the same way"),
+        "the advice has to name the call that works and rule out the one that does not: \
+         {nowhere_near}"
+    );
 
     // A path under a root this scene does not have. Two live turns in a row wrote `/Arena/...`
     // into `create_nodes` against a scene still rooted at `ProtocolFixture`, and the refusal —

@@ -864,9 +864,10 @@ fn run_one<R: Runtime>(
 fn session_domain<R: Runtime>(app: &AppHandle<R>, op: &str) -> Result<Value, ToolFailure> {
     match op {
         "status" => Ok(json!({"session": godot_session_api::get_session(app)?})),
-        "start" => Ok(json!({
-            "session": godot_session_api::start_session(app, StartGodotSessionRequest {})?
-        })),
+        "start" => {
+            godot_session_api::start_session(app, StartGodotSessionRequest {})?;
+            Ok(json!({"session": the_editor_once_it_can_answer(app)?}))
+        }
         "stop" => {
             godot_session_api::stop_session(app)?;
             Ok(json!({"stopped": true}))
@@ -877,6 +878,72 @@ fn session_domain<R: Runtime>(app: &AppHandle<R>, op: &str) -> Result<Value, Too
         )),
     }
 }
+
+/// The session, once the editor behind it can actually take a call.
+///
+/// `start_session` returns as soon as the editor is spawned, and it is right to: the desktop has a
+/// window watching the state change. The agent has one answer and no event stream, and what it was
+/// handed was `{"state": "starting"}` reported as a success. Across every recorded run, a
+/// successful `godot_session start` answered **`ready` twice, `starting` thirteen times and `error`
+/// once** — and the prompt sends the model here before any other `godot_` tool.
+///
+/// What that cost, in one live turn: `godot_scene open` and two `godot_session get_state` refused
+/// with `session_closed`, a `bash sleep 12` refused by the shell rule, and then — because nothing
+/// lets a caller wait for a session — the agent wrote its own wait loop, thirty `curl` polls
+/// against Gofer's own RPC port, to find out when the editor it had just been told was started
+/// could answer.
+///
+/// So this holds the call open, the way `runtime.run` "is answered only after the game booted, its
+/// helper announced itself, and the first frame was captured". Polled rather than awaited because
+/// nothing here signals: `start_session_watch` emits to a window, and the tool has none.
+fn the_editor_once_it_can_answer<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<crate::godot_session_api::GodotSessionResponse>, ToolFailure> {
+    let deadline = std::time::Instant::now() + SESSION_START_TIMEOUT;
+    loop {
+        match godot_session::current_state() {
+            godot_session::SessionState::Ready
+            | godot_session::SessionState::Playing
+            | godot_session::SessionState::DebugPaused => {
+                return Ok(godot_session_api::get_session(app)?);
+            }
+            // An editor that died on the way up is not something to keep waiting for, and the
+            // caller has to be told rather than handed a session object with `error` inside it.
+            godot_session::SessionState::Error | godot_session::SessionState::Offline => {
+                return Err(ToolFailure::new(
+                    "session_start_failed",
+                    "The editor was started and stopped before it could answer. Read godot_logs \
+                     for what it printed on the way up, then start it again."
+                        .to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            let state = godot_session::current_state();
+            return Err(ToolFailure::new(
+                "session_slow_start",
+                format!(
+                    "The editor has been {state:?} for {} seconds and has not answered yet. It is \
+                     still coming up rather than gone: read godot_session status again rather than \
+                     starting a second one.",
+                    SESSION_START_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        std::thread::sleep(SESSION_START_POLL);
+    }
+}
+
+/// How long a session start may take before the caller is told it is slow rather than broken.
+///
+/// A cold editor imports the project and enables plugins before the addon connects. Sixty seconds
+/// is `runtime.run`'s own launch budget, and a session start is the same kind of wait.
+const SESSION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How often the state is read while waiting. Fast, because the wait is the editor's and every
+/// extra tick is a caller kept waiting for nothing.
+const SESSION_START_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Everything the read ledger asks of one file-touching operation, in one wrapper.
 ///

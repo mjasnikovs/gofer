@@ -5905,8 +5905,9 @@ func _property_not_found_error(node: Node, path: String, property: String) -> Di
     var near := _nearest_property(node, property)
     if near.is_empty():
         message += (
-            ". node.inspect lists every property this node has with its current value, including "
-            + "the theme_override_* ones a Control keeps"
+            ". node.inspect with no `properties` lists every property this node has with its "
+            + "current value, including the theme_override_* ones a Control keeps — naming this "
+            + "one there is refused the same way"
         )
     else:
         message += ". Did you mean %s?" % near

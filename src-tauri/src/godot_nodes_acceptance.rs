@@ -382,15 +382,21 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         "a property one prefix short must be refused and corrected, said: {corrected}"
     );
     // `postion` is a transposition, so nothing is a prefix of anything and there is no correction
-    // to give. What it gets instead is the call that would have answered it.
+    // to give. What it gets instead is the call that would have answered it — and this refusal is
+    // the exact case that had to be spelled out, because it *is* `node.inspect`: a live turn read
+    // "node.inspect lists every property this node has" as "ask inspect about this property", did
+    // that, and met these same words again. Five times in one run.
     let refused = session.error(
         "node.inspect",
         json!({"node": "/narrow/Caption", "properties": ["postion"]}),
         None,
     );
     assert!(
-        refused.contains("postion") && refused.contains("node.inspect lists every property"),
-        "a property nothing is near must be refused and pointed somewhere, said: {refused}"
+        refused.contains("postion")
+            && refused.contains("node.inspect with no `properties`")
+            && refused.contains("refused the same way"),
+        "a property nothing is near must be refused and pointed at the call that answers, said: \
+         {refused}"
     );
 }
 

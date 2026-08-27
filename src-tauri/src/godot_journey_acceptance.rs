@@ -46,7 +46,6 @@ const READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// hundreds of milliseconds; generous enough for a loaded machine, short enough that a watch which
 /// never ran is reported rather than waited out.
 const POLICY_TIMEOUT: Duration = Duration::from_secs(20);
-const PROBE_TIMEOUT_MS: u64 = 2_000;
 const CALL_TIMEOUT_MS: u64 = 30_000;
 /// A launch is answered only once the game booted, its helper announced itself, and the first
 /// frame was captured.
@@ -381,29 +380,27 @@ impl Journey {
             .unwrap_or_else(|| panic!("{tool}.{op} was expected to fail"))
     }
 
-    /// Starts the session the supervisor way and waits until the staged addon reports readiness.
+    /// Starts the session the supervisor way. The call itself is the wait.
+    ///
+    /// This used to start the editor and then poll `session.get_state` for up to two minutes,
+    /// because `godot_session start` answered as soon as the process was spawned — across every
+    /// recorded run it reported `ready` twice, `starting` thirteen times and `error` once, all as
+    /// successes. A live turn met that and spent six calls on it, ending with the agent writing a
+    /// thirty-iteration `curl` loop against Gofer's own RPC port to find out when the editor it
+    /// had been told was started could answer.
+    ///
+    /// The wait belongs in the call, so the assertion here is what a caller is now entitled to:
+    /// `start` answers with a session that can take the next request.
     fn start_session(&self) -> Value {
         let started = self.call("godot_session", "start", json!({}))["session"].clone();
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let mut last = "no reply".to_owned();
-        while Instant::now() < deadline {
-            match self
-                .try_call(
-                    "godot_session",
-                    Self::one("get_state", json!({"timeoutMs": PROBE_TIMEOUT_MS})),
-                )
-                .map(|answer| answer["ops"][0]["result"].clone())
-            {
-                Ok(state) if state["state"] == "ready" => return started,
-                Ok(state) => last = state.to_string(),
-                Err(failure) => last = format!("{}: {}", failure.code, failure.message),
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-        panic!(
-            "the addon never reported a ready session: {last}\n--- session output ---\n{}",
+        assert_eq!(
+            started["state"],
+            "ready",
+            "godot_session start has to answer with an editor that can take a call, not with one \
+             that is still coming up: {started}\n--- session output ---\n{}",
             session_output()
         );
+        started
     }
 
     /// Opens a script through the language server, retrying while the editor is still importing:
