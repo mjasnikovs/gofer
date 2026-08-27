@@ -128,6 +128,14 @@ const OTHER_LANE = [
         'test:coverage:node-critical',
         "c8 --include='scripts/workspace-confinement.mjs' --temp-directory=coverage/node-critical/tmp --reports-dir=coverage/node-critical --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/workspace-confinement.test.mjs"
     ],
+    // The other file where a branch nobody exercised costs real money. What this one assembles is
+    // sent on the tail of every turn rather than on the system prompt, because the system prompt is
+    // where every provider's cache prefix begins — and a turn that lands one byte of this in the
+    // wrong place re-buys the whole conversation. A directory of its own, for the reason above.
+    [
+        'test:coverage:node-turn-context',
+        "c8 --include='scripts/turn-context.mjs' --temp-directory=coverage/turn-context/tmp --reports-dir=coverage/turn-context --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/turn-context.test.mjs"
+    ],
     // The source worker passing proves nothing about the file a built Gofer runs: that one is
     // bundled, and a bundle can lose a module the source resolved fine.
     script('test:worker:bundled'),

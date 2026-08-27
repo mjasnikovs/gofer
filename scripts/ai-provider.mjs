@@ -19,6 +19,7 @@ import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createGodotTools} from './godot-tools.mjs'
+import {turnContextText, withTurnContext} from './turn-context.mjs'
 import {
     EMPTY_ANSWER,
     abortableWait,
@@ -888,12 +889,16 @@ export async function runAgent({
      * `agent.state.messages` lazily, so the agent existing by the time anything calls it is enough.
      */
     let transcript
+    const turnText = turnContextText({memoryContext, sessionContext, inventory})
+    /** Which message this turn hung its context on, so a re-prompt mid-turn does not move it. */
+    const turnAnchor = {}
     const agent = new Agent({
         initialState: {
             // The prompt arrives whole: the backend composes what it ships, the settings page
-            // shows that text, and a project that edited it sends its own. Memory is the one thing
-            // appended here, because it is this turn's data rather than the user's instructions.
-            systemPrompt: `${systemPrompt}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}${sessionContext ? `\n\n${sessionContext}` : ''}${inventory ? `\n\n${inventory}` : ''}`,
+            // shows that text, and a project that edited it sends its own. Nothing is appended:
+            // what this turn knows goes on the tail of the conversation, in `transformContext`
+            // below, because the system message is where every provider's cache prefix begins.
+            systemPrompt,
             model,
             thinkingLevel: parentThinkingLevel(settings),
             tools,
@@ -912,6 +917,11 @@ export async function runAgent({
         // which silently includes the compaction summary. Without this the summary is written, is
         // stored, is counted — and never reaches the model.
         convertToLlm,
+        // What this turn knows, hung on the tail of the last thing the user said rather than on the
+        // system prompt. Pi binds this result to a local and never writes it back, so the block is
+        // sent and not stored — which is the point twice over: the transcript keeps the user's own
+        // words, and the prefix in front of it stays the same bytes it was last turn.
+        transformContext: async messages => withTurnContext(messages, turnText, turnAnchor),
         streamFn: (nextModel, context, options) =>
             models.streamSimple(nextModel, context, {...options, ...streamOptions}),
         // The prompt cache key, and it was `settings.sessionId` — a field the settings file has

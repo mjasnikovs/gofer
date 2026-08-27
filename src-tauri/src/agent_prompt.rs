@@ -43,7 +43,7 @@ Guidelines:
 const GODOT_PROMPT: &str = r#"Godot engine (a Gofer-managed editor, reached through the godot_* tools):
 {engine}
 - Search godot_docs_search before writing any Godot class, method, signal, property or constant, every time, including when the name feels obvious
-- The editor session is described at the end of these instructions; read it there rather than asking for it, and if it says offline, start it with godot_session start before any other godot_ tool
+- What Gofer already knows about this project — the editor session, anything it has learned before, the files it tracks — is written at the end of the message that started this turn; read it there rather than asking for any of it, and if the session says offline, start it with godot_session start before any other godot_ tool
 - Every godot_ tool takes an ops list, so put everything you want from that tool now into one call: three inspections is one call of three entries, not three calls
 - Each entry names its op with its parameters beside it, and the entries run in order; most ops may be repeated in one call, and the few that may not — along with the debugger's, which have to be the only entry of theirs — say so on their own line
 

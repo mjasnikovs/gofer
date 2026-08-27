@@ -496,11 +496,11 @@ test('a refused tool call reaches the model as an error result', async context =
  * prove here is that the worker does not touch it: the text arrives whole and reaches the model
  * whole. Memory is the exception, because it is this turn's data rather than the user's wording.
  */
-test('the system prompt reaches the model as it arrived, with this turn’s memory behind it', async context => {
+test('the system prompt reaches the model as it arrived, and this turn’s own data does not', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     // One server per turn: the shared mock accumulates request bodies, and this test compares two.
-    const systemPrompt = async extra => {
+    const sent = async extra => {
         const mock = startServer()
         await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
         try {
@@ -512,60 +512,71 @@ test('the system prompt reaches the model as it arrived, with this turn’s memo
                 emit: () => undefined,
                 ...extra
             })
-            return mock.request().body.messages[0].content
+            const {messages} = mock.request().body
+            return {system: messages[0].content, prompt: messages.at(-1).content}
         } finally {
             mock.server.close()
         }
     }
 
-    assert.equal(await systemPrompt({}), 'Be brief. Never mention cats.')
-    const withTools = await systemPrompt({
-        tools: catalog,
-        host: {call: () => Promise.resolve({})},
-        memoryContext: 'The player is a cat.'
-    })
+    const godot = {tools: catalog, host: {call: () => Promise.resolve({})}}
+
+    // The prompt is the user's, whole, whatever else the turn knows. That is the whole contract:
+    // every provider's cache prefix begins at the system message, so anything re-derived per turn
+    // that lands here costs the conversation behind it.
+    const bare = await sent({})
+    assert.equal(bare.system, 'Be brief. Never mention cats.')
+    assert.equal(bare.prompt, 'Hello')
+
+    const withMemory = await sent({...godot, memoryContext: 'The player is a cat.'})
+    assert.equal(withMemory.system, 'Be brief. Never mention cats.')
     assert.equal(
-        withTools,
-        'Be brief. Never mention cats.\n\nRelevant persistent project memory:\nThe player is a cat.'
+        withMemory.prompt,
+        'Hello\n\nRelevant persistent project memory:\nThe player is a cat.'
     )
 
-    // The editor session, last, because the prompt sends the model to the end of the instructions
-    // to read it. It replaces a call: the shipped prompt used to say "call godot_session status
-    // first, every time", and 58 of 72 recorded turns opened with exactly that — one round trip
-    // per turn for a state the backend already holds.
-    const withSession = await systemPrompt({
-        tools: catalog,
-        host: {call: () => Promise.resolve({})},
+    // The editor session, after the memory. It replaces a call: the shipped prompt used to say
+    // "call godot_session status first, every time", and 58 of 72 recorded turns opened with
+    // exactly that — one round trip per turn for a state the backend already holds.
+    const withSession = await sent({
+        ...godot,
         memoryContext: 'The player is a cat.',
         sessionContext: 'Editor session: ready. Godot 4.7.2.'
     })
+    assert.equal(withSession.system, 'Be brief. Never mention cats.')
     assert.equal(
-        withSession,
-        'Be brief. Never mention cats.'
+        withSession.prompt,
+        'Hello'
             + '\n\nRelevant persistent project memory:\nThe player is a cat.'
             + '\n\nEditor session: ready. Godot 4.7.2.'
     )
 
     // The project's files after the session, for the same reason and with the same measurement:
     // 98 of 113 recorded turns opened with a call that only asked what the project holds.
-    const withInventory = await systemPrompt({
-        tools: catalog,
-        host: {call: () => Promise.resolve({})},
+    const withInventory = await sent({
+        ...godot,
         memoryContext: 'The player is a cat.',
         sessionContext: 'Editor session: ready. Godot 4.7.2.',
         inventory: "The project's tracked files:\nscripts/player.gd"
     })
+    assert.equal(withInventory.system, 'Be brief. Never mention cats.')
     assert.equal(
-        withInventory,
-        'Be brief. Never mention cats.'
+        withInventory.prompt,
+        'Hello'
             + '\n\nRelevant persistent project memory:\nThe player is a cat.'
             + '\n\nEditor session: ready. Godot 4.7.2.'
             + "\n\nThe project's tracked files:\nscripts/player.gd"
     )
 
-    // And a turn with no session to describe sends the prompt it arrived with.
-    assert.equal(await systemPrompt({sessionContext: undefined}), 'Be brief. Never mention cats.')
-    assert.equal(await systemPrompt({inventory: undefined}), 'Be brief. Never mention cats.')
+    // And a turn with none of it to describe asks the question the user asked, and nothing else.
+    assert.deepEqual(await sent({sessionContext: undefined}), {
+        system: 'Be brief. Never mention cats.',
+        prompt: 'Hello'
+    })
+    assert.deepEqual(await sent({inventory: undefined}), {
+        system: 'Be brief. Never mention cats.',
+        prompt: 'Hello'
+    })
 })
 
 /**
@@ -2276,4 +2287,219 @@ test('a length stop names which limit it was, and what the conversation really h
     assert.match(crowded, /no longer leaves room/u)
     assert.match(crowded, /filled 118,900 of the model's 120,064-token/u)
     assert.match(crowded, /larger context window/u)
+})
+
+/**
+ * The one thing that makes a long conversation affordable, and the one thing nothing checked.
+ *
+ * Every provider Gofer talks to caches a prompt by its leading bytes and charges full price for the
+ * first byte that differs and everything after it. So what a turn re-sends has to be what the last
+ * turn sent, exactly — the same system message, the same tool schemas, the same transcript in front
+ * of the new words.
+ *
+ * It was not. The memory block, the session line and the file listing were concatenated onto the
+ * system prompt, and all three are re-derived every turn — the memory block is a search keyed on
+ * the words the user just typed, so it was never twice the same. Measured across one project's
+ * 1,645 requests: 96.6% of the prompt came from cache inside a turn and 14.3% at a turn boundary,
+ * the cached prefix stopped at 9,728 tokens every single time — the base prompt and the tool
+ * schemas, and not one byte past where the memory block began — and 94 prompts cost as much as the
+ * 1,551 tool results between them.
+ *
+ * Three turns rather than two, because two share only the system message and that is not a prefix
+ * worth the name. Turns two and three share the whole of turn one.
+ *
+ * "Byte for byte" up to one message, and the exception is the point of the design rather than a
+ * gap in it. The block is sent and not stored, so turn N+1 re-sends turn N's prompt without it and
+ * the prefix ends there — one turn's span re-read, once. What it buys is everything in front of
+ * that: the system message, the tool schemas, and every turn before the last. The loop below names
+ * the shared run for each pair, and the `+ 1` is that one message.
+ */
+test('what a turn re-sends is what the last turn sent, byte for byte', async context => {
+    const mock = startScriptedServer([{text: 'One'}, {text: 'Two'}, {text: 'Three'}])
+    const url = await baseUrl(context, mock.server)
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+
+    // Everything a turn derives for itself, different on every turn — which is what the real ones
+    // do. Retrieval is keyed on the prompt, the editor moves, and the model writes files.
+    const derived = turn => ({
+        memoryContext: `Turn ${String(turn)} remembered something else entirely.`,
+        sessionContext: `Editor session: ready. Godot 4.7.${String(turn)}.`,
+        inventory: `The project's tracked files:\n${'scripts/player.gd\n'.repeat(turn)}`
+    })
+
+    let agentMessages = []
+    const messages = []
+    for (const turn of [1, 2, 3]) {
+        messages.push({sender: 'user', text: `Ask number ${String(turn)}`, timestamp: turn})
+        await runAgent({
+            settings: servedBy(url),
+            systemPrompt: 'Be brief.',
+            tools: catalog,
+            host: {call: () => Promise.resolve({})},
+            messages: [...messages],
+            agentMessages,
+            sessionId: 'one-task',
+            workspacePath: workspace.path,
+            emit: event => {
+                if (event.type === 'turn-state') agentMessages = event.agentMessages
+            },
+            ...derived(turn)
+        })
+        messages.push({sender: 'assistant', text: 'ok', timestamp: turn})
+    }
+
+    assert.equal(mock.bodies.length, 3, 'three turns, three requests')
+
+    /** Where two requests stop being the same request, as a person can read it. */
+    const divergence = (before, after) => {
+        const at = [...before].findIndex((part, index) => part !== after[index])
+        if (at < 0) return undefined
+        return {
+            at,
+            before: JSON.stringify(before[at]).slice(0, 200),
+            after: JSON.stringify(after[at]).slice(0, 200)
+        }
+    }
+
+    // Each turn's request holds the one before it plus an answer and a new prompt, so the run of
+    // messages both requests have to agree on grows by two a turn. Named rather than derived from
+    // the shorter request: `earlier.length - 1` is the same number today and stops meaning anything
+    // the moment a regression makes a request shorter, which is exactly when this has to fail.
+    for (const [earlier, later, shared] of [
+        [mock.bodies[0], mock.bodies[1], 1],
+        [mock.bodies[1], mock.bodies[2], 3]
+    ]) {
+        // The tool schemas, first, because they are the largest single thing in the request and a
+        // reordered key in one of them is as expensive as a rewritten one.
+        assert.equal(
+            JSON.stringify(later.tools),
+            JSON.stringify(earlier.tools),
+            'the tool schemas have to be the same bytes every turn'
+        )
+
+        // The system message, which is where every provider starts counting.
+        assert.equal(
+            later.messages[0].content,
+            earlier.messages[0].content,
+            'the system message has to be the same bytes every turn'
+        )
+
+        // And the conversation in front of the new words. The earlier request's own last message is
+        // where this turn's context was hung, so it is the one message allowed to differ.
+        assert.equal(
+            earlier.messages.length,
+            shared + 1,
+            'the earlier request is the shared run plus the prompt this turn hung its context on'
+        )
+        const before = earlier.messages.slice(0, shared).map(message => JSON.stringify(message))
+        const after = later.messages.slice(0, shared).map(message => JSON.stringify(message))
+        assert.deepEqual(
+            divergence(before, after),
+            undefined,
+            `the first ${String(shared)} messages have to be the same bytes every turn`
+        )
+    }
+
+    // And the turn's own data still reaches the model, on the tail where it costs nothing. Without
+    // this, deleting the memory feature outright would pass every assertion above.
+    const asked = mock.bodies[2].messages.at(-1).content
+    assert.ok(asked.startsWith('Ask number 3'), 'the user still asks first')
+    assert.ok(asked.includes('Turn 3 remembered something else entirely.'), 'memory still arrives')
+    assert.ok(asked.includes('Godot 4.7.3'), 'the session line still arrives')
+    assert.ok(asked.includes('scripts/player.gd'), 'the file listing still arrives')
+})
+
+/**
+ * The block this turn appends is sent, never stored — and Retry is where that stops being a detail.
+ *
+ * A retry decides between carrying on from the transcript and asking the prompt again by matching
+ * the stored prompt against the one being retried, word for word. The words the turn hangs on the
+ * tail are re-derived every time — memory is a search keyed on the prompt, against a corpus the
+ * failed turn already wrote to — so a block written into the stored message would never match twice.
+ * The retry would fall through to asking again, and the prompt would land on the transcript a
+ * second time: the exact loss `retryEntry` was written to prevent, reintroduced from below.
+ */
+test('a retry still recognises its own prompt, whatever this turn remembered', async context => {
+    const mock = startScriptedServer([{text: 'Carrying on'}])
+    const url = await baseUrl(context, mock.server)
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+
+    const crashed = [
+        {role: 'user', content: 'Build the level', timestamp: 10},
+        {
+            role: 'assistant',
+            content: [{type: 'text', text: 'Starting on it'}],
+            api: 'openai-completions',
+            provider: 'local',
+            model: MODEL_ID,
+            usage: NO_USAGE,
+            stopReason: 'stop',
+            timestamp: 11
+        }
+    ]
+
+    await runAgent({
+        settings: servedBy(url),
+        messages: [{sender: 'user', text: 'Build the level', timestamp: 10}],
+        agentMessages: crashed,
+        isRetry: true,
+        tools: catalog,
+        host: {call: () => Promise.resolve({})},
+        // Nothing like what the failed turn was given, which is the realistic case.
+        memoryContext: 'Something the last attempt never saw.',
+        sessionContext: 'Editor session: ready. Godot 4.7.2.',
+        workspacePath: workspace.path,
+        emit: () => undefined
+    })
+
+    const sent = mock.bodies[0].messages
+    assert.equal(
+        sent.filter(message => JSON.stringify(message).includes('Build the level')).length,
+        1,
+        'the retry carried on rather than asking the prompt a second time'
+    )
+    // And this turn's data still reached it, on the prompt the transcript already held.
+    const asked = sent.find(message => JSON.stringify(message).includes('Build the level'))
+    assert.ok(String(asked.content).includes('Something the last attempt never saw.'))
+})
+
+/**
+ * A turn can ask a second question of itself, and the block has to stay where it was put.
+ *
+ * A red verify report is asked as a user message, partway through a turn that has already sent
+ * twenty tool results. Hanging this turn's context on "the last user message" would move it off the
+ * original prompt and onto the report — and every earlier request of that turn had already sent it
+ * on the prompt, so the prefix would break there and throw away the whole turn behind it. Once per
+ * re-prompted turn is better than once per tool call and still worse than never.
+ */
+test('a red verify report does not move this turn’s context off the prompt', async context => {
+    const mock = startScriptedServer([{text: 'Hello'}, {text: 'Fixed it'}])
+    const url = await baseUrl(context, mock.server)
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+
+    const spec = 'GOAL\nA thing.\n\nVERIFY\n```sh\n# it is registered\nsh -c "exit 1"\n```\n'
+    await runAgent({
+        settings: servedBy(url),
+        messages: [{sender: 'user', text: spec, images: [], timestamp: 1}],
+        memoryContext: 'The player is a cat.',
+        workspacePath: workspace.path,
+        emit: () => undefined
+    })
+
+    assert.equal(mock.bodies.length, 2, 'the red report was asked as a second request')
+    const [asked, reasked] = mock.bodies
+    const prompt = body => body.messages.find(message => String(message.content).includes('GOAL'))
+
+    // The prompt reaches the second request exactly as it reached the first — block and all.
+    assert.equal(
+        JSON.stringify(prompt(reasked)),
+        JSON.stringify(prompt(asked)),
+        'the prompt has to be the same bytes in both requests'
+    )
+    assert.ok(String(prompt(asked).content).includes('The player is a cat.'))
+    // And the report is asked without a second copy of it.
+    assert.ok(!String(reasked.messages.at(-1).content).includes('The player is a cat.'))
 })

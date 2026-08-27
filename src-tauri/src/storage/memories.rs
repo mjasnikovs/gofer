@@ -386,7 +386,17 @@ impl Memories<'_> {
                 })
             })
             .collect::<Vec<_>>();
-        results.sort_by(|left, right| right.score.total_cmp(&left.score));
+        // Ties break on the id, and that is not tidiness. `scores` is a `HashMap`, so what
+        // `into_iter` hands over is in no order at all, and two memories fused to the same score
+        // came out in a different order run to run — for the same question, against the same rows.
+        // The six this answers with are sent on every turn, and a provider's prompt cache is a run
+        // of bytes: two rows swapping places re-buys the whole conversation behind them.
+        results.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.memory.id.cmp(&right.memory.id))
+        });
         results.truncate(limit);
         Ok(results)
     }
