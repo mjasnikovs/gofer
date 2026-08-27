@@ -61,7 +61,7 @@ const PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource typ
 
 /// Copies the fixture project and turns it into a game the loop can observe: a main scene whose
 /// probe script counts injected input in a Label.
-fn fixture_worktree(directory: &TempDir) -> PathBuf {
+fn worktree_with_probes(directory: &TempDir) -> PathBuf {
     let worktree = godot_editor_harness::fixture_worktree(directory);
     std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
     std::fs::write(worktree.join("scripts/runtime_probe.gd"), PROBE_SCRIPT)
@@ -73,7 +73,7 @@ fn fixture_worktree(directory: &TempDir) -> PathBuf {
 /// A ready session editing the probe scene, on a worktree this suite prepared.
 fn start_session() -> Session {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = fixture_worktree(&directory);
+    let worktree = worktree_with_probes(&directory);
     let ledger = directory.path().join("ledger.json");
     Session::start_on_worktree(worktree, ledger, Some(directory))
 }
@@ -822,7 +822,7 @@ const UNPARSABLE_PROBE_SCRIPT: &str = "extends Node2D\n\nfunc _ready() -> void:\
 #[test]
 fn a_named_scene_runs_without_becoming_the_project_entry_point() {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = fixture_worktree(&directory);
+    let worktree = worktree_with_probes(&directory);
     std::fs::write(
         worktree.join("other.tscn"),
         "[gd_scene format=3]\n\n[node name=\"OtherScene\" type=\"Node2D\"]\n",
@@ -1479,7 +1479,7 @@ fn dap_client(dap_port: u16, session: &Session) -> DapClient {
 #[test]
 fn a_game_continued_after_a_break_answers_again() {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = fixture_worktree(&directory);
+    let worktree = worktree_with_probes(&directory);
     let script = worktree.join("scripts/runtime_probe.gd");
     std::fs::write(&script, TICKING_PROBE_SCRIPT).expect("write the ticking probe script");
     let ledger = directory.path().join("ledger.json");

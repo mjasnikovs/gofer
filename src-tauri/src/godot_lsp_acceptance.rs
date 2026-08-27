@@ -28,7 +28,7 @@ const BROKEN: &str = "extends Node\n\nfunc explode( -> void:\n\tpass\n";
 /// Copies the fixture project and adds the scripts this suite navigates. The checked-in fixture
 /// deliberately stays free of them: the parse error in `broken.gd` must never reach the Node
 /// journeys, which scan editor output for script errors.
-pub(crate) fn fixture_worktree(directory: &TempDir) -> PathBuf {
+pub(crate) fn worktree_with_probes(directory: &TempDir) -> PathBuf {
     let worktree = godot_editor_harness::fixture_worktree(directory);
     let scripts = worktree.join("scripts");
     std::fs::create_dir_all(&scripts).expect("create scripts directory");
@@ -49,7 +49,7 @@ fn connect(worktree: &Path, lsp_port: u16, editor: &Editor) -> LspClient {
     let address = SocketAddr::from(([127, 0, 0, 1], lsp_port));
     retry_until(
         "the language server never answered",
-        editor,
+        || editor.output(),
         RETRY_EVERY,
         || {
             LspClient::connect(address, worktree)
@@ -86,7 +86,7 @@ fn definition_uris(response: Option<GotoDefinitionResponse>) -> Vec<Url> {
 #[test]
 fn the_editor_reports_diagnostics_and_navigation_across_scripts() {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = fixture_worktree(&directory);
+    let worktree = worktree_with_probes(&directory);
     let workspace = Workspace::open(&worktree).expect("open worktree");
 
     let lsp_port = free_port();

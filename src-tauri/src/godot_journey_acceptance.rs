@@ -26,7 +26,9 @@
 
 use crate::ai_tools::{self, ToolFailure, ToolRequest};
 use crate::approvals;
-use crate::godot_editor_harness::copy_tree;
+use crate::godot_editor_harness::{
+    PNG_BASE64_PREFIX, RETRY_EVERY, child_names, copy_tree, retry_within,
+};
 use crate::godot_lsp_acceptance::{MATH_UTILS, SCORE_KEEPER, position_of};
 use crate::godot_session::{self, LogQuery};
 use crate::storage::ProjectStorage;
@@ -39,9 +41,11 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 use tempfile::TempDir;
 
-/// The editor imports the project, enables the addon, and only then connects, so the first probes
-/// are expected to fail.
-const READY_TIMEOUT: Duration = Duration::from_secs(120);
+/// The supervisor imports the project, enables the addon, and only then connects, so the first
+/// probes are expected to fail. Longer than the harness's own wait because a journey boots the
+/// supervisor as well as the editor.
+const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// How long a ready session gets to have the Godot rules applied to it. Measured in the low
 /// hundreds of milliseconds; generous enough for a loaded machine, short enough that a watch which
 /// never ran is reported rather than waited out.
@@ -90,9 +94,6 @@ const BROKEN_SCRIPT: &str = "extends Node\n\nfunc explode( -> void:\n\tpass\n";
 const FIXED_SCRIPT: &str = "extends Node\n\nfunc explode() -> void:\n\tpass\n";
 /// Valid GDScript that gdformat has something to say about, so `changed` means the sidecar ran.
 const UNFORMATTED: &str = "extends Node\n\nfunc value() -> int:\n\treturn 1+2\n";
-
-/// Base64 always opens with these characters when the payload is the eight-byte PNG signature.
-const PNG_BASE64_PREFIX: &str = "iVBORw0KGgo";
 
 /// Sets a process environment variable for as long as the journey runs and puts back whatever was
 /// there before. The suite runs single-threaded, so the process environment is the journey's while
@@ -406,22 +407,17 @@ impl Journey {
     /// Opens a script through the language server, retrying while the editor is still importing:
     /// the script commands connect lazily, so the first call is also what proves the server is up.
     fn open_script(&self, path: &str) -> Value {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let mut last = "no attempt".to_owned();
-        while Instant::now() < deadline {
-            match self
-                .try_call("godot_script", Self::one("open", json!({"path": path})))
-                .map(|answer| answer["ops"][0]["result"].clone())
-            {
-                Ok(document) => return document,
-                Err(failure) => last = format!("{}: {}", failure.code, failure.message),
-            }
-            thread::sleep(Duration::from_millis(500));
-        }
-        panic!(
-            "the language server never accepted {path}: {last}\n--- session output ---\n{}",
-            session_output()
-        );
+        retry_within(
+            &format!("the language server never accepted {path}"),
+            SESSION_READY_TIMEOUT,
+            session_output,
+            RETRY_EVERY,
+            || {
+                self.try_call("godot_script", Self::one("open", json!({"path": path})))
+                    .map(|answer| answer["ops"][0]["result"].clone())
+                    .map_err(|failure| format!("{}: {}", failure.code, failure.message))
+            },
+        )
     }
 }
 
@@ -440,15 +436,6 @@ fn session_output() -> String {
             .join("")
     })
     .unwrap_or_default()
-}
-
-fn child_names(tree: &Value) -> Vec<String> {
-    tree["root"]["children"]
-        .as_array()
-        .unwrap_or_else(|| panic!("a scene tree must carry children: {tree}"))
-        .iter()
-        .map(|child| child["name"].as_str().expect("child name").to_owned())
-        .collect()
 }
 
 fn assert_frame(frame: &Value) {

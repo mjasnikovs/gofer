@@ -66,7 +66,7 @@ const TILESET_PATH: &str = "res://tiles/world.tres";
 
 /// Copies the fixture project and turns it into the project the turn works on: a main scene with
 /// a probe script, a script that does not parse, and the atlas the tileset is cut from.
-fn fixture_worktree(directory: &TempDir) -> PathBuf {
+fn worktree_with_probes(directory: &TempDir) -> PathBuf {
     let worktree = godot_editor_harness::fixture_worktree(directory);
     let scripts = worktree.join("scripts");
     std::fs::create_dir_all(&scripts).expect("create scripts directory");
@@ -99,7 +99,7 @@ fn is_a_percentage(opening: &str) -> bool {
 /// session behind it is torn down — including when an assertion panics first.
 fn start_session() -> godot_editor_harness::Session {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = fixture_worktree(&directory);
+    let worktree = worktree_with_probes(&directory);
     let ledger = directory.path().join("ledger.json");
     godot_editor_harness::Session::start_on_worktree_with(
         worktree,

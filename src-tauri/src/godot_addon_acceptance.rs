@@ -12,7 +12,9 @@
 //! The test is gated behind the `godot-acceptance` feature so the fast `cargo test` gate stays
 //! process-free; `npm run test:godot` enables it after the Node journeys have proven the binary.
 
-use crate::godot_editor_harness::{PNG_BASE64_PREFIX, Session, Transports, fixture_worktree};
+use crate::godot_editor_harness::{
+    PNG_BASE64_PREFIX, Session, Transports, child_names, fixture_worktree,
+};
 use crate::godot_rpc::{CallRequest, HEARTBEAT_INTERVAL_MS};
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -39,15 +41,6 @@ fn slow_importing_worktree(directory: &TempDir) -> PathBuf {
         .expect("write padding resource");
     }
     worktree
-}
-
-fn child_names(tree: &Value) -> Vec<String> {
-    tree["root"]["children"]
-        .as_array()
-        .expect("children array")
-        .iter()
-        .map(|child| child["name"].as_str().expect("child name").to_owned())
-        .collect()
 }
 
 /// A ready session owns the edited scene; the editor must not still be about to open one.

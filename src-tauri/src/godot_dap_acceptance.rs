@@ -35,7 +35,7 @@ const PROBE_SCENE: &str = "[gd_scene load_steps=2 format=3]\n\n[ext_resource typ
 
 /// Copies the fixture project and gives it a main scene whose probe script the debugger can break
 /// inside. The checked-in fixture stays script-free so the Node journeys never see script output.
-fn fixture_worktree(directory: &TempDir) -> PathBuf {
+fn worktree_with_probes(directory: &TempDir) -> PathBuf {
     let worktree = godot_editor_harness::fixture_worktree(directory);
     let scripts = worktree.join("scripts");
     std::fs::create_dir_all(&scripts).expect("create scripts directory");
@@ -55,7 +55,7 @@ fn connect(dap_port: u16, editor: &Editor) -> DapClient {
     let address = SocketAddr::from(([127, 0, 0, 1], dap_port));
     retry_until(
         "the debug adapter never answered",
-        editor,
+        || editor.output(),
         RETRY_EVERY,
         || {
             DapClient::connect(address)
@@ -118,7 +118,7 @@ fn await_termination(client: &DapClient, events: &Receiver<DapEvent>) {
 #[test]
 fn the_editor_runs_breaks_steps_and_terminates() {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = fixture_worktree(&directory);
+    let worktree = worktree_with_probes(&directory);
 
     let dap_port = free_port();
     let editor = launch(&worktree, dap_port);

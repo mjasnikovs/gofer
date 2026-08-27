@@ -63,13 +63,34 @@ const SCENE_SWITCHES: [&str; 3] = ["scene.create", "scene.open", "scene.reload"]
 ///
 /// The failure is a panic rather than a `Result` because every caller is a test that cannot go on
 /// without the answer, and the editor's output is the only thing that explains why it never came.
+///
+/// That output is a closure rather than an `&Editor` because the one suite that most needed this
+/// never holds an `Editor` value: a journey drives the supervisor's editor, and the supervisor
+/// drains it into a buffer of its own. Typing the parameter to the struct excluded the only caller
+/// with a different way of answering the same question, so `godot_journey_acceptance` wrote the
+/// wait out by hand — the fifth copy, after the four this was extracted to replace.
 pub(crate) fn retry_until<T>(
     what: &str,
-    editor: &Editor,
+    output: impl Fn() -> String,
+    every: Duration,
+    attempt: impl FnMut() -> Result<T, String>,
+) -> T {
+    retry_within(what, READY_TIMEOUT, output, every, attempt)
+}
+
+/// [`retry_until`] for a caller whose wait is not the editor's own.
+///
+/// A journey boots the supervisor as well as the editor, and gave itself two minutes rather than
+/// the editor's ninety seconds. That is a real difference between two waits, so it is a parameter
+/// — shortening it to share the helper would have been the helper changing the test.
+pub(crate) fn retry_within<T>(
+    what: &str,
+    within: Duration,
+    output: impl Fn() -> String,
     every: Duration,
     mut attempt: impl FnMut() -> Result<T, String>,
 ) -> T {
-    let deadline = Instant::now() + READY_TIMEOUT;
+    let deadline = Instant::now() + within;
     let mut last = "no attempt".to_owned();
     while Instant::now() < deadline {
         match attempt() {
@@ -80,7 +101,21 @@ pub(crate) fn retry_until<T>(
             }
         }
     }
-    panic!("{what}: {last}\n--- editor output ---\n{}", editor.output());
+    panic!("{what}: {last}\n--- editor output ---\n{}", output());
+}
+
+/// The names of a scene root's children, in the order the tree reports them.
+///
+/// Two suites had this, differing only in what they said when the tree carried no children at all.
+/// The one that quoted the tree is the one kept: an assertion that fails here has been handed a
+/// shape nobody expected, and the shape is the whole of the evidence.
+pub(crate) fn child_names(tree: &serde_json::Value) -> Vec<String> {
+    tree["root"]["children"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a scene tree must carry children: {tree}"))
+        .iter()
+        .map(|child| child["name"].as_str().expect("child name").to_owned())
+        .collect()
 }
 
 /// How often a transport that is still coming up is asked again.
@@ -650,7 +685,7 @@ impl Session {
         // carries its own short timeout, so the wait is the sleep rather than the call.
         retry_until(
             "the addon never reported a ready session",
-            &self.editor,
+            || self.editor.output(),
             Duration::from_millis(250),
             || match self.request("session.get_state", json!({}), None, PROBE_TIMEOUT_MS) {
                 Ok(result) if result["state"] == "ready" => Ok(()),

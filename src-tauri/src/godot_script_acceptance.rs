@@ -12,7 +12,7 @@
 use crate::files::Workspace;
 use crate::godot_editor_harness::{BoundEditor, Editor, RETRY_EVERY, free_port, retry_until};
 use crate::godot_lsp_acceptance::{
-    MATH_UTILS, SCORE_KEEPER, fixture_worktree, launch, position_of,
+    MATH_UTILS, SCORE_KEEPER, launch, position_of, worktree_with_probes,
 };
 use crate::script::{
     self, ApplyRenameRequest, EditScriptRequest, OpenScriptRequest, SaveScriptRequest,
@@ -30,7 +30,7 @@ const KEEPER_PATH: &str = "scripts/score_keeper.gd";
 fn open_when_ready(path: &str, editor: &Editor) -> ScriptDocument {
     retry_until(
         &format!("the language server never accepted {path}"),
-        editor,
+        || editor.output(),
         RETRY_EVERY,
         || {
             script::open_document(OpenScriptRequest {
@@ -63,7 +63,7 @@ fn read(worktree: &Path, path: &str) -> String {
 #[test]
 fn the_editor_serves_monaco_through_the_script_commands() {
     let directory = TempDir::new().expect("temporary directory");
-    let worktree = fixture_worktree(&directory);
+    let worktree = worktree_with_probes(&directory);
     let lsp_port = free_port();
     let editor = launch(&worktree, lsp_port);
     // Held rather than cleared at the end: an assertion below panicking would otherwise leave this
