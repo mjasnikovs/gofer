@@ -1230,3 +1230,63 @@ test('an entry that fits two operations is refused by naming both', async () => 
     // `an entry written as an operation name, and one written as its own list entry`.
     assert.deepEqual(normalizeToolCalls(script, {ops: [{nonsense: 1}]}), {ops: [{nonsense: 1}]})
 })
+
+/**
+ * Past two, the list is the answer and the suggestion is a guess.
+ *
+ * Ten of the twenty ambiguous shapes in the shipped catalogue fit more than three operations, and
+ * `{path, position}` on `godot_script` fits eight. The sentence used to read "hover and completion
+ * and signature_help and … **both** take", and then told the model to add `"op": "hover"` — which
+ * is catalogue order, not likelihood. A model that takes that literally sends `hover` when it meant
+ * `definition`, and the refusal has cost a round trip to say something untrue.
+ */
+test('an entry that fits more than two operations is named without being told which to pick', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script').operations
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{path: 'a.gd', position: {line: 1, column: 1}}]}),
+        error => {
+            assert.match(
+                error.message,
+                /what hover, completion, signature_help, definition, declaration, references, highlights and prepare_rename all take/u
+            )
+            assert.match(error.message, /name the one you meant in `op`/u)
+            assert.ok(!error.message.includes('both take'), 'eight operations do not "both" take')
+            assert.ok(
+                !/add `"op"/u.test(error.message),
+                'the first of eight is not the one to suggest'
+            )
+            return true
+        }
+    )
+
+    // And the two-way case still hands over something to copy, because there it is a choice of two
+    // rather than a guess among eight.
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{files: []}]}),
+        /what edit and apply_rename both take.*add `"op": "edit"`/su
+    )
+})
+
+/**
+ * The key names the operation, so nothing inside the object it wraps may take that name back.
+ *
+ * `{"create": {"op": 7, "parent": "/Main"}}` used to come out as `{op: 7, parent: "/Main"}`: the
+ * wrapped object was spread after the repair and overwrote it. The guard above only declines an
+ * inner `op` that is a *string*, so a number went straight through, and `refuseUnknownOperation`
+ * skipped the result for the same reason — leaving the model the generic enum refusal this repair
+ * was written to replace.
+ */
+test('the operation the key names survives whatever the object it wraps holds', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node').operations
+
+    assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 7, parent: '/Main'}}]}), {
+        ops: [{op: 'create', parent: '/Main'}]
+    })
+    // A string still declines the repair outright, because then the model named an operation and
+    // guessing which of the two it meant is not this function's to do.
+    assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 'rename', parent: '/Main'}}]}), {
+        ops: [{create: {op: 'rename', parent: '/Main'}}]
+    })
+})

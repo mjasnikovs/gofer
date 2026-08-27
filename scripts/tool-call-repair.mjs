@@ -39,6 +39,19 @@ function isObject(value) {
 }
 
 /**
+ * A list of names as a sentence reads one: `a`, `a and b`, `a, b and c`.
+ *
+ * Not `listed`: `normalizeToolCalls` binds that name to the entry array and `sayingNoneOfItRan`
+ * takes it as a count, and both build refusals. A later call to this from inside either would have
+ * found the array, thrown `listed is not a function`, and done it while a refusal was being
+ * written — so only on a call that had already gone wrong.
+ */
+function asSentenceList(names) {
+    if (names.length < 3) return names.join(' and ')
+    return `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`
+}
+
+/**
  * The shape "exactly", written once: every required declared entry has its name held, and every
  * held name belongs to a declared entry. It was written three — `gluedWrapperKey`,
  * `listParamShapedLike`, `nameTheOperation` — over three slightly different tables, and three
@@ -159,7 +172,12 @@ export function unwrapOperationNamedKey(operations, entry) {
     if (OP_KEYS.includes(key) || !isObject(entry[key])) return entry
     if (!operations.some(operation => operation.op === key)) return entry
     if (OP_KEYS.some(named => typeof entry[key][named] === 'string')) return entry
-    return {op: key, ...entry[key]}
+    // The key is the operation, so it is written last. Spread last, `{"create": {"op": 7, …}}`
+    // came out as `{op: 7, …}` — the guard above only declines an inner `op` that is a *string*,
+    // so a number went through and undid the repair. `refuseUnknownOperation` then skipped it too,
+    // because that only speaks about a string, and the model got the generic enum refusal this
+    // repair exists to replace.
+    return {...entry[key], op: key}
 }
 
 /**
@@ -557,7 +575,7 @@ export function refuseUnknownOperation(operations, entry, elsewhere) {
     const known = operations.map(operation => operation.op).join(', ')
     const others = elsewhere?.(entry.op) ?? []
     const pointer =
-        others.length > 0 ? ` '${entry.op}' is an operation of ${others.join(' and ')}.` : ''
+        others.length > 0 ? ` '${entry.op}' is an operation of ${asSentenceList(others)}.` : ''
     throw new Error(`This tool has no '${entry.op}' operation. It has: ${known}.${pointer}`)
 }
 
@@ -585,10 +603,19 @@ export function refuseUnnamedOperation(operations, entry) {
     )
     if (fitting.length < 2) return
     const named = fitting.map(operation => operation.op)
+    // A concrete `op` to copy only where there are two to choose between. `named` is catalogue
+    // order, not likelihood, and half the shapes that reach here fit more than three operations —
+    // `{path, position}` on `godot_script` fits eight. Naming the first of eight as the one to add
+    // is a guess dressed as an answer, and a model that takes it literally sends `hover` when it
+    // meant `definition`. The list is the useful half; the suggestion past two is not.
+    const suggestion =
+        named.length === 2 ?
+            `add \`"op": "${named[0]}"\` or the one you meant`
+        :   'name the one you meant in `op`'
     throw new Error(
-        `This entry names no operation. Its parameters are what ${named.join(' and ')} both take,`
-            + ` so they cannot be told apart here: add \`"op": "${named[0]}"\` or the one you meant.`
-            + ' Every entry of an ops list names its own operation.'
+        `This entry names no operation. Its parameters are what ${asSentenceList(named)}`
+            + ` ${named.length === 2 ? 'both' : 'all'} take, so they cannot be told apart here:`
+            + ` ${suggestion}. Every entry of an ops list names its own operation.`
     )
 }
 

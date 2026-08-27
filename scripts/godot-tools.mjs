@@ -67,6 +67,18 @@ export function createGodotTools(domains, host) {
             // adapter or the log buffer, and this one answers through a sidecar and a model cache
             // that hold no state a sibling call can disturb. Two searches in one message stay
             // concurrent, which is what they were.
+            //
+            // This flag is not a property of one tool, and that is deliberate rather than
+            // overlooked: one tool in an assistant message carrying it makes the loop run the
+            // *whole* message one call at a time. It was replaced with a queue inside `execute`
+            // once, to stop a `subagent` waiting behind a scene read, and put back when the
+            // recorded batches were read. Of the 88 messages that put a godot call beside a tool
+            // that is not one, 21 were `write`, `edit` or `bash` — and those bash calls are
+            // `godot --headless --import` and a Python script writing PNGs, which is a second
+            // engine and a file the editor call beside it is about to read. The remaining 38 were
+            // `subagent`, and a child holds `read` and `bash` of its own, so it mutates the same
+            // checkout. Ordering the whole message is what keeps all of that behind one caller.
+            // The latency is the price, and it is the smaller of the two.
             ...(domain.name === 'godot_docs_search' ? {} : {executionMode: 'sequential'}),
             description: `${domain.description}\nOperations:\n${domain.operations
                 .map(operation => {
