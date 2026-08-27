@@ -138,6 +138,31 @@ export function normalizeEntry(operations, args) {
 }
 
 /**
+ * An entry that named its operation as the key its parameters were written under.
+ *
+ * `{"ops": [{"create": {"parent": "/Main", "type": "CanvasLayer", "name": "HUD"}}]}`, where
+ * `{"op": "create", "parent": …}` was meant. Counted on Cerebras' `gemma-4-31b` over five turns:
+ * **11 entries in 8 refused calls across 4 of the 5**, which is every missing-`op` entry that model
+ * wrote but one. Each was answered `ops.N.op: must have required properties op` — a sentence that
+ * names neither the key it read nor the word it wanted — and the rest of the batch went with it.
+ *
+ * Unambiguous, and measured rather than assumed: no operation in the shipped catalogue declares a
+ * parameter named after an operation of its own tool, so a lone key that is an operation name
+ * cannot be a parameter written without its `op`. The guards are the whole rule — one key, that key
+ * an operation this domain has, an object under it, and the operation named no other way.
+ */
+export function unwrapOperationNamedKey(operations, entry) {
+    if (!isObject(entry)) return entry
+    const keys = Object.keys(entry)
+    if (keys.length !== 1) return entry
+    const [key] = keys
+    if (OP_KEYS.includes(key) || !isObject(entry[key])) return entry
+    if (!operations.some(operation => operation.op === key)) return entry
+    if (OP_KEYS.some(named => typeof entry[key][named] === 'string')) return entry
+    return {op: key, ...entry[key]}
+}
+
+/**
  * The `{ops: [...]}` call a model meant, out of the one it wrote.
  *
  * Every call is a list, including a call of one operation, so that a model wanting three
@@ -537,6 +562,37 @@ export function refuseUnknownOperation(operations, entry, elsewhere) {
 }
 
 /**
+ * An entry whose parameters fit more than one operation, refused by naming them.
+ *
+ * `{"ops": [{"path": "scripts/coin.gd", "text": "extends Area2D…"}]}` is `godot_script save`
+ * written without its `op` — and it is `update` written without its `op`, because the two declare
+ * the same two parameters. `{"question": "Input.get_vector"}` is both `godot_docs_search search`
+ * and `ask`. Three of these across five live turns on 2026-08-27, each answered
+ * `ops.0.op: must have required properties op`: the word that is missing, and nothing about which
+ * of the two the caller has to choose between.
+ *
+ * [`nameTheOperation`] repairs the entry when exactly one operation fits, and declines when
+ * several do, which is right — a guess between two is a call the caller never made. This is what
+ * to say instead. Only where at least two fit: an entry fitting none is a shape nothing here can
+ * name, and no live turn has written one.
+ */
+export function refuseUnnamedOperation(operations, entry) {
+    if (entry.op !== undefined) return
+    const keys = Object.keys(entry)
+    if (keys.length === 0) return
+    const fitting = operations.filter(
+        operation => Array.isArray(operation.params) && exactFit(operation.params, keys)
+    )
+    if (fitting.length < 2) return
+    const named = fitting.map(operation => operation.op)
+    throw new Error(
+        `This entry names no operation. Its parameters are what ${named.join(' and ')} both take,`
+            + ` so they cannot be told apart here: add \`"op": "${named[0]}"\` or the one you meant.`
+            + ' Every entry of an ops list names its own operation.'
+    )
+}
+
+/**
  * A parameter that belongs to a sibling operation, refused by name instead of by type.
  *
  * `godot_node create` written with `create_nodes`' `nodes` list — what a model does when it
@@ -648,6 +704,9 @@ export function normalizeToolCalls(operations, args, elsewhere) {
     const entries = foldStrayEntries(
         operations,
         dropEmptyEntries(listed)
+            // Before `normalizeEntry`, because it is the entry's `op` that every later repair
+            // reads: without it the parameters have no operation to be checked against.
+            .map(entry => unwrapOperationNamedKey(operations, entry))
             .map(entry => normalizeEntry(operations, entry))
             .map(entry => foldFlatEntry(operations, entry))
     )
@@ -656,6 +715,7 @@ export function normalizeToolCalls(operations, args, elsewhere) {
             .map(entry => nameTheOperation(operations, entry))
             .map(entry => {
                 try {
+                    refuseUnnamedOperation(operations, entry)
                     refuseUnknownOperation(operations, entry, elsewhere)
                     const params = operations.find(operation => operation.op === entry.op)?.params
                     // After the repairs, so a padded key that was about to be renamed onto a real

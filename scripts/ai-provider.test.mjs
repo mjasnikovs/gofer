@@ -568,14 +568,23 @@ test('the system prompt reaches the model as it arrived, with this turn’s memo
     assert.equal(await systemPrompt({inventory: undefined}), 'Be brief. Never mention cats.')
 })
 
+/**
+ * Two calls in flight at once, on the one domain where that is still what happens.
+ *
+ * It used to be `godot_scene get_tree` beside `godot_runtime capture`, and those are ordered now:
+ * every domain that reaches the editor runs one at a time, for the race
+ * `the editor is one caller at a time` in `godot-tools.test.mjs` records. `godot_docs_search`
+ * answers through a sidecar and a cache and keeps no state a sibling can disturb, so two of its
+ * searches still run together — which is what leaves this test something real to prove.
+ */
 test('parallel domain calls are answered out of order without crossing results', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const mock = startScriptedServer([
         {
             calls: [
-                {name: 'godot_scene', args: {op: 'get_tree', params: {}}},
-                {name: 'godot_runtime', args: {op: 'capture', params: {}}}
+                {name: 'godot_docs_search', args: {op: 'search', question: 'signals'}},
+                {name: 'godot_docs_search', args: {op: 'search', question: 'tweens'}}
             ]
         },
         {text: 'Both answered'}
@@ -594,7 +603,7 @@ test('parallel domain calls are answered out of order without crossing results',
                 type: 'tool-result',
                 id: request.id,
                 ok: true,
-                result: {answered: request.params.ops[0].op}
+                result: {answered: request.params.ops[0].question}
             })
     })
     const events = []
@@ -610,16 +619,71 @@ test('parallel domain calls are answered out of order without crossing results',
 
     assert.equal(completion.text, 'Both answered')
     assert.deepEqual(
-        held.map(request => request.params.ops[0].op),
-        ['get_tree', 'capture']
+        held.map(request => request.params.ops[0].question),
+        ['signals', 'tweens']
     )
-    const requested = new Map(
-        events.filter(event => event.type === 'tool-start').map(event => [event.id, event.target])
-    )
+    // Both calls are the same operation, so the `target` a start event carries cannot tell them
+    // apart and the question has to. The backend saw them in the order they were started — that is
+    // the assertion directly above — so the two lists line up by position.
+    const started = events.filter(event => event.type === 'tool-start').map(event => event.id)
+    const requested = new Map(started.map((id, index) => [id, held[index].params.ops[0].question]))
     const ended = events.filter(event => event.type === 'tool-end')
     assert.equal(ended.length, 2)
     for (const end of ended)
         assert.equal(JSON.parse(end.output).answered, requested.get(end.id), end.id)
+    assert.equal(host.pendingCount, 0)
+})
+
+/**
+ * Two editor calls in one assistant message run one at a time, in the order they were written.
+ *
+ * The turn that bought this wrote `godot_runtime stop` beside `godot_node connect_signal` and
+ * `godot_scene save`. Run together, both mutations were refused `session_playing` before the stop
+ * they were sent with had returned, and the retry after that met `revision_conflict`. Five of that
+ * turn's seven refusals were the race; none of its parameters was wrong.
+ *
+ * The backend holds each call for a tick before answering, so an overlap would be seen rather than
+ * missed by luck: with the old `parallel` both calls arrive before either is answered.
+ */
+test('two editor calls in one message do not overlap', async context => {
+    const workspace = await temporaryWorkspace()
+    context.after(workspace.remove)
+    const mock = startScriptedServer([
+        {
+            calls: [
+                {name: 'godot_runtime', args: {op: 'capture', params: {}}},
+                {name: 'godot_scene', args: {op: 'save', params: {}}}
+            ]
+        },
+        {text: 'Stopped, then saved'}
+    ])
+    const url = await baseUrl(context, mock.server)
+    const order = []
+    let inFlight = 0
+    let overlapped = false
+    const host = createToolHost(call => {
+        if (isProbe(call)) return host.deliver(probeResult(call))
+        order.push(call.params.ops[0].op)
+        inFlight += 1
+        if (inFlight > 1) overlapped = true
+        setTimeout(() => {
+            inFlight -= 1
+            host.deliver({type: 'tool-result', id: call.id, ok: true, result: {ran: true}})
+        }, 5)
+    })
+
+    const completion = await runAgent({
+        settings: servedBy(url),
+        messages: [{sender: 'user', text: 'Capture, then save', timestamp: 1}],
+        workspacePath: workspace.path,
+        tools: catalog,
+        host,
+        emit: () => undefined
+    })
+
+    assert.equal(completion.text, 'Stopped, then saved')
+    assert.equal(overlapped, false, 'two editor calls were in flight at once')
+    assert.deepEqual(order, ['capture', 'save'])
     assert.equal(host.pendingCount, 0)
 })
 

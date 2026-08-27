@@ -592,10 +592,15 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }
     )
 
-    // A pair of operations the same keys fit is still a guess, and is left for the router to name.
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{path: 'a.gd'}, {path: 'b.gd'}]}), {
-        ops: [{path: 'a.gd'}, {path: 'b.gd'}]
-    })
+    // A pair of operations the same keys fit is still a guess, and is still not guessed at. It
+    // used to be left here "for the router to name", which it never was: the schema refuses an
+    // entry with no `op` before the router is reached, so what the caller actually got was pi's
+    // `ops.0.op: must have required properties op` and no word about the two it had to choose
+    // between. Now it is refused by naming them — see `refuseUnnamedOperation`.
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{path: 'a.gd'}, {path: 'b.gd'}]}),
+        /open and diagnostics both take/su
+    )
 })
 
 // The tagged value a model wrapped twice. One live turn against a local Qwen3.6-27B sent 51 of
@@ -1118,4 +1123,110 @@ test('a list written as text is read under listOf and under either', () => {
         normalizeToolCalls(wider, {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}),
         {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}
     )
+})
+
+/**
+ * Cerebras' `gemma-4-31b` writes the operation as the key its parameters sit under.
+ *
+ * Eleven entries in eight refused calls across four of five live turns on 2026-08-27, every one
+ * answered `ops.N.op: must have required properties op` and every one taking its whole batch with
+ * it — the largest was three node creations at once.
+ */
+test('an operation written as the key of its own parameters is read as the operation', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node').operations
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {create: {name: 'HUD', parent: '/Main', type: 'CanvasLayer'}},
+                {create: {name: 'ScoreLabel', parent: '/Main/HUD', type: 'Label'}},
+                {
+                    set_property: {
+                        node: '/Main/HUD',
+                        property: 'script',
+                        value: {type: 'resource', value: {path: 'res://scripts/hud.gd'}}
+                    }
+                }
+            ]
+        }),
+        {
+            ops: [
+                {op: 'create', name: 'HUD', parent: '/Main', type: 'CanvasLayer'},
+                {op: 'create', name: 'ScoreLabel', parent: '/Main/HUD', type: 'Label'},
+                {
+                    op: 'set_property',
+                    node: '/Main/HUD',
+                    property: 'script',
+                    value: {type: 'resource', value: {path: 'res://scripts/hud.gd'}}
+                }
+            ]
+        }
+    )
+
+    // The same shape one bracket down: the wrapper the model parked its parameters under is still
+    // read, because the unwrap runs before `normalizeEntry` rather than instead of it.
+    const script = domains.find(domain => domain.name === 'godot_script').operations
+    const edits = [{oldText: 'extends Node\nclass_name GameState\n', newText: 'extends Node\n'}]
+    assert.deepEqual(
+        normalizeToolCalls(script, {ops: [{edit: {params: {files: [{path: 'a.gd', edits}]}}}]}),
+        {ops: [{op: 'edit', files: [{path: 'a.gd', edits}]}]}
+    )
+
+    // A key that is not an operation, a second key beside it, and a value that is not an object.
+    // None of the three can be read as an operation, so all three are left for the router.
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{save: 'a.gd'}]}), {ops: [{save: 'a.gd'}]})
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{write: {path: 'a.gd'}}]}), {
+        ops: [{write: {path: 'a.gd'}}]
+    })
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{save: {path: 'a.gd'}, why: 'x'}]}), {
+        ops: [{save: {path: 'a.gd'}, why: 'x'}]
+    })
+})
+
+/**
+ * What makes the unwrap above a repair rather than a guess, held to the shipped contract.
+ *
+ * If any operation ever declares a parameter named after an operation of its own tool, a lone key
+ * stops being unambiguous — `{"create": {…}}` could then be that parameter written without its
+ * `op`, and the unwrap would run an operation the caller never asked for.
+ */
+test('no operation is named after a parameter of its own tool', async () => {
+    for (const domain of await declaredDomains()) {
+        const named = new Set(domain.operations.map(operation => operation.op))
+        for (const operation of domain.operations) {
+            for (const param of operation.params) {
+                assert.ok(
+                    !named.has(param.name),
+                    `${domain.name} ${operation.op} takes a \`${param.name}\`, which is also an operation`
+                )
+            }
+        }
+    }
+})
+
+/**
+ * The entry whose parameters two operations share, told which two they are.
+ *
+ * `{path, text}` is `godot_script save` and `godot_script update`; `{question}` is
+ * `godot_docs_search search` and `ask`. Three across five live turns on 2026-08-27, each answered
+ * `ops.0.op: must have required properties op` — the missing word named, the choice behind it not.
+ */
+test('an entry that fits two operations is refused by naming both', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script').operations
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{path: 'a.gd', text: 'extends Node\n'}]}),
+        /names no operation.*update and save both take/su
+    )
+
+    const docs = domains.find(domain => domain.name === 'godot_docs_search').operations
+    assert.throws(
+        () => normalizeToolCalls(docs, {ops: [{question: 'Input.get_vector'}]}),
+        /search and ask both take/su
+    )
+
+    // An entry no operation fits is left for the schema to answer, because nothing here can name
+    // it. An entry exactly one fits is still named rather than refused, which is
+    // `an entry written as an operation name, and one written as its own list entry`.
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{nonsense: 1}]}), {ops: [{nonsense: 1}]})
 })

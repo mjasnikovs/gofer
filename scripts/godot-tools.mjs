@@ -47,6 +47,27 @@ export function createGodotTools(domains, host) {
         return {
             name: domain.name,
             label: domain.name.replace(/_/gu, ' '),
+            // One editor, one running game, one edited scene — so two of these at once is two
+            // callers mutating one thing, and the loop's default is to run an assistant message's
+            // tool calls concurrently.
+            //
+            // Measured on 2026-08-27: one Gemma turn wrote `godot_runtime stop` beside
+            // `godot_node connect_signal` and `godot_scene save`, twice. Both mutations were
+            // refused `session_playing` before the stop they were sent with had returned — one
+            // millisecond before it, the second time — and the retry that followed met
+            // `revision_conflict`, because by then half the batch had run. Five of that turn's
+            // seven refusals were this race, and not one of its parameters was wrong.
+            //
+            // Ordering has to be across domains, because that is where the race was: `stop` is
+            // `godot_runtime`'s and `save` is `godot_scene`'s. Pi runs a whole assistant message
+            // sequentially as soon as one tool in it says so, so declaring it here is enough.
+            //
+            // `godot_docs_search` is the one domain that does not, and it is the same exception
+            // `ai_tools::probe` names: the other nine route to the editor session, the debug
+            // adapter or the log buffer, and this one answers through a sidecar and a model cache
+            // that hold no state a sibling call can disturb. Two searches in one message stay
+            // concurrent, which is what they were.
+            ...(domain.name === 'godot_docs_search' ? {} : {executionMode: 'sequential'}),
             description: `${domain.description}\nOperations:\n${domain.operations
                 .map(operation => {
                     const narrowing =
