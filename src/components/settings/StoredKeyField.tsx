@@ -5,7 +5,13 @@ import type {SecretName} from '../../models/settings'
 import type {KeyDraft, SettingsAction} from '../../models/settings-draft'
 
 /** The three secrets a person types. ChatGPT is the fourth, and it is a sign-in rather than a box. */
-type TypedSecret = Exclude<SecretName, 'chat-gpt'>
+/**
+ * A secret that is typed into a box, which is every one but the ChatGPT credential.
+ *
+ * Exported because the AI tab's hosted-driver table names one per driver, and a table that could
+ * name `chat-gpt` would be a table that renders a text field for a sign-in.
+ */
+export type TypedSecret = Exclude<SecretName, 'chat-gpt'>
 
 /**
  * What one key box says, which is the whole of what ever differed between the three.
@@ -44,6 +50,15 @@ const STORED_KEY_COPY: Readonly<Record<TypedSecret, StoredKeyCopy>> = {
         label: 'API key',
         placeholder: 'sk-or-v1-…',
         description: 'Create one at openrouter.ai under Keys.',
+        removeLabel: 'Remove stored API key',
+        keepLabel: 'Keep stored API key',
+        isRequired: true,
+        isOptional: false
+    },
+    cerebras: {
+        label: 'API key',
+        placeholder: 'csk-…',
+        description: 'Create one at cloud.cerebras.ai under API Keys.',
         removeLabel: 'Remove stored API key',
         keepLabel: 'Keep stored API key',
         isRequired: true,

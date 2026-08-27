@@ -20,7 +20,12 @@ import {
     selectAiDriver,
     startSubagentConnection
 } from './settings'
-import {DEFAULT_SUBAGENT_SETTINGS, DEFAULT_WEB_SETTINGS} from './settings'
+import {
+    AI_CONNECTION_LABELS,
+    AI_CONNECTION_TYPES,
+    DEFAULT_SUBAGENT_SETTINGS,
+    DEFAULT_WEB_SETTINGS
+} from './settings'
 import type {AiConnectionProfile, AiModelOption, GoferSettings, ThinkingLevel} from './settings'
 
 /** What a ChatGPT connection is, as the backend sends it. Never invented in the renderer. */
@@ -541,6 +546,21 @@ describe('driverOptions', () => {
         expect(driverOptions(localOnly)).toEqual([
             {value: 'openai-compatible', label: 'Local model'}
         ])
+    })
+
+    // The order is the picker's, and it is the one place a driver can be added everywhere else and
+    // still never be offered. Every one of them must also carry a label: a `Record` keyed on the
+    // union catches a missing one at build time, but not a label added under a name nobody offers.
+    it('names every driver this build knows, in the order the picker offers them', () => {
+        expect(AI_CONNECTION_TYPES).toEqual([
+            'openai-compatible',
+            'openai-codex',
+            'openrouter',
+            'cerebras'
+        ])
+        for (const driver of AI_CONNECTION_TYPES) {
+            expect(AI_CONNECTION_LABELS[driver]).toBeTruthy()
+        }
     })
 })
 

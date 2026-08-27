@@ -61,7 +61,7 @@ export const SEARCH_PROVIDERS_NEEDING_KEY: readonly SearchProvider[] = ['brave']
 /** The shipped engine. Keyless, so a fresh install can search the moment it is opened. */
 export const DEFAULT_WEB_SETTINGS: WebSettings = {searchProvider: 'exa'}
 
-export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openrouter'
+export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openrouter' | 'cerebras'
 export type AiApiDialect = 'openai-completions' | 'openai-codex-responses'
 
 /**
@@ -71,6 +71,15 @@ export type AiApiDialect = 'openai-completions' | 'openai-codex-responses'
  * driver has to ask the user by hand.
  */
 export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
+
+/**
+ * Cerebras' address, which the user never types. Mirrors `CEREBRAS_BASE_URL` in `settings.rs`.
+ *
+ * The same fixed host as OpenRouter's, for a different reason. Its catalogue answers only ids, so
+ * what the models can do is a table Gofer ships — but the address is still not the user's to set,
+ * and pinning it is what stops a hand-edited file from sending this driver's key elsewhere.
+ */
+export const CEREBRAS_BASE_URL = 'https://api.cerebras.ai/v1'
 
 /**
  * One connection and the model chosen on it: an address half, and a `ModelChoice`.
@@ -189,6 +198,18 @@ export type AiModelOption = Readonly<{
     /** See `AiSettings`. Empty for anything but a local server that named its own efforts. */
     thinkingLevels: readonly ThinkingLevel[]
     input: readonly string[]
+    /**
+     * The provider's own word for not thinking, where this model has one.
+     *
+     * Complementary to `reasoningMandatory`, never a substitute. That flag decides whether `off` is
+     * on the menu at all; this decides what goes on the wire when it is chosen. Absent means no
+     * effort field is sent, which is what `off` has always meant — and what it still means on every
+     * driver but Cerebras, whose shipped table is the only catalogue that names such a word.
+     *
+     * Deliberately a plain string rather than a `ThinkingLevel`: `none` is the provider's
+     * vocabulary, not Gofer's, and typing it as a level would invite it into `EFFORT_LEVELS`.
+     */
+    offEffort?: string | undefined
 }>
 
 /**
@@ -216,6 +237,7 @@ export type SettingsResponse = Readonly<{
     hasChatGptCredential?: boolean | undefined
     hasBraveApiKey?: boolean | undefined
     hasOpenrouterApiKey?: boolean | undefined
+    hasCerebrasApiKey?: boolean | undefined
     credentialStoreError?: string
 }>
 
@@ -245,6 +267,7 @@ export type SettingsRequest = Readonly<{
     apiKey: ApiKeyUpdate
     braveApiKey: ApiKeyUpdate
     openrouterApiKey: ApiKeyUpdate
+    cerebrasApiKey: ApiKeyUpdate
 }>
 
 export type CacheStatus = Readonly<{
@@ -268,13 +291,13 @@ export type Notice = Readonly<{
 export type ApiKeyIntent = 'keep' | 'set' | 'clear'
 
 /**
- * Which secret a key field is about. The same four names as `Secret` in `settings.rs`.
+ * Which secret a key field is about. The same five names as `Secret` in `settings.rs`.
  *
  * Four secrets used to be four sets of draft fields, four actions and three copies of one field on
  * screen, all differing in a noun. Naming them is what lets one field, one action and one draft
  * entry serve all of them.
  */
-export type SecretName = 'ai-default' | 'brave' | 'openrouter' | 'chat-gpt'
+export type SecretName = 'ai-default' | 'brave' | 'openrouter' | 'cerebras' | 'chat-gpt'
 
 export type StorageMaintenanceResult = Readonly<{
     attachmentsRemoved: number
@@ -505,6 +528,10 @@ export function adoptModelReasoning(choice: ModelChoice, model: AiModelOption): 
         choice.reasoning === model.reasoning
         && choice.supportsReasoningEffort === model.supportsReasoningEffort
         && choice.reasoningMandatory === model.reasoningMandatory
+        // In the guard as well as in the copy. A word for not thinking that the catalogue has
+        // started or stopped naming is the whole difference between an `off` that stops the model
+        // and one that only says so, and nothing else here would notice it had changed.
+        && choice.offEffort === model.offEffort
     ) {
         return choice
     }
@@ -514,6 +541,7 @@ export function adoptModelReasoning(choice: ModelChoice, model: AiModelOption): 
         supportsReasoningEffort: model.supportsReasoningEffort,
         reasoningMandatory: model.reasoningMandatory,
         thinkingLevels: model.thinkingLevels,
+        offEffort: model.offEffort,
         thinkingLevel: keepThinkingLevel(model, choice.thinkingLevel)
     }
 }
@@ -603,14 +631,16 @@ export function withActiveConnection(
 export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = {
     'openai-compatible': 'Local model',
     'openai-codex': 'ChatGPT subscription',
-    openrouter: 'OpenRouter'
+    openrouter: 'OpenRouter',
+    cerebras: 'Cerebras'
 }
 
 /** Every driver a build knows, in the order the pickers offer them. */
 export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [
     'openai-compatible',
     'openai-codex',
-    'openrouter'
+    'openrouter',
+    'cerebras'
 ]
 
 /**

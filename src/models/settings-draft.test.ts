@@ -171,7 +171,8 @@ describe('the request the page would send', () => {
         // now, so this asserts it holds for each secret rather than that three copies agree.
         const fields = [
             {secret: 'brave', field: 'braveApiKey'},
-            {secret: 'openrouter', field: 'openrouterApiKey'}
+            {secret: 'openrouter', field: 'openrouterApiKey'},
+            {secret: 'cerebras', field: 'cerebrasApiKey'}
         ] as const
         for (const {secret, field} of fields) {
             expect(settingsRequest(loaded)?.[field]).toEqual({action: 'keep'})

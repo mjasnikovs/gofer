@@ -161,6 +161,12 @@ function readsOnlyThroughGit(command) {
  * Not when the command can act on what it finds. `-delete` and `-exec` turn a search into a write,
  * so a command carrying either is read whole with its patterns still in it.
  *
+ * Nor when something downstream acts on it. `find . -name "*.tscn" | xargs rm` carries neither
+ * flag and deletes every scene in the worktree — the pipe is the write, not the search. So a chain
+ * is judged the way `readsOnlyThroughGit` judges one: every part after the search must be a reader
+ * this file already trusts, and anything else puts the patterns back and the whole command under
+ * the rule. `| wc -l` and `| head` still search; `| xargs rm` and `| xargs sed -i` never did.
+ *
  * A redirect needs no clause of its own: what it writes to is a path, not a pattern, so
  * `grep -rn X --include="*.gd" . > scenes/level_1.tscn` still names a scene and is still refused —
  * while `> matches.txt` beside the same search names none and is not the rule's business.
@@ -176,7 +182,14 @@ const SEARCH_PATTERN =
 
 function withoutASearchGlob(command) {
     if (ACTS_ON_WHAT_IT_FINDS.test(command)) return command
+    if (isHandedToAWriter(command)) return command
     return command.replace(SEARCH_PATTERN, ' ')
+}
+
+/** Whether anything downstream of the search does something a reader would not. */
+function isHandedToAWriter(command) {
+    const [, ...downstream] = command.split(COMMAND_BREAK)
+    return downstream.filter(part => part.trim() !== '').some(part => !READS_A_PIPE.test(part))
 }
 
 function refuseEditorOwnedWrite(toolName, path) {

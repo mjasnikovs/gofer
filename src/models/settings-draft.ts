@@ -207,6 +207,7 @@ export const INITIAL_SETTINGS_DRAFT: SettingsDraft = {
         'ai-default': NO_KEY,
         brave: NO_KEY,
         openrouter: NO_KEY,
+        cerebras: NO_KEY,
         'chat-gpt': NO_KEY
     },
     tab: 'ai',
@@ -276,6 +277,7 @@ function withStoredKeys(state: SettingsDraft, response: SettingsResponse): Setti
                 ...state.keys.openrouter,
                 isStored: response.hasOpenrouterApiKey ?? false
             },
+            cerebras: {...state.keys.cerebras, isStored: response.hasCerebrasApiKey ?? false},
             'chat-gpt': {
                 ...state.keys['chat-gpt'],
                 isStored: response.hasChatGptCredential ?? false
@@ -290,6 +292,7 @@ function forgottenKeys(keys: SettingsDraft['keys']): SettingsDraft['keys'] {
         'ai-default': {...keys['ai-default'], typed: '', intent: 'keep'},
         brave: {...keys.brave, typed: '', intent: 'keep'},
         openrouter: {...keys.openrouter, typed: '', intent: 'keep'},
+        cerebras: {...keys.cerebras, typed: '', intent: 'keep'},
         'chat-gpt': {...keys['chat-gpt'], typed: '', intent: 'keep'}
     }
 }
@@ -302,12 +305,13 @@ function noticedOn(notices: SettingsNotices, tab: SettingsTab, notice?: Notice):
 /** What the page sends to the backend, or `undefined` while there is nothing loaded to send. */
 export function settingsRequest(state: SettingsDraft): SettingsRequest | undefined {
     if (!state.settings) return undefined
-    const {'ai-default': ai, brave, openrouter} = state.keys
+    const {'ai-default': ai, brave, openrouter, cerebras} = state.keys
     return {
         settings: state.settings,
         apiKey: apiKeyUpdate(ai.intent, ai.typed),
         braveApiKey: apiKeyUpdate(brave.intent, brave.typed),
-        openrouterApiKey: apiKeyUpdate(openrouter.intent, openrouter.typed)
+        openrouterApiKey: apiKeyUpdate(openrouter.intent, openrouter.typed),
+        cerebrasApiKey: apiKeyUpdate(cerebras.intent, cerebras.typed)
     }
 }
 

@@ -5733,19 +5733,29 @@ func _do_swap_node(outgoing: Node, incoming: Node, parent: Node, owner: Node, in
 ## Not "the scene owns everything". A node placed by `node.instantiate` owns its own contents, and
 ## handing those to the edited scene writes an instance's insides into the file that instanced it.
 ## The owners are read before the move and put back after, so what was there is what comes back.
-func _who_owned_what(node: Node, into: Dictionary) -> void:
+##
+## Keyed by the path down from the swapped node, never by name. Godot only makes a name unique
+## among its siblings, so a subtree walked whole collides the moment two branches agree: two
+## instanced scenes each holding a `Sprite2D`, or a `Player/CollisionShape2D` beside an
+## `Enemy/CollisionShape2D`. The second write won and both nodes were handed the same owner — and
+## where that owner was the edited root, an instance's insides went into the .tscn, which is the
+## exact failure the paragraph above says this exists to prevent. The children move across
+## unchanged, so one path names the same node on both sides of the swap.
+func _who_owned_what(node: Node, into: Dictionary, prefix: String = "") -> void:
     for child in node.get_children():
-        into[child.name] = child.owner
-        _who_owned_what(child, into)
+        var path := prefix + "/" + String(child.name)
+        into[path] = child.owner
+        _who_owned_what(child, into, path)
 
 ## The other half of [`_who_owned_what`]. A node keeps its owner while it is only moved and loses it
 ## when it leaves the tree and comes back, and a node the edited scene does not own is a node the
 ## save writes nothing about.
-func _give_them_back_their_owners(node: Node, owners: Dictionary) -> void:
+func _give_them_back_their_owners(node: Node, owners: Dictionary, prefix: String = "") -> void:
     for child in node.get_children():
-        if owners.has(child.name):
-            child.set_owner(owners[child.name])
-        _give_them_back_their_owners(child, owners)
+        var path := prefix + "/" + String(child.name)
+        if owners.has(path):
+            child.set_owner(owners[path])
+        _give_them_back_their_owners(child, owners, path)
 
 func _do_reparent(node: Node, new_parent: Node, owner: Node, index: int) -> void:
     var old_parent := node.get_parent()

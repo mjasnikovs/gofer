@@ -560,6 +560,11 @@ pub struct RetrieveConnection {
     /// `high`, and a template that has no word for `high` answers with HTTP 500.
     #[serde(default)]
     pub thinking_levels: Vec<String>,
+    /// The provider's own word for not thinking, where this model has one. Carried for the same
+    /// reason as the two above: this is a second copy of the worker's model builder, and without it
+    /// a sub-agent on Cerebras left at `off` sends no effort field and the model thinks anyway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_effort: Option<String>,
     /// See `AiSettings::chat_template_thinking`. Carried because this call is a second copy of the
     /// worker's model builder, in a process that must not import the agent to reach one.
     pub chat_template_thinking: bool,
@@ -617,12 +622,19 @@ struct RetrieveWorkerResponse {
 /// question its expansion and nothing else, so neither is reported as a failure.
 pub fn expansion_connection<R: Runtime>(app: &AppHandle<R>) -> Option<RetrieveConnection> {
     let settings = crate::settings::read_settings(app).ok()?;
-    // Through the one store, by slot. Which of the three is spent is the connection's to decide.
+    // Through the one store, by slot. Which of the four is spent is the connection's to decide.
     let secrets = crate::settings::SystemSecrets;
     let key = secrets.read(Secret::AiDefault).ok().flatten();
     let openrouter_key = secrets.read(Secret::OpenRouter).ok().flatten();
+    let cerebras_key = secrets.read(Secret::Cerebras).ok().flatten();
     let credential = crate::settings::stored_chatgpt_credential().ok().flatten();
-    crate::settings::docs_expansion_connection(&settings.ai, key, openrouter_key, credential)
+    crate::settings::docs_expansion_connection(
+        &settings.ai,
+        key,
+        openrouter_key,
+        cerebras_key,
+        credential,
+    )
 }
 
 pub fn retrieve_query(

@@ -477,7 +477,10 @@ test('lets git read a scene it can only ever read', async context => {
         'find . -type f -name "*.tscn" -not -path "./.godot/*"',
         'find . -name "*.gd" -o -name "*.tscn"',
         // A redirect that names no scene is not this rule's business.
-        'grep -rn X --include="*.tscn" . > matches.txt'
+        'grep -rn X --include="*.tscn" . > matches.txt',
+        // Nor is a pipe into something that only reads what it is handed.
+        'find . -name "*.tscn" | wc -l',
+        'grep -rn X --include="*.tscn" . | head -20'
     ])
         assert.deepEqual(await tool.execute('7', {command}), asRun(command))
 
@@ -487,7 +490,13 @@ test('lets git read a scene it can only ever read', async context => {
         'grep -rn X --include="*.gd" . scenes/level_1.tscn',
         'grep -rn X --include="*.gd" . > scenes/level_1.tscn',
         'find . -name "*.tscn" -delete',
-        'find . -name "*.tscn" -exec sed -i "s/a/b/" {} +'
+        'find . -name "*.tscn" -exec sed -i "s/a/b/" {} +',
+        // The pipe is the write. None of these carries `-delete` or `-exec`, and each one deletes
+        // or rewrites every scene in the worktree — which is the whole of what the rule is for.
+        'find . -name "*.tscn" | xargs rm',
+        'find . -name "*.tscn" -print0 | xargs -0 sed -i "s/a/b/"',
+        'find . -name "*.tscn" | tee scenes.txt',
+        'find . -name "*.tscn" | xargs cat'
     ])
         await assert.rejects(tool.execute('8', {command}), /godot_scene|godot_project/u)
 })

@@ -4,6 +4,7 @@
 #
 #   GOFER_LIVE_CONNECTION=openai-codex   GOFER_LIVE_MODEL=gpt-5.6-luna   ./scripts/live-turn.sh …
 #   GOFER_LIVE_CONNECTION=openrouter     GOFER_LIVE_MODEL=z-ai/glm-5.3-flash
+#   GOFER_LIVE_CONNECTION=cerebras       GOFER_LIVE_MODEL=gpt-oss-120b
 #   GOFER_LIVE_CONNECTION=openai-compatible (the default: the local server)
 #
 # The credential is looked up here, per connection, and named on the command line — the suite never
@@ -36,6 +37,10 @@ case "$GOFER_LIVE_CONNECTION" in
   openrouter)
     export GOFER_LIVE_MODEL="${GOFER_LIVE_MODEL:-z-ai/glm-5.3-flash}"
     export GOFER_LIVE_API_KEY="$(secret-tool lookup service com.gofer.desktop username ai-openrouter)"
+    ;;
+  cerebras)
+    export GOFER_LIVE_MODEL="${GOFER_LIVE_MODEL:-gpt-oss-120b}"
+    export GOFER_LIVE_API_KEY="$(secret-tool lookup service com.gofer.desktop username ai-cerebras)"
     ;;
   openai-compatible) : ;;
   *) echo "GOFER_LIVE_CONNECTION=$GOFER_LIVE_CONNECTION is not a driver this build knows" >&2; exit 2 ;;

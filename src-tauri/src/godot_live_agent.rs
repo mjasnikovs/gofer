@@ -185,20 +185,21 @@ fn live_agent_acceptance() {
     let out = PathBuf::from(
         std::env::var("GOFER_LIVE_OUT").expect("GOFER_LIVE_OUT names where the events go"),
     );
-    // Which of the three drivers answers this run. `openai-compatible` is the default because a
-    // local server is what a run with nothing named wants; the other two reach a hosted endpoint
+    // Which of the four drivers answers this run. `openai-compatible` is the default because a
+    // local server is what a run with nothing named wants; the other three reach a hosted endpoint
     // and need the credential their own environment variable carries.
     let driver = match std::env::var("GOFER_LIVE_CONNECTION").as_deref() {
         Ok("openai-codex") => crate::settings::AiConnectionType::OpenaiCodex,
         Ok("openrouter") => crate::settings::AiConnectionType::Openrouter,
+        Ok("cerebras") => crate::settings::AiConnectionType::Cerebras,
         Ok("openai-compatible") | Err(_) => crate::settings::AiConnectionType::OpenaiCompatible,
         Ok(other) => panic!(
-            "GOFER_LIVE_CONNECTION names {other}, which is not openai-compatible, openai-codex or \
-             openrouter"
+            "GOFER_LIVE_CONNECTION names {other}, which is not openai-compatible, openai-codex, \
+             openrouter or cerebras"
         ),
     };
-    // Only the local driver gets an address filled in from nothing. ChatGPT's and OpenRouter's are
-    // constants in the shipped connection, and a run that overwrote either with this default would
+    // Only the local driver gets an address filled in from nothing. Every hosted driver's is a
+    // constant in the shipped connection, and a run that overwrote one with this default would
     // ask `127.0.0.1` for a hosted model.
     let base_url = std::env::var("GOFER_LIVE_BASE_URL").ok().or_else(|| {
         (driver == crate::settings::AiConnectionType::OpenaiCompatible)

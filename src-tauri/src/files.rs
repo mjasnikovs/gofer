@@ -534,14 +534,25 @@ impl Workspace {
             fs::create_dir_all(parent).map_err(|error| FileError::io(to, &error))?;
         }
         fs::rename(&source, &destination).map_err(|error| FileError::io(to, &error))?;
+        let mut moved = Vec::new();
         for (carried, landing) in carrying {
             // Renamed over whatever is there. A sidecar at the destination with no file of its
             // own is metadata for something that does not exist, and leaving it would give the
             // moved file that dead file's uid.
             if let Err(error) = fs::rename(&carried, &landing) {
+                // Every rename this loop already made, not just the main file. There is more than
+                // one sidecar, so a `.uid` that moved and an `.import` that then failed used to
+                // put the file back at its old path and leave its uid stranded at the new one —
+                // which is the breakage `SIDECARS` exists to prevent, reported as a failure. The
+                // doc above promises both ends moved or neither did; only undoing all of them
+                // keeps that promise.
+                for (carried, landing) in moved {
+                    let _ = fs::rename(&landing, &carried);
+                }
                 let _ = fs::rename(&destination, &source);
                 return Err(FileError::io(to, &error));
             }
+            moved.push((carried, landing));
         }
         Ok(())
     }
@@ -1625,6 +1636,47 @@ mod tests {
             "one",
             "the move was refused, so nothing may have moved"
         );
+    }
+
+    /// A move that carries one sidecar and fails on the next puts both of them back.
+    ///
+    /// There is more than one sidecar, and the rollback used to know about one file: the main one.
+    /// So a `.uid` that renamed and an `.import` that then failed left the file back at its old
+    /// path with its uid stranded at the new one — a `.gd` whose identity now belongs to a file
+    /// that does not exist, which is precisely the state `SIDECARS` exists to prevent, reported to
+    /// the caller as a failure. The doc on `move_path` promises both ends moved or neither did.
+    #[test]
+    fn a_move_that_fails_on_the_second_sidecar_puts_the_first_one_back() {
+        let (_directory, workspace) = workspace();
+        assert_eq!(
+            SIDECARS,
+            ["uid", "import"],
+            "this test moves uid then import"
+        );
+        for relative in ["a.gd", "a.gd.uid", "a.gd.import"] {
+            workspace.write(relative, "one", None).expect("write");
+        }
+        // A non-empty directory where the second sidecar must land: renaming a file onto one is
+        // what the filesystem refuses, which is the failure this needs and cannot fake.
+        let blocked = workspace.resolve("b.gd.import").expect("resolve");
+        fs::create_dir_all(blocked.join("inside")).expect("a directory in the way");
+
+        let failure = workspace.move_path("a.gd", "b.gd").expect_err("refused");
+        assert_eq!(failure.code, "io_failed", "{failure:?}");
+
+        // Everything back where it started, sidecars included.
+        for relative in ["a.gd", "a.gd.uid", "a.gd.import"] {
+            assert_eq!(
+                workspace.read(relative).expect("still where it was").text,
+                "one",
+                "{relative} did not come back"
+            );
+        }
+        assert!(
+            !workspace.resolve("b.gd.uid").expect("resolve").exists(),
+            "the uid stayed at the destination, so the file's identity is somewhere it is not"
+        );
+        assert!(!workspace.resolve("b.gd").expect("resolve").exists());
     }
 
     /// A tiny picture in whatever format the test asks for, written into the worktree.

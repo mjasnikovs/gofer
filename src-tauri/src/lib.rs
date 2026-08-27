@@ -1127,6 +1127,7 @@ async fn ai_health(app: &AppHandle) -> health::AiHealth {
             api_key: ApiKeyUpdate::Keep,
             brave_api_key: ApiKeyUpdate::Keep,
             openrouter_api_key: ApiKeyUpdate::Keep,
+            cerebras_api_key: ApiKeyUpdate::Keep,
         },
         AI_HEALTH_TIMEOUT,
     )

@@ -156,9 +156,11 @@ pub(crate) struct ChatRequest {
 pub(crate) struct AiWorkerRequest {
     pub(crate) settings: AiSettings,
     pub(crate) api_key: Option<String>,
-    /// OpenRouter's key, from its own keyring slot. Both keys travel because the parent and the
+    /// OpenRouter's key, from its own keyring slot. Every key travels because the parent and the
     /// sub-agent can be on different key-based drivers in the same turn.
     pub(crate) openrouter_api_key: Option<String>,
+    /// Cerebras' key, from its own keyring slot, for the same reason.
+    pub(crate) cerebras_api_key: Option<String>,
     /// The Brave Search key, when the user has set one. Absent is ordinary: the two other engines
     /// need no key, and `web_search` says so itself when Brave is chosen without one.
     pub(crate) brave_api_key: Option<String>,
@@ -336,12 +338,13 @@ pub(crate) enum Job {
 struct Credentials {
     api_key: Option<String>,
     openrouter_api_key: Option<String>,
+    cerebras_api_key: Option<String>,
     brave_api_key: Option<String>,
     oauth_credential: Option<serde_json::Value>,
 }
 
 impl Credentials {
-    /// Everything this machine has stored. Three of the four are the same read under a different
+    /// Everything this machine has stored. Four of the five are the same read under a different
     /// slot, so they are the same call with a different [`Secret`]. The ChatGPT one stays a helper
     /// because it parses what it read rather than handing back the string.
     fn read() -> Result<Self, String> {
@@ -349,6 +352,7 @@ impl Credentials {
         Ok(Self {
             api_key: secrets.read(Secret::AiDefault)?,
             openrouter_api_key: secrets.read(Secret::OpenRouter)?,
+            cerebras_api_key: secrets.read(Secret::Cerebras)?,
             brave_api_key: secrets.read(Secret::Brave)?,
             oauth_credential: crate::settings::stored_chatgpt_credential()?,
         })
@@ -358,19 +362,24 @@ impl Credentials {
     ///
     /// A suite is given a single key on the command line and the host looks one up per provider,
     /// so a key in the wrong slot is no key at all — `scripts/ai-provider.mjs` resolves the
-    /// OpenRouter connection from `openrouterApiKey` and every other one from `apiKey`. Filling
-    /// both would authenticate a local server with an OpenRouter key, which is the mistake in the
-    /// other direction.
+    /// OpenRouter connection from `openrouterApiKey`, Cerebras from `cerebrasApiKey`, and every
+    /// other one from `apiKey`. Filling more than one would authenticate a local server with a
+    /// hosted key, which is the mistake in the other direction.
     #[cfg(all(test, feature = "godot-acceptance"))]
     fn for_driver(
         driver: crate::settings::AiConnectionType,
         api_key: Option<String>,
         oauth_credential: Option<serde_json::Value>,
     ) -> Self {
-        let openrouter = driver == crate::settings::AiConnectionType::Openrouter;
+        use crate::settings::AiConnectionType;
+        let slot = |wanted| (driver == wanted).then(|| api_key.clone()).flatten();
         Self {
-            api_key: if openrouter { None } else { api_key.clone() },
-            openrouter_api_key: if openrouter { api_key } else { None },
+            api_key: match driver {
+                AiConnectionType::Openrouter | AiConnectionType::Cerebras => None,
+                _ => api_key.clone(),
+            },
+            openrouter_api_key: slot(AiConnectionType::Openrouter),
+            cerebras_api_key: slot(AiConnectionType::Cerebras),
             oauth_credential,
             ..Self::default()
         }
@@ -594,6 +603,7 @@ impl JobContext {
             settings: self.ai.clone(),
             api_key: self.credentials.api_key.clone(),
             openrouter_api_key: self.credentials.openrouter_api_key.clone(),
+            cerebras_api_key: self.credentials.cerebras_api_key.clone(),
             brave_api_key,
             oauth_credential: self.credentials.oauth_credential.clone(),
             session_id,
@@ -1688,7 +1698,8 @@ fn handle_judge_event<R: Runtime>(
 fn describe_inventory(listed: String) -> String {
     format!(
         "The project's tracked files are listed below. Read them here rather than listing the \
-         project; list again only after you have written a file this list does not name.\n\n         {listed}"
+         project; list again only after you have written a file this list does not name.\n\n\
+         {listed}"
     )
 }
 
@@ -2214,6 +2225,7 @@ mod tests {
         // Not both: filling the default slot too would authenticate a local server with a key
         // meant for OpenRouter.
         assert_eq!(openrouter.api_key, None);
+        assert_eq!(openrouter.cerebras_api_key, None);
 
         let local = Credentials::for_driver(
             AiConnectionType::OpenaiCompatible,
@@ -2222,6 +2234,15 @@ mod tests {
         );
         assert_eq!(local.api_key.as_deref(), Some("local-key"));
         assert_eq!(local.openrouter_api_key, None);
+        assert_eq!(local.cerebras_api_key, None);
+
+        // The third slot, for the same reason as the second: two hosted drivers sharing one entry
+        // is a key meant for api.cerebras.ai sent as bearer to openrouter.ai.
+        let cerebras =
+            Credentials::for_driver(AiConnectionType::Cerebras, Some("csk-key".to_owned()), None);
+        assert_eq!(cerebras.cerebras_api_key.as_deref(), Some("csk-key"));
+        assert_eq!(cerebras.api_key, None);
+        assert_eq!(cerebras.openrouter_api_key, None);
 
         // ChatGPT carries an OAuth blob rather than a key, and it travels whatever the driver.
         let chatgpt = Credentials::for_driver(
@@ -2231,6 +2252,7 @@ mod tests {
         );
         assert_eq!(chatgpt.api_key, None);
         assert_eq!(chatgpt.openrouter_api_key, None);
+        assert_eq!(chatgpt.cerebras_api_key, None);
         assert!(chatgpt.oauth_credential.is_some());
     }
 
@@ -2706,6 +2728,7 @@ mod tests {
             settings: AiSettings::default(),
             api_key: None,
             openrouter_api_key: None,
+            cerebras_api_key: None,
             brave_api_key: None,
             oauth_credential: None,
             session_id: Some("task-1".to_owned()),
@@ -2782,6 +2805,17 @@ mod tests {
                 .contains("list again only after you have written a file this list does not name"),
             "{described}"
         );
+        // Every path starts its line, first one included. A `\n\n` on the same source line as the
+        // indented continuation carries that indentation into the string, so the first file
+        // arrived nine spaces in and every later one did not — a list the model reads as two
+        // different kinds of line, in the prompt this whole measurement was made on.
+        for line in described.lines().skip_while(|line| !line.is_empty()) {
+            assert_eq!(
+                line.trim_start(),
+                line,
+                "a listed path is indented: {described:?}"
+            );
+        }
     }
 
     /// Everything this machine could have stored, so a job that must not carry one is visible.
@@ -2789,6 +2823,7 @@ mod tests {
         Credentials {
             api_key: Some("ai-default-key".to_owned()),
             openrouter_api_key: Some("openrouter-key".to_owned()),
+            cerebras_api_key: None,
             brave_api_key: Some("brave-key".to_owned()),
             oauth_credential: Some(serde_json::json!({"type": "oauth", "access": "token"})),
         }

@@ -50,7 +50,7 @@ export function isUsableConnection(connection) {
  * wants the window. A model object is plain data, so it is built per call rather than mutated.
  */
 function modelFor(connection, maxTokens) {
-    const thinkingLevelMap = piThinkingLevelMap(connection.thinkingLevels)
+    const thinkingLevelMap = piThinkingLevelMap(connection.thinkingLevels, connection.offEffort)
     return {
         id: connection.model,
         name: connection.modelName || connection.model,

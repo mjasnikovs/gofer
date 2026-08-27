@@ -71,6 +71,29 @@ const PROVIDER_ID = 'local'
  * different credentials.
  */
 const OPENROUTER_PROVIDER_ID = 'openrouter'
+/** Cerebras' own provider id, for the reason above. A third hosted driver is a third registration. */
+const CEREBRAS_PROVIDER_ID = 'cerebras'
+
+/**
+ * Which pi-ai provider answers each driver, which is the one map every caller reads.
+ *
+ * Two-armed ternaries asking "OpenRouter or local?" were the shape this replaces. There were four
+ * of them, they each had to be found when a driver was added, and the one that was missed sent a
+ * key to the wrong address rather than failing. A driver is added here once.
+ */
+const PROVIDER_IDS = {
+    'openai-compatible': PROVIDER_ID,
+    openrouter: OPENROUTER_PROVIDER_ID,
+    cerebras: CEREBRAS_PROVIDER_ID
+}
+
+/** What each driver is called in the one sentence a user reads when its connection is missing. */
+const DRIVER_NAMES = {
+    'openai-compatible': 'local',
+    openrouter: 'OpenRouter',
+    cerebras: 'Cerebras'
+}
+
 const DEFAULT_CONTEXT_WINDOW = 120_064
 /**
  * How full the context may get before the old part of it is summarised away.
@@ -322,7 +345,7 @@ async function compactMessages(messages, models, model, settings, thinkingLevel,
  */
 function modelFor(connection, providerId = PROVIDER_ID) {
     const chosen = connection.model ?? {}
-    const thinkingLevelMap = piThinkingLevelMap(chosen.thinkingLevels)
+    const thinkingLevelMap = piThinkingLevelMap(chosen.thinkingLevels, chosen.offEffort)
     // Only a local server holds a KV cache a session header could route back to. See the field.
     const isLocal = providerId === PROVIDER_ID
     return {
@@ -368,8 +391,8 @@ function modelFor(connection, providerId = PROVIDER_ID) {
             // holding a KV cache per session — a proxy, a second worker — can route the ask back to
             // the machine that already has this task's prefix rather than recomputing it.
             //
-            // Off for OpenRouter. The header exists to reach a machine that already holds this
-            // prefix, and behind that address there is no such machine to reach.
+            // Off for every hosted driver. The header exists to reach a machine that already
+            // holds this prefix, and behind those addresses there is no such machine to reach.
             sendSessionAffinityHeaders: isLocal
         }
     }
@@ -406,11 +429,11 @@ function subagentModelFor(settings, models, parent) {
             throw new Error(`The sub-agent's model '${chosen.model?.id}' is unavailable on ChatGPT`)
         return {model, thinkingLevel}
     }
-    const openrouter = chosen.connectionType === 'openrouter'
-    const driver = openrouter ? 'openrouter' : 'openai-compatible'
+    const driver =
+        chosen.connectionType in PROVIDER_IDS ? chosen.connectionType : 'openai-compatible'
     const profile = connectionProfile(settings, driver)
     if (!profile) {
-        const named = openrouter ? 'OpenRouter' : 'local'
+        const named = DRIVER_NAMES[driver]
         throw new Error(
             `The sub-agent is set to the ${named} connection, but no ${named} connection is configured`
         )
@@ -419,10 +442,7 @@ function subagentModelFor(settings, models, parent) {
     // One field, because the two halves are two types — `chatTemplateThinking` stays the
     // connection's without having to be left out by hand, since it never was the model's.
     return {
-        model: modelFor(
-            {...profile, model: chosen.model},
-            openrouter ? OPENROUTER_PROVIDER_ID : PROVIDER_ID
-        ),
+        model: modelFor({...profile, model: chosen.model}, PROVIDER_IDS[driver]),
         thinkingLevel
     }
 }
@@ -570,6 +590,7 @@ export function createModelContext({
     settings,
     apiKey,
     openrouterApiKey,
+    cerebrasApiKey,
     oauthCredential,
     credentialHost,
     sessionId,
@@ -621,25 +642,30 @@ export function createModelContext({
             })
         )
     }
-    // Registered on the same `Models` and under its own id, so a parent on a local server and a
-    // child on OpenRouter each reach their own address with their own key. The two credentials are
-    // never interchangeable: `apiKey` is the local server's and never leaves this machine.
-    const openrouterProfile = connectionProfile(settings, 'openrouter')
-    if (drivers.has('openrouter') && openrouterProfile) {
+    // Each registered on the same `Models` and under its own id, so a parent on a local server and
+    // a child on a hosted one each reach their own address with their own key. No two credentials
+    // are interchangeable: `apiKey` is the local server's and never leaves this machine.
+    for (const [driver, key] of [
+        ['openrouter', openrouterApiKey],
+        ['cerebras', cerebrasApiKey]
+    ]) {
+        const profile = connectionProfile(settings, driver)
+        if (!drivers.has(driver) || !profile) continue
         models.setProvider(
             createProvider({
-                id: OPENROUTER_PROVIDER_ID,
-                name: openrouterProfile.name,
-                baseUrl: openrouterProfile.baseUrl,
+                id: PROVIDER_IDS[driver],
+                name: profile.name,
+                baseUrl: profile.baseUrl,
                 auth: {
                     apiKey: {
-                        name: openrouterProfile.name,
-                        // No `|| 'local'` fallback. OpenRouter refuses an unknown key by name,
-                        // which is a better failure than a turn that looks configured and is not.
-                        resolve: async () => ({auth: {apiKey: openrouterApiKey ?? ''}})
+                        name: profile.name,
+                        // No `|| 'local'` fallback. A hosted endpoint refuses an unknown key by
+                        // name, which is a better failure than a turn that looks configured and is
+                        // not.
+                        resolve: async () => ({auth: {apiKey: key ?? ''}})
                     }
                 },
-                models: [modelFor(openrouterProfile, OPENROUTER_PROVIDER_ID)],
+                models: [modelFor(profile, PROVIDER_IDS[driver])],
                 api: openAICompletionsApi()
             })
         )
@@ -648,8 +674,7 @@ export function createModelContext({
     const model =
         isChatGpt ? models.getModel('openai-codex', parent?.model?.id)
         : !parent ? undefined
-        : settings.connectionType === 'openrouter' ? modelFor(parent, OPENROUTER_PROVIDER_ID)
-        : modelFor(parent)
+        : modelFor(parent, PROVIDER_IDS[settings.connectionType] ?? PROVIDER_ID)
     if (!model) throw new Error(`The selected model '${parent?.model?.id}' is unavailable`)
     const subagent = subagentModelFor(settings, models, model)
     // Shared by the caller's own requests and by the sub-agent's, so a child never waits on a
@@ -671,6 +696,7 @@ export async function runAgent({
     systemPrompt = '',
     apiKey,
     openrouterApiKey,
+    cerebrasApiKey,
     braveApiKey,
     oauthCredential,
     messages,
@@ -699,6 +725,7 @@ export async function runAgent({
         settings,
         apiKey,
         openrouterApiKey,
+        cerebrasApiKey,
         oauthCredential,
         credentialHost,
         sessionId,

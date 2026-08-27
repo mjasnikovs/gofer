@@ -896,6 +896,16 @@ fn session_domain<R: Runtime>(app: &AppHandle<R>, op: &str) -> Result<Value, Too
 /// So this holds the call open, the way `runtime.run` "is answered only after the game booted, its
 /// helper announced itself, and the first frame was captured". Polled rather than awaited because
 /// nothing here signals: `start_session_watch` emits to a window, and the tool has none.
+/// What a caller is told when the editor behind a start is gone rather than slow.
+fn the_editor_never_came_up() -> ToolFailure {
+    ToolFailure::new(
+        "session_start_failed",
+        "The editor was started and stopped before it could answer. Read godot_logs for what it \
+         printed on the way up, then start it again."
+            .to_owned(),
+    )
+}
+
 fn the_editor_once_it_can_answer<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Option<crate::godot_session_api::GodotSessionResponse>, ToolFailure> {
@@ -909,13 +919,16 @@ fn the_editor_once_it_can_answer<R: Runtime>(
             }
             // An editor that died on the way up is not something to keep waiting for, and the
             // caller has to be told rather than handed a session object with `error` inside it.
-            godot_session::SessionState::Error | godot_session::SessionState::Offline => {
-                return Err(ToolFailure::new(
-                    "session_start_failed",
-                    "The editor was started and stopped before it could answer. Read godot_logs \
-                     for what it printed on the way up, then start it again."
-                        .to_owned(),
-                ));
+            //
+            // `Error` alone is not that editor. `derive_state` answers `Error` for two different
+            // things: a child that has exited, and a live editor whose addon is not answering —
+            // which is every `session.unavailable` the addon announces, and it announces one on a
+            // plugin reload and on a connection dropped during the startup import scan. Both are
+            // ordinary on the way up. Asking the process directly is what tells the two apart, so
+            // a healthy editor that blinks keeps being waited for and only a dead one ends this.
+            godot_session::SessionState::Offline => return Err(the_editor_never_came_up()),
+            godot_session::SessionState::Error if godot_session::editor_has_exited() => {
+                return Err(the_editor_never_came_up());
             }
             _ => {}
         }

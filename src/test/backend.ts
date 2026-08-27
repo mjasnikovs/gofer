@@ -564,6 +564,10 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                     hasOpenrouterApiKey: keyAfter(
                         sent.openrouterApiKey,
                         state.settings.hasOpenrouterApiKey
+                    ),
+                    hasCerebrasApiKey: keyAfter(
+                        sent.cerebrasApiKey,
+                        state.settings.hasCerebrasApiKey
                     )
                 }
                 return state.settings

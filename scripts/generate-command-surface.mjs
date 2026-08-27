@@ -9,12 +9,13 @@
 // were reconciled by that same checker reading both files as text, and the defaults by nobody. A
 // default and a range are one fact about one ceiling, so they are one row here.
 //
-// Five sources, and none of them is generated:
+// Six sources, and none of them is generated:
 //
 //   protocol/schemas/v2/request.schema.json   which commands mutate the edited scene
 //   protocol/schemas/v2/commands.json         every command, and the addon method that answers it
 //   protocol/schemas/v2/params.json           what every tool operation takes, and what refuses it
 //   protocol/subagent-bounds.json             what the sub-agent's ceilings ship as and may be set to
+//   protocol/cerebras-models.json             what each Cerebras model can do, which Cerebras will not say
 //   src-tauri/src/lib.rs                      which commands the backend registers
 //
 // Two surfaces stay hand-written on purpose. `src/services/desktop.ts` carries an argument and a
@@ -303,6 +304,72 @@ async function subagentBoundsCatalogue() {
     return bounds
 }
 
+/**
+ * What each Cerebras model can do, because its endpoint will not say.
+ *
+ * Every other driver reads a catalogue. Cerebras answers `{id, object, created, owned_by}` and
+ * nothing more, so the facts are measured by hand and shipped. Held to the same rules the Rust that
+ * receives them relies on: a window that an output ceiling cannot exceed, efforts drawn only from
+ * the words Gofer has, and a model that cannot stop thinking naming no word for stopping.
+ */
+async function cerebrasModelCatalogue() {
+    const path = 'protocol/cerebras-models.json'
+    const {models} = JSON.parse(await read(path))
+    if (!Array.isArray(models) || models.length === 0) throw new Error(`${path} declares no models`)
+    const seen = new Set()
+    for (const model of models) {
+        for (const key of ['id', 'name', 'note'])
+            if (typeof model[key] !== 'string' || model[key].trim() === '')
+                throw new Error(`${path}: a model has no ${key}`)
+        if (seen.has(model.id)) throw new Error(`${path}: ${model.id} is named twice`)
+        seen.add(model.id)
+        for (const key of ['contextWindow', 'maxTokens'])
+            if (!Number.isInteger(model[key]) || model[key] < 1)
+                throw new Error(`${path}: ${model.id} has no whole ${key}`)
+        if (model.maxTokens > model.contextWindow)
+            throw new Error(
+                `${path}: ${model.id} declares an output ceiling above its own context window`
+            )
+        if (typeof model.reasoningMandatory !== 'boolean')
+            throw new Error(`${path}: ${model.id} does not say whether its reasoning is mandatory`)
+        for (const key of ['input', 'thinkingLevels'])
+            if (!Array.isArray(model[key]) || model[key].length === 0)
+                throw new Error(`${path}: ${model.id} declares an empty ${key}`)
+        // Pi types a model's input as exactly these two, so a third word is one nothing downstream
+        // can act on. Same narrowing `openrouter_model_options` applies to its own catalogue.
+        for (const modality of model.input)
+            if (modality !== 'text' && modality !== 'image')
+                throw new Error(
+                    `${path}: ${model.id} accepts ${modality}, which Pi has no word for`
+                )
+        for (const level of model.thinkingLevels)
+            if (!NAMED_EFFORTS.includes(level))
+                throw new Error(
+                    `${path}: ${model.id} names the effort ${level}, which Gofer has not`
+                )
+        // `off` is a level, never an effort, so a model whose reasoning is mandatory has no word for
+        // stopping by definition — and one written here would be sent by a menu that never offers it.
+        if (model.offEffort !== undefined) {
+            if (typeof model.offEffort !== 'string' || model.offEffort.trim() === '')
+                throw new Error(`${path}: ${model.id} declares an empty offEffort`)
+            if (model.reasoningMandatory)
+                throw new Error(
+                    `${path}: ${model.id} cannot stop thinking and names ${model.offEffort} as the word for stopping`
+                )
+        }
+    }
+    return models
+}
+
+/**
+ * Every effort Gofer has a word for, in the order it ranks them.
+ *
+ * The same list as `NAMED_EFFORTS` in `settings.rs` and `KNOWN_EFFORTS` in `thinking-level.mjs`,
+ * which `scripts/check-command-surface.mjs` already holds to each other. Repeated here rather than
+ * imported because this file reads sources as text and emits bytes; it owns no runtime code.
+ */
+const NAMED_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
 // --- The emitters. Each returns the exact bytes its formatter would leave behind.
 
 function gdMutating(names) {
@@ -544,6 +611,37 @@ function rustSubagentBounds(bounds) {
 }
 
 /**
+ * What Gofer knows about each Cerebras model, as a table `cerebras_model_options` reads.
+ *
+ * A `const` rather than a function per model, because the lister walks it: the offered catalogue is
+ * the live id list intersected with this, and an intersection needs something to iterate.
+ */
+function rustCerebrasModels(models) {
+    const rows = models
+        .map(model => {
+            const note = `${wrapPrefixed(model.note, '    // ', 100)}\n`
+            const input = model.input.map(rustString).join(', ')
+            const levels = model.thinkingLevels.map(rustString).join(', ')
+            const off =
+                model.offEffort === undefined ? 'None' : `Some(${rustString(model.offEffort)})`
+            return (
+                `${note}    CerebrasModel {\n`
+                + `        id: ${rustString(model.id)},\n`
+                + `        name: ${rustString(model.name)},\n`
+                + `        context_window: ${grouped(model.contextWindow)},\n`
+                + `        max_tokens: ${grouped(model.maxTokens)},\n`
+                + `        input: &[${input}],\n`
+                + `        thinking_levels: &[${levels}],\n`
+                + `        reasoning_mandatory: ${model.reasoningMandatory},\n`
+                + `        off_effort: ${off},\n`
+                + `    },\n`
+            )
+        })
+        .join('')
+    return `const CEREBRAS_MODELS: [CerebrasModel; ${models.length}] = [\n${rows}];\n`
+}
+
+/**
  * An integer literal, digit-grouped from a thousand up, which is how both sources spell one.
  *
  * Rust and TypeScript agree on `_` as the separator and on what it means, so one function serves
@@ -610,6 +708,7 @@ export async function generateSurfaces() {
     const desktop = await registeredDesktopCommands()
     const {operations: parameters, vocabularies} = await parameterCatalogue()
     const subagentBounds = await subagentBoundsCatalogue()
+    const cerebrasModels = await cerebrasModelCatalogue()
 
     const declared = new Set(commands.map(entry => entry.command))
     for (const name of mutating) {
@@ -664,7 +763,10 @@ export async function generateSurfaces() {
             path: 'src-tauri/src/settings.rs',
             comment: '//',
             rustfmt: true,
-            regions: [{name: 'subagent-bounds', body: rustSubagentBounds(subagentBounds)}]
+            regions: [
+                {name: 'subagent-bounds', body: rustSubagentBounds(subagentBounds)},
+                {name: 'cerebras-models', body: rustCerebrasModels(cerebrasModels)}
+            ]
         },
         {
             path: 'src/models/settings.ts',

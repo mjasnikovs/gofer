@@ -50,6 +50,7 @@ import type {
 } from '../../models/settings'
 import {settingsRequest} from '../../models/settings-draft'
 import {StoredKeyField} from './StoredKeyField'
+import type {TypedSecret} from './StoredKeyField'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {SettingsTabView, SettingsView} from './settings-view'
 
@@ -61,6 +62,52 @@ import type {SettingsTabView, SettingsView} from './settings-view'
  * every Gofer before this did and still the right answer for one model on one machine.
  */
 const SUBAGENT_INHERITS = 'inherit'
+
+/**
+ * The drivers whose whole configuration is a key and a model chosen off a catalogue.
+ *
+ * One row rather than one branch each. The two of them differ in five sentences and nothing else,
+ * and a fourth driver written as a fourth arm of a ternary chain is four copies of eight fields
+ * that can drift apart in any of them. A driver is added here once.
+ *
+ * The local driver is not one of these — its address, its window and its ceiling are all typed —
+ * and neither is ChatGPT, which is a sign-in rather than a key.
+ */
+const HOSTED_DRIVERS: Partial<
+    Record<
+        AiConnectionType,
+        Readonly<{
+            secret: TypedSecret
+            awaiting: string
+            listed: string
+            answered: string
+            ceiling: string
+            accepts: string
+        }>
+    >
+> = {
+    openrouter: {
+        secret: 'openrouter',
+        awaiting: 'OpenRouter has not answered with its catalogue yet.',
+        listed: 'Only models that can call tools are listed. The rest cannot run Gofer.',
+        answered: "OpenRouter's catalogue answers this, so there is nothing to type.",
+        ceiling: "OpenRouter's catalogue answers this, so there is nothing to type.",
+        accepts: 'What this model takes as input, as OpenRouter describes it.'
+    },
+    cerebras: {
+        secret: 'cerebras',
+        awaiting: 'Cerebras has not answered with its model list yet.',
+        // The narrowing said out loud. Cerebras answers ids and nothing else, so what a model can
+        // do is a table Gofer ships — and a user who sees a model on the Cerebras dashboard and not
+        // here is owed the sentence rather than left to guess the list is broken.
+        listed: 'Only models Gofer holds measured capabilities for are listed, because Cerebras publishes none.',
+        answered: 'Measured against the live endpoint, so there is nothing to type.',
+        // Not the same sentence as the window's. Cerebras declares no output ceiling at all — a
+        // request may name the whole window and is answered — so this number is Gofer's, not theirs.
+        ceiling: 'Output shares the context window here, so this is the room Gofer leaves for it.',
+        accepts: 'What this model takes as input, measured against the live endpoint.'
+    }
+}
 
 /** The AI tab, plus the sign-in it may have left half-finished when the dialog is closed. */
 type AiTabView = SettingsTabView & Readonly<{cancelPendingLogin: () => void}>
@@ -78,6 +125,8 @@ export function useAiTab(view: SettingsView): AiTabView {
     const draft = state.settings
     /** The connection the live driver runs on, which is what this tab's fields are about. */
     const connection = draft && activeConnection(draft.ai)
+    /** The prose this driver's key-and-catalogue fields carry, or nothing when it has none. */
+    const hosted = draft && HOSTED_DRIVERS[draft.ai.connectionType]
     // The key field appears only for the engine that needs one, so a keyless setup is never shown a
     // credential box it has no use for.
     const needsSearchKey = SEARCH_PROVIDERS_NEEDING_KEY.includes(
@@ -376,8 +425,8 @@ export function useAiTab(view: SettingsView): AiTabView {
                             <Heading level={2}>AI connection</Heading>
                         </HStack>
                         <Text color='secondary'>
-                            Choose one active driver. Local and ChatGPT model selections are
-                            preserved independently; changes take effect after saving.
+                            Choose one active driver. Each driver's model selection is preserved
+                            independently; changes take effect after saving.
                         </Text>
                     </VStack>
 
@@ -387,7 +436,7 @@ export function useAiTab(view: SettingsView): AiTabView {
                                 <Selector
                                     label='AI driver'
                                     value={draft.ai.connectionType}
-                                    description='Your own server, a ChatGPT subscription, or OpenRouter. Only a driver that has somewhere to run is offered.'
+                                    description='Your own server or a hosted provider. Only a driver that has somewhere to run is offered.'
                                     options={driverOptions(draft.ai)}
                                     onChange={connectionType => {
                                         modelsFor.current = undefined
@@ -460,11 +509,11 @@ export function useAiTab(view: SettingsView): AiTabView {
                                             }}
                                         />
                                     </>
-                                : draft.ai.connectionType === 'openrouter' ?
+                                : hosted ?
                                     <>
                                         <StoredKeyField
-                                            secret='openrouter'
-                                            draft={keys.openrouter}
+                                            secret={hosted.secret}
+                                            draft={keys[hosted.secret]}
                                             dispatch={dispatch}
                                         />
                                         <Selector
@@ -473,8 +522,8 @@ export function useAiTab(view: SettingsView): AiTabView {
                                             hasSearch
                                             searchPlaceholder='Filter by name or id'
                                             isDisabled={availableModels.length === 0}
-                                            disabledMessage='OpenRouter has not answered with its catalogue yet.'
-                                            description='Only models that can call tools are listed. The rest cannot run Gofer.'
+                                            disabledMessage={hosted.awaiting}
+                                            description={hosted.listed}
                                             options={availableModels.map(model => ({
                                                 value: model.id,
                                                 label: model.name
@@ -496,19 +545,19 @@ export function useAiTab(view: SettingsView): AiTabView {
                                             label='Context window'
                                             value={connection.model.contextWindow.toLocaleString()}
                                             isReadOnly
-                                            description="OpenRouter's catalogue answers this, so there is nothing to type."
+                                            description={hosted.answered}
                                         />
                                         <TextInput
                                             label='Maximum output tokens'
                                             value={connection.model.maxTokens.toLocaleString()}
                                             isReadOnly
-                                            description="OpenRouter's catalogue answers this, so there is nothing to type."
+                                            description={hosted.ceiling}
                                         />
                                         <TextInput
                                             label='Accepts'
                                             value={connection.model.input.join(', ')}
                                             isReadOnly
-                                            description='What this model takes as input, as OpenRouter describes it.'
+                                            description={hosted.accepts}
                                         />
                                     </>
                                 :   <>

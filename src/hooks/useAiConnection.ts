@@ -53,7 +53,8 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
                 settings: of,
                 apiKey: {action: 'keep'},
                 braveApiKey: {action: 'keep'},
-                openrouterApiKey: {action: 'keep'}
+                openrouterApiKey: {action: 'keep'},
+                cerebrasApiKey: {action: 'keep'}
             }
         })
         listedFor.current = catalogueOf(of.ai)
@@ -70,7 +71,8 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
                         settings: nextSettings,
                         apiKey: {action: 'keep'},
                         braveApiKey: {action: 'keep'},
-                        openrouterApiKey: {action: 'keep'}
+                        openrouterApiKey: {action: 'keep'},
+                        cerebrasApiKey: {action: 'keep'}
                     }
                 })
                 onConnected()

@@ -23,6 +23,8 @@ use crate::model_server::ServedModel;
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 /// OpenRouter's address, which the user never types. Mirrors `OPENROUTER_BASE_URL` in settings.ts.
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Cerebras' address, which the user never types. Mirrors `CEREBRAS_BASE_URL` in settings.ts.
+const CEREBRAS_BASE_URL: &str = "https://api.cerebras.ai/v1";
 
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
@@ -179,6 +181,14 @@ pub(crate) struct ModelChoice {
     reasoning_mandatory: bool,
     #[serde(default = "default_model_input")]
     input: Vec<String>,
+    /// The word this model answers to for "stop thinking", where it has one. See
+    /// `CerebrasModel::off_effort`.
+    ///
+    /// Defaulted and skipped when absent, so every settings file written before this field — and
+    /// every model on every other driver — reads as "no such word", which sends no effort field at
+    /// all. That is what `off` has always meant here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    off_effort: Option<String>,
     #[serde(default = "default_thinking_level")]
     thinking_level: String,
 }
@@ -386,6 +396,7 @@ pub(crate) enum AiConnectionType {
     OpenaiCompatible,
     OpenaiCodex,
     Openrouter,
+    Cerebras,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -444,6 +455,7 @@ impl ModelChoiceFile {
                 reasoning_mandatory: false,
                 thinking_levels: self.thinking_levels.unwrap_or_default(),
                 input: self.input.unwrap_or_else(default_model_input),
+                off_effort: None,
                 thinking_level: self.thinking_level.unwrap_or_else(default_thinking_level),
             },
         }
@@ -519,6 +531,8 @@ struct AiSettingsFile {
     chatgpt: Option<AiConnectionProfile>,
     #[serde(default)]
     openrouter: Option<AiConnectionProfile>,
+    #[serde(default)]
+    cerebras: Option<AiConnectionProfile>,
     #[serde(default = "default_max_retries")]
     max_retries: u32,
     #[serde(default = "default_timeout_ms")]
@@ -541,6 +555,7 @@ impl From<AiSettingsFile> for AiSettings {
                 (AiConnectionType::OpenaiCompatible, file.local),
                 (AiConnectionType::OpenaiCodex, file.chatgpt),
                 (AiConnectionType::Openrouter, file.openrouter),
+                (AiConnectionType::Cerebras, file.cerebras),
             ] {
                 if let Some(profile) = mirrored {
                     connections.insert(driver, profile);
@@ -559,6 +574,24 @@ impl From<AiSettingsFile> for AiSettings {
                     },
                 );
             }
+        }
+        // Every hosted driver this build knows, filled in where the file names none.
+        //
+        // Not only for a file that has no connections at all. A driver with no connection is not
+        // offered in the picker, and a driver that is not offered can never be selected in order
+        // to be configured — so a driver added after a settings file was written would be
+        // permanently invisible to every existing install, which is what happened the first time
+        // this was left to `default_connections` alone. Insert only where absent: what the user
+        // has configured is theirs, and this must never write over it.
+        for (driver, shipped) in [
+            (
+                AiConnectionType::OpenaiCodex,
+                default_chatgpt_profile as fn() -> _,
+            ),
+            (AiConnectionType::Openrouter, default_openrouter_profile),
+            (AiConnectionType::Cerebras, default_cerebras_profile),
+        ] {
+            connections.entry(driver).or_insert_with(shipped);
         }
         Self {
             connection_type: file.connection_type,
@@ -580,6 +613,7 @@ pub(crate) struct SettingsResponse {
     has_chat_gpt_credential: bool,
     has_brave_api_key: bool,
     has_openrouter_api_key: bool,
+    has_cerebras_api_key: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential_store_error: Option<String>,
 }
@@ -596,6 +630,9 @@ pub(crate) struct SettingsRequest {
     /// OpenRouter's key, by the same three-way rule, into its own keyring slot.
     #[serde(default)]
     pub(crate) openrouter_api_key: ApiKeyUpdate,
+    /// Cerebras' key, by the same three-way rule, into its own keyring slot again.
+    #[serde(default)]
+    pub(crate) cerebras_api_key: ApiKeyUpdate,
 }
 
 #[derive(Default, Deserialize)]
@@ -644,6 +681,13 @@ pub(crate) struct AiModelOption {
     #[serde(default)]
     thinking_levels: Vec<String>,
     input: Vec<String>,
+    /// The word this model answers to for "stop thinking", where its catalogue named one.
+    ///
+    /// Absent for every driver but Cerebras, whose shipped table is the only catalogue that carries
+    /// it — so `off` keeps meaning "send no effort field" everywhere it always did. See
+    /// `CerebrasModel::off_effort`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    off_effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -890,12 +934,12 @@ impl Default for AiSettings {
     }
 }
 
-/// The three connections a settings file starts life with, around whichever local one is known.
+/// The four connections a settings file starts life with, around whichever local one is known.
 ///
-/// ChatGPT and OpenRouter are always there for a reason the local one used to have to earn: a
+/// The three hosted ones are always there for a reason the local one used to have to earn: a
 /// driver with no connection is not offered in the picker, and a driver that is not offered can
-/// never be selected in order to be configured. Both of their addresses and dialects are constants,
-/// so there is nothing to wait for.
+/// never be selected in order to be configured. Every one of their addresses and dialects is a
+/// constant, so there is nothing to wait for.
 fn default_connections(
     local: AiConnectionProfile,
 ) -> BTreeMap<AiConnectionType, AiConnectionProfile> {
@@ -903,6 +947,7 @@ fn default_connections(
         (AiConnectionType::OpenaiCompatible, local),
         (AiConnectionType::OpenaiCodex, default_chatgpt_profile()),
         (AiConnectionType::Openrouter, default_openrouter_profile()),
+        (AiConnectionType::Cerebras, default_cerebras_profile()),
     ])
 }
 
@@ -923,6 +968,7 @@ fn default_local_profile() -> AiConnectionProfile {
             reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: default_model_input(),
+            off_effort: None,
             thinking_level: default_thinking_level(),
         },
     }
@@ -953,6 +999,7 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
             reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: vec!["text".to_owned(), "image".to_owned()],
+            off_effort: None,
             thinking_level: "high".to_owned(),
         },
     }
@@ -966,6 +1013,7 @@ fn driver_id(driver: AiConnectionType) -> &'static str {
         AiConnectionType::OpenaiCompatible => "openai-compatible",
         AiConnectionType::OpenaiCodex => "openai-codex",
         AiConnectionType::Openrouter => "openrouter",
+        AiConnectionType::Cerebras => "cerebras",
     }
 }
 
@@ -996,9 +1044,151 @@ fn default_openrouter_profile() -> AiConnectionProfile {
             reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: vec!["text".to_owned()],
+            off_effort: None,
             thinking_level: "off".to_owned(),
         },
     }
+}
+
+/// Cerebras, as it looks before the user has chosen anything.
+///
+/// The address is fixed and the dialect is the ordinary chat-completions one, measured against the
+/// live endpoint rather than assumed. The model seed is the one of the two shipped models that
+/// takes no image, because a seed that promises a modality is a seed that can be believed.
+fn default_cerebras_profile() -> AiConnectionProfile {
+    let seed = &CEREBRAS_MODELS[0];
+    AiConnectionProfile {
+        name: "Cerebras".to_owned(),
+        base_url: CEREBRAS_BASE_URL.to_owned(),
+        api: ApiDialect::OpenaiCompletions,
+        // A chat template is a llama.cpp mechanism. There is no `/props` behind this address.
+        chat_template_thinking: false,
+        model: ModelChoice {
+            id: seed.id.to_owned(),
+            name: seed.name.to_owned(),
+            context_window: seed.context_window,
+            max_tokens: ceiling_within(seed.context_window, Some(seed.max_tokens)),
+            reasoning: true,
+            supports_reasoning_effort: true,
+            reasoning_mandatory: seed.reasoning_mandatory,
+            thinking_levels: seed.thinking_levels.iter().map(|&s| s.to_owned()).collect(),
+            input: seed.input.iter().map(|&s| s.to_owned()).collect(),
+            off_effort: seed.off_effort.map(str::to_owned),
+            // Never `off` for a seed that cannot stop thinking: that is the one value which makes
+            // its every request fail, reached by nothing more than opening a settings file that
+            // had never named a level here. See `thinking_levels_for`.
+            thinking_level: if seed.reasoning_mandatory {
+                "medium"
+            } else {
+                "off"
+            }
+            .to_owned(),
+        },
+    }
+}
+
+/// What Gofer knows about one Cerebras model, which is everything its endpoint declines to say.
+///
+/// `GET /v1/models` there answers `{id, object, created, owned_by}` and no more — no window, no
+/// output ceiling, no tool support, no reasoning. Every other driver reads those facts off a
+/// catalogue. This one has none to read, so they are measured by hand and shipped, and the row is
+/// emitted from `protocol/cerebras-models.json` rather than typed here.
+struct CerebrasModel {
+    id: &'static str,
+    name: &'static str,
+    context_window: u64,
+    max_tokens: u64,
+    input: &'static [&'static str],
+    thinking_levels: &'static [&'static str],
+    /// Whether the model refuses to be asked not to think. See `AiModelOption::reasoning_mandatory`.
+    reasoning_mandatory: bool,
+    /// The word this model answers to for "stop thinking", where it has one.
+    ///
+    /// Not every model does, and the two shipped ones differ: `gemma-4-31b` takes
+    /// `reasoning_effort: "none"` and comes back with no reasoning at all, while `gpt-oss-120b`
+    /// passes the same value through the validator and is then refused by its own chat template.
+    /// Nothing here means `off` sends no effort field, which is what every other driver does.
+    off_effort: Option<&'static str>,
+}
+
+// GENERATED-BEGIN cerebras-models sha256:67ea66a53c1f1124
+const CEREBRAS_MODELS: [CerebrasModel; 2] = [
+    // Measured on 2026-08-27. The window is the number the endpoint names itself: a 300,000-token
+    // prompt answers HTTP 400 `context_length_exceeded`, "Current length is 300068 while limit is
+    // 131000". Not 131,072 — the two models on this endpoint do not share a window. Output has no
+    // ceiling of its own and shares that window, so `maxTokens` repeats it and `ceiling_within`
+    // cuts it down. `image_url` answers 400 "Content type 'image_url' is not supported by selected
+    // model", so text only. Reasoning is mandatory: the API validator accepts `reasoning_effort:
+    // "none"` and the chat template then refuses it with "Unsupported reasoning effort: none.
+    // Supported values are 'low', 'medium', and 'high'." So this model has no word for stopping and
+    // carries no `offEffort`.
+    CerebrasModel {
+        id: "gpt-oss-120b",
+        name: "GPT OSS 120B",
+        context_window: 131_000,
+        max_tokens: 131_000,
+        input: &["text"],
+        thinking_levels: &["low", "medium", "high"],
+        reasoning_mandatory: true,
+        off_effort: None,
+    },
+    // Measured on 2026-08-27. The window is the endpoint's own number, "limit is 131072", and
+    // output shares it. `image_url` is accepted, so text and image. `reasoning_effort: "none"` is
+    // accepted by both the validator and the template, and the reply comes back with no `reasoning`
+    // field at all — so unlike its neighbour this model has a real word for stopping, and `off`
+    // sends it rather than sending nothing.
+    CerebrasModel {
+        id: "gemma-4-31b",
+        name: "Gemma 4 31B IT",
+        context_window: 131_072,
+        max_tokens: 131_072,
+        input: &["text", "image"],
+        thinking_levels: &["low", "medium", "high"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+];
+// GENERATED-END cerebras-models
+
+/// One row of the shipped table, as the rest of Gofer states a model.
+fn cerebras_model_option(model: &CerebrasModel) -> AiModelOption {
+    AiModelOption {
+        id: model.id.to_owned(),
+        name: model.name.to_owned(),
+        context_window: model.context_window,
+        // Cerebras has no output ceiling of its own — a request may name the whole window and is
+        // answered — so the table repeats the window and this is what actually bounds it.
+        max_tokens: ceiling_within(model.context_window, Some(model.max_tokens)),
+        reasoning: true,
+        // Named efforts are the only evidence an effort field will be read, and both shipped models
+        // name three. Same rule as `openrouter_model_options`.
+        supports_reasoning_effort: !model.thinking_levels.is_empty(),
+        reasoning_mandatory: model.reasoning_mandatory,
+        thinking_levels: model
+            .thinking_levels
+            .iter()
+            .map(|&s| s.to_owned())
+            .collect(),
+        input: model.input.iter().map(|&s| s.to_owned()).collect(),
+        off_effort: model.off_effort.map(str::to_owned),
+    }
+}
+
+/// The Cerebras models this key can reach, which is the live list narrowed to the ones Gofer knows.
+///
+/// An intersection, and deliberately in that direction. The endpoint is the authority on which
+/// models a key may use — it lists what the organisation has, and answers HTTP 404
+/// `model_archived` for one it has retired — and the shipped table is the authority on what they
+/// can do. A model in the table that the key cannot reach is not offered, and a model the key can
+/// reach that the table has never seen is not offered either: every fact a picker needs about it
+/// would have to be guessed, and a guessed ceiling is a connection whose every request fails on a
+/// number nobody checked.
+fn cerebras_model_options(remote: &[Model]) -> Vec<AiModelOption> {
+    CEREBRAS_MODELS
+        .iter()
+        .filter(|known| remote.iter().any(|model| model.id == known.id))
+        .map(cerebras_model_option)
+        .collect()
 }
 
 /// The connection the documentation search's own model calls should go to.
@@ -1018,6 +1208,7 @@ pub(crate) fn docs_expansion_connection(
     settings: &AiSettings,
     api_key: Option<String>,
     openrouter_api_key: Option<String>,
+    cerebras_api_key: Option<String>,
     oauth_credential: Option<serde_json::Value>,
 ) -> Option<crate::rag::RetrieveConnection> {
     let chosen = settings.subagent.connection.as_ref();
@@ -1037,13 +1228,14 @@ pub(crate) fn docs_expansion_connection(
         base_url: connection.base_url.clone(),
         model: model.id.clone(),
         model_name: model.name.clone(),
-        // ChatGPT authenticates with the credential above and takes no key. The other two each
+        // ChatGPT authenticates with the credential above and takes no key. The other three each
         // take their own, from their own keyring slot — a key sent to the wrong address is a key
         // handed to a machine that was never meant to see it.
         api_key: match driver {
             AiConnectionType::OpenaiCodex => None,
             AiConnectionType::OpenaiCompatible => api_key,
             AiConnectionType::Openrouter => openrouter_api_key,
+            AiConnectionType::Cerebras => cerebras_api_key,
         },
         thinking_level: model.thinking_level.clone(),
         context_window: model.context_window,
@@ -1052,6 +1244,7 @@ pub(crate) fn docs_expansion_connection(
         supports_reasoning_effort: model.supports_reasoning_effort,
         reasoning_mandatory: model.reasoning_mandatory,
         thinking_levels: model.thinking_levels.clone(),
+        off_effort: model.off_effort.clone(),
         // The connection's, never the child's: the child borrows an address, and how thinking is
         // turned on is a fact about the server at that address.
         chat_template_thinking: connection.chat_template_thinking,
@@ -1175,8 +1368,9 @@ fn keep_level(
 /// Called on every read and every save, so what is on disk is never the authority — it is a copy
 /// the next load overwrites. The local driver's connection, and no other. Both sources describe
 /// servers on this machine: Pi's `models.json` is a file naming local providers, and `served` is
-/// what a llama.cpp host answered when it was asked. ChatGPT and OpenRouter keep what they have and
-/// are refreshed by the model lister instead, which is the only other writer of these fields.
+/// what a llama.cpp host answered when it was asked. ChatGPT, OpenRouter and Cerebras keep what
+/// they have and are refreshed by the model lister instead, which is the only other writer of these
+/// fields. They are excluded by construction rather than by a filter: this names the local driver.
 ///
 /// Offering the other two would not merely be useless. Both sources are keyed by address alone, and
 /// nothing stops a `~/.pi/agent/models.json` from naming a provider at OpenRouter's — which
@@ -1325,14 +1519,17 @@ async fn prepare_models_request(
     let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
         let settings = validate_settings(request.settings)?;
         // The driver decides which credential is sent, because each has its own keyring slot. The
-        // local driver's key must never reach openrouter.ai, and OpenRouter's must never reach a
-        // server on this machine.
+        // local driver's key must never reach openrouter.ai or api.cerebras.ai, and neither of
+        // theirs must ever reach a server on this machine.
         let api_key = match settings.ai.connection_type {
             AiConnectionType::Openrouter => resolve(
                 &request.openrouter_api_key,
                 Secret::OpenRouter,
                 &SystemSecrets,
             )?,
+            AiConnectionType::Cerebras => {
+                resolve(&request.cerebras_api_key, Secret::Cerebras, &SystemSecrets)?
+            }
             _ => resolve(&request.api_key, Secret::AiDefault, &SystemSecrets)?,
         };
         Ok::<_, String>((settings, api_key))
@@ -1394,6 +1591,13 @@ pub(crate) async fn run_connection_test(
         request.settings.ai.connection_type,
         AiConnectionType::Openrouter
     );
+    // Cerebras is asked `/models` like the local driver, not `/key` like OpenRouter. Its catalogue
+    // is not public: a wrong key answers HTTP 401 `wrong_api_key`, so the ordinary endpoint already
+    // refuses a credential that does not exist and there is nothing a second one would add.
+    let cerebras = matches!(
+        request.settings.ai.connection_type,
+        AiConnectionType::Cerebras
+    );
     let path = if openrouter { "key" } else { "models" };
     let ModelsRequest { settings, builder } =
         prepare_models_request(request, timeout, path).await?;
@@ -1436,6 +1640,29 @@ pub(crate) async fn run_connection_test(
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
     let chosen = active_endpoint(&settings.ai).1;
+    // Narrowed the same way the picker is, and for the reason the picker is narrowed: a model
+    // Cerebras serves that the shipped table has never seen is one no screen will ever offer, so
+    // reporting a healthy connection to it would be reporting a connection nobody can select.
+    if cerebras {
+        return Ok(
+            if cerebras_model_options(&models.data)
+                .iter()
+                .any(|option| option.id == chosen)
+            {
+                ConnectionTestResult {
+                    status: ConnectionTestStatus::Connected,
+                    message: format!("Connected to Cerebras. Model '{chosen}' is available."),
+                }
+            } else {
+                ConnectionTestResult {
+                    status: ConnectionTestStatus::ModelUnavailable,
+                    message: format!(
+                        "Connected to Cerebras, but model '{chosen}' is not one Gofer holds capabilities for."
+                    ),
+                }
+            },
+        );
+    }
     if models.data.iter().any(|model| model.id == chosen) {
         return Ok(ConnectionTestResult {
             status: ConnectionTestStatus::Connected,
@@ -1498,6 +1725,10 @@ pub(crate) async fn list_ai_models_with(
         request.settings.ai.connection_type,
         AiConnectionType::Openrouter
     );
+    let cerebras = matches!(
+        request.settings.ai.connection_type,
+        AiConnectionType::Cerebras
+    );
     let ModelsRequest { settings, builder } =
         prepare_models_request(request, AI_REQUEST_TIMEOUT, "models").await?;
     let response = builder
@@ -1520,6 +1751,11 @@ pub(crate) async fn list_ai_models_with(
     let models = response.json::<ModelsResponse>().await.map_err(|error| {
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
+    // The plain OpenAI shape, which is all Cerebras answers — ids and nothing else. What those ids
+    // can do is the shipped table's answer, so the live list is only ever used to narrow it.
+    if cerebras {
+        return Ok(cerebras_model_options(&models.data));
+    }
     let connection = settings
         .ai
         .connection()
@@ -1594,6 +1830,9 @@ fn local_model_options(
                     .and_then(|model| model.input.clone())
                     .or_else(|| known.map(|model| model.input.clone()))
                     .unwrap_or_else(|| connection.model.input.clone()),
+                // A chat template is told not to think by leaving the effort out, never by being
+                // handed a word for it. Only Cerebras' shipped table names one.
+                off_effort: None,
             }
         })
         .collect()
@@ -1674,6 +1913,9 @@ fn openrouter_model_options(remote: Vec<OpenrouterModel>) -> Vec<AiModelOption> 
                 } else {
                     input
                 },
+                // OpenRouter's catalogue names no such word, and `off` there is already a shape of
+                // its own — `reasoning: {enabled: false}` — rather than an effort.
+                off_effort: None,
             }
         })
         .collect()
@@ -1724,6 +1966,9 @@ fn chatgpt_models() -> Result<Vec<AiModelOption>, String> {
                     // takes, which is what an empty list here means.
                     thinking_levels: Vec::new(),
                     input: model.input,
+                    // The Codex driver owns its own reasoning field; nothing here becomes an
+                    // effort word on the wire.
+                    off_effort: None,
                 })
                 .collect()
         })
@@ -1899,6 +2144,8 @@ fn pi_model_option(provider: &PiProvider, model: &PiModel) -> AiModelOption {
         // The catalogue is a file. Only the server that has the model loaded can name its efforts.
         thinking_levels: Vec::new(),
         input: model.input.clone(),
+        // The catalogue is a file, and no file has ever carried this either.
+        off_effort: None,
     }
 }
 
@@ -1932,6 +2179,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
                     reasoning_mandatory: known.reasoning_mandatory,
                     thinking_levels: Vec::new(),
                     input: model.input.clone(),
+                    off_effort: None,
                     thinking_level: default_thinking_level(),
                 },
             }),
@@ -1990,18 +2238,19 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
             settings.version
         ));
     }
-    // OpenRouter's address and dialect are not the user's to set, so they are corrected rather
-    // than validated. A settings file hand-edited to point this driver somewhere else would send
-    // the OpenRouter key to that address, and the catalogue parser to a server that answers a
+    // A hosted driver's address and dialect are not the user's to set, so they are corrected rather
+    // than validated. A settings file hand-edited to point one of these somewhere else would send
+    // that driver's key to that address, and the catalogue parser to a server that answers a
     // different shape.
-    if let Some(openrouter) = settings
-        .ai
-        .connections
-        .get_mut(&AiConnectionType::Openrouter)
-    {
-        openrouter.base_url = OPENROUTER_BASE_URL.to_owned();
-        openrouter.api = ApiDialect::OpenaiCompletions;
-        openrouter.chat_template_thinking = false;
+    for (driver, address) in [
+        (AiConnectionType::Openrouter, OPENROUTER_BASE_URL),
+        (AiConnectionType::Cerebras, CEREBRAS_BASE_URL),
+    ] {
+        if let Some(pinned) = settings.ai.connections.get_mut(&driver) {
+            pinned.base_url = address.to_owned();
+            pinned.api = ApiDialect::OpenaiCompletions;
+            pinned.chat_template_thinking = false;
+        }
     }
     // Every connection, not only the live one. They are all the user's to save and any of them can
     // be the one a sub-agent runs on, so a rule that held for whichever was switched on was a rule
@@ -2109,6 +2358,19 @@ fn validate_model_choice(choice: &mut ModelChoice, id_name: &str) -> Result<(), 
         return Err(
             "Context window and maximum output tokens must be greater than zero".to_owned(),
         );
+    }
+    // Dropped rather than refused, and dropped in two shapes. A blank word is a word nothing can
+    // send, and a word on a model that takes no effort field is a word nothing will read — both
+    // are settings files hand-edited to say something the catalogue never said. Left in place they
+    // would put a provider's private vocabulary onto the wire for a connection that has no use for
+    // it. See `CerebrasModel::off_effort`.
+    if choice
+        .off_effort
+        .as_ref()
+        .is_some_and(|word| word.trim().is_empty() || word.len() > 64)
+        || !choice.supports_reasoning_effort
+    {
+        choice.off_effort = None;
     }
     if !EVERY_LEVEL.contains(&choice.thinking_level.as_str()) {
         return Err("Reasoning level is invalid".to_owned());
@@ -2320,10 +2582,11 @@ pub(crate) enum Secret {
     /// without one.
     Brave,
     OpenRouter,
+    Cerebras,
     ChatGpt,
 }
 
-/// What empty text means for one secret, which is not the same answer for all four.
+/// What empty text means for one secret, which is not the same answer for all five.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Blank {
     /// Refused. The AI key's box is the connection's own field, and saving a connection with a
@@ -2345,6 +2608,7 @@ impl Secret {
             // configuring the second wipes the first, and — worse — a key meant for openrouter.ai
             // being sent as bearer to whatever `http://127.0.0.1:8080` happens to be.
             Self::OpenRouter => "ai-openrouter",
+            Self::Cerebras => "ai-cerebras",
             Self::ChatGpt => "ai-openai-codex",
             Self::Brave => "web-brave-search",
         }
@@ -2355,6 +2619,7 @@ impl Secret {
         match self {
             Self::AiDefault => "AI API key",
             Self::OpenRouter => "OpenRouter API key",
+            Self::Cerebras => "Cerebras API key",
             Self::ChatGpt => "ChatGPT credential",
             Self::Brave => "Brave Search key",
         }
@@ -2363,12 +2628,12 @@ impl Secret {
     const fn blank(self) -> Blank {
         match self {
             Self::AiDefault | Self::ChatGpt => Blank::Refused,
-            Self::Brave | Self::OpenRouter => Blank::Clears,
+            Self::Brave | Self::OpenRouter | Self::Cerebras => Blank::Clears,
         }
     }
 }
 
-/// Where the four secrets are kept. The seam, and it takes the slot.
+/// Where the five secrets are kept. The seam, and it takes the slot.
 ///
 /// It used to take none: one implementation was hardcoded to `ai-default` and the other three
 /// reached past it to the keyring, so a test could drive one flag of the four.
@@ -2496,6 +2761,7 @@ pub(crate) fn settings_response(settings: GoferSettings) -> SettingsResponse {
             has_chat_gpt_credential: false,
             has_brave_api_key: false,
             has_openrouter_api_key: false,
+            has_cerebras_api_key: false,
             credential_store_error: None,
         };
     }
@@ -2514,6 +2780,7 @@ fn settings_response_with(secrets: &impl Secrets, settings: GoferSettings) -> Se
             has_chat_gpt_credential: chatgpt_credential_in(secrets).ok().flatten().is_some(),
             has_brave_api_key: secrets.read(Secret::Brave).ok().flatten().is_some(),
             has_openrouter_api_key: secrets.read(Secret::OpenRouter).ok().flatten().is_some(),
+            has_cerebras_api_key: secrets.read(Secret::Cerebras).ok().flatten().is_some(),
             credential_store_error: None,
         },
         Err(error) => SettingsResponse {
@@ -2522,6 +2789,7 @@ fn settings_response_with(secrets: &impl Secrets, settings: GoferSettings) -> Se
             has_chat_gpt_credential: false,
             has_brave_api_key: false,
             has_openrouter_api_key: false,
+            has_cerebras_api_key: false,
             credential_store_error: Some(error),
         },
     }
@@ -2534,11 +2802,12 @@ pub(crate) struct WrittenSecret {
 }
 
 /// The three secrets a settings save carries, in the order they are written.
-fn saved_secrets(request: &SettingsRequest) -> [(Secret, &ApiKeyUpdate); 3] {
+fn saved_secrets(request: &SettingsRequest) -> [(Secret, &ApiKeyUpdate); 4] {
     [
         (Secret::AiDefault, &request.api_key),
         (Secret::Brave, &request.brave_api_key),
         (Secret::OpenRouter, &request.openrouter_api_key),
+        (Secret::Cerebras, &request.cerebras_api_key),
     ]
 }
 
@@ -2794,6 +3063,7 @@ mod tests {
             },
             brave_api_key: ApiKeyUpdate::Keep,
             openrouter_api_key: ApiKeyUpdate::Keep,
+            cerebras_api_key: ApiKeyUpdate::Keep,
         }
     }
 
@@ -3007,7 +3277,7 @@ mod tests {
     #[test]
     fn a_blank_box_clears_the_keys_it_is_meant_to_and_is_refused_where_it_is_not() {
         let store = FakeSecrets::default();
-        for secret in [Secret::Brave, Secret::OpenRouter] {
+        for secret in [Secret::Brave, Secret::OpenRouter, Secret::Cerebras] {
             store.put(secret, "already-stored");
             apply(
                 &ApiKeyUpdate::Set {
@@ -3042,7 +3312,7 @@ mod tests {
         );
     }
 
-    /// One slot written never touches another. Four secrets, four keyring usernames.
+    /// One slot written never touches another. Five secrets, five keyring usernames.
     #[test]
     fn every_secret_is_written_to_its_own_slot() {
         let store = FakeSecrets::default();
@@ -3050,6 +3320,7 @@ mod tests {
             Secret::AiDefault,
             Secret::Brave,
             Secret::OpenRouter,
+            Secret::Cerebras,
             Secret::ChatGpt,
         ] {
             apply(
@@ -3065,6 +3336,7 @@ mod tests {
             Secret::AiDefault,
             Secret::Brave,
             Secret::OpenRouter,
+            Secret::Cerebras,
             Secret::ChatGpt,
         ] {
             assert_eq!(
@@ -3083,28 +3355,31 @@ mod tests {
         );
     }
 
-    /// Every one of the four flags, answered by the injected store.
+    /// Every one of the five flags, answered by the injected store.
     ///
     /// Three of them used to reach past it to the real keyring, which is why nothing could say what
     /// they reported. The ChatGPT flag is the one that is not simply "something is there": an
     /// OAuth grant that will not parse is not a credential the user is signed in with.
     #[test]
-    fn the_response_reports_all_four_secrets_through_the_one_store() {
+    fn the_response_reports_all_five_secrets_through_the_one_store() {
         let store = FakeSecrets::default();
         let empty = settings_response_with(&store, settings("http://localhost", "model"));
         assert!(!empty.has_api_key);
         assert!(!empty.has_brave_api_key);
         assert!(!empty.has_openrouter_api_key);
+        assert!(!empty.has_cerebras_api_key);
         assert!(!empty.has_chat_gpt_credential);
 
         store.put(Secret::AiDefault, "sk-1");
         store.put(Secret::Brave, "brave-1");
         store.put(Secret::OpenRouter, "sk-or-1");
+        store.put(Secret::Cerebras, "csk-1");
         store.put(Secret::ChatGpt, "not json");
         let partial = settings_response_with(&store, settings("http://localhost", "model"));
         assert!(partial.has_api_key);
         assert!(partial.has_brave_api_key);
         assert!(partial.has_openrouter_api_key);
+        assert!(partial.has_cerebras_api_key);
         assert!(!partial.has_chat_gpt_credential);
 
         store.put(
@@ -3136,6 +3411,7 @@ mod tests {
             brave_api_key: ApiKeyUpdate::Clear,
             // Untouched, so it is never read and never put back.
             openrouter_api_key: ApiKeyUpdate::Keep,
+            cerebras_api_key: ApiKeyUpdate::Keep,
         };
         let written = apply_saved_secrets_with(&store, &request).expect("write the save's secrets");
         assert_eq!(written.len(), 2);
@@ -3178,6 +3454,7 @@ mod tests {
             // The second slot, and the one the keyring refuses.
             brave_api_key: ApiKeyUpdate::Clear,
             openrouter_api_key: ApiKeyUpdate::Keep,
+            cerebras_api_key: ApiKeyUpdate::Keep,
         };
 
         // `err()` rather than `unwrap_err()`: the window holds the keys that were taken out, and a
@@ -3207,6 +3484,7 @@ mod tests {
             api_key: ApiKeyUpdate::Keep,
             brave_api_key: ApiKeyUpdate::Keep,
             openrouter_api_key: ApiKeyUpdate::Keep,
+            cerebras_api_key: ApiKeyUpdate::Keep,
         };
         let written = apply_saved_secrets_with(&unreadable, &request).expect("nothing to write");
         assert!(written.is_empty());
@@ -3432,9 +3710,14 @@ mod tests {
     /// including at ChatGPT, and say nothing only when there is no model to reach at all.
     #[test]
     fn the_docs_expansion_connection_follows_the_subagent() {
-        let borrowed =
-            docs_expansion_connection(&AiSettings::default(), Some("k".to_owned()), None, None)
-                .expect("a local parent with no sub-agent connection lends its own");
+        let borrowed = docs_expansion_connection(
+            &AiSettings::default(),
+            Some("k".to_owned()),
+            None,
+            None,
+            None,
+        )
+        .expect("a local parent with no sub-agent connection lends its own");
         assert_eq!(borrowed.connection_type, "openai-compatible");
         assert_eq!(borrowed.base_url, default_local_profile().base_url);
         assert_eq!(borrowed.model, default_local_profile().model.id);
@@ -3453,12 +3736,13 @@ mod tests {
                 reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: default_model_input(),
+                off_effort: None,
                 thinking_level: "low".to_owned(),
             },
         };
         let mut own = AiSettings::default();
         own.subagent.connection = Some(local_child.clone());
-        let child = docs_expansion_connection(&own, None, None, None)
+        let child = docs_expansion_connection(&own, None, None, None, None)
             .expect("a local sub-agent is reachable");
         // The address stays the connection's; the model and its level are the child's own.
         assert_eq!(child.base_url, default_local_profile().base_url);
@@ -3479,6 +3763,7 @@ mod tests {
             &chatgpt,
             Some("k".to_owned()),
             None,
+            None,
             Some(credential.clone()),
         )
         .expect("a ChatGPT sub-agent is followed to ChatGPT");
@@ -3490,7 +3775,7 @@ mod tests {
         assert_eq!(followed.api_key, None);
 
         assert_eq!(
-            docs_expansion_connection(&chatgpt, None, None, None),
+            docs_expansion_connection(&chatgpt, None, None, None, None),
             None,
             "a ChatGPT sub-agent with no stored credential has nothing to authenticate with"
         );
@@ -3498,7 +3783,7 @@ mod tests {
         let codex_only =
             settings_only_on(AiConnectionType::OpenaiCodex, default_chatgpt_profile()).ai;
         assert_eq!(
-            docs_expansion_connection(&codex_only, None, None, None),
+            docs_expansion_connection(&codex_only, None, None, None, None),
             None,
             "a ChatGPT-only install with no credential has no model to reach"
         );
@@ -3654,6 +3939,7 @@ mod tests {
                 reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: default_model_input(),
+                off_effort: None,
                 thinking_level: "low".to_owned(),
             },
         };
@@ -3729,6 +4015,7 @@ mod tests {
                 reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: default_model_input(),
+                off_effort: None,
                 thinking_level: "off".to_owned(),
             },
         };
@@ -4254,6 +4541,209 @@ mod tests {
         );
     }
 
+    /// The Cerebras catalogue, which is the live list narrowed by the table Gofer ships.
+    ///
+    /// Narrowed in both directions, and both are the point. A model the endpoint serves that the
+    /// table has never measured is dropped — every fact a picker needs about it would have to be
+    /// guessed, and a guessed ceiling is a connection whose every request fails on a number nobody
+    /// checked. A model the table names that the key cannot reach is not invented: pi-ai's own
+    /// bundled Cerebras file still lists `zai-glm-4.7`, which answers HTTP 404 `model_archived`,
+    /// and a picker offering it would offer a model no request can use.
+    #[test]
+    fn the_cerebras_catalogue_is_narrowed_to_what_gofer_has_facts_for() {
+        let live: ModelsResponse = serde_json::from_str(
+            r#"{"data": [
+                {"id": "gpt-oss-120b"},
+                {"id": "gemma-4-31b"},
+                {"id": "some-model-shipped-after-this-build"}
+            ]}"#,
+        )
+        .expect("Cerebras answers the plain OpenAI shape");
+        let options = cerebras_model_options(&live.data);
+
+        // The unmeasured one is gone, and the two measured ones are in the table's order.
+        let ids: Vec<&str> = options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-oss-120b", "gemma-4-31b"]);
+
+        let oss = &options[0];
+        assert_eq!(oss.name, "GPT OSS 120B");
+        // The endpoint's own number, from the body it refuses an oversized prompt with. Not
+        // 131,072: the two models on this endpoint do not share a window.
+        assert_eq!(oss.context_window, 131_000);
+        // Cerebras declares no output ceiling, so the table repeats the window and this is what
+        // actually bounds a reply. A ceiling that is the whole window is not a ceiling.
+        assert_eq!(oss.max_tokens, ceiling_within(131_000, Some(131_000)));
+        assert!(oss.max_tokens < oss.context_window);
+        assert_eq!(oss.input, vec!["text".to_owned()]);
+        assert!(oss.reasoning);
+        assert!(oss.supports_reasoning_effort);
+        // Its chat template refuses `reasoning_effort: "none"`, so it cannot be told to stop and
+        // has no word for stopping either. The two facts travel together or `off` is offered for a
+        // model that would ignore it.
+        assert!(oss.reasoning_mandatory);
+        assert_eq!(oss.off_effort, None);
+        assert_eq!(
+            oss.thinking_levels,
+            vec!["low".to_owned(), "medium".to_owned(), "high".to_owned()]
+        );
+
+        let gemma = &options[1];
+        assert_eq!(gemma.context_window, 131_072);
+        assert_eq!(gemma.input, vec!["text".to_owned(), "image".to_owned()]);
+        // The other half of the pair: this one honours `none`, so `off` sends it and means it.
+        assert!(!gemma.reasoning_mandatory);
+        assert_eq!(gemma.off_effort.as_deref(), Some("none"));
+
+        // A table row the key cannot reach is not offered either.
+        let one: ModelsResponse =
+            serde_json::from_str(r#"{"data": [{"id": "gemma-4-31b"}]}"#).expect("one model");
+        let narrowed = cerebras_model_options(&one.data);
+        assert_eq!(narrowed.len(), 1);
+        assert_eq!(narrowed[0].id, "gemma-4-31b");
+
+        // And a key that reaches nothing Gofer knows offers nothing rather than everything.
+        let none: ModelsResponse =
+            serde_json::from_str(r#"{"data": [{"id": "unknown"}]}"#).expect("one unknown model");
+        assert!(cerebras_model_options(&none.data).is_empty());
+    }
+
+    /// A driver added after a settings file was written is still offered to that file.
+    ///
+    /// The bug this pins: `default_connections` runs only for a file that has none, and the legacy
+    /// mirror block only for a file whose `connections` map is empty. So an install written before
+    /// Cerebras existed loaded three connections, `driverOptions` offered three drivers, and the
+    /// fourth could never be selected in order to be configured — invisible on every machine that
+    /// had ever saved settings, and visible only on a fresh one. Measured against the developer's
+    /// own file, which held exactly `openai-compatible`, `openai-codex` and `openrouter`.
+    #[test]
+    fn a_settings_file_written_before_a_driver_existed_still_offers_it() {
+        let older = serde_json::json!({
+            "connectionType": "openai-compatible",
+            "connections": {
+                "openai-compatible": {
+                    "name": "My server",
+                    "baseUrl": "http://127.0.0.1:9999/v1",
+                    "api": "openai-completions",
+                    "chatTemplateThinking": false,
+                    "model": {"id": "mine", "contextWindow": 8192, "maxTokens": 1024}
+                },
+                "openai-codex": {
+                    "name": "My ChatGPT",
+                    "baseUrl": "https://chatgpt.com/backend-api",
+                    "api": "openai-codex-responses",
+                    "chatTemplateThinking": false,
+                    "model": {"id": "gpt-5.6-terra", "contextWindow": 272000, "maxTokens": 128000}
+                }
+            }
+        });
+        let ai: AiSettings = serde_json::from_value::<AiSettingsFile>(older)
+            .expect("an older settings file parses")
+            .into();
+
+        assert_eq!(
+            ai.connection_for(AiConnectionType::Cerebras),
+            Some(&default_cerebras_profile())
+        );
+        assert_eq!(
+            ai.connection_for(AiConnectionType::Openrouter),
+            Some(&default_openrouter_profile())
+        );
+        // What the file did say is left exactly as it said it. The fill-in must never overwrite a
+        // connection the user configured, which is the whole risk of filling any in.
+        let local = ai
+            .connection_for(AiConnectionType::OpenaiCompatible)
+            .expect("the file's own local connection");
+        assert_eq!(local.name, "My server");
+        assert_eq!(local.base_url, "http://127.0.0.1:9999/v1");
+        assert_eq!(local.model.id, "mine");
+        // And a hosted one the file *did* name is its own, not the shipped seed.
+        assert_eq!(
+            ai.connection_for(AiConnectionType::OpenaiCodex)
+                .expect("the file's own ChatGPT connection")
+                .name,
+            "My ChatGPT"
+        );
+    }
+
+    /// Cerebras' address is pinned the same way OpenRouter's is, and for the same reason.
+    #[test]
+    fn a_cerebras_connection_is_pinned_and_kept_beside_the_others() {
+        let mut settings = GoferSettings::default();
+        settings.ai.connection_type = AiConnectionType::Cerebras;
+        let stored = settings
+            .ai
+            .connections
+            .get_mut(&AiConnectionType::Cerebras)
+            .expect("the Cerebras connection");
+        // A hand-edited file pointing this driver at somebody else's server would send the Cerebras
+        // key there. It is put back rather than refused.
+        stored.base_url = "https://not-cerebras.example/v1".to_owned();
+        stored.api = ApiDialect::OpenaiCodexResponses;
+        stored.chat_template_thinking = true;
+
+        let saved = validate_settings(settings).expect("a Cerebras connection is valid");
+        assert_eq!(live(&saved).base_url, CEREBRAS_BASE_URL);
+        assert_eq!(live(&saved).api, ApiDialect::OpenaiCompletions);
+        assert!(!live(&saved).chat_template_thinking);
+        // The other three are untouched, OpenRouter's own pinning included.
+        assert_eq!(
+            saved.ai.connection_for(AiConnectionType::OpenaiCompatible),
+            Some(&default_local_profile())
+        );
+        assert_eq!(
+            saved.ai.connection_for(AiConnectionType::Openrouter),
+            Some(&default_openrouter_profile())
+        );
+    }
+
+    /// The shipped Cerebras seed survives its own validation, which is not a given.
+    ///
+    /// A default that trips a repair is a settings file that is rewritten the first time it is
+    /// read. Two ways this one could: a ceiling that is the whole window, and — because this seed
+    /// is the model that cannot stop thinking — a stored level of `off`, which is the one value
+    /// that makes its every request fail.
+    #[test]
+    fn the_shipped_cerebras_seed_is_one_its_own_rules_accept() {
+        let seed = default_cerebras_profile();
+        let mut validated = seed.clone();
+        validate_connection(&mut validated).expect("the shipped seed is valid");
+        assert_eq!(validated, seed);
+        assert!(seed.model.max_tokens < seed.model.context_window);
+        let offered = thinking_levels(
+            seed.model.reasoning,
+            seed.model.supports_reasoning_effort,
+            seed.model.reasoning_mandatory,
+            &seed.model.thinking_levels,
+        );
+        assert!(!offered.contains(&"off".to_owned()));
+        assert!(offered.contains(&seed.model.thinking_level));
+    }
+
+    /// A word for not thinking is dropped where nothing could send it.
+    ///
+    /// The only new thing a hand-edited settings file can put here. Left in place, a blank word is
+    /// one nothing can write, and a word on a model that takes no effort field at all is one
+    /// nothing will read — both would put a provider's private vocabulary on the wire for a
+    /// connection that has no use for it.
+    #[test]
+    fn a_word_for_not_thinking_survives_only_where_it_can_be_sent() {
+        let mut kept = default_cerebras_profile().model;
+        kept.off_effort = Some("none".to_owned());
+        kept.supports_reasoning_effort = true;
+        validate_model_choice(&mut kept, "Model").expect("a sendable word is kept");
+        assert_eq!(kept.off_effort.as_deref(), Some("none"));
+
+        let mut blank = kept.clone();
+        blank.off_effort = Some("   ".to_owned());
+        validate_model_choice(&mut blank, "Model").expect("a blank word is dropped, not refused");
+        assert_eq!(blank.off_effort, None);
+
+        let mut unreadable = kept.clone();
+        unreadable.supports_reasoning_effort = false;
+        validate_model_choice(&mut unreadable, "Model").expect("an unreadable word is dropped");
+        assert_eq!(unreadable.off_effort, None);
+    }
+
     /// The sub-agent may run on OpenRouter, and it takes OpenRouter's key rather than the AI one.
     #[test]
     fn a_subagent_on_openrouter_is_reached_with_its_own_key() {
@@ -4270,6 +4760,7 @@ mod tests {
                 reasoning_mandatory: false,
                 thinking_levels: vec!["xhigh".to_owned(), "high".to_owned()],
                 input: vec!["text".to_owned()],
+                off_effort: None,
                 thinking_level: "high".to_owned(),
             },
         });
@@ -4278,6 +4769,7 @@ mod tests {
             &settings,
             Some("local-key".to_owned()),
             Some("openrouter-key".to_owned()),
+            None,
             None,
         )
         .expect("an OpenRouter child is reachable");
@@ -4488,6 +4980,7 @@ mod tests {
                 reasoning_mandatory: false,
                 thinking_levels: Vec::new(),
                 input: vec!["text".to_owned(), "image".to_owned()],
+                off_effort: None,
                 thinking_level: "high".to_owned(),
             },
         });
@@ -5011,7 +5504,12 @@ mod tests {
         // than written out per slot. OpenRouter's copy of this used to be its own function, which
         // is what made it the credential module's coverage gap in the first place.
         let store = FakeSecrets::default();
-        for secret in [Secret::AiDefault, Secret::OpenRouter, Secret::Brave] {
+        for secret in [
+            Secret::AiDefault,
+            Secret::OpenRouter,
+            Secret::Cerebras,
+            Secret::Brave,
+        ] {
             assert_eq!(resolve(&ApiKeyUpdate::Clear, secret, &store), Ok(None));
             assert_eq!(
                 resolve(

@@ -64,16 +64,26 @@ const KNOWN_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
  * Without the alias, llama.cpp answers every request with HTTP 500.
  *
  * So the map is the server's own list: what it named maps to itself, and what it did not is null,
- * which puts it out of the clamp's reach entirely. `off` is never mapped — pi-ai reads a mapped
- * `off` as an instruction of its own.
+ * which puts it out of the clamp's reach entirely.
  *
- * Nothing when the server named no efforts. That connection has one level, `on`, and the effort
- * field never leaves the building.
+ * `off` is mapped only where the model has a word for it. pi-ai reads a mapped `off` as an
+ * instruction of its own — it sends that word as the effort — which is exactly right for a provider
+ * that has one and wrong everywhere else. Only Cerebras' shipped table names one, and only for the
+ * model that honours it: `gemma-4-31b` takes `reasoning_effort: "none"` and comes back having
+ * thought about nothing. Left unmapped, as it is for every other driver, `off` sends no effort
+ * field at all and a model that thinks by default goes on thinking — which is what `off` has always
+ * quietly meant here, and is still what it means wherever no word was named.
+ *
+ * Nothing when the server named no efforts, whatever `offEffort` says. That connection has one
+ * level, `on`, and the effort field never leaves the building — so a word for stopping would have
+ * nowhere to be written. The table cannot produce that pair, and this is where it would be ignored
+ * if it did.
  */
-export function piThinkingLevelMap(levels) {
+export function piThinkingLevelMap(levels, offEffort) {
     const named = new Set(levels ?? [])
     if (named.size === 0) return undefined
-    return Object.fromEntries(
-        KNOWN_EFFORTS.map(effort => [effort, named.has(effort) ? effort : null])
-    )
+    return Object.fromEntries([
+        ...KNOWN_EFFORTS.map(effort => [effort, named.has(effort) ? effort : null]),
+        ...(offEffort ? [['off', offEffort]] : [])
+    ])
 }

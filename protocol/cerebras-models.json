@@ -1,0 +1,28 @@
+{
+    "$comment": "What Gofer knows about each Cerebras model, because Cerebras will not say. `GET https://api.cerebras.ai/v1/models` answers `{id, object, created, owned_by}` and nothing else — no context window, no output ceiling, no tool support, no reasoning. Every other driver reads those facts off a catalogue; this one has none to read, so the facts are measured by hand and shipped here. `scripts/generate-command-surface.mjs` emits `CEREBRAS_MODELS` in `src-tauri/src/settings.rs` from this file, which is what `cerebras_model_options` intersects the live id list against.",
+    "$hiddenComment": "A model this file does not name is not offered. The live endpoint is the authority on which models a key can reach, and this file is the authority on what they can do — so a model Cerebras adds later is invisible until it is measured and added here. Offering it on guessed numbers would be a picker entry whose every request fails on a ceiling nobody checked.",
+    "$noteComment": "`note` is the measurement that produced the row and becomes the Rust doc comment. It is prose, so it is written here and never derived.",
+    "models": [
+        {
+            "id": "gpt-oss-120b",
+            "name": "GPT OSS 120B",
+            "contextWindow": 131000,
+            "maxTokens": 131000,
+            "input": ["text"],
+            "thinkingLevels": ["low", "medium", "high"],
+            "reasoningMandatory": true,
+            "note": "Measured on 2026-08-27. The window is the number the endpoint names itself: a 300,000-token prompt answers HTTP 400 `context_length_exceeded`, \"Current length is 300068 while limit is 131000\". Not 131,072 — the two models on this endpoint do not share a window. Output has no ceiling of its own and shares that window, so `maxTokens` repeats it and `ceiling_within` cuts it down. `image_url` answers 400 \"Content type 'image_url' is not supported by selected model\", so text only. Reasoning is mandatory: the API validator accepts `reasoning_effort: \"none\"` and the chat template then refuses it with \"Unsupported reasoning effort: none. Supported values are 'low', 'medium', and 'high'.\" So this model has no word for stopping and carries no `offEffort`."
+        },
+        {
+            "id": "gemma-4-31b",
+            "name": "Gemma 4 31B IT",
+            "contextWindow": 131072,
+            "maxTokens": 131072,
+            "input": ["text", "image"],
+            "thinkingLevels": ["low", "medium", "high"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-08-27. The window is the endpoint's own number, \"limit is 131072\", and output shares it. `image_url` is accepted, so text and image. `reasoning_effort: \"none\"` is accepted by both the validator and the template, and the reply comes back with no `reasoning` field at all — so unlike its neighbour this model has a real word for stopping, and `off` sends it rather than sending nothing."
+        }
+    ]
+}
