@@ -1250,3 +1250,55 @@ fn registered(worktree: &std::path::Path, path: &str, stamped: &str) {
         cache.display()
     );
 }
+
+/// A scene already at the path is not a scene to create.
+///
+/// `ResourceSaver.save` writes over whatever is there, and a live turn tidying a project sent
+/// `{"op": "create", "path": "scenes/main.tscn", "rootName": "Main", "rootType": "Node2D"}` against
+/// the scene it had open. The whole file became an empty root. The agent noticed and spent the rest
+/// of its turn rebuilding the scene from what it had read earlier; nothing said a word while the
+/// file went.
+#[test]
+fn creating_a_scene_over_one_that_exists_is_refused_rather_than_done() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = fixture_worktree(&directory);
+    let ledger = directory.path().join("ledger.json");
+    let mut session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
+
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://level.tscn", "rootType": "Node2D", "rootName": "Level"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"parent": "/Level", "name": "Player", "type": "Node2D"}),
+    );
+    session.mutate("scene.save", json!({}));
+    let before = std::fs::read_to_string(worktree.join("level.tscn")).expect("the scene");
+    assert!(before.contains("Player"), "{before}");
+
+    let at = session.call("scene.get_tree", json!({}))["revision"]
+        .as_u64()
+        .expect("the scene reports its revision");
+    let refused = session
+        .try_call(
+            "scene.create",
+            json!({"path": "res://level.tscn", "rootType": "Node2D", "rootName": "Level"}),
+            Some(at),
+        )
+        .expect_err("a scene that is already there is refused");
+    assert!(refused.contains("already_exists"), "{refused}");
+    assert!(refused.contains("scene.open"), "{refused}");
+    assert!(refused.contains("scene.save_as"), "{refused}");
+
+    // And the file is exactly as it was.
+    let after = std::fs::read_to_string(worktree.join("level.tscn")).expect("the scene");
+    assert_eq!(before, after, "nothing may be written by a refused create");
+
+    // A path nothing holds is still created.
+    session.mutate(
+        "scene.create",
+        json!({"path": "res://levels/two.tscn", "rootType": "Node2D", "rootName": "Two"}),
+    );
+    assert!(worktree.join("levels/two.tscn").exists());
+}

@@ -3676,6 +3676,23 @@ func _scene_create(params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
+    # A scene already at this path is not a scene to create. `ResourceSaver.save` below writes over
+    # whatever is there, and a live turn tidying a project sent
+    # `{"op": "create", "path": "scenes/main.tscn", "rootName": "Main", "rootType": "Node2D"}`
+    # against the scene it had open — which replaced the whole file with an empty root. It noticed,
+    # and spent the rest of the turn rebuilding the scene from what it had read earlier. Nothing
+    # said a word while the file went.
+    #
+    # The revision check in front of this guards the *unsaved* work in the open scene, which the
+    # summary says; it has nothing to say about a saved file at another path.
+    if FileAccess.file_exists(path):
+        return Params.error(
+            "already_exists",
+            "%s is already a scene, and create writes a new one over whatever is there. " % path
+            + "Open it with scene.open to work on it, or save this one over it with scene.save_as "
+            + "if replacing it is what you meant.",
+            {"path": path}
+        )
     _set_readiness("importing")
     var root: Node = ClassDB.instantiate(root_type) as Node
     if root == null:
