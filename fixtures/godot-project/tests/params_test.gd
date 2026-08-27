@@ -23,6 +23,7 @@ func _initialize() -> void:
         _test_shapes(params, failures)
         _test_input_events(params, failures)
         _test_check_declared(params, failures)
+        _test_climbing_paths(params, failures)
     if failures.is_empty():
         print("Gofer Godot command parameters passed")
         quit(0)
@@ -183,3 +184,43 @@ func _test_check_declared(params: GDScript, failures: Array[String]) -> void:
     # refuses — the field never reaches a handler from there, so accepting it would be silence.
     if params.call("check_declared", "scene.save", {"expectedRevision": 3}).is_empty():
         failures.append("An envelope field sent as a parameter must be refused")
+
+
+## The wire's own backstop against a path that leaves the project.
+##
+## Godot resolves `res://../` out of the project and follows it: measured on the pinned 4.7.2,
+## `Image.save_png("res://../escaped.png")` wrote a directory above the project and answered OK.
+## The router refuses this in Rust before the socket, so this guard only ever fires for a caller
+## with no router in front of it — which is exactly the caller the acceptance suite cannot be.
+##
+## The distinction it has to keep is prose against paths. A Label's `text` may say `../docs/readme`
+## and mean nothing by it, so an unschemed string counts as a path only under a key that names one.
+func _test_climbing_paths(params: GDScript, failures: Array[String]) -> void:
+    var climbs: Array = [
+        ["", "res://../escaped.png"],
+        ["", "user://../escaped.tres"],
+        ["path", "../outside.tscn"],
+        ["path", ".."],
+        ["files", "a/../../b.gd"]
+    ]
+    for case: Array in climbs:
+        if not params.call("climbs_out_of_the_project", case[0], case[1]):
+            failures.append("%s under `%s` climbs out" % [case[1], case[0]])
+
+    var stays: Array = [
+        ["", "res://scenes/main.tscn"],
+        ["path", "res://a/b.gd"],
+        ["text", "../docs/readme"],
+        ["text", ".."],
+        ["path", "a/b/c.gd"]
+    ]
+    for case: Array in stays:
+        if params.call("climbs_out_of_the_project", case[0], case[1]):
+            failures.append("%s under `%s` stays inside" % [case[1], case[0]])
+
+    # The walk finds the first climbing path anywhere in the parameters, however deeply it is held.
+    var nested := {"files": [{"path": "res://ok.gd"}, {"path": "res://../out.gd"}]}
+    if params.call("a_path_that_climbs_out", "", nested) != "res://../out.gd":
+        failures.append("The walk names the climbing path it found: %s" % str(nested))
+    if not str(params.call("a_path_that_climbs_out", "", {"text": "../fine"})).is_empty():
+        failures.append("Prose under a key that names no file is not a path")

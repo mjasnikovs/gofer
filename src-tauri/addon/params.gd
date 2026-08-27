@@ -301,3 +301,59 @@ static func check_declared(command: String, params: Dictionary) -> Dictionary:
                 {"param": name, "takes": accepted}
             )
     return {}
+
+
+## The first path in these parameters that climbs out of the project, or an empty string.
+##
+## Godot resolves `res://../` out of the project and follows it. Measured against the pinned 4.7.2:
+## `Image.save_png("res://../escaped.png")` and `ResourceSaver.save(shape, "res://../escaped.tres")`
+## both wrote one directory above the project, and both answered OK. The router refuses this before
+## the socket; this is the wire's own backstop, which is also the desktop client's.
+##
+## A `..` inside a path, not a `..` inside a value: a Label's text may say anything, so a string
+## counts as a path only when it carries the scheme or a separator.
+static func a_path_that_climbs_out(under: String, value: Variant) -> String:
+    match typeof(value):
+        TYPE_STRING, TYPE_STRING_NAME:
+            if climbs_out_of_the_project(under, str(value)):
+                return str(value)
+        TYPE_ARRAY:
+            for entry: Variant in value as Array:
+                var found := a_path_that_climbs_out(under, entry)
+                if not found.is_empty():
+                    return found
+        TYPE_DICTIONARY:
+            var held: Dictionary = value
+            for key: Variant in held:
+                var found := a_path_that_climbs_out(str(key), held[key])
+                if not found.is_empty():
+                    return found
+    return ""
+
+## The keys whose value is a file, so a `..` in one is a path climbing rather than prose.
+##
+## A node's `text` may say anything, `../docs/readme` included. A string carrying the scheme is a
+## path wherever it sits; everything else has to be named here. `path` covers the nested one a
+## resource value holds.
+const A_KEY_THAT_NAMES_A_FILE: Array[String] = [
+    "path", "paths", "texture", "scene", "file", "files", "from", "to"
+]
+
+## Whether one string is a path, and climbs.
+static func climbs_out_of_the_project(under: String, text: String) -> bool:
+    var path := text
+    var schemed := false
+    if path.begins_with("res://"):
+        path = path.substr(6)
+        schemed = true
+    elif path.begins_with("user://"):
+        path = path.substr(7)
+        schemed = true
+    if not schemed and not A_KEY_THAT_NAMES_A_FILE.has(under):
+        return false
+    if not schemed and path == "..":
+        return true
+    for segment in path.split("/"):
+        if segment == "..":
+            return true
+    return false
