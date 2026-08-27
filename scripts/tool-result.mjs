@@ -164,8 +164,18 @@ function sameWhateverTheOrder(value) {
  * method that is genuinely not there. A guard that guesses the cause is worse than one that names
  * only what it can see: this call, this answer, this many times.
  *
- * Unmeasured. The loops are reproduced and this is not yet shown to break one; what it does
- * guarantee is that the identical string stops going back a third time.
+ * Measured now, and it does not break one. `scratchpad/bench-guard.mjs` poses the loop a live turn
+ * actually reached — three refusals of
+ * `{"op": "instantiate", "parent": "/Main", "path": …, "name': null}]…'}, {": null}` and then this
+ * sentence — and scores whether the next call escapes. Interleaved, four seeds an arm:
+ * **0 of 4 with this sentence alone, and 0 of 4 with the answer it replaced appended to it.**
+ * Every one of the eight sent the identical torn call again.
+ *
+ * So the lever is not a sentence at all, and this one is not it either. What broke that loop was
+ * `drop_the_wreckage_a_complete_call_can_spare` in `tool_params.rs`: the entry was a working call
+ * with an empty key beside it, and taking the key away and running it is the only thing that
+ * reached the goal. What this still guarantees is that the identical string stops going back a
+ * third time.
  */
 export function withoutRepeatingARefusal(tool) {
     const heard = new Map()
