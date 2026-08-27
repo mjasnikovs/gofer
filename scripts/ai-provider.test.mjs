@@ -15,6 +15,7 @@ import {createToolHost} from './ai-host.mjs'
 import {
     createAgentTools,
     createModelContext,
+    outOfRoom,
     readableProviderError,
     retryDelay,
     runAgent
@@ -2181,4 +2182,34 @@ test('a level the server did not name is never what a request settles on', async
     } finally {
         mock.server.close()
     }
+})
+
+/*
+ * Two length limits reach the same `stopReason`, and they need opposite advice.
+ *
+ * A live turn asked to build a whole Breakout spent 16,384 tokens planning — exactly `maxTokens` —
+ * with 84,104 of its 120,064-token window still free, and was told the conversation had no room
+ * left and to point the connection at a model with a larger context window. A larger window would
+ * have changed nothing.
+ *
+ * The number was wrong too, and always was: `usage.input` is the part of the request the provider
+ * did *not* serve from cache, so the same run reported "the request filled 1,000 of 120,064" about
+ * a conversation holding 35,960.
+ */
+test('a length stop names which limit it was, and what the conversation really held', () => {
+    const model = {contextWindow: 120064, maxTokens: 16384}
+
+    // The Breakout run, to the token.
+    const ceiling = outOfRoom({usage: {input: 1000, cacheRead: 34960, output: 16384}}, model)
+    assert.match(ceiling, /whole response limit/u)
+    assert.match(ceiling, /84,104 of its 120,064-token context window still free/u)
+    assert.match(ceiling, /a larger context window would not change it/u)
+    assert.doesNotMatch(ceiling, /no longer leaves room/u)
+
+    // A conversation that genuinely crowded out its reply keeps the old answer — and names what it
+    // really held, cache included, rather than the sliver that missed the cache.
+    const crowded = outOfRoom({usage: {input: 900, cacheRead: 118000, output: 40}}, model)
+    assert.match(crowded, /no longer leaves room/u)
+    assert.match(crowded, /filled 118,900 of the model's 120,064-token/u)
+    assert.match(crowded, /larger context window/u)
 })

@@ -60,7 +60,7 @@ import {piThinkingLevel, piThinkingLevelMap} from './thinking-level.mjs'
 
 // Re-exported rather than moved out of reach: this module's own tests and every caller name it
 // here, and where a sentence is written is not something a caller has an opinion about.
-export {readableProviderError}
+export {readableProviderError, outOfRoom}
 
 const PROVIDER_ID = 'local'
 /**
@@ -191,20 +191,49 @@ function turnFailure(finalMessage, agent) {
 }
 
 /**
- * Says that the conversation left the model no room to answer.
+ * Why the model stopped at a length limit, told apart from the other reason it could have been.
  *
  * A turn that ran out of room is not an answer, and it does not look like a failure either: the
  * model emits a token or two and stops, and every layer above records a complete assistant message
  * whose text is the single word "I". The work carries on against a conversation that can no longer
  * hold a reply, and nothing on screen says why the answers went empty. So it is raised as the error
- * it is, naming the two numbers that explain it and the one thing that fixes it.
+ * it is, naming the numbers that explain it and the one thing that fixes it.
+ *
+ * **Two limits reach this, and they need opposite advice.** `stopReason: 'length'` means *a* length
+ * limit was hit — the conversation crowding out the reply, or the reply reaching its own ceiling —
+ * and until this was split it always said the first. A live turn asked to build a whole Breakout
+ * spent 16,384 tokens planning, which is exactly `maxTokens`, with **84,104 of its 120,064-token
+ * window still free**, and was told the conversation had no room left and to point the connection
+ * at a model with a larger context window. A larger window would have changed nothing.
+ *
+ * **And the number it named was wrong every time.** `usage.input` is the part of the request the
+ * provider did *not* serve from cache, and every turn after the first is nearly all cache — so the
+ * same run reported "the request filled 1,000 of 120,064" about a conversation holding 35,960. What
+ * the conversation holds is `input + cacheRead`.
  */
 function outOfRoom(message, model) {
-    const used = message.usage?.input ?? 0
+    const fresh = message.usage?.input ?? 0
+    const cached = message.usage?.cacheRead ?? 0
+    const held = fresh + cached
     const wrote = message.usage?.output ?? 0
+    const window = model.contextWindow ?? 0
+    const ceiling = model.maxTokens ?? 0
+    const free = window - held
+    // The answer reached its own ceiling with the window still open behind it. Told apart by the
+    // room that was left: a conversation that genuinely crowded out its reply has none.
+    if (ceiling > 0 && wrote >= ceiling && free > ceiling) {
+        return (
+            `The answer ran to its full length and stopped: the model wrote `
+            + `${wrote.toLocaleString()} tokens, which is this connection's whole response limit, `
+            + `with ${free.toLocaleString()} of its ${window.toLocaleString()}-token context window `
+            + `still free. That is a limit on one answer rather than on the conversation, so a `
+            + `larger context window would not change it — ask for less at once, or raise the `
+            + `response limit on this connection.`
+        )
+    }
     return (
         `This conversation no longer leaves room for an answer: the request filled `
-        + `${used.toLocaleString()} of the model's ${model.contextWindow.toLocaleString()}-token `
+        + `${held.toLocaleString()} of the model's ${window.toLocaleString()}-token `
         + `context window, so it stopped after ${wrote.toLocaleString()} token`
         + `${wrote === 1 ? '' : 's'}. Start a new task for the rest of this work — a task carries `
         + `its own conversation — or point the connection at a model with a larger context window.`
