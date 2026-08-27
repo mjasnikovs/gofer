@@ -146,21 +146,34 @@ function readsOnlyThroughGit(command) {
 }
 
 /**
- * A grep's file filter is not the name of a scene.
+ * A search pattern is not the name of a scene.
  *
- * `grep -rn "OldSaveSystem" --include="*.gd" --include="*.tscn" .` searches; it names no file, it
- * cannot write to one, and nothing else in this catalogue searches the *text* of a scene at all —
- * `godot_scene list` names them and `read` opens one. A live turn proving an autoload was dead
- * wrote exactly that command and was told to use the read tool, which cannot answer the question
- * it was asking. Two more in another turn, both grepping for a `uid` across two scenes.
+ * `grep -rn "OldSaveSystem" --include="*.gd" --include="*.tscn" .` and
+ * `find . -name "*.tscn" -not -path "./.godot/*"` both search; neither names a file. Nothing else
+ * in this catalogue searches the *text* of a scene at all — `godot_scene list` names them and
+ * `read` opens one — so a live turn proving an autoload was dead had no other way to ask, and was
+ * told to use the read tool. Five refusals across three turns, every one a read.
  *
- * Only the glob. `grep -c . scenes/level_1.tscn` still names a scene and is still refused: reading
- * one as text is what the read tool is for, which is the line `READS_A_PIPE` already draws by
- * leaving `cat` off it. `--include` and `--exclude` belong to grep and rg and to nothing that
- * writes, and a redirect after one is still a redirect.
+ * These flags belong to grep, rg and find, and none of them designates a file to write. What the
+ * rule above is for is a `.tscn` written behind the editor's back, which raises a modal dialog in
+ * a window the agent cannot reach; a pattern raises none.
+ *
+ * Not when the command can act on what it finds. `-delete` and `-exec` turn a search into a write,
+ * and a redirect writes wherever it points — so a command carrying any of them is read whole, with
+ * its patterns still in it.
+ *
+ * And only the flag's own value. `grep -c . scenes/level_1.tscn` still names a scene and is still
+ * refused: reading one as text is what the read tool is for, which is the line `READS_A_PIPE`
+ * already draws by leaving `cat` off it.
  */
+const ACTS_ON_WHAT_IT_FINDS =
+    /(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fprint|fls|fprintf)(?:\s|$)|[<>]/u
+const SEARCH_PATTERN =
+    /(?:--(?:include|exclude)(?:-dir)?|(?:^|\s)-(?:i?name|i?path|wholename|lname|regex))[=\s]+(?:"[^"]*"|'[^']*'|\S+)/gu
+
 function withoutASearchGlob(command) {
-    return command.replace(/--(?:include|exclude)(?:-dir)?[=\s]+(?:"[^"]*"|'[^']*'|\S+)/gu, ' ')
+    if (ACTS_ON_WHAT_IT_FINDS.test(command)) return command
+    return command.replace(SEARCH_PATTERN, ' ')
 }
 
 function refuseEditorOwnedWrite(toolName, path) {

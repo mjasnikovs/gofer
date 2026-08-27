@@ -473,14 +473,19 @@ test('lets git read a scene it can only ever read', async context => {
     for (const command of [
         'grep -rn "OldSaveSystem" --include="*.gd" --include="*.tscn" .',
         "grep -rln uid --include='*.tscn' scenes",
-        'grep -rn Ticker --include=*.tscn .'
+        'grep -rn Ticker --include=*.tscn .',
+        'find . -type f -name "*.tscn" -not -path "./.godot/*"',
+        'find . -name "*.gd" -o -name "*.tscn"'
     ])
         assert.deepEqual(await tool.execute('7', {command}), asRun(command))
 
-    // The glob and nothing else: a scene named as a file, or written to after one, is unchanged.
+    // The pattern and nothing else. A scene named as a file, a redirect after a search, and a
+    // search that acts on what it finds are all still what the rule is for.
     for (const command of [
         'grep -rn X --include="*.gd" . scenes/level_1.tscn',
-        'grep -rn X --include="*.gd" . > scenes/level_1.tscn'
+        'grep -rn X --include="*.gd" . > scenes/level_1.tscn',
+        'find . -name "*.tscn" -delete',
+        'find . -name "*.tscn" -exec sed -i "s/a/b/" {} +'
     ])
         await assert.rejects(tool.execute('8', {command}), /godot_scene|godot_project/u)
 })
