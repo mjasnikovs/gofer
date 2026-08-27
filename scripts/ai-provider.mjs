@@ -57,7 +57,8 @@ import {toolTarget} from './tool-target.mjs'
 import {withoutPackedLiterals} from './scene-text.mjs'
 import {confineTool} from './workspace-confinement.mjs'
 import {readableProviderError} from './provider-error.mjs'
-import {piThinkingLevel, piThinkingLevelMap} from './thinking-level.mjs'
+import {piThinkingLevel} from './thinking-level.mjs'
+import {piModel} from './pi-model.mjs'
 
 // Re-exported rather than moved out of reach: this module's own tests and every caller name it
 // here, and where a sentence is written is not something a caller has an opinion about.
@@ -95,7 +96,6 @@ const DRIVER_NAMES = {
     cerebras: 'Cerebras'
 }
 
-const DEFAULT_CONTEXT_WINDOW = 120_064
 /**
  * How full the context may get before the old part of it is summarised away.
  *
@@ -338,65 +338,17 @@ async function compactMessages(messages, models, model, settings, thinkingLevel,
 }
 
 /**
- * One connection and the model on it, as pi-ai describes a model.
+ * One connection and the model on it, for this worker's callers.
  *
- * Two halves, and which half a field comes from is the whole of the split: the address, the dialect
- * and how thinking is turned on belong to the connection, and everything the model carries with it
- * belongs to the model. A sub-agent is that same pair with the second half replaced.
+ * The shape is `pi-model.mjs`'s and shared with the docs sidecar. What is decided here is the two
+ * facts that are this worker's: which provider the model is registered under, and that only a local
+ * server holds a KV cache a session header could route back to.
  */
 function modelFor(connection, providerId = PROVIDER_ID) {
-    const chosen = connection.model ?? {}
-    const thinkingLevelMap = piThinkingLevelMap(chosen.thinkingLevels, chosen.offEffort)
-    // Only a local server holds a KV cache a session header could route back to. See the field.
-    const isLocal = providerId === PROVIDER_ID
-    return {
-        id: chosen.id,
-        name: chosen.name || chosen.id,
-        api: 'openai-completions',
-        provider: providerId,
-        baseUrl: connection.baseUrl,
-        reasoning: chosen.reasoning ?? false,
-        input: chosen.input ?? ['text'],
-        cost: chosen.cost ?? {input: 0, output: 0, cacheRead: 0, cacheWrite: 0},
-        contextWindow: chosen.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        maxTokens: chosen.maxTokens ?? chosen.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        // The efforts this server named, so pi-ai asks at the one that was picked rather than at the
-        // nearest one it believes in. See `piThinkingLevelMap`.
-        ...(thinkingLevelMap ? {thinkingLevelMap} : {}),
-        compat: {
-            supportsDeveloperRole: false,
-            supportsReasoningEffort: chosen.supportsReasoningEffort ?? false,
-            // A llama.cpp host turns thinking on with a chat-template argument and ignores
-            // `reasoning_effort` without a word. Sending only the effort field is why the reasoning
-            // level did nothing at all for a local model: the server accepted the request, the
-            // template never saw the switch, and the model thought or did not think according to
-            // whatever the server was started with.
-            ...(connection.chatTemplateThinking ?
-                {
-                    thinkingFormat: 'chat-template',
-                    chatTemplateKwargs: {
-                        enable_thinking: {$var: 'thinking.enabled'},
-                        // So a turn that thought still shows what it thought when it is replayed as
-                        // context. Without it the template drops the reasoning of every prior turn.
-                        preserve_thinking: true,
-                        // Only where the template has efforts to name. Passing one it does not know
-                        // puts an unknown key in the kwargs of every single request.
-                        ...(chosen.supportsReasoningEffort ?
-                            {reasoning_effort: {$var: 'thinking.effort', omitWhenOff: true}}
-                        :   {})
-                    }
-                }
-            :   {}),
-            // The same story, told to a local server. `prompt_cache_key` is an OpenAI field and a
-            // local endpoint never sees one, so the session travels as headers instead: anything
-            // holding a KV cache per session — a proxy, a second worker — can route the ask back to
-            // the machine that already has this task's prefix rather than recomputing it.
-            //
-            // Off for every hosted driver. The header exists to reach a machine that already
-            // holds this prefix, and behind those addresses there is no such machine to reach.
-            sendSessionAffinityHeaders: isLocal
-        }
-    }
+    return piModel(connection, {
+        providerId,
+        sessionAffinity: providerId === PROVIDER_ID
+    })
 }
 
 /**
