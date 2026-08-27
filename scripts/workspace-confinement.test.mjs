@@ -466,6 +466,23 @@ test('lets git read a scene it can only ever read', async context => {
 
     // And git is not a way past the other rules: an absolute path is still an absolute path.
     await assert.rejects(tool.execute('6', {command: 'git diff -- /etc/passwd'}), /absolute/u)
+
+    // A search glob is not the name of a scene. Nothing in the catalogue searches the *text* of a
+    // scene — `godot_scene list` names them and `read` opens one — so a turn proving an autoload
+    // was dead had no other way to ask, and was told to use the read tool.
+    for (const command of [
+        'grep -rn "OldSaveSystem" --include="*.gd" --include="*.tscn" .',
+        "grep -rln uid --include='*.tscn' scenes",
+        'grep -rn Ticker --include=*.tscn .'
+    ])
+        assert.deepEqual(await tool.execute('7', {command}), asRun(command))
+
+    // The glob and nothing else: a scene named as a file, or written to after one, is unchanged.
+    for (const command of [
+        'grep -rn X --include="*.gd" . scenes/level_1.tscn',
+        'grep -rn X --include="*.gd" . > scenes/level_1.tscn'
+    ])
+        await assert.rejects(tool.execute('8', {command}), /godot_scene|godot_project/u)
 })
 
 /**

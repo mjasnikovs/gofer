@@ -145,6 +145,24 @@ function readsOnlyThroughGit(command) {
     )
 }
 
+/**
+ * A grep's file filter is not the name of a scene.
+ *
+ * `grep -rn "OldSaveSystem" --include="*.gd" --include="*.tscn" .` searches; it names no file, it
+ * cannot write to one, and nothing else in this catalogue searches the *text* of a scene at all —
+ * `godot_scene list` names them and `read` opens one. A live turn proving an autoload was dead
+ * wrote exactly that command and was told to use the read tool, which cannot answer the question
+ * it was asking. Two more in another turn, both grepping for a `uid` across two scenes.
+ *
+ * Only the glob. `grep -c . scenes/level_1.tscn` still names a scene and is still refused: reading
+ * one as text is what the read tool is for, which is the line `READS_A_PIPE` already draws by
+ * leaving `cat` off it. `--include` and `--exclude` belong to grep and rg and to nothing that
+ * writes, and a redirect after one is still a redirect.
+ */
+function withoutASearchGlob(command) {
+    return command.replace(/--(?:include|exclude)(?:-dir)?[=\s]+(?:"[^"]*"|'[^']*'|\S+)/gu, ' ')
+}
+
 function refuseEditorOwnedWrite(toolName, path) {
     if (!WRITING_TOOLS.includes(toolName)) return
     const owned = EDITOR_OWNED.find(entry => entry.matches(path))
@@ -299,7 +317,7 @@ export function validateBashCommand(command) {
                 + 'with godot_runtime wait, which renders the frames before it answers — '
                 + '{"op": "wait", "frames": 30} or {"op": "wait", "ms": 500}.'
         )
-    if (EDITOR_OWNED_IN_SHELL.test(command) && !readsOnlyThroughGit(command))
+    if (EDITOR_OWNED_IN_SHELL.test(withoutASearchGlob(command)) && !readsOnlyThroughGit(command))
         throw new Error(
             'Shell commands cannot name a scene or project.godot. Read one with the read tool, '
                 + 'and change it with godot_scene, godot_node and godot_project, which write it '
