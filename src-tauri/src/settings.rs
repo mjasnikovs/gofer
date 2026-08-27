@@ -399,6 +399,31 @@ pub(crate) enum AiConnectionType {
     Cerebras,
 }
 
+impl AiConnectionType {
+    /// The one stored key this driver authenticates with, or `None` when it takes none.
+    ///
+    /// A key sent to the wrong address is a key handed to a machine that was never meant to see
+    /// it, so this is the only place the pairing is written down. ChatGPT is the `None`: it
+    /// authenticates with an OAuth credential and reads no key at all, which is why a missing
+    /// credential there reads as "Sign in with ChatGPT" rather than as an error.
+    ///
+    /// `Credentials::for_driver` is this rule inverted — one key placed into the slot its driver
+    /// reads — and the acceptance suites are what hold the two to each other.
+    pub(crate) fn key_from(
+        self,
+        api_key: Option<String>,
+        openrouter_api_key: Option<String>,
+        cerebras_api_key: Option<String>,
+    ) -> Option<String> {
+        match self {
+            Self::OpenaiCodex => None,
+            Self::OpenaiCompatible => api_key,
+            Self::Openrouter => openrouter_api_key,
+            Self::Cerebras => cerebras_api_key,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ApiDialect {
@@ -1228,15 +1253,7 @@ pub(crate) fn docs_expansion_connection(
         base_url: connection.base_url.clone(),
         model: model.id.clone(),
         model_name: model.name.clone(),
-        // ChatGPT authenticates with the credential above and takes no key. The other three each
-        // take their own, from their own keyring slot — a key sent to the wrong address is a key
-        // handed to a machine that was never meant to see it.
-        api_key: match driver {
-            AiConnectionType::OpenaiCodex => None,
-            AiConnectionType::OpenaiCompatible => api_key,
-            AiConnectionType::Openrouter => openrouter_api_key,
-            AiConnectionType::Cerebras => cerebras_api_key,
-        },
+        api_key: driver.key_from(api_key, openrouter_api_key, cerebras_api_key),
         thinking_level: model.thinking_level.clone(),
         context_window: model.context_window,
         max_tokens: model.max_tokens,
@@ -2944,6 +2961,40 @@ fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every driver reads exactly one key, and it is the one its own keyring slot holds.
+    ///
+    /// The rule is written once, on the enum, because a key sent to the wrong address is a key
+    /// handed to a machine that was never meant to see it. This states the whole table so that
+    /// adding a fifth driver has to say which key it reads rather than silently reading none.
+    #[test]
+    fn a_driver_reads_the_key_its_own_slot_holds() {
+        let keys = || {
+            (
+                Some("local".to_owned()),
+                Some("openrouter".to_owned()),
+                Some("cerebras".to_owned()),
+            )
+        };
+        let read = |driver: AiConnectionType| {
+            let (api, openrouter, cerebras) = keys();
+            driver.key_from(api, openrouter, cerebras)
+        };
+        assert_eq!(
+            read(AiConnectionType::OpenaiCompatible),
+            Some("local".to_owned())
+        );
+        assert_eq!(
+            read(AiConnectionType::Openrouter),
+            Some("openrouter".to_owned())
+        );
+        assert_eq!(
+            read(AiConnectionType::Cerebras),
+            Some("cerebras".to_owned())
+        );
+        // ChatGPT authenticates with an OAuth credential and takes no key at all.
+        assert_eq!(read(AiConnectionType::OpenaiCodex), None);
+    }
     use crate::{list_ai_models, test_ai_connection};
     use std::io::{Read, Write};
     use std::net::TcpListener;
