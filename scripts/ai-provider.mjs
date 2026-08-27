@@ -651,6 +651,7 @@ export async function runAgent({
     workspacePath,
     memoryContext,
     sessionContext,
+    inventory,
     tools: domains,
     host,
     credentialHost,
@@ -836,7 +837,7 @@ export async function runAgent({
             // The prompt arrives whole: the backend composes what it ships, the settings page
             // shows that text, and a project that edited it sends its own. Memory is the one thing
             // appended here, because it is this turn's data rather than the user's instructions.
-            systemPrompt: `${systemPrompt}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}${sessionContext ? `\n\n${sessionContext}` : ''}`,
+            systemPrompt: `${systemPrompt}${memoryContext ? `\n\nRelevant persistent project memory:\n${memoryContext}` : ''}${sessionContext ? `\n\n${sessionContext}` : ''}${inventory ? `\n\n${inventory}` : ''}`,
             model,
             thinkingLevel: parentThinkingLevel(settings),
             tools,

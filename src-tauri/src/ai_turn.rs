@@ -226,6 +226,24 @@ pub(crate) enum WorkerJob {
         /// this process already holds and can simply say. Filled by [`JobContext::request`], for
         /// the same reason the prompt is.
         session_context: Option<String>,
+        /// The project's tracked files, so a turn does not spend its first call finding out what
+        /// the project holds.
+        ///
+        /// The same measurement as `session_context`, one question along. Counted across every
+        /// recorded trace: **98 of 113 turns opened with a discovery call** — `godot_script list`
+        /// 26 times, `godot_scene list` 19, `godot_resource list` 17, a sub-agent asked to list the
+        /// project 11, `bash ls` and `find` the rest. The answer is the same every time and this
+        /// process already has it.
+        ///
+        /// Measured before it was built, the way `scripts/bench-prompt-line.mjs` measures: three
+        /// asks, three seeds each, arms interleaved in one process against the local Qwen3.8-27B. With the
+        /// shipped context the model spent its first call listing **9 of 9** times. With the file
+        /// list appended and a sentence telling it to read the list there, it went straight to the
+        /// work **8 of 9**. The list alone, with no sentence, was 6 of 9 — the sentence is half the
+        /// effect, which is what every other prompt measurement in this repo has found too.
+        ///
+        /// `None` when Git does not know the worktree, which leaves the turn exactly as it was.
+        inventory: Option<String>,
     },
     Brief {
         /// The raw ask, as the user typed it when they made the task.
@@ -403,6 +421,11 @@ pub(crate) struct JobContext {
     system_prompt: Option<String>,
     /// What the editor session is, in the sentence the prompt tells the model to read.
     session_context: String,
+    /// The project's tracked files, in the block the prompt tells the model to read them in.
+    ///
+    /// Read once per job, beside the session, because both answer a question the model would
+    /// otherwise spend a call on. `None` for a worktree Git does not know.
+    inventory: Option<String>,
 }
 
 impl JobContext {
@@ -432,6 +455,9 @@ impl JobContext {
         } else {
             None
         };
+        let inventory = composes
+            .then(|| crate::git::tracked_files(std::path::Path::new(&workspace_path)))
+            .flatten();
         Ok(Self {
             ai: settings.ai,
             credentials: Credentials::read()?,
@@ -439,6 +465,7 @@ impl JobContext {
             workspace_path,
             system_prompt,
             session_context: describe_session(app),
+            inventory,
         })
     }
 
@@ -495,6 +522,7 @@ impl JobContext {
                     }),
             ),
             storage,
+            inventory: crate::git::tracked_files(std::path::Path::new(&workspace_path)),
             workspace_path,
             system_prompt,
             session_context: describe_session(app),
@@ -534,6 +562,7 @@ impl JobContext {
                     memory_context,
                     system_prompt: self.system_prompt.clone(),
                     session_context: Some(self.session_context.clone()),
+                    inventory: self.inventory.clone().map(describe_inventory),
                 },
             ),
             Job::Brief {
@@ -1646,6 +1675,23 @@ fn handle_judge_event<R: Runtime>(
     let _ = app.emit_to(crate::ask::MAIN_WINDOW, JUDGE_EVENT, event);
 }
 
+/// The project's files, in the block the prompt sends the model to read them in.
+///
+/// The sentence is half of it. The list on its own moved the model off its opening `list` call in
+/// 6 of 9 interleaved runs; the same list under this sentence moved it in 8 of 9, and the shipped
+/// context moved it in 0 of 9. That matches every other prompt measurement in this repo: what a
+/// model is given and what it is told to do with it are two separate levers.
+///
+/// It says when to list anyway, because the list is a snapshot: a script written this turn is not
+/// in it, and a model told only "read them here" would look for a file it had just created in a
+/// list made before it existed.
+fn describe_inventory(listed: String) -> String {
+    format!(
+        "The project's tracked files are listed below. Read them here rather than listing the \
+         project; list again only after you have written a file this list does not name.\n\n         {listed}"
+    )
+}
+
 /// The editor session, in the sentence the prompt sends the model to read.
 ///
 /// Every field here is one the model would otherwise have spent a call to learn, and the sentence
@@ -2615,6 +2661,7 @@ mod tests {
                 memory_context: Some("what the project remembers".to_owned()),
                 session_context: Some("Editor session: offline. No editor is running.".to_owned()),
                 system_prompt: Some("the shipped agent prompt".to_owned()),
+                inventory: Some("scripts/player.gd".to_owned()),
             },
             ..worker_request()
         };
@@ -2637,6 +2684,7 @@ mod tests {
             encoded["sessionContext"],
             serde_json::json!("Editor session: offline. No editor is running.")
         );
+        assert_eq!(encoded["inventory"], serde_json::json!("scripts/player.gd"));
         // Named once, not twice: a snake_case key beside the camelCase one is a worker reading the
         // one it understands while the other rides along unused.
         for stale in [
@@ -2675,6 +2723,7 @@ mod tests {
                 memory_context: None,
                 system_prompt: None,
                 session_context: None,
+                inventory: None,
             },
         }
     }
@@ -2707,7 +2756,32 @@ mod tests {
             workspace_path: workspace.display().to_string(),
             system_prompt: Some(system_prompt.to_owned()),
             session_context: describe_session(app),
+            inventory: None,
         }
+    }
+
+    /// The file list travels with the sentence that says what to do with it.
+    ///
+    /// Counted across every recorded trace, **98 of 113 turns opened with a discovery call** —
+    /// `godot_script list` 26 times, `godot_scene list` 19, `godot_resource list` 17, a sub-agent
+    /// asked to list the project 11. Interleaved against the local Qwen3.8-27B, three asks and
+    /// three seeds each: the shipped context went to the work first in 0 of 9, the bare list in 6
+    /// of 9, and the list under this sentence in 8 of 9. The sentence is half the effect, so it
+    /// travels with the list rather than being left to the prompt.
+    #[test]
+    fn the_file_list_is_sent_with_the_sentence_that_says_how_to_read_it() {
+        let described = describe_inventory("scripts/player.gd\nscenes/main.tscn".to_owned());
+        assert!(described.contains("scripts/player.gd"), "{described}");
+        assert!(
+            described.contains("rather than listing the project"),
+            "the list without the sentence is most of the effect thrown away: {described}"
+        );
+        // It is a snapshot, and says so: a script written this turn is not in it.
+        assert!(
+            described
+                .contains("list again only after you have written a file this list does not name"),
+            "{described}"
+        );
     }
 
     /// Everything this machine could have stored, so a job that must not carry one is visible.

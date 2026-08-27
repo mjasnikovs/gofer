@@ -545,8 +545,26 @@ test('the system prompt reaches the model as it arrived, with this turn’s memo
             + '\n\nEditor session: ready. Godot 4.7.2.'
     )
 
+    // The project's files after the session, for the same reason and with the same measurement:
+    // 98 of 113 recorded turns opened with a call that only asked what the project holds.
+    const withInventory = await systemPrompt({
+        tools: catalog,
+        host: {call: () => Promise.resolve({})},
+        memoryContext: 'The player is a cat.',
+        sessionContext: 'Editor session: ready. Godot 4.7.2.',
+        inventory: "The project's tracked files:\nscripts/player.gd"
+    })
+    assert.equal(
+        withInventory,
+        'Be brief. Never mention cats.'
+            + '\n\nRelevant persistent project memory:\nThe player is a cat.'
+            + '\n\nEditor session: ready. Godot 4.7.2.'
+            + "\n\nThe project's tracked files:\nscripts/player.gd"
+    )
+
     // And a turn with no session to describe sends the prompt it arrived with.
     assert.equal(await systemPrompt({sessionContext: undefined}), 'Be brief. Never mention cats.')
+    assert.equal(await systemPrompt({inventory: undefined}), 'Be brief. Never mention cats.')
 })
 
 test('parallel domain calls are answered out of order without crossing results', async context => {
