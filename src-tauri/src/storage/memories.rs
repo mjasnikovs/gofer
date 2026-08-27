@@ -774,6 +774,94 @@ mod tests {
         assert_eq!(embeddings, 0);
     }
 
+    /// Two memories the fusion scored the same have to come back in the same order every time.
+    ///
+    /// `scores` is a `HashMap` and `into_iter` walks it in no order at all, so a tie was broken by
+    /// whatever the map felt like — the same question answered differently run to run, with nothing
+    /// about either answer wrong. The six this returns are sent to the model on every turn, and a
+    /// prompt cache is a run of bytes: two of them swapping places re-buys the whole conversation
+    /// behind them.
+    ///
+    /// A tie needs one memory found only by its words and another found only by its vector, at the
+    /// same position in their own list — the two reciprocal ranks are then the same number and the
+    /// scores are equal. Six pairs of those, with ids chosen so the tie-break has something to say:
+    /// every vector-only id sorts before every text-only one, so an answer that is not in id order
+    /// within a pair is the map's order rather than the comparator's.
+    #[test]
+    fn memories_the_fusion_scored_the_same_come_back_in_the_same_order() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let save = |id: String, content: String| {
+            storage
+                .memory()
+                .upsert(&UpsertMemoryRequest {
+                    id: Some(id),
+                    task_id: None,
+                    kind: "fact".to_owned(),
+                    state: "confirmed".to_owned(),
+                    content,
+                    provenance: serde_json::json!({"source": "user"}),
+                    superseded_by: None,
+                })
+                .expect("save memory")
+        };
+
+        let mut query_vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
+        query_vector[0] = 1.0;
+        for index in 0..6 {
+            // Found by its words, never by a vector: no embedding is ever saved for it.
+            save(
+                format!("ffffffff-0000-7000-8000-00000000000{index}"),
+                format!("The player controller is a CharacterBody2D, note {index}"),
+            );
+            // Found by its vector, never by the words: nothing in it matches the question.
+            let vectored = save(
+                format!("00000000-0000-7000-8000-00000000000{index}"),
+                format!("The wind moves the grass, note {index}"),
+            );
+            // Spaced apart so the six of them rank 1 to 6 rather than tying with each other.
+            let mut vector = query_vector.clone();
+            vector[1] = index as f32 / 100.0;
+            storage
+                .memory()
+                .save_embedding(&SaveMemoryEmbeddingRequest {
+                    memory_id: vectored.id,
+                    model: MEMORY_EMBEDDING_MODEL.to_owned(),
+                    vector,
+                })
+                .expect("save embedding");
+        }
+
+        let results = storage
+            .memory()
+            .search(&SearchMemoryRequest {
+                query: "player controller CharacterBody2D".to_owned(),
+                task_id: None,
+                vector: Some(query_vector),
+                limit: Some(12),
+            })
+            .expect("search memory");
+
+        let tied = results
+            .windows(2)
+            .filter(|pair| pair[0].score == pair[1].score)
+            .count();
+        assert!(
+            tied > 0,
+            "this proves nothing unless the scores actually tie"
+        );
+        for pair in results.windows(2) {
+            if pair[0].score == pair[1].score {
+                assert!(
+                    pair[0].memory.id < pair[1].memory.id,
+                    "two memories scored the same came back in the map's order, not the id's: {} then {}",
+                    pair[0].memory.id,
+                    pair[1].memory.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn memories_without_vectors_are_reported_and_deletions_clear_the_vector_index() {
         let directory = TempDir::new().expect("temporary directory");
