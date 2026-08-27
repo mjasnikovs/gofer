@@ -456,10 +456,36 @@ const EVENT_KINDS: Array[String] = [
     "key", "mouse_button", "mouse_motion", "joypad_button", "joypad_motion"
 ]
 
+## Whether an event that does not spell `pressed` is a press or the release of the one before it.
+##
+## `pressed` used to default to `true` for every event, and the catalogue says "send the release as
+## a second event, or the key stays down" — so a model that read that and wrote the same event twice
+## sent two presses and no release. A Godot `Button` emits `pressed` on the button *up*, so a menu
+## clicked that way never opens. Measured against 4.7.2 in a windowed game: press then release fires
+## it once, two presses fire it not at all. One live turn spent **twenty calls** on a Start button
+## that way — every call answered `applied: 2`, every one changing nothing, and no error anywhere.
+##
+## So an event with no `pressed` alternates on its own identity within one call: the first is the
+## press, the second is the release, the third is a press again. An event that spells `pressed` is
+## left exactly as it was written, which is every call the acceptance suite makes.
+##
+## The identity is the kind and the key or button, not the position: a click is a press and a
+## release of the same button, wherever the pointer is.
+func _pressed_or_released(entry: Dictionary, held: Dictionary, identity: String) -> bool:
+    if entry.has("pressed"):
+        return bool(entry["pressed"])
+    var down: bool = not bool(held.get(identity, false))
+    held[identity] = down
+    return down
+
+
 func _decode_runtime_events(raw: Variant) -> Dictionary:
     if typeof(raw) != TYPE_ARRAY:
         return _decode_failed("events must be an array of input event objects")
     var events: Array = []
+    # Which buttons and keys this call has already put down, so an event that does not spell
+    # `pressed` alternates rather than repeating. See `_pressed_or_released`.
+    var held := {}
     for entry in raw:
         if typeof(entry) != TYPE_DICTIONARY:
             return _decode_failed("an input event must be an object carrying a kind")
@@ -478,7 +504,7 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 # simply did not move — with no error anywhere to say why.
                 key_event.keycode = code
                 key_event.physical_keycode = code
-                key_event.pressed = bool((entry as Dictionary).get("pressed", true))
+                key_event.pressed = _pressed_or_released(entry as Dictionary, held, "key:%d" % code)
                 events.append(key_event)
             "mouse_button":
                 var button_name: Variant = (entry as Dictionary).get("button", "left")
@@ -504,7 +530,9 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                         return _decode_failed("A mouse_button event requires a button index of 1 or higher")
                 var mouse_event := InputEventMouseButton.new()
                 mouse_event.button_index = button_index
-                mouse_event.pressed = bool((entry as Dictionary).get("pressed", true))
+                mouse_event.pressed = _pressed_or_released(
+                    entry as Dictionary, held, "mouse:%d" % button_index
+                )
                 var position := _point((entry as Dictionary).get("position", [0, 0]))
                 mouse_event.position = position
                 mouse_event.global_position = position
@@ -521,7 +549,9 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                     return _decode_failed("A joypad_button event requires a button index")
                 var joypad_event := InputEventJoypadButton.new()
                 joypad_event.button_index = pad_button
-                joypad_event.pressed = bool((entry as Dictionary).get("pressed", true))
+                joypad_event.pressed = _pressed_or_released(
+                    entry as Dictionary, held, "pad:%d" % pad_button
+                )
                 events.append(joypad_event)
             "joypad_motion":
                 var axis := int((entry as Dictionary).get("axis", -1))

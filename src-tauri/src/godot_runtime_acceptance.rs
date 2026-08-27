@@ -363,6 +363,31 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     assert_eq!(click["applied"], 2, "press and release are both applied");
     assert_eq!(label_text(&session), "presses: 2 (mouse)");
 
+    // The release a caller did not spell.
+    //
+    // Every call above says `pressed` both times, and every call a model writes does not: the
+    // catalogue says "send the release as a second event", and a model that reads that writes the
+    // same event twice. `pressed` used to default to `true`, so that was two presses and no
+    // release — and a Godot `Button` answers the button *up*, so a menu clicked that way never
+    // opens. One live turn spent twenty calls on a Start button, each answered `applied: 2` and
+    // each changing nothing.
+    //
+    // The probe counts presses, so two presses would count two. One is the assertion that the
+    // second event was read as the release.
+    let unspelled = session.call(
+        "runtime.input",
+        json!({"events": [
+            {"kind": "mouse_button", "button": "left", "position": [10, 10], "device": INJECTED_DEVICE},
+            {"kind": "mouse_button", "button": "left", "position": [10, 10], "device": INJECTED_DEVICE},
+        ]}),
+    );
+    assert_eq!(unspelled["applied"], 2, "both events are still injected");
+    assert_eq!(
+        label_text(&session),
+        "presses: 3 (mouse)",
+        "an event that does not spell `pressed` is the press and then the release, not two presses"
+    );
+
     let pad = session.call(
         "runtime.input",
         json!({"events": [
@@ -371,7 +396,7 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         ]}),
     );
     assert_eq!(pad["applied"], 2, "press and release are both applied");
-    assert_eq!(label_text(&session), "presses: 3 (gamepad)");
+    assert_eq!(label_text(&session), "presses: 4 (gamepad)");
 
     assert!(
         session

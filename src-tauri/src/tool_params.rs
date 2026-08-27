@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:7aad2907045aaf9c
+// GENERATED-BEGIN operations sha256:bab5e4d78fee616e
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1829,7 +1829,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
     op(
         "godot_runtime",
         "input",
-        "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
+        "Injects input and captures the result. Each event names its kind and the parameters that kind uses, as {\"kind\": \"key\", \"key\": \"A\", \"pressed\": true} — send the release as a second event, or the key stays down. An event that leaves `pressed` out alternates on its own: the first is the press and the second the release, so a click is the same event written twice. A Button answers the release, not the press. The named keys are in the signature; F1 to F16, A to Z and 0 to 9 are spelled as they read. A mouse button is named left, right, middle, wheel_up or wheel_down, or given as an index. A position is [x, y]. This drives the Input Map, so it is how you check that a level you built can actually be played. Its answer carries a frame, unless a later entry of the same call carries one too: a picture another picture replaces is not worth sending, and a moment in the middle of a key sequence is what capture is for.",
         Answers::Addon("runtime.input"),
         &[noted(
             shaped(
