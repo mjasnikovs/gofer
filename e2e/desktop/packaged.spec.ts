@@ -192,21 +192,20 @@ describe('packaged desktop application', () => {
         )
         const stopButton = browser.$('button[aria-label*="Stop"]')
         await stopButton.click()
-        // Retry appears only once the last assistant message is `error` or `aborted`, so a Retry
-        // that never arrives is a stop that never landed — and "not displayed" says nothing about
-        // which half failed. The first Windows run to reach this line had no Retry and no evidence,
-        // so the state the assertion reads is printed with it: whether the stop was accepted, and
-        // what the stored conversation looks like from the backend's own side.
-        // A minute, against the suite's 15-second default, and the number is measured rather than
-        // picked. Two Windows runs failed here at exactly 15 seconds and the diagnostic below then
-        // found the button already drawn and the stored message already `aborted` — so the stop had
-        // landed and the wait was simply short. The same journey takes under seven seconds end to
-        // end on Linux. What has not been explained is why: both Windows runs also logged
-        // `WebDriverError: The request timed out when running "execute/sync"` about twenty seconds
-        // in, which stalls every command queued behind it, and that stall is the thing still worth
-        // chasing. This wait is long enough to survive it, not an excuse not to.
+        // Retry is drawn only when the last assistant message is `error` or `aborted`, so its
+        // absence would mean the stop never landed. On Windows it is drawn and the assertion still
+        // fails: three runs now have ended here with the stored message already `aborted` and the
+        // word "Retry" inside `body.getText()`, which returns rendered text. Waiting longer does
+        // not help — sixty seconds failed exactly as fifteen did — so this is not the runner being
+        // slow, it is `button*=Retry` resolving to something WebView2 calls undisplayed while
+        // WebKitGTK does not.
+        //
+        // `tag*=text` is XPath `.//button[contains(., "Retry")]` and `$` answers with the first
+        // match in document order, so a hidden button whose text contains the word wins over the
+        // real one. The diagnostic below asks every candidate what it is rather than guessing which:
+        // its size, what the driver says about displayedness, and its markup.
         try {
-            await expect(browser.$('button*=Retry')).toBeDisplayed({wait: 60_000})
+            await expect(browser.$('button*=Retry')).toBeDisplayed()
         } catch (failure) {
             const chat = await command<{messages: {text: string; status?: string}[]}>(
                 'load_chat',
@@ -215,9 +214,22 @@ describe('packaged desktop application', () => {
             const stored = chat.messages.map(
                 message => `${message.status ?? 'no-status'}: ${message.text.slice(0, 60)}`
             )
+            const candidates = browser.$$('button*=Retry')
+            const described: string[] = []
+            for (const candidate of candidates) {
+                const size = await candidate.getSize()
+                const displayed = await candidate.isDisplayed()
+                const html = await candidate.getHTML({includeSelectorTag: true})
+                described.push(
+                    `displayed=${String(displayed)} ${String(size.width)}x${String(size.height)} `
+                        + html.slice(0, 300)
+                )
+            }
             const body = await browser.$('body').getText()
             throw new Error(
-                `--- stored messages ---\n${stored.join('\n')}\n--- body ---\n${body}`,
+                `--- stored messages ---\n${stored.join('\n')}`
+                    + `\n--- button*=Retry candidates (${String(described.length)}) ---\n`
+                    + `${described.join('\n')}\n--- body ---\n${body}`,
                 {cause: failure}
             )
         }
