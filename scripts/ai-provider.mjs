@@ -65,37 +65,45 @@ import {DEFAULT_SEARCH_PROVIDER, TUNING_DEFAULTS} from './tuning-defaults.mjs'
 // here, and where a sentence is written is not something a caller has an opinion about.
 export {readableProviderError, outOfRoom}
 
-const PROVIDER_ID = 'local'
-/**
- * OpenRouter's own provider id, so both key-based connections can be registered at once.
- *
- * Required, not tidiness: a `Models` is keyed by provider id, and a parent on a local server with
- * a sub-agent on OpenRouter needs two live registrations with two different addresses and two
- * different credentials.
- */
-const OPENROUTER_PROVIDER_ID = 'openrouter'
-/** Cerebras' own provider id, for the reason above. A third hosted driver is a third registration. */
-const CEREBRAS_PROVIDER_ID = 'cerebras'
+// GENERATED-BEGIN drivers sha256:91516ff3c944f6c4
+/** Every driver a build knows, in the order the pickers offer them. */
+export const DRIVERS = ['openai-compatible', 'openai-codex', 'openrouter', 'cerebras']
 
-/**
- * Which pi-ai provider answers each driver, which is the one map every caller reads.
- *
- * Two-armed ternaries asking "OpenRouter or local?" were the shape this replaces. There were four
- * of them, they each had to be found when a driver was added, and the one that was missed sent a
- * key to the wrong address rather than failing. A driver is added here once.
- */
+/** Which pi-ai provider answers each driver. ChatGPT has none: pi-ai ships its own. */
 const PROVIDER_IDS = {
-    'openai-compatible': PROVIDER_ID,
-    openrouter: OPENROUTER_PROVIDER_ID,
-    cerebras: CEREBRAS_PROVIDER_ID
+    'openai-compatible': 'local',
+    openrouter: 'openrouter',
+    cerebras: 'cerebras'
 }
 
-/** What each driver is called in the one sentence a user reads when its connection is missing. */
+/** What each driver is called in the one sentence a user reads about its connection. */
 const DRIVER_NAMES = {
     'openai-compatible': 'local',
+    'openai-codex': 'ChatGPT',
     openrouter: 'OpenRouter',
     cerebras: 'Cerebras'
 }
+
+/**
+ * The hosted drivers `createModelContext` has to build a provider for, in order.
+ *
+ * Not every driver. pi-ai ships the ChatGPT provider, and the local one is registered
+ * on its own because its key falls back to a placeholder where a hosted key must not.
+ * What is left is the loop, and it used to be a hand-written pair of names — so a
+ * fifth hosted driver passed `providerIdOf`, was never registered, and failed inside
+ * pi-ai under a provider id nothing had created.
+ */
+const HOSTED_DRIVERS = ['openrouter', 'cerebras']
+// GENERATED-END drivers
+
+/**
+ * The local server's provider id, read out of the generated map rather than spelt a second time.
+ *
+ * It is not only a key here: `modelFor` defaults to it, and session affinity is on for it alone —
+ * a local llama holds one slot and reuses the prompt cache behind it, and a hosted endpoint has
+ * neither.
+ */
+const PROVIDER_ID = PROVIDER_IDS['openai-compatible']
 
 /** Recent conversation kept verbatim behind the summary. Pi's default, unchanged. */
 const KEEP_RECENT_TOKENS = 20_000
@@ -358,6 +366,25 @@ function connectionProfile(settings, connectionType) {
 }
 
 /**
+ * The pi-ai provider a driver is registered under, refusing a driver this build does not know.
+ *
+ * It used to be `PROVIDER_IDS[driver] ?? PROVIDER_ID`, and the fallback is the bug: a driver added
+ * to the Rust enum and the TypeScript union but not to [`PROVIDER_IDS`] does not fail — it resolves
+ * to `local`, and the turn is put to the local server with a hosted model's name on it. That is the
+ * exact failure [`PROVIDER_IDS`]'s own comment says it was written to stop, left open by the one
+ * read that tolerated a miss. A driver nobody registered has no address, and saying so is the
+ * answer.
+ */
+function providerIdOf(driver) {
+    const id = PROVIDER_IDS[driver]
+    if (id) return id
+    throw new Error(
+        `No pi-ai provider is registered for the '${driver}' connection. `
+            + `This build knows ${DRIVERS.join(', ')}.`
+    )
+}
+
+/**
  * The model one delegation is answered by, and the level it is asked at.
  *
  * Absent settings mean the child borrows the parent's, which is what every settings file written
@@ -375,8 +402,12 @@ function subagentModelFor(settings, models, parent) {
             throw new Error(`The sub-agent's model '${chosen.model?.id}' is unavailable on ChatGPT`)
         return {model, thinkingLevel}
     }
-    const driver =
-        chosen.connectionType in PROVIDER_IDS ? chosen.connectionType : 'openai-compatible'
+    // The second read that used to answer a driver it did not know with the local one. A child
+    // pointed at a connection that is not there stops the turn by name three lines below, and a
+    // child pointed at a driver this build has never heard of was quietly given the parent's
+    // machine instead — which is the one thing this function's own doc comment says it does not do.
+    const driver = chosen.connectionType
+    const providerId = providerIdOf(driver)
     const profile = connectionProfile(settings, driver)
     if (!profile) {
         const named = DRIVER_NAMES[driver]
@@ -388,7 +419,7 @@ function subagentModelFor(settings, models, parent) {
     // One field, because the two halves are two types — `chatTemplateThinking` stays the
     // connection's without having to be left out by hand, since it never was the model's.
     return {
-        model: modelFor({...profile, model: chosen.model}, PROVIDER_IDS[driver]),
+        model: modelFor({...profile, model: chosen.model}, providerId),
         thinkingLevel
     }
 }
@@ -591,12 +622,18 @@ export function createModelContext({
     // Each registered on the same `Models` and under its own id, so a parent on a local server and
     // a child on a hosted one each reach their own address with their own key. No two credentials
     // are interchangeable: `apiKey` is the local server's and never leaves this machine.
-    for (const [driver, key] of [
-        ['openrouter', openrouterApiKey],
-        ['cerebras', cerebrasApiKey]
-    ]) {
+    // Which slot each hosted driver's key arrives in. The list is generated; this is the wiring,
+    // and a driver the caller has no slot for is refused by name rather than registered keyless.
+    const keySlots = {openrouter: openrouterApiKey, cerebras: cerebrasApiKey}
+    for (const driver of HOSTED_DRIVERS) {
         const profile = connectionProfile(settings, driver)
         if (!drivers.has(driver) || !profile) continue
+        if (!(driver in keySlots))
+            throw new Error(
+                `No API key reaches the '${driver}' connection. It is declared in`
+                    + ' protocol/drivers.json and nothing passes its key to createModelContext.'
+            )
+        const key = keySlots[driver]
         models.setProvider(
             createProvider({
                 id: PROVIDER_IDS[driver],
@@ -620,7 +657,7 @@ export function createModelContext({
     const model =
         isChatGpt ? models.getModel('openai-codex', parent?.model?.id)
         : !parent ? undefined
-        : modelFor(parent, PROVIDER_IDS[settings.connectionType] ?? PROVIDER_ID)
+        : modelFor(parent, providerIdOf(settings.connectionType))
     if (!model) throw new Error(`The selected model '${parent?.model?.id}' is unavailable`)
     const subagent = subagentModelFor(settings, models, model)
     // Shared by the caller's own requests and by the sub-agent's, so a child never waits on a

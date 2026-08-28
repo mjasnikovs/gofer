@@ -1,0 +1,40 @@
+{
+    "$comment": "Every model service Gofer can be pointed at, and the words each one is known by. One row per driver, and all three spellings are emitted from it by `scripts/generate-command-surface.mjs`: `driver_id` and `DRIVER_IDS` in `src-tauri/src/settings/mod.rs`, `AiConnectionType` with `AI_CONNECTION_TYPES` and `AI_CONNECTION_LABELS` in `src/models/settings.ts`, and `DRIVERS`, `PROVIDER_IDS` and `DRIVER_NAMES` in `scripts/ai-provider.mjs`. They were one closed set written out three times in three languages with nothing holding them together, and the cost of that was not a compile error: a driver added to two of them reached the worker as a word `PROVIDER_IDS` had no key for, and two separate reads answered that miss by falling back to the local server — a hosted model's turn put to this machine, with the hosted key never sent and nothing said about it.",
+    "$orderComment": "The order is the order the pickers offer them in, which is why it is a list rather than an object. `AI_CONNECTION_TYPES` is emitted in it and `checkOrder` in `check-command-surface.mjs` holds the emitted copies to it.",
+    "$variantComment": "`variant` is the Rust enum variant, and the enum stays hand-written. The generated `driver_id` match is what holds the two together: a variant with no row makes the match non-exhaustive, and a row with no variant names something that does not exist. Both are compile errors, in the direction the mistake was made.",
+    "$providerComment": "`providerId` is the pi-ai provider a driver's models are registered under. It is `null` only for ChatGPT, whose provider pi-ai ships — so that one is set rather than built, and asking `PROVIDER_IDS` for it is a question with no answer rather than a miss to be papered over.",
+    "drivers": [
+        {
+            "id": "openai-compatible",
+            "variant": "OpenaiCompatible",
+            "label": "Local model",
+            "shortName": "local",
+            "providerId": "local",
+            "note": "A llama.cpp or any other server speaking OpenAI completions, on an address the user types. The only driver whose key never leaves this machine."
+        },
+        {
+            "id": "openai-codex",
+            "variant": "OpenaiCodex",
+            "label": "ChatGPT subscription",
+            "shortName": "ChatGPT",
+            "providerId": null,
+            "note": "Authenticates with an OAuth credential rather than a key, which is why a missing one reads as \"Sign in with ChatGPT\" rather than as an error. pi-ai ships the provider."
+        },
+        {
+            "id": "openrouter",
+            "variant": "Openrouter",
+            "label": "OpenRouter",
+            "shortName": "OpenRouter",
+            "providerId": "openrouter",
+            "note": "A fixed host whose catalogue answers every question the local server cannot. Billed, and it reserves credit for the ceiling before it generates a token."
+        },
+        {
+            "id": "cerebras",
+            "variant": "Cerebras",
+            "label": "Cerebras",
+            "shortName": "Cerebras",
+            "providerId": "cerebras",
+            "note": "A fixed host whose endpoint publishes no capabilities at all, which is why what Gofer knows about its models is a table shipped in this directory rather than something asked for."
+        }
+    ]
+}

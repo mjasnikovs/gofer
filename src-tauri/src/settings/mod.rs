@@ -19,6 +19,26 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::model_server::ServedModel;
 
+mod catalogue;
+mod legacy;
+// Only `mod tests` reads the rest of it: the catalogue's per-driver decisions are the parent's
+// tests, and moving 2,800 lines of them was not part of the split.
+#[cfg(test)]
+use catalogue::*;
+pub(crate) use catalogue::{
+    AI_HEALTH_TIMEOUT, AI_REQUEST_TIMEOUT, list_ai_models_with, run_connection_test,
+};
+mod secrets;
+use legacy::*;
+// Imported rather than re-exported: `mod tests` reads these through `use super::*`, and a private
+// `use` is visible to a module's descendants. The names the rest of the crate calls are re-exported
+// below, by name, so the crate's view of this module does not change with the split.
+use secrets::*;
+pub(crate) use secrets::{
+    Secret, Secrets, SystemSecrets, apply_saved_secrets, clear_chatgpt_credential,
+    restore_saved_secrets, settings_response, store_chatgpt_credential, stored_chatgpt_credential,
+};
+
 /// The one service every secret is kept under. Which of them a slot holds is `Secret::username`.
 const API_KEY_SERVICE: &str = "com.gofer.desktop";
 /// OpenRouter's address, which the user never types. Mirrors `OPENROUTER_BASE_URL` in settings.ts.
@@ -444,205 +464,6 @@ pub(crate) enum ApiDialect {
     OpenaiCodexResponses,
 }
 
-/// A model as a settings file names it, in either of the two shapes one has ever been written in.
-///
-/// The shape this build writes is the model and its facts together. The shape before it was an id
-/// with its facts scattered beside it, in whichever struct the id happened to sit in — which is why
-/// this is one type rather than three: the reading is the same wherever it happens.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum StoredModel {
-    Chosen(ModelChoice),
-    Id(String),
-}
-
-/// The facts a flat settings file scattered beside a model id, all of them optional.
-///
-/// Read, never written. `AiSettings`, `AiConnectionProfile` and `SubagentConnection` all serialize
-/// as themselves; this is only what an older file has to be understood as.
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelChoiceFile {
-    model_name: Option<String>,
-    context_window: Option<u64>,
-    max_tokens: Option<u64>,
-    reasoning: Option<bool>,
-    supports_reasoning_effort: Option<bool>,
-    thinking_levels: Option<Vec<String>>,
-    input: Option<Vec<String>>,
-    thinking_level: Option<String>,
-}
-
-impl ModelChoiceFile {
-    /// The model this file names, whichever of the two shapes it named it in.
-    fn choice(self, model: StoredModel) -> ModelChoice {
-        match model {
-            StoredModel::Chosen(chosen) => chosen,
-            StoredModel::Id(id) => ModelChoice {
-                name: self
-                    .model_name
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or_else(|| id.clone()),
-                id,
-                context_window: self.context_window.unwrap_or_else(default_context_window),
-                max_tokens: self.max_tokens.unwrap_or_else(default_max_tokens),
-                reasoning: self.reasoning.unwrap_or_default(),
-                supports_reasoning_effort: self.supports_reasoning_effort.unwrap_or_default(),
-                // A file written before the field. Nothing in that shape ever named a hosted
-                // catalogue, so nothing it can hold refuses to stop thinking.
-                reasoning_mandatory: false,
-                thinking_levels: self.thinking_levels.unwrap_or_default(),
-                input: self.input.unwrap_or_else(default_model_input),
-                off_effort: None,
-                thinking_level: self.thinking_level.unwrap_or_else(default_thinking_level),
-            },
-        }
-    }
-}
-
-/// One connection as a settings file holds it, in either shape.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AiConnectionProfileFile {
-    name: String,
-    base_url: String,
-    api: ApiDialect,
-    #[serde(default)]
-    chat_template_thinking: bool,
-    model: StoredModel,
-    #[serde(flatten)]
-    model_fields: ModelChoiceFile,
-}
-
-impl From<AiConnectionProfileFile> for AiConnectionProfile {
-    fn from(file: AiConnectionProfileFile) -> Self {
-        Self {
-            name: file.name,
-            base_url: file.base_url,
-            api: file.api,
-            chat_template_thinking: file.chat_template_thinking,
-            model: file.model_fields.choice(file.model),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SubagentConnectionFile {
-    connection_type: AiConnectionType,
-    model: StoredModel,
-    #[serde(flatten)]
-    model_fields: ModelChoiceFile,
-}
-
-impl From<SubagentConnectionFile> for SubagentConnection {
-    fn from(file: SubagentConnectionFile) -> Self {
-        Self {
-            connection_type: file.connection_type,
-            model: file.model_fields.choice(file.model),
-        }
-    }
-}
-
-/// The settings file as every Gofer before the connections map wrote it.
-///
-/// The live connection was flattened onto `ai` and mirrored into a slot named after its driver, and
-/// the flat half was the original: a save wrote it first and copied it second. So the flat half is
-/// read last here, over the slot it was mirrored into, and the mirror is dropped rather than
-/// merged. This is the only code left that knows either shape existed.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AiSettingsFile {
-    connection_type: AiConnectionType,
-    /// Present in every file this build writes, and in none written before it.
-    #[serde(default)]
-    connections: Option<BTreeMap<AiConnectionType, AiConnectionProfile>>,
-    name: Option<String>,
-    base_url: Option<String>,
-    api: Option<ApiDialect>,
-    #[serde(default)]
-    chat_template_thinking: bool,
-    model: Option<StoredModel>,
-    #[serde(default)]
-    local: Option<AiConnectionProfile>,
-    #[serde(default)]
-    chatgpt: Option<AiConnectionProfile>,
-    #[serde(default)]
-    openrouter: Option<AiConnectionProfile>,
-    #[serde(default)]
-    cerebras: Option<AiConnectionProfile>,
-    #[serde(default = "default_max_retries")]
-    max_retries: u32,
-    #[serde(default = "default_timeout_ms")]
-    timeout_ms: u64,
-    #[serde(default = "default_compaction_percent")]
-    compaction_percent: u32,
-    #[serde(default)]
-    subagent: SubagentSettings,
-    #[serde(default)]
-    web: WebSettings,
-    #[serde(flatten)]
-    model_fields: ModelChoiceFile,
-}
-
-impl From<AiSettingsFile> for AiSettings {
-    fn from(file: AiSettingsFile) -> Self {
-        let mut connections = file.connections.unwrap_or_default();
-        if connections.is_empty() {
-            for (driver, mirrored) in [
-                (AiConnectionType::OpenaiCompatible, file.local),
-                (AiConnectionType::OpenaiCodex, file.chatgpt),
-                (AiConnectionType::Openrouter, file.openrouter),
-                (AiConnectionType::Cerebras, file.cerebras),
-            ] {
-                if let Some(profile) = mirrored {
-                    connections.insert(driver, profile);
-                }
-            }
-            // Last, so the original wins over the copy of itself. See the note above.
-            if let Some(model) = file.model {
-                connections.insert(
-                    file.connection_type,
-                    AiConnectionProfile {
-                        name: file.name.unwrap_or_default(),
-                        base_url: file.base_url.unwrap_or_default(),
-                        api: file.api.unwrap_or(ApiDialect::OpenaiCompletions),
-                        chat_template_thinking: file.chat_template_thinking,
-                        model: file.model_fields.choice(model),
-                    },
-                );
-            }
-        }
-        // Every hosted driver this build knows, filled in where the file names none.
-        //
-        // Not only for a file that has no connections at all. A driver with no connection is not
-        // offered in the picker, and a driver that is not offered can never be selected in order
-        // to be configured — so a driver added after a settings file was written would be
-        // permanently invisible to every existing install, which is what happened the first time
-        // this was left to `default_connections` alone. Insert only where absent: what the user
-        // has configured is theirs, and this must never write over it.
-        for (driver, shipped) in [
-            (
-                AiConnectionType::OpenaiCodex,
-                default_chatgpt_profile as fn() -> _,
-            ),
-            (AiConnectionType::Openrouter, default_openrouter_profile),
-            (AiConnectionType::Cerebras, default_cerebras_profile),
-        ] {
-            connections.entry(driver).or_insert_with(shipped);
-        }
-        Self {
-            connection_type: file.connection_type,
-            connections,
-            max_retries: file.max_retries,
-            timeout_ms: file.timeout_ms,
-            compaction_percent: file.compaction_percent,
-            subagent: file.subagent,
-            web: file.web,
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsResponse {
@@ -1043,9 +864,11 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
     }
 }
 
+// GENERATED-BEGIN drivers sha256:f77507ddfffd3ea8
 /// The word a driver is written down as, on the wire and in the settings file.
 ///
-/// Never the display label: a file holding `OpenRouter` matches no driver this build knows.
+/// Never the display label: a file holding `OpenRouter` matches no driver this build
+/// knows.
 fn driver_id(driver: AiConnectionType) -> &'static str {
     match driver {
         AiConnectionType::OpenaiCompatible => "openai-compatible",
@@ -1054,6 +877,20 @@ fn driver_id(driver: AiConnectionType) -> &'static str {
         AiConnectionType::Cerebras => "cerebras",
     }
 }
+
+/// Every driver a build knows, in the order the pickers offer them.
+///
+/// Read only by the test that round-trips each id through serde and back through
+/// `driver_id`. Rust itself needs no list: the enum is the list, and the match above is
+/// exhaustive over it.
+#[cfg(test)]
+const DRIVER_IDS: [&str; 4] = [
+    "openai-compatible",
+    "openai-codex",
+    "openrouter",
+    "cerebras",
+];
+// GENERATED-END drivers
 
 /// OpenRouter, as it looks before the user has chosen anything.
 ///
@@ -1549,487 +1386,6 @@ fn resolve_model(
         choice.reasoning_mandatory,
         &choice.thinking_levels,
     );
-}
-
-/// A validated settings payload paired with a ready-to-send request to its models endpoint.
-struct ModelsRequest {
-    settings: GoferSettings,
-    builder: reqwest::RequestBuilder,
-}
-
-/// How long a user-initiated connection test waits for the AI server.
-pub(crate) const AI_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long the startup health check waits for it.
-///
-/// Deliberately shorter: the report is what stands between the user and their project, and a
-/// server that is simply not running yet must not hold the window blank while it is waited for.
-pub(crate) const AI_HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
-
-/// Validates settings, resolves the credential, and builds the models-endpoint request.
-///
-/// Sending is left to the caller because the two commands classify transport failures
-/// differently: the connection test reports them as a status, model listing as an error.
-async fn prepare_models_request(
-    request: SettingsRequest,
-    timeout: Duration,
-    path: &str,
-) -> Result<ModelsRequest, String> {
-    let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
-        let settings = validate_settings(request.settings)?;
-        // The driver decides which credential is sent, because each has its own keyring slot. The
-        // local driver's key must never reach openrouter.ai or api.cerebras.ai, and neither of
-        // theirs must ever reach a server on this machine.
-        let api_key = match settings.ai.connection_type {
-            AiConnectionType::Openrouter => resolve(
-                &request.openrouter_api_key,
-                Secret::OpenRouter,
-                &SystemSecrets,
-            )?,
-            AiConnectionType::Cerebras => {
-                resolve(&request.cerebras_api_key, Secret::Cerebras, &SystemSecrets)?
-            }
-            _ => resolve(&request.api_key, Secret::AiDefault, &SystemSecrets)?,
-        };
-        Ok::<_, String>((settings, api_key))
-    })
-    .await
-    .map_err(|error| format!("AI settings validation task failed: {error}"))??;
-    // Validated above, so the live driver has a connection: the address is read off it rather
-    // than off a second copy beside it.
-    let base_url = format!("{}/", active_endpoint(&settings.ai).0.trim_end_matches('/'));
-    let models_url = reqwest::Url::parse(&base_url)
-        .and_then(|url| url.join(path))
-        .map_err(|error| format!("Could not construct the models endpoint: {error}"))?;
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-        .map_err(|error| format!("Could not create the AI connection client: {error}"))?;
-    let mut builder = client.get(models_url);
-    if let Some(api_key) = api_key {
-        builder = builder.bearer_auth(api_key);
-    }
-    Ok(ModelsRequest { settings, builder })
-}
-
-pub(crate) async fn run_connection_test(
-    request: SettingsRequest,
-    timeout: Duration,
-) -> Result<ConnectionTestResult, String> {
-    if matches!(
-        request.settings.ai.connection_type,
-        AiConnectionType::OpenaiCodex
-    ) {
-        let settings = validate_settings(request.settings)?;
-        let chosen = active_endpoint(&settings.ai).1;
-        return tauri::async_runtime::spawn_blocking(move || {
-            check_chatgpt_credential()?;
-            let models = chatgpt_models()?;
-            let available = models.iter().any(|model| model.id == chosen);
-            Ok(if available {
-                ConnectionTestResult {
-                    status: ConnectionTestStatus::Connected,
-                    message: format!("Signed in with ChatGPT. Model '{chosen}' is available."),
-                }
-            } else {
-                ConnectionTestResult {
-                    status: ConnectionTestStatus::ModelUnavailable,
-                    message: format!(
-                        "Signed in with ChatGPT, but model '{chosen}' is not in this Pi release."
-                    ),
-                }
-            })
-        })
-        .await
-        .map_err(|error| format!("ChatGPT connection test failed: {error}"))?;
-    }
-    // OpenRouter is asked `/key`, not `/models`. Its catalogue is public — it answers HTTP 200
-    // with no credential at all — so a test through `/models` reports a healthy connection for a
-    // key that does not exist. `/key` is the only cheap endpoint that refuses a bad one.
-    let openrouter = matches!(
-        request.settings.ai.connection_type,
-        AiConnectionType::Openrouter
-    );
-    // Cerebras is asked `/models` like the local driver, not `/key` like OpenRouter. Its catalogue
-    // is not public: a wrong key answers HTTP 401 `wrong_api_key`, so the ordinary endpoint already
-    // refuses a credential that does not exist and there is nothing a second one would add.
-    let cerebras = matches!(
-        request.settings.ai.connection_type,
-        AiConnectionType::Cerebras
-    );
-    let path = if openrouter { "key" } else { "models" };
-    let ModelsRequest { settings, builder } =
-        prepare_models_request(request, timeout, path).await?;
-
-    let response = match builder.send().await {
-        Ok(response) => response,
-        Err(error) => {
-            return Ok(ConnectionTestResult {
-                status: ConnectionTestStatus::ServerUnreachable,
-                message: format!("The AI server could not be reached: {error}"),
-            });
-        }
-    };
-
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED
-        || response.status() == reqwest::StatusCode::FORBIDDEN
-    {
-        return Ok(ConnectionTestResult {
-            status: ConnectionTestStatus::Unauthorized,
-            message: "The server rejected the API key.".to_owned(),
-        });
-    }
-    if !response.status().is_success() {
-        return Ok(ConnectionTestResult {
-            status: ConnectionTestStatus::ServerError,
-            message: format!(
-                "The server returned HTTP {} from its models endpoint.",
-                response.status()
-            ),
-        });
-    }
-
-    // The key is good. Whether the chosen model is still in the catalogue is a second question,
-    // and a public endpoint answers it without spending the credential again.
-    if openrouter {
-        return Ok(openrouter_model_available(&active_endpoint(&settings.ai).1, timeout).await);
-    }
-
-    let models = response.json::<ModelsResponse>().await.map_err(|error| {
-        format!("The server returned an invalid OpenAI models response: {error}")
-    })?;
-    let chosen = active_endpoint(&settings.ai).1;
-    // Narrowed the same way the picker is, and for the reason the picker is narrowed: a model
-    // Cerebras serves that the shipped table has never seen is one no screen will ever offer, so
-    // reporting a healthy connection to it would be reporting a connection nobody can select.
-    if cerebras {
-        return Ok(
-            if cerebras_model_options(&models.data)
-                .iter()
-                .any(|option| option.id == chosen)
-            {
-                ConnectionTestResult {
-                    status: ConnectionTestStatus::Connected,
-                    message: format!("Connected to Cerebras. Model '{chosen}' is available."),
-                }
-            } else {
-                ConnectionTestResult {
-                    status: ConnectionTestStatus::ModelUnavailable,
-                    message: format!(
-                        "Connected to Cerebras, but model '{chosen}' is not one Gofer holds capabilities for."
-                    ),
-                }
-            },
-        );
-    }
-    if models.data.iter().any(|model| model.id == chosen) {
-        return Ok(ConnectionTestResult {
-            status: ConnectionTestStatus::Connected,
-            message: format!("Connected. Model '{chosen}' is available."),
-        });
-    }
-
-    Ok(ConnectionTestResult {
-        status: ConnectionTestStatus::ModelUnavailable,
-        message: format!("Connected, but model '{chosen}' is not available on this server."),
-    })
-}
-
-/// Whether OpenRouter still lists the chosen model, asked of the public catalogue.
-///
-/// A second request rather than a reuse of the first: `/key` answers about the credential and says
-/// nothing about models. Anything that goes wrong here is reported as connected rather than as a
-/// failure — the credential has already been proven, and a catalogue that could not be read is not
-/// a reason to tell the user their key is bad.
-async fn openrouter_model_available(model: &str, timeout: Duration) -> ConnectionTestResult {
-    let connected = ConnectionTestResult {
-        status: ConnectionTestStatus::Connected,
-        message: format!("Connected to OpenRouter. Model '{model}' is available."),
-    };
-    let Ok(client) = reqwest::Client::builder().timeout(timeout).build() else {
-        return connected;
-    };
-    let url = format!("{OPENROUTER_BASE_URL}/models");
-    let Ok(response) = client.get(url).send().await else {
-        return connected;
-    };
-    let Ok(catalog) = response.json::<OpenrouterModelsResponse>().await else {
-        return connected;
-    };
-    let options = openrouter_model_options(catalog.data);
-    if options.iter().any(|option| option.id == model) {
-        return connected;
-    }
-    ConnectionTestResult {
-        status: ConnectionTestStatus::ModelUnavailable,
-        message: format!(
-            "Connected to OpenRouter, but model '{model}' is not one it offers with tool support."
-        ),
-    }
-}
-
-pub(crate) async fn list_ai_models_with(
-    request: SettingsRequest,
-) -> Result<Vec<AiModelOption>, String> {
-    if matches!(
-        request.settings.ai.connection_type,
-        AiConnectionType::OpenaiCodex
-    ) {
-        validate_settings(request.settings)?;
-        return tauri::async_runtime::spawn_blocking(chatgpt_models)
-            .await
-            .map_err(|error| format!("ChatGPT model listing failed: {error}"))?;
-    }
-    let openrouter = matches!(
-        request.settings.ai.connection_type,
-        AiConnectionType::Openrouter
-    );
-    let cerebras = matches!(
-        request.settings.ai.connection_type,
-        AiConnectionType::Cerebras
-    );
-    let ModelsRequest { settings, builder } =
-        prepare_models_request(request, AI_REQUEST_TIMEOUT, "models").await?;
-    let response = builder
-        .send()
-        .await
-        .map_err(|error| format!("The AI server could not be reached: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "The server returned HTTP {} from its models endpoint.",
-            response.status()
-        ));
-    }
-    if openrouter {
-        let catalog = response
-            .json::<OpenrouterModelsResponse>()
-            .await
-            .map_err(|error| format!("OpenRouter returned an invalid models response: {error}"))?;
-        return Ok(openrouter_model_options(catalog.data));
-    }
-    let models = response.json::<ModelsResponse>().await.map_err(|error| {
-        format!("The server returned an invalid OpenAI models response: {error}")
-    })?;
-    // The plain OpenAI shape, which is all Cerebras answers — ids and nothing else. What those ids
-    // can do is the shipped table's answer, so the live list is only ever used to narrow it.
-    if cerebras {
-        return Ok(cerebras_model_options(&models.data));
-    }
-    let connection = settings
-        .ai
-        .connection()
-        .ok_or_else(|| "The chosen AI driver has no connection configured".to_owned())?;
-    Ok(local_model_options(
-        models.data,
-        &pi_catalog().unwrap_or_default(),
-        connection,
-        crate::model_server::served_model(&connection.base_url).as_ref(),
-    ))
-}
-
-/// What a local server's models endpoint means, read through Pi's catalogue.
-///
-/// A separate function because the catalogue it reads is a file in the user's home, and a test that
-/// went through the network call would answer differently on every machine.
-///
-/// Two facts come from two places. What a *named* model can do is the catalogue's answer. What an
-/// unnamed one can do is its *server's* answer — llama.cpp reports the file it was started with,
-/// under that file's own path, which is almost never the id Pi names the same model by. Falling
-/// back to `false` instead is what wrote `reasoning: false` into settings for a model that thinks,
-/// and left its reasoning menu offering nothing but `off`.
-fn local_model_options(
-    remote: Vec<Model>,
-    catalog: &PiCatalog,
-    connection: &AiConnectionProfile,
-    served: Option<&ServedModel>,
-) -> Vec<AiModelOption> {
-    let server_reasoning = catalog
-        .servers
-        .get(&server_key(&connection.base_url))
-        .copied()
-        .unwrap_or(false);
-    remote
-        .into_iter()
-        .map(|remote| {
-            let known = catalog.models.iter().find(|model| model.id == remote.id);
-            let context_window = remote
-                .meta
-                .and_then(|meta| meta.n_ctx)
-                .or_else(|| known.map(|model| model.context_window))
-                .unwrap_or(connection.model.context_window);
-            // And the server outranks both, for the model it says it has loaded. It is the only
-            // one of the three that changes when the user swaps the file it was started with.
-            let loaded = served.filter(|model| model.id == remote.id);
-            AiModelOption {
-                id: remote.id.clone(),
-                name: known
-                    .map(|model| model.name.clone())
-                    .unwrap_or_else(|| remote.id.clone()),
-                context_window,
-                // Through the same clamp OpenRouter's rows take. A model Pi's catalogue does
-                // not know used to be given the whole window as its ceiling, which is the runaway
-                // `default_max_tokens` was written for — and that runaway was measured *here*, on
-                // the local Qwen3.6-27B, not on a billed endpoint.
-                max_tokens: ceiling_within(context_window, known.map(|model| model.max_tokens)),
-                reasoning: loaded.map_or_else(
-                    || known.map_or(server_reasoning, |model| model.reasoning),
-                    |model| model.reasoning,
-                ),
-                supports_reasoning_effort: loaded.map_or_else(
-                    || known.map_or(server_reasoning, |model| model.supports_reasoning_effort),
-                    |model| !model.efforts.is_empty(),
-                ),
-                // A local server is never one of these. `off` is how a chat template is told not
-                // to think, and a template that has a switch has both of its positions.
-                reasoning_mandatory: false,
-                thinking_levels: loaded
-                    .map(|model| model.efforts.clone())
-                    .unwrap_or_default(),
-                input: loaded
-                    .and_then(|model| model.input.clone())
-                    .or_else(|| known.map(|model| model.input.clone()))
-                    .unwrap_or_else(|| connection.model.input.clone()),
-                // A chat template is told not to think by leaving the effort out, never by being
-                // handed a word for it. Only Cerebras' shipped table names one.
-                off_effort: None,
-            }
-        })
-        .collect()
-}
-
-/// What OpenRouter's catalogue means, model by model.
-///
-/// Every rule here was read off a live response rather than assumed, and each one has a reason it
-/// cannot be simplified away:
-///
-/// * Models without `tools` are dropped. 70 of 422 have no tool support, and a model that cannot
-///   call a tool cannot run Gofer at all — offering it is offering a broken choice.
-/// * Every ceiling here goes through `ceiling_within`, declared or not — as `local_model_options`'
-///   do, for the same reason. `max_completion_tokens` is null on 52 models, and larger than the
-///   compaction reserve on 188 more; neither may become the window, and neither may become zero,
-///   which fails validation.
-/// * Efforts are kept only if `NAMED_EFFORTS` knows them, rather than dropping the one word that
-///   is known not to be an effort. `supported_efforts` carries `none` today, which is OpenRouter's
-///   word for "thinking can be switched off" — `thinking_levels_for` prepends `off` on its own, so
-///   it is redundant as well as unknown. An allowlist also holds for whatever the catalogue names
-///   next: an effort Gofer has no word for reaches the reasoning picker, and choosing it makes
-///   `validate_settings` refuse the save with "Reasoning level is invalid" and no field named.
-/// * Input modalities are narrowed to text and image. Pi types a model's input as exactly those
-///   two, so `video`, `audio` and `file` have nowhere to go.
-fn openrouter_model_options(remote: Vec<OpenrouterModel>) -> Vec<AiModelOption> {
-    remote
-        .into_iter()
-        .filter(|model| model.supported_parameters.iter().any(|p| p == "tools"))
-        .map(|model| {
-            let context_window = model.context_length.unwrap_or_else(default_context_window);
-            let thinking_levels: Vec<String> = model
-                .reasoning
-                .as_ref()
-                .map(|reasoning| {
-                    reasoning
-                        .supported_efforts
-                        .iter()
-                        .filter(|effort| NAMED_EFFORTS.contains(&effort.as_str()))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            let input: Vec<String> = model
-                .architecture
-                .as_ref()
-                .map(|architecture| {
-                    architecture
-                        .input_modalities
-                        .iter()
-                        .filter(|modality| matches!(modality.as_str(), "text" | "image"))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            AiModelOption {
-                name: model.name.unwrap_or_else(|| model.id.clone()),
-                id: model.id,
-                context_window,
-                max_tokens: ceiling_within(
-                    context_window,
-                    model
-                        .top_provider
-                        .and_then(|provider| provider.max_completion_tokens),
-                ),
-                reasoning: model.reasoning.is_some(),
-                // Named efforts are the only evidence that an effort field will be read. A model
-                // that reasons without naming any takes no effort, which is the `on`/`off` case.
-                supports_reasoning_effort: !thinking_levels.is_empty(),
-                reasoning_mandatory: model
-                    .reasoning
-                    .as_ref()
-                    .is_some_and(|reasoning| reasoning.mandatory),
-                thinking_levels,
-                // Never empty: `validate_settings` refuses an empty input list, and every model in
-                // the catalogue takes text.
-                input: if input.is_empty() {
-                    vec!["text".to_owned()]
-                } else {
-                    input
-                },
-                // OpenRouter's catalogue names no such word, and `off` there is already a shape of
-                // its own — `reasoning: {enabled: false}` — rather than an effort.
-                off_effort: None,
-            }
-        })
-        .collect()
-}
-
-fn check_chatgpt_credential() -> Result<(), String> {
-    let credential = stored_chatgpt_credential()?
-        .ok_or_else(|| "Sign in with ChatGPT before testing this connection".to_owned())?;
-    crate::chatgpt_auth::run_worker(
-        &serde_json::json!({"operation": "check", "credential": credential}),
-    )?;
-    Ok(())
-}
-
-fn chatgpt_models() -> Result<Vec<AiModelOption>, String> {
-    let events = crate::chatgpt_auth::run_worker(&serde_json::json!({"operation": "models"}))?;
-    let models = events
-        .into_iter()
-        .find(|event| event.get("type").and_then(serde_json::Value::as_str) == Some("models"))
-        .and_then(|event| event.get("models").cloned())
-        .ok_or_else(|| "Pi returned no ChatGPT model catalogue".to_owned())?;
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct CodexModel {
-        id: String,
-        name: String,
-        context_window: u64,
-        max_tokens: u64,
-        reasoning: bool,
-        input: Vec<String>,
-        #[serde(default)]
-        thinking_level_map: HashMap<String, String>,
-    }
-    serde_json::from_value::<Vec<CodexModel>>(models)
-        .map_err(|error| format!("Pi returned an invalid ChatGPT model catalogue: {error}"))
-        .map(|models| {
-            models
-                .into_iter()
-                .map(|model| AiModelOption {
-                    id: model.id,
-                    name: model.name,
-                    context_window: model.context_window,
-                    max_tokens: model.max_tokens,
-                    reasoning: model.reasoning,
-                    supports_reasoning_effort: !model.thinking_level_map.is_empty(),
-                    reasoning_mandatory: false,
-                    // ChatGPT names no efforts of its own — the seven Gofer knows are what it
-                    // takes, which is what an empty list here means.
-                    thinking_levels: Vec::new(),
-                    input: model.input,
-                    // The Codex driver owns its own reasoning field; nothing here becomes an
-                    // effort word on the wire.
-                    off_effort: None,
-                })
-                .collect()
-        })
 }
 
 fn settings_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -2573,435 +1929,99 @@ fn validate_subagent_connection(
     Ok(connection)
 }
 
-fn required_value(name: &str, value: String) -> Result<String, String> {
-    let value = value.trim().to_owned();
-    if value.is_empty() {
-        return Err(format!("{name} is required"));
-    }
-    Ok(value)
-}
-
-fn credential_entry(username: &str) -> Result<Entry, String> {
-    entry_in_a_store(username)?.ok_or_else(|| NO_CREDENTIAL_STORE.to_owned())
-}
-
-/// What a machine with no credential store at all is reported as: `Ok(None)`.
-///
-/// A GitHub runner has no Secret Service, so `Entry::new` fails before any entry is looked at —
-/// the keyring crate registers no default store and says so. Every reader turned that into an
-/// error, and a turn reads three credentials, so on such a machine *every* AI turn ended as "The
-/// AI response could not be completed." even with a local model that needs no key at all. The
-/// packaged journey has failed on exactly this since it started running.
-///
-/// No store is not a failed read: it is a machine where nothing was ever saved, which is what
-/// `None` already means everywhere below. A store that exists and refuses — locked, denied, an
-/// entry that will not decode — still errors, because that is a key the user did save and cannot
-/// get back.
-fn entry_in_a_store(username: &str) -> Result<Option<Entry>, String> {
-    let _initialization = KEYRING_INITIALIZATION
-        .lock()
-        .map_err(|_| "The credential-store initialization lock is poisoned".to_owned())?;
-    match Entry::new(API_KEY_SERVICE, username) {
-        Ok(entry) => Ok(Some(entry)),
-        // The keyring crate builds the platform store on the first `Entry::new` of the process and
-        // never tries again, so the first failure carries the platform's own words and the second
-        // call says what was left behind: `NoDefaultStore` means nothing was, and there is nowhere
-        // on this machine to keep a credential. A store that did register and refused this entry —
-        // locked, prompted, denied — fails the same way twice and stays an error.
-        Err(first) => match Entry::new(API_KEY_SERVICE, username) {
-            Ok(entry) => Ok(Some(entry)),
-            Err(KeyringError::NoDefaultStore) => Ok(None),
-            Err(_) => Err(format!(
-                "Could not access the operating system credential store: {first}"
-            )),
-        },
-    }
-}
-
-/// What saving says when there is nowhere to save to. Reading answers `None` instead.
-const NO_CREDENTIAL_STORE: &str = "This machine has no credential store, so Gofer cannot keep a key on it. On Linux that is a \
-     Secret Service provider — GNOME Keyring or KWallet — and Gofer needs one running to hold a \
-     key.";
-
-/// One secret Gofer keeps, and everything that is particular to it.
-///
-/// Four secrets used to be four hand-copied implementations of one idea: a keyring slot, a noun for
-/// the sentence a failure is reported in, and what an empty box means. Only one of them went
-/// through a seam a test could drive, so the two with the *other* blank rule were the two nothing
-/// held to it. This carries the three differences, and everything else is written once.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Secret {
-    /// The AI key of the local, OpenAI-compatible driver.
-    AiDefault,
-    /// The Brave Search key. In the keyring rather than in `settings.json`, on the same reasoning
-    /// as the AI key: the settings file is plain text a person may copy, diff or paste into a bug
-    /// report, and a search key is a credential. Nothing is an ordinary state, not a fault — the
-    /// two other engines need no key, and `web_search` says so itself when Brave is chosen
-    /// without one.
-    Brave,
-    OpenRouter,
-    Cerebras,
-    ChatGpt,
-}
-
-/// What empty text means for one secret, which is not the same answer for all five.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Blank {
-    /// Refused. The AI key's box is the connection's own field, and saving a connection with a
-    /// blank key would silently take the key off a server that needs one.
-    Refused,
-    /// Takes the key off the machine. Emptying the field and saving is how a person removes a key
-    /// they typed, and an empty entry left behind reads as a configured key every request is then
-    /// rejected for.
-    Clears,
-}
-
-impl Secret {
-    /// The username this secret is stored under, beneath the one service. A second username is how
-    /// this keyring holds more than one secret.
-    const fn username(self) -> &'static str {
-        match self {
-            Self::AiDefault => "ai-default",
-            // Its own slot, not `ai-default`. Two key-based drivers sharing one entry means
-            // configuring the second wipes the first, and — worse — a key meant for openrouter.ai
-            // being sent as bearer to whatever `http://127.0.0.1:8080` happens to be.
-            Self::OpenRouter => "ai-openrouter",
-            Self::Cerebras => "ai-cerebras",
-            Self::ChatGpt => "ai-openai-codex",
-            Self::Brave => "web-brave-search",
-        }
-    }
-
-    /// What this secret is called in the one sentence a user ever reads about it.
-    const fn noun(self) -> &'static str {
-        match self {
-            Self::AiDefault => "AI API key",
-            Self::OpenRouter => "OpenRouter API key",
-            Self::Cerebras => "Cerebras API key",
-            Self::ChatGpt => "ChatGPT credential",
-            Self::Brave => "Brave Search key",
-        }
-    }
-
-    const fn blank(self) -> Blank {
-        match self {
-            Self::AiDefault | Self::ChatGpt => Blank::Refused,
-            Self::Brave | Self::OpenRouter | Self::Cerebras => Blank::Clears,
-        }
-    }
-}
-
-/// Where the five secrets are kept. The seam, and it takes the slot.
-///
-/// It used to take none: one implementation was hardcoded to `ai-default` and the other three
-/// reached past it to the keyring, so a test could drive one flag of the four.
-pub(crate) trait Secrets {
-    fn clear(&self, secret: Secret) -> Result<(), String>;
-    fn read(&self, secret: Secret) -> Result<Option<String>, String>;
-    fn write(&self, secret: Secret, value: &str) -> Result<(), String>;
-}
-
-pub(crate) struct SystemSecrets;
-
-/// Whether this build is under a driver that has been told to leave the real store alone.
-///
-/// All three methods, not just the read. A skip on one half is worse than no skip at all: the run
-/// writes its own test key into the developer's `ai-default` slot and then reads back nothing, so
-/// `write_one_secret` records no previous value — and a settings save that fails afterwards
-/// restores by *clearing* the slot. The developer's own key is gone, from a test that was supposed
-/// not to touch it.
-#[cfg(feature = "webdriver")]
-fn store_is_skipped(secret: Secret) -> bool {
-    matches!(secret, Secret::AiDefault)
-        && std::env::var_os("GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE").is_some()
-}
-
-impl Secrets for SystemSecrets {
-    fn clear(&self, secret: Secret) -> Result<(), String> {
-        #[cfg(feature = "webdriver")]
-        if store_is_skipped(secret) {
-            return Ok(());
-        }
-        match credential_entry(secret.username())?.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(format!("Could not remove the {}: {error}", secret.noun())),
-        }
-    }
-
-    fn read(&self, secret: Secret) -> Result<Option<String>, String> {
-        #[cfg(feature = "webdriver")]
-        if store_is_skipped(secret) {
-            return Ok(None);
-        }
-        let Some(entry) = entry_in_a_store(secret.username())? else {
-            return Ok(None);
-        };
-        match entry.get_password() {
-            // What a blank *slot* means, which is the same question [`Blank`] answers for a blank
-            // box. Nothing here writes one, so this is about a slot an older build left behind: a
-            // key it reads back as configured is one every request is then rejected for.
-            Ok(value) if matches!(secret.blank(), Blank::Clears) && value.trim().is_empty() => {
-                Ok(None)
-            }
-            Ok(value) => Ok(Some(value)),
-            Err(KeyringError::NoEntry) => Ok(None),
-            Err(error) => Err(format!(
-                "Could not read the {} from the credential store: {error}",
-                secret.noun()
-            )),
-        }
-    }
-
-    fn write(&self, secret: Secret, value: &str) -> Result<(), String> {
-        #[cfg(feature = "webdriver")]
-        if store_is_skipped(secret) {
-            return Ok(());
-        }
-        credential_entry(secret.username())?
-            .set_password(value)
-            .map_err(|error| format!("Could not store the {}: {error}", secret.noun()))
-    }
-}
-
-pub(crate) fn stored_chatgpt_credential() -> Result<Option<serde_json::Value>, String> {
-    chatgpt_credential_in(&SystemSecrets)
-}
-
-/// The stored ChatGPT credential, parsed. The one secret that is not a key: it is an OAuth grant,
-/// so what comes out of the slot has to be readable as one before it counts as stored at all.
-fn chatgpt_credential_in(secrets: &impl Secrets) -> Result<Option<serde_json::Value>, String> {
-    let Some(value) = secrets.read(Secret::ChatGpt)? else {
-        return Ok(None);
-    };
-    serde_json::from_str(&value).map(Some).map_err(|error| {
-        format!("The stored ChatGPT credential is invalid and must be replaced: {error}")
-    })
-}
-
-pub(crate) fn store_chatgpt_credential(credential: &serde_json::Value) -> Result<(), String> {
-    let object = credential
-        .as_object()
-        .ok_or_else(|| "The ChatGPT credential is invalid".to_owned())?;
-    if object.get("type").and_then(serde_json::Value::as_str) != Some("oauth")
-        || object
-            .get("access")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        || object
-            .get("refresh")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        || object
-            .get("expires")
-            .and_then(serde_json::Value::as_f64)
-            .is_none()
-    {
-        return Err("The ChatGPT credential is missing OAuth fields".to_owned());
-    }
-    let serialized = serde_json::to_string(credential)
-        .map_err(|error| format!("Could not serialize the ChatGPT credential: {error}"))?;
-    if serialized.len() > MAX_API_KEY_BYTES {
-        return Err("The ChatGPT credential cannot exceed 16 KiB".to_owned());
-    }
-    SystemSecrets.write(Secret::ChatGpt, &serialized)
-}
-
-pub(crate) fn clear_chatgpt_credential() -> Result<(), String> {
-    SystemSecrets.clear(Secret::ChatGpt)
-}
-
-pub(crate) fn settings_response(settings: GoferSettings) -> SettingsResponse {
-    #[cfg(feature = "webdriver")]
-    if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
-        return SettingsResponse {
-            settings,
-            has_api_key: false,
-            has_chat_gpt_credential: false,
-            has_brave_api_key: false,
-            has_openrouter_api_key: false,
-            has_cerebras_api_key: false,
-            credential_store_error: None,
-        };
-    }
-    settings_response_with(&SystemSecrets, settings)
-}
-
-/// Which of the four the machine is holding, every one of them read through the one store.
-///
-/// Three of these flags used to reach past the injected store to the real keyring, so a test could
-/// drive one of the four — and not either of the two whose blank rule differs.
-fn settings_response_with(secrets: &impl Secrets, settings: GoferSettings) -> SettingsResponse {
-    match secrets.read(Secret::AiDefault) {
-        Ok(api_key) => SettingsResponse {
-            settings,
-            has_api_key: api_key.is_some(),
-            has_chat_gpt_credential: chatgpt_credential_in(secrets).ok().flatten().is_some(),
-            has_brave_api_key: secrets.read(Secret::Brave).ok().flatten().is_some(),
-            has_openrouter_api_key: secrets.read(Secret::OpenRouter).ok().flatten().is_some(),
-            has_cerebras_api_key: secrets.read(Secret::Cerebras).ok().flatten().is_some(),
-            credential_store_error: None,
-        },
-        Err(error) => SettingsResponse {
-            settings,
-            has_api_key: false,
-            has_chat_gpt_credential: false,
-            has_brave_api_key: false,
-            has_openrouter_api_key: false,
-            has_cerebras_api_key: false,
-            credential_store_error: Some(error),
-        },
-    }
-}
-
-/// One slot a save wrote, and what was in it beforehand. See [`apply_saved_secrets`].
-pub(crate) struct WrittenSecret {
-    secret: Secret,
-    previous: Option<String>,
-}
-
-/// The three secrets a settings save carries, in the order they are written.
-fn saved_secrets(request: &SettingsRequest) -> [(Secret, &ApiKeyUpdate); 4] {
-    [
-        (Secret::AiDefault, &request.api_key),
-        (Secret::Brave, &request.brave_api_key),
-        (Secret::OpenRouter, &request.openrouter_api_key),
-        (Secret::Cerebras, &request.cerebras_api_key),
-    ]
-}
-
-/// Writes every secret a save carries, and answers with the slots it actually wrote.
-///
-/// The answer is the rollback window: a settings file that then fails to write must leave the
-/// machine as it found it, and what has to be put back is exactly what was taken out. It used to be
-/// the AI key alone, with the other two written before the window and two hand-written comments
-/// explaining why the AI key's restore could not put them back. It could not because it was the AI
-/// key's; a restore that names its slot has no such problem.
-pub(crate) fn apply_saved_secrets(request: &SettingsRequest) -> Result<Vec<WrittenSecret>, String> {
-    apply_saved_secrets_with(&SystemSecrets, request)
-}
-
-fn apply_saved_secrets_with(
-    secrets: &impl Secrets,
-    request: &SettingsRequest,
-) -> Result<Vec<WrittenSecret>, String> {
-    let mut written = Vec::new();
-    for (secret, update) in saved_secrets(request) {
-        // A slot nobody asked about is never read, so a save that touches no key costs no keyring
-        // lookup and has nothing to put back.
-        if matches!(update, ApiKeyUpdate::Keep) {
-            continue;
-        }
-        match write_one_secret(secret, update, secrets) {
-            Ok(slot) => written.push(slot),
-            Err(failure) => {
-                // Put back here, because the window goes back with the answer and an `Err` carries
-                // no window. `lib.rs` propagates this with `?` and the settings file is then never
-                // written — so a keyring failure on the second of three slots used to leave the
-                // first one changed, the file unchanged, and nothing anywhere able to undo it.
-                //
-                // A restore that fails too is not reported over the failure that caused it: the
-                // first one is what the user did and what they can act on.
-                let _ = restore_saved_secrets_with(secrets, &written);
-                return Err(failure);
-            }
-        }
-    }
-    Ok(written)
-}
-
-/// One slot: what was in it, and what the save puts there.
-fn write_one_secret(
-    secret: Secret,
-    update: &ApiKeyUpdate,
-    secrets: &impl Secrets,
-) -> Result<WrittenSecret, String> {
-    let previous = secrets.read(secret)?;
-    apply(update, secret, secrets)?;
-    Ok(WrittenSecret { secret, previous })
-}
-
-/// Puts back what [`apply_saved_secrets`] took out, slot by slot.
-pub(crate) fn restore_saved_secrets(written: &[WrittenSecret]) -> Result<(), String> {
-    restore_saved_secrets_with(&SystemSecrets, written)
-}
-
-fn restore_saved_secrets_with(
-    secrets: &impl Secrets,
-    written: &[WrittenSecret],
-) -> Result<(), String> {
-    for slot in written {
-        restore(slot.secret, slot.previous.as_deref(), secrets)?;
-    }
-    Ok(())
-}
-
-// coverage-critical-start: credential
-/// The three-way rule a settings page's key box is saved by, for any of the four secrets.
-///
-/// `Keep` is what an untouched box means, because the page never reads a stored secret back and so
-/// cannot send one. `Clear` is the removal button. `Set` is typed text — and blank typed text is
-/// the one place the four differ: see [`Blank`].
-fn apply(update: &ApiKeyUpdate, secret: Secret, secrets: &impl Secrets) -> Result<(), String> {
-    match update {
-        ApiKeyUpdate::Keep => Ok(()),
-        ApiKeyUpdate::Set { value } => {
-            let value = value.trim();
-            if value.is_empty() {
-                return match secret.blank() {
-                    Blank::Refused => {
-                        Err("API key cannot be empty when setting a credential".to_owned())
-                    }
-                    Blank::Clears => secrets.clear(secret),
-                };
-            }
-            if value.len() > MAX_API_KEY_BYTES {
-                return Err("API keys cannot exceed 16 KiB".to_owned());
-            }
-            secrets.write(secret, value)
-        }
-        ApiKeyUpdate::Clear => secrets.clear(secret),
-    }
-}
-
-/// Puts one slot back the way it was, which for a slot that held nothing is emptying it.
-fn restore(secret: Secret, value: Option<&str>, secrets: &impl Secrets) -> Result<(), String> {
-    match value {
-        Some(value) => secrets
-            .write(secret, value)
-            .map_err(|error| format!("Could not restore the previous {}: {error}", secret.noun())),
-        None => secrets.clear(secret),
-    }
-}
-
-/// The key a connection test should send, which is the typed one or the stored one.
-///
-/// Not [`apply`]: nothing is written here. Blank typed text is refused for every secret, because a
-/// test of a blank credential is a test of nothing — the removal button is what says "no key".
-fn resolve(
-    update: &ApiKeyUpdate,
-    secret: Secret,
-    secrets: &impl Secrets,
-) -> Result<Option<String>, String> {
-    match update {
-        ApiKeyUpdate::Keep => Ok(secrets.read(secret).unwrap_or(None)),
-        ApiKeyUpdate::Set { value } => {
-            let value = value.trim();
-            if value.is_empty() {
-                return Err("API key cannot be empty when testing a credential".to_owned());
-            }
-            if value.len() > MAX_API_KEY_BYTES {
-                return Err("API keys cannot exceed 16 KiB".to_owned());
-            }
-            Ok(Some(value.to_owned()))
-        }
-        ApiKeyUpdate::Clear => Ok(None),
-    }
-}
-// coverage-critical-end: credential
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The word serde writes a driver as is the word `driver_id` says it is.
+    ///
+    /// Two spellings of one thing, and only one of them is generated. `AiConnectionType` carries
+    /// `#[serde(rename_all = "kebab-case")]`, so the settings file's word comes out of the variant
+    /// name; `driver_id` is emitted from `protocol/drivers.json` and is what every other language
+    /// is emitted from. Nothing compared them. A variant whose kebab-case is not its declared id —
+    /// `OpenAiCodex` rather than `OpenaiCodex`, one capital — would write a settings file this
+    /// build cannot read back, and both halves would still compile.
+    ///
+    /// Round-tripped rather than asserted against a list, so it fails on the id and on the variant
+    /// alike: every declared id must parse to a driver, and that driver must write itself back as
+    /// the same id.
+    #[test]
+    fn the_word_serde_writes_is_the_word_the_catalogue_declares() {
+        for id in DRIVER_IDS {
+            let driver: AiConnectionType = serde_json::from_str(&format!("\"{id}\""))
+                .unwrap_or_else(|error| {
+                    panic!("{id} is declared but parses to no driver: {error}")
+                });
+            assert_eq!(
+                driver_id(driver),
+                id,
+                "{id} parses to a driver that names itself differently"
+            );
+            let written = serde_json::to_string(&driver).expect("a driver serializes");
+            assert_eq!(
+                written,
+                format!("\"{id}\""),
+                "serde writes {id} as {written}"
+            );
+        }
+        // And no driver is missing from the catalogue: the map every settings file is built with
+        // has one connection per driver, so its length is the count the enum really has.
+        assert_eq!(
+            default_connections(default_local_profile()).len(),
+            DRIVER_IDS.len(),
+            "a driver has a default connection and no row in protocol/drivers.json, or the reverse"
+        );
+    }
+
+    /// The one file that leaves this machine is `catalogue.rs`.
+    ///
+    /// That is the whole claim behind the split: `settings.rs` held six subjects, and only one of
+    /// them asks a vendor anything. A `reqwest` call appearing in `mod.rs` — a validator that
+    /// checks a model by fetching it, a read that probes an endpoint — puts the network back in
+    /// front of every caller that only wanted to read a file, and nothing about the module tree
+    /// would say so.
+    ///
+    /// Read off the source, because there is no type that carries it. The client and the builder
+    /// are what leave the machine; `reqwest::Url` is a URL parser, and `validate_connection` uses
+    /// it to refuse a base address without asking anyone about it. `model_server.rs` reaches a
+    /// local llama over a bare socket and is a third seam again; this says nothing about it, only
+    /// that this module has one door.
+    #[test]
+    fn only_the_catalogue_asks_a_vendor_anything() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings");
+        for name in ["mod.rs", "secrets.rs", "legacy.rs"] {
+            let body = std::fs::read_to_string(here.join(name)).expect("read a settings module");
+            // The test modules are exempt: `mod tests` in `mod.rs` drives the real per-driver
+            // decisions, and it holds this very sentence.
+            //
+            // Anchored on the `mod` and not on the attribute alone, which is what this was and is
+            // why it went quietly vacuous: `#[cfg(test)] use catalogue::*;` sits at the top of this
+            // file, so splitting on the first attribute left 25 of 4,800 lines to search and the
+            // test went on passing. A source-reading test that cannot say how much source it read
+            // is a test that can be switched off by an unrelated edit, so it says.
+            let production = body
+                .split("\n#[cfg(test)]\nmod ")
+                .next()
+                .unwrap_or_default();
+            let read = production.lines().count();
+            let whole = body.lines().count();
+            assert!(
+                read * 4 > whole,
+                "settings/{name}: only {read} of {whole} lines were searched, so this proves nothing"
+            );
+            for reaching in ["reqwest::Client", "RequestBuilder", ".send()"] {
+                assert!(
+                    !production.contains(reaching),
+                    "settings/{name} holds {reaching}; reaching a vendor belongs in catalogue.rs"
+                );
+            }
+        }
+        let catalogue = std::fs::read_to_string(here.join("catalogue.rs")).expect("read catalogue");
+        assert!(
+            catalogue.contains("reqwest::Client"),
+            "catalogue.rs is the module that asks a vendor, and no longer does"
+        );
+    }
 
     /// Every driver reads exactly one key, and it is the one its own keyring slot holds.
     ///

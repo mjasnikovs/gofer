@@ -1,0 +1,276 @@
+{
+    "note": [
+        "One repair, one row, read by both engines that repair a torn tool call.",
+        "`repairedBy` names which one owns it, and both suites assert both halves of that:",
+        "`worker` means scripts/tool-call-repair.mjs turns `wrote` into `becomes` and",
+        "src-tauri/src/tool_repair.rs leaves it alone; `router` is the other way round; `both`",
+        "means each engine makes it. The split is not a preference: the agent loop validates a",
+        "call against the generated schema between `prepareArguments` and the router, and the",
+        "schema for a nested entry and for a tagged value is closed, so a shape it refuses never",
+        "reaches the table. The entry's own schema is open, so a key no operation declares does.",
+        "Written down in two prose comments and checked by nothing, that line already drifted:",
+        "a fix for the double-wrapped tag came to exist only in JavaScript while both suites",
+        "stayed green. A repair that migrates now fails on the side it left."
+    ],
+    "repairs": [
+        {
+            "why": "a key that swallowed its own value, separated by a space",
+            "tool": "godot_logs",
+            "op": "read",
+            "wrote": {
+                "limit 50": null
+            },
+            "becomes": {
+                "limit": 50
+            },
+            "repairedBy": "both"
+        },
+        {
+            "why": "a key that swallowed its own value, concatenated and said twice",
+            "tool": "godot_logs",
+            "op": "read",
+            "wrote": {
+                "minSeverityWarning": "warning"
+            },
+            "becomes": {
+                "minSeverity": "warning"
+            },
+            "repairedBy": "both"
+        },
+        {
+            "why": "a key that swallowed a whole JSON value",
+            "tool": "godot_resource",
+            "op": "create_shape",
+            "wrote": {
+                "path": "res://a.tres",
+                "shapeType": "RectangleShape2D",
+                "size [16, 16]": null
+            },
+            "becomes": {
+                "path": "res://a.tres",
+                "shapeType": "RectangleShape2D",
+                "size": [16, 16]
+            },
+            "repairedBy": "both"
+        },
+        {
+            "why": "the same pair torn twice, the second one saying nothing new",
+            "tool": "godot_resource",
+            "op": "create_shape",
+            "wrote": {
+                "path": "res://a.tres",
+                "shapeType RectangleShape2D": null,
+                "size [640, 16]": null
+            },
+            "becomes": {
+                "path": "res://a.tres",
+                "shapeType": "RectangleShape2D",
+                "size": [640, 16]
+            },
+            "repairedBy": "both"
+        },
+        {
+            "why": "a torn key whose tail is a value with the tear's trailing comma behind it",
+            "tool": "godot_logs",
+            "op": "read",
+            "wrote": {
+                "limit\":\": 40, ": "",
+                "source": "editor"
+            },
+            "becomes": {
+                "limit": 40,
+                "source": "editor"
+            },
+            "repairedBy": "router"
+        },
+        {
+            "why": "a torn key whose tail is a value with the tear's trailing brackets behind it",
+            "tool": "godot_logs",
+            "op": "read",
+            "wrote": {
+                "limit\":\": 60}]": null,
+                "source": "editor"
+            },
+            "becomes": {
+                "limit": 60,
+                "source": "editor"
+            },
+            "repairedBy": "router"
+        },
+        {
+            "why": "wreckage over a call that is already complete without it",
+            "tool": "godot_node",
+            "op": "instantiate",
+            "wrote": {
+                "parent": "/Main",
+                "path": "res://scenes/brick.tscn",
+                "name': null}]_1_1_PLACEHOLDER_1_1'}, {": null
+            },
+            "becomes": {
+                "parent": "/Main",
+                "path": "res://scenes/brick.tscn"
+            },
+            "repairedBy": "router"
+        },
+        {
+            "why": "two wrong keys that read as one parameter and hold the same value",
+            "tool": "godot_resource",
+            "op": "create_shape",
+            "wrote": {
+                "path": "res://a.tres",
+                "shapeType": "RectangleShape2D",
+                "size2": [16, 16],
+                "size_value": [16, 16]
+            },
+            "becomes": {
+                "path": "res://a.tres",
+                "shapeType": "RectangleShape2D",
+                "size": [16, 16]
+            },
+            "repairedBy": "router"
+        },
+        {
+            "why": "a list handed over as the JSON text of itself",
+            "tool": "godot_resource",
+            "op": "create_shape",
+            "wrote": {
+                "path": "res://a.tres",
+                "shapeType": "RectangleShape2D",
+                "size": "[16, 32]"
+            },
+            "becomes": {
+                "path": "res://a.tres",
+                "shapeType": "RectangleShape2D",
+                "size": [16, 32]
+            },
+            "repairedBy": "worker"
+        },
+        {
+            "why": "a resource written straight into a tagged value, with no payload wrapper",
+            "tool": "godot_node",
+            "op": "set_property",
+            "wrote": {
+                "node": "/HUD",
+                "property": "script",
+                "value": {
+                    "type": "resource",
+                    "path": "res://scripts/hud.gd"
+                }
+            },
+            "becomes": {
+                "node": "/HUD",
+                "property": "script",
+                "value": {
+                    "type": "resource",
+                    "value": {
+                        "path": "res://scripts/hud.gd"
+                    }
+                }
+            },
+            "repairedBy": "both"
+        },
+        {
+            "why": "a tagged value whose own key names arrived wearing quotation marks",
+            "tool": "godot_node",
+            "op": "set_property",
+            "wrote": {
+                "node": "/HUD",
+                "property": "script",
+                "value": {
+                    "\"type\"": "resource",
+                    "value": {
+                        "\"path\"": "res://scripts/hud.gd"
+                    }
+                }
+            },
+            "becomes": {
+                "node": "/HUD",
+                "property": "script",
+                "value": {
+                    "type": "resource",
+                    "value": {
+                        "path": "res://scripts/hud.gd"
+                    }
+                }
+            },
+            "repairedBy": "worker"
+        },
+        {
+            "why": "a padded key inside a nested entry, whose schema is closed",
+            "tool": "godot_node",
+            "op": "set_properties",
+            "wrote": {
+                "properties": [
+                    {
+                        " node": "/HUD",
+                        "property": "visible",
+                        "value": {
+                            "type": "bool",
+                            "value": true
+                        }
+                    }
+                ]
+            },
+            "becomes": {
+                "properties": [
+                    {
+                        "node": "/HUD",
+                        "property": "visible",
+                        "value": {
+                            "type": "bool",
+                            "value": true
+                        }
+                    }
+                ]
+            },
+            "repairedBy": "worker"
+        },
+        {
+            "why": "a tagged value wrapped in a second copy of its own tag",
+            "tool": "godot_node",
+            "op": "set_property",
+            "wrote": {
+                "node": "/HUD",
+                "property": "text",
+                "value": {
+                    "type": "string",
+                    "value": {
+                        "type": "String",
+                        "value": "Score: 0"
+                    }
+                }
+            },
+            "becomes": {
+                "node": "/HUD",
+                "property": "text",
+                "value": {
+                    "type": "string",
+                    "value": "Score: 0"
+                }
+            },
+            "repairedBy": "router"
+        },
+        {
+            "why": "a flat entry beside the operation's own parameters, folded into the list it belongs to",
+            "tool": "godot_node",
+            "op": "set_cells",
+            "wrote": {
+                "node": "/Map",
+                "x": 1,
+                "y": 2,
+                "expectedRevision": 3
+            },
+            "becomes": {
+                "node": "/Map",
+                "cells": [
+                    {
+                        "x": 1,
+                        "y": 2
+                    }
+                ],
+                "expectedRevision": 3
+            },
+            "repairedBy": "router"
+        }
+    ]
+}

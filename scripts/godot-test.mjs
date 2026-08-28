@@ -15,7 +15,11 @@ const project = resolve('fixtures/godot-project')
  * both run in about a second — which is the whole point of them being separate from `plugin.gd`,
  * where every one of these checks cost a real editor boot to reach.
  */
-const SUITES = ['res://tests/protocol_test.gd', 'res://tests/params_test.gd']
+const SUITES = [
+    'res://tests/protocol_test.gd',
+    'res://tests/params_test.gd',
+    'res://tests/parse_test.gd'
+]
 
 /*
  * The addon, copied in fresh from source for the length of the run.
@@ -30,7 +34,10 @@ const ADDON = resolve('src-tauri/addon')
 
 function stageAddon() {
     mkdirSync(STAGED, {recursive: true})
-    for (const name of ['protocol.gd', 'params.gd'])
+    // `plugin.gd` and `runtime.gd` are staged too, and only `parse_test.gd` reads them: neither
+    // can be *run* without an editor or a game, but both can be compiled, and a moved function
+    // that no longer parses is the one thing that breaks without any suite noticing.
+    for (const name of ['protocol.gd', 'params.gd', 'plugin.gd', 'runtime.gd'])
         copyFileSync(resolve(ADDON, name), resolve(STAGED, name))
 }
 

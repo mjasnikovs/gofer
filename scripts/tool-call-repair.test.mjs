@@ -1495,3 +1495,97 @@ test('the operation the key names survives whatever the object it wraps holds', 
         ops: [{op: 'create', parent: '/Main'}]
     })
 })
+
+/**
+ * Every repair in the shared corpus is made by the engine the corpus says makes it.
+ *
+ * There are two repair engines, and one rule split across them: this file repairs what the agent
+ * loop's schema would refuse before the router is reached, `tool_repair.rs` repairs everything a
+ * value or a key means. The split is real — the entry schema is open, so a key no operation
+ * declares reaches the router untouched — but until now it was written down in two prose comments
+ * and checked by nothing. A fix for the double-wrapped tag came to exist only in JavaScript that
+ * way, and both suites stayed green.
+ *
+ * `fixtures/tool-call-repairs.json` is one row per repair, naming which engine owns it. Both halves
+ * of every row are asserted here:
+ *
+ * - `worker` and `both`: this engine turns `wrote` into `becomes`.
+ * - `router`: this engine leaves `wrote` exactly as the model wrote it, because the open entry
+ *   schema carries it through to `tool_repair.rs`, which is what `every_repair_in_the_shared_corpus`
+ *   in that file proves.
+ *
+ * So a repair that migrates from one engine to the other fails here or there, rather than silently
+ * existing twice or nowhere.
+ */
+test('every repair in the shared corpus is made by the engine that owns it', async () => {
+    const corpus = JSON.parse(
+        await readFile(new URL('../fixtures/tool-call-repairs.json', import.meta.url), 'utf8')
+    )
+    const domains = await declaredDomains()
+    assert.ok(corpus.repairs.length > 10, 'the corpus lost its repairs')
+
+    for (const row of corpus.repairs) {
+        const operations = domains.find(domain => domain.name === row.tool)?.operations
+        assert.ok(operations, `${row.tool} is not a domain`)
+        assert.ok(
+            operations.some(operation => operation.op === row.op),
+            `${row.tool} has no ${row.op} operation`
+        )
+        assert.ok(
+            ['both', 'router', 'worker'].includes(row.repairedBy),
+            `${row.why}: ${row.repairedBy} is not an engine`
+        )
+        const {op, ...ran} = normalizeToolCalls(operations, {
+            ops: [{op: row.op, ...row.wrote}]
+        }).ops[0]
+        assert.equal(op, row.op, row.why)
+        const wanted = row.repairedBy === 'router' ? row.wrote : row.becomes
+        assert.deepEqual(ran, wanted, `${row.tool} ${row.op}: ${row.why}`)
+    }
+})
+
+/**
+ * Everything the worker leaves for the router passes the schema the agent loop validates against.
+ *
+ * This is the rule the corpus's `repairedBy` states, proven rather than asserted. A repair belongs
+ * to the router only if the call still reaches it: the agent loop runs `prepareArguments` and then
+ * validates the result, so a shape the schema refuses is answered there and the table is never
+ * called. A row marked `router` whose repaired call ajv refuses is a repair that runs nowhere.
+ *
+ * The chain is the real one — `createGodotTools` over the declared contract, `prepareArguments`,
+ * then ajv over the tool's own generated parameters — and it ran only in `bench-schema-probe.mjs`
+ * until now, which is a bench and not a gate.
+ */
+test('what the worker leaves for the router still passes the schema', async () => {
+    const corpus = JSON.parse(
+        await readFile(new URL('../fixtures/tool-call-repairs.json', import.meta.url), 'utf8')
+    )
+    const {default: Ajv} = await import('ajv')
+    const ajv = new Ajv({strict: false, allErrors: true})
+    const tools = new Map(
+        createGodotTools(await declaredDomains(), {call: async () => ({})}).map(tool => [
+            tool.name,
+            tool
+        ])
+    )
+
+    for (const row of corpus.repairs) {
+        const tool = tools.get(row.tool)
+        assert.ok(tool, `${row.tool} is not a tool`)
+        const validate = ajv.compile(tool.parameters)
+        const prepared = tool.prepareArguments({ops: [{op: row.op, ...row.wrote}]})
+        assert.ok(
+            validate(prepared),
+            `${row.tool} ${row.op}: ${row.why} — the worker left a call the schema refuses: `
+                + `${ajv.errorsText(validate.errors)}`
+        )
+        // And the shape as the model wrote it, for a `worker` row, is one the schema really does
+        // refuse — otherwise the row is recording a repair that had no reason to live there.
+        if (row.repairedBy !== 'worker') continue
+        assert.ok(
+            !validate({ops: [{op: row.op, ...row.wrote}]}),
+            `${row.tool} ${row.op}: ${row.why} — the schema accepts this unrepaired, so the `
+                + 'router could have answered it'
+        )
+    }
+})

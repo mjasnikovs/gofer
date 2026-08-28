@@ -804,12 +804,6 @@ pub(crate) fn repair_call(tool: &str, op: &str, spec: &'static [Param], params: 
 }
 
 /// [`repair_call`], for a caller holding two strings. Read only by tests, like the lookup behind it.
-/// The operation's own list, written under a name the operation does not have.
-///
-/// Its own paragraph again: this comment used to sit above `fold_a_lone_entry_into_the_list_it_belongs_to`,
-/// which was inserted between it and the function it describes. `edits` for `files` is the shape —
-/// a list of the right entries under the wrong word — and it is renamed only when every entry fits
-/// the target's declared entry exactly, and only when one parameter fits.
 #[cfg(test)]
 pub fn repair(domain: &str, op: &str, params: &mut Value) {
     if let Some(operation) = operation_of(domain, op) {
@@ -1118,29 +1112,6 @@ fn drop_the_wreckage_a_complete_call_can_spare(
     }
 }
 
-/// The operation's own list, written under a name the operation does not have.
-///
-/// ```text
-/// {"op": "edit", "edits": [{"path": "scripts/player.gd", "edits": [{"oldText": …}]}]}
-/// ```
-///
-/// `edit`'s list is `files`, and every entry the model put under `edits` *is* a `files` entry — a
-/// `path` and its own `edits`. The whole call is right except the word above it, and it was
-/// answered "godot_script edit has no `edits` parameter. It takes {files: list of {path: text,
-/// edits: …}}": a sentence that quotes back the shape the caller had already written and never says
-/// the shape is the part that is right. Three recorded live turns, in `N01-backwards`,
-/// `V02-backwards` and `s24-level`, each losing a whole batch of edits to the name.
-///
-/// [`only_one_meaning`] cannot reach it — `edits` is not a near miss for `files`, it is a different
-/// word — and [`drop_a_value_the_call_already_carries`] is right not to: there is no `files` here
-/// for the key to be a copy of.
-///
-/// The fit is what makes it a repair rather than a guess, and it is the same "exactly" every other
-/// rule in this file uses: every entry under the stray key holds every required field of the
-/// declared entry and holds nothing the declared entry does not. Narrow on every side — one stray
-/// key of that shape, exactly one declared list it fits, and that list not already written, because
-/// a stray beside a list that is already there is a second copy rather than a misspelling and
-/// choosing between two copies is not a repair.
 /// One entry of a required list, written without the list around it.
 ///
 /// `godot_script edit` takes `files`, a list of `{path, edits}`. A caller changing one file has one
@@ -1172,9 +1143,19 @@ fn fold_a_lone_entry_into_the_list_it_belongs_to(
     let [target] = absent.as_slice() else {
         return;
     };
+    // The stray entry, and nothing the operation declares for itself.
+    //
+    // This used to keep every key but `op` and `UNIVERSAL`, so it swept in the operation's own
+    // top-level parameters along with the entry that had been flattened out of its list —
+    // `set_cells`'s `node`, and the hidden `expectedRevision` a caller lifts onto any mutating
+    // call. `exactly_fits` then said no, the single-key branch counted three keys rather than one,
+    // and the fold declined; the call was refused for a missing `cells` with every value it needed
+    // written in front of it. `the_operation_these_keys_belong_to` already reads the spec this way,
+    // for the same parameter; only this half was left reading the whole object.
     let spread: serde_json::Map<String, Value> = object
         .iter()
         .filter(|(key, _)| !UNIVERSAL.contains(&key.as_str()) && key.as_str() != "op")
+        .filter(|(key, _)| !spec.iter().any(|param| param.name == key.as_str()))
         .map(|(key, held)| (key.clone(), held.clone()))
         .collect();
     let named: Vec<String> = spread.keys().cloned().collect();
@@ -1333,6 +1314,32 @@ fn the_word_the_operation_does_not_use(
     object.insert(name.to_owned(), moved);
 }
 
+/// The operation's own list, written under a name the operation does not have.
+///
+/// ```text
+/// {"op": "edit", "edits": [{"path": "scripts/player.gd", "edits": [{"oldText": …}]}]}
+/// ```
+///
+/// `edit`'s list is `files`, and every entry the model put under `edits` *is* a `files` entry — a
+/// `path` and its own `edits`. The whole call is right except the word above it, and it was
+/// answered "godot_script edit has no `edits` parameter. It takes {files: list of {path: text,
+/// edits: …}}": a sentence that quotes back the shape the caller had already written and never says
+/// the shape is the part that is right. Three recorded live turns, in `N01-backwards`,
+/// `V02-backwards` and `s24-level`, each losing a whole batch of edits to the name.
+///
+/// [`only_one_meaning`] cannot reach it — `edits` is not a near miss for `files`, it is a different
+/// word — and [`drop_a_value_the_call_already_carries`] is right not to: there is no `files` here
+/// for the key to be a copy of.
+///
+/// The fit is what makes it a repair rather than a guess, and it is the same "exactly" every other
+/// rule in this file uses: every entry under the stray key holds every required field of the
+/// declared entry and holds nothing the declared entry does not. Narrow on every side — one stray
+/// key of that shape, exactly one declared list it fits, and that list not already written, because
+/// a stray beside a list that is already there is a second copy rather than a misspelling and
+/// choosing between two copies is not a repair.
+/// Moved here from above `fold_a_lone_entry_into_the_list_it_belongs_to`, which was inserted
+/// between this paragraph and the function it describes and then kept it. This is the rename;
+/// that one is the fold, and they are two different repairs of two different shapes.
 fn rename_a_list_written_under_another_name(
     spec: &[Param],
     object: &mut serde_json::Map<String, Value>,
@@ -4885,5 +4892,102 @@ mod tests {
             "{}",
             ordinary.message
         );
+    }
+
+    /// A flat entry is folded into its list past the parameters that are not entry fields.
+    ///
+    /// `spread` took every key but `op` and `timeoutMs`, so it swept in the operation's own
+    /// top-level parameters as well as the stray entry — `node` on `set_cells`, and the hidden
+    /// `expectedRevision` the caller lifts onto any mutating call. `exactly_fits` then said no, the
+    /// single-key branch found three keys rather than one, and the fold declined; the call was
+    /// refused for a missing `cells` with every value it needed sitting in front of it.
+    ///
+    /// The tests missed it because `godot_script edit` takes `files` and nothing else, and it is the
+    /// one shape where a parameter that is not an entry field cannot be there to be swept.
+    #[test]
+    fn a_flat_entry_is_folded_past_the_parameters_that_are_not_entry_fields() {
+        let mut beside_a_sibling = json!({"node": "/Map", "x": 1, "y": 2});
+        repair("godot_node", "set_cells", &mut beside_a_sibling);
+        assert_eq!(
+            beside_a_sibling["cells"],
+            json!([{"x": 1, "y": 2}]),
+            "a required sibling is not a field of the entry: {beside_a_sibling}"
+        );
+        assert_eq!(
+            beside_a_sibling["node"],
+            json!("/Map"),
+            "and it stays where the operation declared it: {beside_a_sibling}"
+        );
+        check_ok("godot_node", "set_cells", beside_a_sibling);
+
+        let mut with_revision = json!({"node": "/Map", "x": 1, "y": 2, "expectedRevision": 3});
+        repair("godot_node", "set_cells", &mut with_revision);
+        assert_eq!(
+            with_revision["cells"],
+            json!([{"x": 1, "y": 2}]),
+            "a hidden parameter is not a field of the entry either: {with_revision}"
+        );
+        assert_eq!(
+            with_revision["expectedRevision"],
+            json!(3),
+            "{with_revision}"
+        );
+        check_ok("godot_node", "set_cells", with_revision);
+    }
+
+    /// Every repair in the shared corpus is made by the engine the corpus says makes it.
+    ///
+    /// The twin of `every repair in the shared corpus is made by the engine that owns it` in
+    /// `scripts/tool-call-repair.test.mjs`, over the same rows of
+    /// `fixtures/tool-call-repairs.json`. Two engines repair a torn tool call, and the line
+    /// between them was written down twice in prose and checked nowhere: the worker repairs what
+    /// the agent loop's schema refuses before this table is reached, and this table repairs
+    /// everything a value or a key means. That is exactly how a fix for the double-wrapped tag
+    /// came to exist only in JavaScript while both suites stayed green.
+    ///
+    /// Both halves of every row are asserted, here and there:
+    ///
+    /// - `router` and `both`: this engine turns `wrote` into `becomes`.
+    /// - `worker`: this engine leaves `wrote` alone, because the entry never arrives — the
+    ///   generated schema for a nested entry and for a tagged value is closed, so the agent loop
+    ///   refuses it first, and the worker is the only layer that can answer it.
+    ///
+    /// So a repair that migrates from one engine to the other fails on one side or the other,
+    /// rather than silently existing twice or nowhere.
+    #[test]
+    fn every_repair_in_the_shared_corpus_is_made_by_the_engine_that_owns_it() {
+        let corpus: Value = serde_json::from_slice(
+            &std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../fixtures/tool-call-repairs.json"),
+            )
+            .expect("read the shared repair corpus"),
+        )
+        .expect("parse the shared repair corpus");
+        let rows = corpus["repairs"].as_array().expect("corpus repairs");
+        assert!(rows.len() > 10, "the corpus lost its repairs");
+
+        for row in rows {
+            let tool = row["tool"].as_str().expect("a tool");
+            let op = row["op"].as_str().expect("an op");
+            let why = row["why"].as_str().expect("a reason");
+            let owner = row["repairedBy"].as_str().expect("an engine");
+            assert!(
+                matches!(owner, "both" | "router" | "worker"),
+                "{why}: {owner} is not an engine"
+            );
+            assert!(
+                operation_of(tool, op).is_some(),
+                "{tool} has no {op} operation"
+            );
+            let mut ran = row["wrote"].clone();
+            repair(tool, op, &mut ran);
+            let wanted = if owner == "worker" {
+                &row["wrote"]
+            } else {
+                &row["becomes"]
+            };
+            assert_eq!(&ran, wanted, "{tool} {op}: {why}");
+        }
     }
 }

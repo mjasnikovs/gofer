@@ -32,7 +32,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 queue="$1"
-while IFS=$'\t' read -r name fixture extra task; do
+# Read on fd 3, not on stdin. `live-turn.sh` below runs a whole `cargo test` — anything under it
+# that reads stdin would otherwise eat the rest of this file, and those queue lines would simply
+# never run, with nothing said about them. The `|| [ -n "${name:-}" ]` is the other half: a queue
+# file whose last line has no newline makes `read` return non-zero after setting the fields, and
+# without it that line is dropped.
+while IFS=$'\t' read -r -u 3 name fixture extra task || [ -n "${name:-}" ]; do
   [ -z "${name:-}" ] && continue
   case "$name" in \#*) continue ;; esac
   if [ -f "logs/oxloop/${name}.json" ]; then
@@ -61,10 +66,10 @@ while IFS=$'\t' read -r name fixture extra task; do
   for attempt in 1 2; do
     GOFER_LIVE_THINKING="${GOFER_LIVE_THINKING:-medium}" \
     GOFER_LIVE_KEEP="$PWD/logs/oxloop/${name}-worktree" \
-      ./scripts/live-turn.sh "$name" "$task" > "logs/oxloop/${name}.log" 2>&1
+      ./scripts/live-turn.sh "$name" "$task" > "logs/oxloop/${name}.log" 2>&1 < /dev/null
     status=$?
     echo "== ${name} attempt=${attempt} exit=${status} $(date -Is)"
     [ -f "logs/oxloop/${name}.json" ] && break
     [ "$attempt" = 2 ] && echo "== ${name} left no report twice; giving up"
   done
-done < "$queue"
+done 3< "$queue"

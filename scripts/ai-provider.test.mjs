@@ -16,6 +16,7 @@ import {cannedModels} from './ai-subagent.mjs'
 import {
     createAgentTools,
     createModelContext,
+    DRIVERS,
     outOfRoom,
     readableProviderError,
     retryDelay,
@@ -2565,4 +2566,157 @@ test('a turn with no world given reaches the live one', async context => {
         }),
         /The selected model .* is unavailable/
     )
+})
+
+/// A driver no provider was registered for stops the turn by name, rather than running as `local`.
+///
+/// This read used to be `PROVIDER_IDS[settings.connectionType] ?? PROVIDER_ID`. The fallback made
+/// the one failure `PROVIDER_IDS` exists to prevent unreachable: a driver added to the Rust enum
+/// and the TypeScript union but not to that map resolved to the local provider id, and the turn was
+/// put to `127.0.0.1` carrying a hosted model's name — with the hosted key never sent, and nothing
+/// said about any of it.
+///
+/// The fifth driver here is not hypothetical in the shape that matters: it is what a settings file
+/// written by a newer build looks like to an older one.
+test('a driver this build has no provider for is refused by name', () => {
+    const profile = {
+        name: 'Somewhere',
+        baseUrl: 'https://example.invalid/v1',
+        api: 'openai-completions',
+        chatTemplateThinking: false,
+        model: {
+            id: 'some-model',
+            name: 'Some model',
+            contextWindow: 128_000,
+            maxTokens: 8_000,
+            reasoning: false,
+            supportsReasoningEffort: false,
+            thinkingLevels: [],
+            input: ['text'],
+            thinkingLevel: 'off'
+        }
+    }
+    assert.throws(
+        () =>
+            createModelContext({
+                settings: {connectionType: 'anthropic', connections: {anthropic: profile}},
+                apiKey: 'local'
+            }),
+        /No pi-ai provider is registered for the 'anthropic' connection/u
+    )
+})
+
+/// The driver list is the four this build knows, and nothing reads a driver that is not on it.
+///
+/// `check-command-surface.mjs` holds this list to the Rust enum and the TypeScript union. What it
+/// cannot say is that the list is the one this file actually uses, which is what this asserts.
+test('every driver but ChatGPT has a pi-ai provider registered for it', () => {
+    assert.deepEqual([...DRIVERS].sort(), [
+        'cerebras',
+        'openai-codex',
+        'openai-compatible',
+        'openrouter'
+    ])
+    // pi-ai ships the ChatGPT provider, so it is set rather than built and has no entry of its own.
+    // A driver with no connection configured still fails — on the model, which is a later question
+    // and a different sentence. What must not happen is the provider refusal.
+    for (const driver of DRIVERS) {
+        if (driver === 'openai-codex') continue
+        let said = ''
+        try {
+            createModelContext({settings: {connectionType: driver, connections: {}}})
+        } catch (refusal) {
+            said = refusal.message
+        }
+        assert.ok(
+            !said.includes('No pi-ai provider is registered'),
+            `${driver} has no provider registered: ${said}`
+        )
+    }
+})
+
+/// A sub-agent pointed at a driver this build has no provider for is refused too.
+///
+/// The second of the two reads that answered an unknown driver with the local one. This one is
+/// worse than the parent's, because the function it sits in documents the opposite: "A child
+/// pointed at a connection or a model that is not there stops the turn by name: falling back to the
+/// parent would spend the large model on the small model's work and say nothing about having done
+/// so." `chosen.connectionType in PROVIDER_IDS ? chosen.connectionType : 'openai-compatible'` did
+/// exactly that, one line under the sentence saying it does not.
+test('a sub-agent driver this build has no provider for is refused by name', () => {
+    const connection = {
+        name: 'Local AI',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        api: 'openai-completions',
+        chatTemplateThinking: false,
+        model: {
+            id: 'a-model',
+            name: 'A model',
+            contextWindow: 128_000,
+            maxTokens: 8_000,
+            reasoning: false,
+            supportsReasoningEffort: false,
+            thinkingLevels: [],
+            input: ['text'],
+            thinkingLevel: 'off'
+        }
+    }
+    assert.throws(
+        () =>
+            createModelContext({
+                settings: {
+                    connectionType: 'openai-compatible',
+                    connections: {'openai-compatible': connection},
+                    subagent: {connection: {connectionType: 'anthropic', model: {id: 'a-model'}}}
+                },
+                apiKey: 'local'
+            }),
+        /No pi-ai provider is registered for the 'anthropic' connection/u
+    )
+})
+
+/// Every hosted driver the catalogue declares has a key slot that reaches it.
+///
+/// `HOSTED_DRIVERS` is generated from `protocol/drivers.json`; the map from driver to key argument
+/// is not, and cannot be — the keys arrive as named parameters of `createModelContext`. That is the
+/// last unchecked step of adding a driver, and the failure it used to produce was the worst kind:
+/// `providerIdOf` succeeded, `modelFor` returned a truthy model, so the named refusal never fired
+/// and the turn died inside pi-ai under a provider id nothing had created.
+///
+/// Driven through the real function rather than by reading the map, so it fails if the wiring stops
+/// being reached as well as if a row is missing from it.
+test('every hosted driver the catalogue declares has a key that reaches it', () => {
+    const profile = name => ({
+        name,
+        baseUrl: 'https://example.invalid/v1',
+        api: 'openai-completions',
+        chatTemplateThinking: false,
+        model: {
+            id: 'a-model',
+            name: 'A model',
+            contextWindow: 128_000,
+            maxTokens: 8_000,
+            reasoning: false,
+            supportsReasoningEffort: false,
+            thinkingLevels: [],
+            input: ['text'],
+            thinkingLevel: 'off'
+        }
+    })
+    const hosted = DRIVERS.filter(
+        driver => driver !== 'openai-compatible' && driver !== 'openai-codex'
+    )
+    assert.ok(hosted.length > 0, 'the catalogue declares no hosted driver')
+    for (const driver of hosted) {
+        assert.doesNotThrow(
+            () =>
+                createModelContext({
+                    settings: {connectionType: driver, connections: {[driver]: profile(driver)}},
+                    apiKey: 'local',
+                    openrouterApiKey: 'k',
+                    cerebrasApiKey: 'k'
+                }),
+            `${driver} is declared but no key reaches it`
+        )
+    }
 })

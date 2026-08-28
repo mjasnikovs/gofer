@@ -277,6 +277,46 @@ function replaceRegion(text, path, comment, name, body) {
  * is a settings page that cannot save the settings it was opened with — which neither side can
  * report as the mistake it is.
  */
+/**
+ * Every driver a build knows, read from the one file that declares them.
+ *
+ * Validated hard, because three languages are emitted from it and a bad row is a bad build in all
+ * three. The ids and the variants must each be distinct, and exactly one driver may decline a
+ * provider id — ChatGPT, whose provider pi-ai ships.
+ */
+async function driverCatalogue() {
+    const path = 'protocol/drivers.json'
+    const {drivers} = JSON.parse(await read(path))
+    if (!Array.isArray(drivers) || drivers.length === 0)
+        throw new Error(`${path} declares no drivers`)
+    const seen = new Map()
+    for (const driver of drivers) {
+        for (const key of ['id', 'variant', 'label', 'shortName', 'note'])
+            if (typeof driver[key] !== 'string' || driver[key].trim() === '')
+                throw new Error(`${path}: a driver has no ${key}`)
+        if (!/^[a-z0-9-]+$/u.test(driver.id))
+            throw new Error(`${path}: ${driver.id} is not a wire word`)
+        for (const [key, value] of [
+            ['id', driver.id],
+            ['variant', driver.variant]
+        ]) {
+            const where = `${key}:${value}`
+            if (seen.has(where)) throw new Error(`${path}: two drivers share the ${key} ${value}`)
+            seen.set(where, driver)
+        }
+        if (driver.providerId !== null && typeof driver.providerId !== 'string')
+            throw new Error(`${path}: ${driver.id} has neither a provider id nor an honest null`)
+    }
+    const shipped = drivers.filter(driver => driver.providerId === null)
+    if (shipped.length !== 1 || shipped[0].id !== 'openai-codex')
+        throw new Error(
+            `${path}: ChatGPT is the one driver whose provider pi-ai ships, and ${
+                shipped.map(one => one.id).join(', ') || 'nothing'
+            } declines a provider id`
+        )
+    return drivers
+}
+
 async function subagentBoundsCatalogue() {
     const path = 'protocol/subagent-bounds.json'
     const {bounds} = JSON.parse(await read(path))
@@ -385,7 +425,7 @@ function gdDispatch(commands) {
                 `        "${command}":\n            return ${handler}(${takesParams ? 'params' : ''})\n`
         )
         .join('')
-    return `    match command:\n${cases}    return _unknown_command_error(command)\n`
+    return `    match command:\n${cases}    return Params.unknown_command_error(command)\n`
 }
 
 function gdRuntimeCommands(names) {
@@ -669,6 +709,104 @@ function wrapDoc(note) {
  * Emitted to prettier's own formatting — four spaces, no semicolons, no bracket spacing — because
  * `npm run check` runs `format:check` over the file this lands in.
  */
+/**
+ * The wire word for each driver, and the list of all of them.
+ *
+ * The enum itself stays hand-written: its derives and its doc comment are decisions, and the match
+ * below is what holds the two together. A variant with no row leaves this match non-exhaustive; a
+ * row with no variant names something that does not exist. Both are compile errors, and each one
+ * points at the half that was not edited.
+ */
+function rustDrivers(drivers) {
+    const arms = drivers
+        .map(driver => `        AiConnectionType::${driver.variant} => ${rustString(driver.id)},\n`)
+        .join('')
+    const listed = drivers.map(driver => rustString(driver.id)).join(', ')
+    return (
+        '/// The word a driver is written down as, on the wire and in the settings file.\n'
+        + '///\n'
+        + '/// Never the display label: a file holding `OpenRouter` matches no driver this build\n'
+        + '/// knows.\n'
+        + "fn driver_id(driver: AiConnectionType) -> &'static str {\n"
+        + '    match driver {\n'
+        + `${arms}`
+        + '    }\n'
+        + '}\n\n'
+        + '/// Every driver a build knows, in the order the pickers offer them.\n'
+        + '///\n'
+        + '/// Read only by the test that round-trips each id through serde and back through\n'
+        + '/// `driver_id`. Rust itself needs no list: the enum is the list, and the match above is\n'
+        + '/// exhaustive over it.\n'
+        + '#[cfg(test)]\n'
+        + `const DRIVER_IDS: [&str; ${drivers.length}] = [${listed}];\n`
+    )
+}
+
+/** The driver union the renderer spells a connection with, the picker's order, and the labels. */
+function typescriptDrivers(drivers) {
+    const union = drivers.map(driver => `'${driver.id}'`).join(' | ')
+    const listed = drivers.map(driver => `    '${driver.id}'`).join(',\n')
+    const labels = drivers
+        .map(driver => {
+            const key = /^[a-z][a-z0-9]*$/u.test(driver.id) ? driver.id : `'${driver.id}'`
+            return `${wrapPrefixed(driver.note, '    // ', 100)}\n    ${key}: '${driver.label}'`
+        })
+        .join(',\n')
+    return (
+        `export type AiConnectionType = ${union}\n\n`
+        + '/** Every driver a build knows, in the order the pickers offer them. */\n'
+        + `export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [\n${listed}\n]\n\n`
+        + '/**\n'
+        + ' * What each driver is called on screen. Separate from the stored id, and one-directional:\n'
+        + ' * a label must never be written to the settings file. Same rule as `SEARCH_PROVIDER_LABELS`.\n'
+        + ' */\n'
+        + 'export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = {\n'
+        + `${labels}\n`
+        + '}\n'
+    )
+}
+
+/**
+ * The three maps the worker reads a driver through.
+ *
+ * `PROVIDER_IDS` deliberately has no ChatGPT entry — pi-ai ships that provider, so it is set rather
+ * than built — and `providerIdOf` refuses the miss rather than resolving it to the local server,
+ * which is what two separate reads used to do.
+ */
+function nodeDrivers(drivers) {
+    const key = id => (/^[a-z][a-z0-9]*$/u.test(id) ? id : `'${id}'`)
+    // One line while it fits inside the print width, several after that — which is what prettier
+    // would do to it, and `format:check` runs over the emitted file like any other.
+    const oneLine = `export const DRIVERS = [${drivers.map(one => `'${one.id}'`).join(', ')}]`
+    const listed = drivers.map(driver => `    '${driver.id}'`).join(',\n')
+    const ids = drivers
+        .filter(driver => driver.providerId !== null)
+        .map(driver => `    ${key(driver.id)}: '${driver.providerId}'`)
+        .join(',\n')
+    const names = drivers.map(driver => `    ${key(driver.id)}: '${driver.shortName}'`).join(',\n')
+    const hosted = drivers.filter(
+        driver => driver.providerId !== null && driver.id !== 'openai-compatible'
+    )
+    return (
+        '/** Every driver a build knows, in the order the pickers offer them. */\n'
+        + (oneLine.length <= 120 ? `${oneLine}\n\n` : `export const DRIVERS = [\n${listed}\n]\n\n`)
+        + '/** Which pi-ai provider answers each driver. ChatGPT has none: pi-ai ships its own. */\n'
+        + `const PROVIDER_IDS = {\n${ids}\n}\n\n`
+        + '/** What each driver is called in the one sentence a user reads about its connection. */\n'
+        + `const DRIVER_NAMES = {\n${names}\n}\n\n`
+        + '/**\n'
+        + ' * The hosted drivers `createModelContext` has to build a provider for, in order.\n'
+        + ' *\n'
+        + ' * Not every driver. pi-ai ships the ChatGPT provider, and the local one is registered\n'
+        + ' * on its own because its key falls back to a placeholder where a hosted key must not.\n'
+        + ' * What is left is the loop, and it used to be a hand-written pair of names — so a\n'
+        + ' * fifth hosted driver passed `providerIdOf`, was never registered, and failed inside\n'
+        + ' * pi-ai under a provider id nothing had created.\n'
+        + ' */\n'
+        + `const HOSTED_DRIVERS = [${hosted.map(one => `'${one.id}'`).join(', ')}]\n`
+    )
+}
+
 function typescriptSubagentBounds(bounds) {
     const defaults = bounds.map(bound => `    ${bound.name}: ${grouped(bound.default)}`).join(',\n')
     const ranges = bounds
@@ -709,6 +847,7 @@ export async function generateSurfaces() {
     const {operations: parameters, vocabularies} = await parameterCatalogue()
     const subagentBounds = await subagentBoundsCatalogue()
     const cerebrasModels = await cerebrasModelCatalogue()
+    const drivers = await driverCatalogue()
 
     const declared = new Set(commands.map(entry => entry.command))
     for (const name of mutating) {
@@ -766,18 +905,22 @@ export async function generateSurfaces() {
             ]
         },
         {
-            path: 'src-tauri/src/settings.rs',
+            path: 'src-tauri/src/settings/mod.rs',
             comment: '//',
             rustfmt: true,
             regions: [
                 {name: 'subagent-bounds', body: rustSubagentBounds(subagentBounds)},
-                {name: 'cerebras-models', body: rustCerebrasModels(cerebrasModels)}
+                {name: 'cerebras-models', body: rustCerebrasModels(cerebrasModels)},
+                {name: 'drivers', body: rustDrivers(drivers)}
             ]
         },
         {
             path: 'src/models/settings.ts',
             comment: '//',
-            regions: [{name: 'subagent-bounds', body: typescriptSubagentBounds(subagentBounds)}]
+            regions: [
+                {name: 'subagent-bounds', body: typescriptSubagentBounds(subagentBounds)},
+                {name: 'drivers', body: typescriptDrivers(drivers)}
+            ]
         },
         {
             path: 'src/models/godot-commands.ts',
@@ -791,6 +934,11 @@ export async function generateSurfaces() {
                     ])
                 }
             ]
+        },
+        {
+            path: 'scripts/ai-provider.mjs',
+            comment: '//',
+            regions: [{name: 'drivers', body: nodeDrivers(drivers)}]
         },
         {
             path: 'src-tauri/permissions/main-window-commands.toml',

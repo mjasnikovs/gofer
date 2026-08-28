@@ -516,6 +516,100 @@ async function cancelLineAgreement() {
         )
 }
 
+/**
+ * The sentence a refused list is answered with, which two engines write in two languages.
+ *
+ * `said_that_none_of_it_ran` in `src-tauri/src/ai_tools.rs` and `sayingNoneOfItRan` in
+ * `scripts/tool-call-repair.mjs` append the same words to a refusal, deliberately: a model meets
+ * one of them when the router refuses a batch and the other when `prepareArguments` throws before
+ * the router is reached, and it cannot tell which layer answered it. The JS one says so in its own
+ * comment — "the same sentence the router appends, in the same words" — and nothing held it to
+ * that, so the two could drift into two answers to one question.
+ *
+ * Compared on the words alone: the placeholders differ by language and the line breaks are the
+ * formatter's, so both are reduced to the count marked `N` and single spaces.
+ */
+async function noneOfItRanAgreement() {
+    const rustPath = 'src-tauri/src/ai_tools.rs'
+    const jsPath = 'scripts/tool-call-repair.mjs'
+    const rust = /None of the \{listed\} operations[\s\S]*?corrected\.",/u.exec(
+        await read(rustPath)
+    )
+    if (!rust) throw new Error(`${rustPath} no longer builds the none-of-it-ran sentence`)
+    const js = /None of the \$\{String\(listed\)\} operations[\s\S]*?corrected\.`/u.exec(
+        await read(jsPath)
+    )
+    if (!js) throw new Error(`${jsPath} no longer builds the none-of-it-ran sentence`)
+    // Rust joins a wrapped string literal with a trailing backslash; JS joins two literals with a
+    // `+`. Both leave the words themselves untouched, so both reduce to the same thing.
+    const said = (text, count) =>
+        text
+            .replace(count, 'N')
+            .replace(/\\\n\s*/gu, '')
+            .replace(/`\s*\+\s*`/gu, '')
+            .replace(/["`],?$/u, '')
+            .replace(/\s+/gu, ' ')
+            .trim()
+    const fromRust = said(rust[0], /\{listed\}/gu)
+    const fromJs = said(js[0], /\$\{String\(listed\)\}/gu)
+    if (fromRust !== fromJs)
+        fail(
+            `a refused list is answered "${fromRust}" by ${rustPath} `
+                + `but "${fromJs}" by ${jsPath}`
+        )
+}
+
+/**
+ * --- Surface 10: the drivers a build knows, spelt in three languages.
+ *
+ * All three are now emitted from `protocol/drivers.json`, so `checkSurfacesAreGenerated` is what
+ * really holds them together and a disagreement here means a hand-edited region. Kept anyway,
+ * because it names *which* file drifted and in what order, and a sha256 mismatch does not.
+ *
+ * One closed set of four, written down as a Rust enum with `driver_id` for the wire word, as a
+ * TypeScript union with `AI_CONNECTION_TYPES` and `AI_CONNECTION_LABELS` beside it, and as
+ * `DRIVERS` in the worker. Nothing held the three to each other, and the cost of that is not a
+ * compile error: a driver added to two of them reaches the worker as a word `PROVIDER_IDS` has no
+ * key for, and until `providerIdOf` was written it resolved to `local` — a hosted model's turn put
+ * to the machine it is running on.
+ *
+ * The wire word is what is compared, never the label: a settings file holding `OpenRouter` matches
+ * no driver any of the three knows.
+ */
+async function declaredDrivers() {
+    const path = 'protocol/drivers.json'
+    const {drivers} = JSON.parse(await read(path))
+    return {path, names: drivers.map(driver => driver.id)}
+}
+
+async function rustDriverIds() {
+    const path = 'src-tauri/src/settings/mod.rs'
+    const body = slice(await read(path), path, 'fn driver_id(', '\n}')
+    const names = [...body.matchAll(/=>\s*"([a-z0-9-]+)"/gu)].map(one => one[1])
+    return {path: `${path} driver_id`, names}
+}
+
+async function typescriptDriverIds() {
+    const path = 'src/models/settings.ts'
+    // Closed on a newline: the first `]` after the anchor is the one in `AiConnectionType[]`.
+    const body = slice(await read(path), path, 'AI_CONNECTION_TYPES: readonly', '\n]')
+    const names = [...body.matchAll(/'([a-z0-9-]+)'/gu)].map(one => one[1])
+    return {path: `${path} AI_CONNECTION_TYPES`, names}
+}
+
+async function typescriptDriverLabels() {
+    const path = 'src/models/settings.ts'
+    const body = slice(await read(path), path, 'AI_CONNECTION_LABELS: Readonly', '\n}')
+    const names = [...body.matchAll(/^\s*'?([a-z0-9-]+)'?:/gmu)].map(one => one[1])
+    return {path: `${path} AI_CONNECTION_LABELS`, names}
+}
+
+async function nodeDriverIds() {
+    const path = 'scripts/ai-provider.mjs'
+    const body = slice(await read(path), path, 'export const DRIVERS = [', ']')
+    return {path: `${path} DRIVERS`, names: [...body.matchAll(/'([a-z0-9-]+)'/gu)].map(o => o[1])}
+}
+
 // --- The comparisons.
 
 const failures = []
@@ -687,12 +781,12 @@ await cancelLineAgreement()
 // The reasoning vocabulary. Membership first, so a missing word is reported as a missing word
 // rather than as an ordering difference, and then the order, because these are menus.
 const efforts = [
-    await rustList('settings.rs', 'NAMED_EFFORTS'),
+    await rustList('settings/mod.rs', 'NAMED_EFFORTS'),
     await rustList('model_server.rs', 'KNOWN_EFFORTS'),
     await nodeKnownEfforts(),
-    withoutOff(await rustList('settings.rs', 'EFFORT_LEVELS')),
+    withoutOff(await rustList('settings/mod.rs', 'EFFORT_LEVELS')),
     withoutOff(await typescriptList('settings.ts', 'EFFORT_LEVELS')),
-    withoutOff(await rustList('settings.rs', 'EVERY_LEVEL'))
+    withoutOff(await rustList('settings/mod.rs', 'EVERY_LEVEL'))
 ]
 for (const surface of efforts) checkForDuplicates(surface)
 checkAgreement('reasoning effort', efforts)
@@ -710,7 +804,7 @@ checkOrder('the reasoning vocabulary', efforts)
  * ugly and is still the only thing that fails when they disagree.
  */
 async function tuningDefaults() {
-    const rust = await read('src-tauri/src/settings.rs')
+    const rust = await read('src-tauri/src/settings/mod.rs')
     const renderer = await read('src/models/settings.ts')
     const {DEFAULT_SEARCH_PROVIDER, TUNING_DEFAULTS} = await import('./tuning-defaults.mjs')
 
@@ -762,7 +856,7 @@ await tuningDefaults()
 // The two menus a settings file may name a level from, which are the efforts with `off` in front.
 // Checked whole rather than through `withoutOff`, so a copy that lost its `off` is caught too.
 checkOrder('the reasoning menu', [
-    await rustList('settings.rs', 'EFFORT_LEVELS'),
+    await rustList('settings/mod.rs', 'EFFORT_LEVELS'),
     await typescriptList('settings.ts', 'EFFORT_LEVELS')
 ])
 
@@ -806,6 +900,24 @@ async function everyMergedNameDeclaresItsShape() {
     }
 }
 await everyMergedNameDeclaresItsShape()
+
+await noneOfItRanAgreement()
+
+const drivers = [
+    await declaredDrivers(),
+    await rustDriverIds(),
+    await typescriptDriverIds(),
+    await typescriptDriverLabels(),
+    await nodeDriverIds()
+]
+for (const surface of drivers) checkForDuplicates(surface)
+checkAgreement('the AI driver', drivers)
+// The order is the order the pickers offer them in, which `protocol/drivers.json` declares and the
+// emitted lists carry. A label map's key order is not a menu, so it is left out of this one.
+checkOrder(
+    'the AI drivers',
+    drivers.filter(surface => !surface.path.includes('LABELS'))
+)
 
 if (failures.length > 0) throw new Error(`command surfaces disagree:\n${failures.join('\n')}`)
 

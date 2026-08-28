@@ -1142,7 +1142,7 @@ test('the three copies of the shipped bounds say the same numbers', async () => 
     // to notice. Reading the other two as text is ugly and is still the only thing that fails.
     const scripts = dirname(fileURLToPath(import.meta.url))
     const [rust, typescript] = await Promise.all([
-        readFile(join(scripts, '..', 'src-tauri', 'src', 'settings.rs'), 'utf8'),
+        readFile(join(scripts, '..', 'src-tauri', 'src', 'settings', 'mod.rs'), 'utf8'),
         readFile(join(scripts, '..', 'src', 'models', 'settings.ts'), 'utf8')
     ])
 

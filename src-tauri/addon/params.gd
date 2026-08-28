@@ -689,3 +689,639 @@ static func same_value(wanted: Variant, found: Variant) -> bool:
 ## property reads.
 static func is_null_object(value: Variant) -> bool:
     return typeof(value) == TYPE_OBJECT and not is_instance_valid(value)
+
+
+## The decisions the editor commands make that reach no editor at all.
+##
+## Every one of these was written inside `plugin.gd`, where `extends EditorPlugin` put it behind a
+## real editor boot: a refused texture size, a reserved setting name, a path that needed the
+## `res://` prefix. None of them ever touched `EditorInterface`. They are here for the reason the
+## header gives — this is what the handlers decide with before they make an editor call — and
+## `params_test.gd` reaches all of them from source in about a second.
+
+## How many files one `resource.rescan` may name. A batch is what this command is for now, and a
+## project walk is cheaper than importing more files than this one by one.
+const MAX_RESCAN_PATHS := 256
+
+## The atlas a tileset command will cut up, and the cells one paint may write, both capped so a
+## mistyped tile size or a runaway rectangle cannot spend minutes inside the editor's main loop.
+## A texture no larger than this on a side, and no more than this many pixels in it. A tile is 16
+## and a sprite sheet is a few hundred; a caller asking for more than this wanted a photograph, and
+## this operation draws rectangles.
+##
+## The two numbers, rather than one per side, because the cost this guards is area and a ground
+## strip is not square. Two recorded live runs asked for a floor as wide as the window — 1152x64 and
+## 1280x40 — and a per-side cap of 1024 refused both, though each draws a twelfth of the pixels the
+## 1024x1024 square it allowed does. The default project window is wider than 1024, so the shape the
+## cap refused first was the most ordinary one there is.
+const MAX_TEXTURE_EDGE := 4096
+
+const MAX_TEXTURE_PIXELS := 1048576
+
+static func unknown_command_error(command: String) -> Dictionary:
+    return {
+        "_gofer_error": {
+            "code": "unknown_command",
+            "message": "Command '%s' is not implemented" % command,
+            "retryable": false,
+            "readiness": "ready",
+            "details": {}
+        }
+    }
+
+## A setting under autoload/, input/, or editor_plugins/ has its own typed command that enforces
+## the structure of its value; routing the write through it keeps malformed entries out of
+## project.godot. Returns the command to use, or an empty string for ordinary settings.
+static func reserved_setting_command(name: String) -> String:
+    if name.begins_with("autoload/"):
+        return "project.set_autoload"
+    if name.begins_with("input/"):
+        return "project.set_input_action"
+    if name.begins_with("editor_plugins/"):
+        return "project.set_plugin_enabled"
+    return ""
+
+## The words a search query is made of, lowered, with the punctuation between them thrown away.
+##
+## A settings name is `text_editor/appearance/gutters/show_line_numbers` — slashes and underscores
+## and never a space. The search matched the whole query as one substring, so every natural way to
+## ask was a guaranteed miss: one live turn asked for "line numbers", "split mode", "grid step",
+## "filesystem split", "2d snap" and eight more, got nothing every time, and concluded two of the
+## three things it wanted were not settings. `show_line_numbers` was there the whole time.
+##
+## Split on the punctuation as well as the spaces, which is what "thrown away" above means and what
+## the body did not do: it split on `" "` alone, so `show line numbers?` asked for a word ending in
+## a question mark and no setting has one. Underscores and digits stay inside a word, because a
+## settings name is full of both — `show_line_numbers` is one word here and matches the name it
+## names, while `line numbers.` is two and matches it as well.
+static func words_of(query: String) -> PackedStringArray:
+    var words := PackedStringArray()
+    var runs := RegEx.create_from_string("\\w+")
+    for found in runs.search_all(query.to_lower()):
+        words.append(found.get_string())
+    return words
+
+## Whether a setting's name holds every word asked for, in any order. No words matches everything,
+## and one word behaves exactly as the substring match it replaces.
+static func name_holds_every_word(name: String, words: PackedStringArray) -> bool:
+    var lowered := name.to_lower()
+    for word in words:
+        if not lowered.contains(word):
+            return false
+    return true
+
+## A path named either way, as Godot names it.
+static func as_resource_path(value: Variant) -> String:
+    var path := str(value).strip_edges()
+    if path.is_empty() or path.begins_with("res://"):
+        return path
+    return "res://" + path.trim_prefix("./").trim_prefix("/")
+
+## Reads `path` as one file or as a list of them, which is what lets a caller rescan everything it
+## just wrote in a single command.
+##
+## One call per file is what produced the batch that broke: the tool takes one path, so eight new
+## sprites are eight requests, and the editor answers them inside one another. A list is both the
+## shape `reimport_files` already wanted and the shape that stops an agent from having to send a
+## storm of them.
+static func rescan_paths_param(params: Dictionary) -> Dictionary:
+    var raw: Variant = params.get("path", null)
+    var listed: Array = []
+    if raw == null:
+        return {"value": listed}
+    if typeof(raw) == TYPE_STRING or typeof(raw) == TYPE_STRING_NAME:
+        var single := str(raw)
+        if not single.is_empty():
+            listed.append(as_resource_path(single))
+        return {"value": listed}
+    if typeof(raw) != TYPE_ARRAY and typeof(raw) != TYPE_PACKED_STRING_ARRAY:
+        return error(
+            "invalid_params",
+            "resource.rescan takes a path or a list of paths",
+            {"path": raw}
+        )
+    for entry: Variant in raw:
+        if typeof(entry) != TYPE_STRING and typeof(entry) != TYPE_STRING_NAME:
+            return error(
+                "invalid_params",
+                "resource.rescan takes a path or a list of paths",
+                {"path": entry}
+            )
+        var named := str(entry)
+        if named.is_empty():
+            continue
+        var resource_path := as_resource_path(named)
+        if not listed.has(resource_path):
+            listed.append(resource_path)
+    if listed.size() > MAX_RESCAN_PATHS:
+        return error(
+            "too_many_paths",
+            "resource.rescan takes at most %d paths at a time, and this one names %d"
+            % [MAX_RESCAN_PATHS, listed.size()],
+            {"limit": MAX_RESCAN_PATHS}
+        )
+    return {"value": listed}
+
+## The pixel size of a texture, written as one number or as two.
+static func texture_size(raw: Variant) -> Dictionary:
+    var width := 0
+    var height := 0
+    if typeof(raw) == TYPE_INT or typeof(raw) == TYPE_FLOAT:
+        width = int(raw)
+        height = width
+    elif (typeof(raw) == TYPE_ARRAY and (raw as Array).size() == 2):
+        width = int((raw as Array)[0])
+        height = int((raw as Array)[1])
+    else:
+        return error(
+            "invalid_params",
+            "resource.create_texture takes size as one number or two, and %s is neither" % str(raw)
+        )
+    if width < 1 or height < 1 or width > MAX_TEXTURE_EDGE or height > MAX_TEXTURE_EDGE:
+        return error(
+            "invalid_params",
+            (
+                "A texture is between 1 and %d pixels on a side, and %dx%d is not"
+                % [MAX_TEXTURE_EDGE, width, height]
+            ),
+            {"limit": MAX_TEXTURE_EDGE}
+        )
+    if width * height > MAX_TEXTURE_PIXELS:
+        return error(
+            "invalid_params",
+            (
+                (
+                    "A texture holds at most %d pixels, and %dx%d holds %d. Draw it smaller and "
+                    + "scale the node up, or tile a small one with texture_repeat."
+                )
+                % [MAX_TEXTURE_PIXELS, width, height, width * height]
+            ),
+            {"limit": MAX_TEXTURE_PIXELS}
+        )
+    return {"value": Vector2i(width, height)}
+
+## The path an entry's children will name it by, with a trailing slash and a doubled slash taken off.
+##
+## Only the caller's own spelling is matched. A batch names a parent the way it named the entry that
+## created it, and anything else falls through to the tree, where a path that is really wrong is
+## answered by `node_not_found` naming it.
+static func batch_parent_key(path: String) -> String:
+    var trimmed := path.strip_edges()
+    while trimmed.length() > 1 and trimmed.ends_with("/"):
+        trimmed = trimmed.substr(0, trimmed.length() - 1)
+    return trimmed
+
+## The groups a scene author wrote, without the ones the engine keeps for itself.
+##
+## An underscore is Godot's own prefix — `_edit_group_`, and the internal groups a node joins for
+## processing — and a caller asking what a node is in means the ones somebody typed.
+##
+## One copy, read by both halves of the addon. It was written twice, byte for byte, once in
+## `plugin.gd` for the edited scene and once in `runtime.gd` for the running one, and the two say
+## the same thing about the same `Node`: the editor is not what decides it.
+static func authored_groups(node: Node) -> Array:
+    var authored: Array = []
+    for group in node.get_groups():
+        if not str(group).begins_with("_"):
+            authored.append(str(group))
+    return authored
+
+
+## The class a node is drawn as: the script's own `class_name` when it has one, its engine class
+## otherwise.
+##
+## The same second copy, under two names — `_node_icon_class` in the editor and
+## `_runtime_icon_class` in the game. Neither reads an editor or a game; both read the node.
+static func icon_class(node: Node) -> String:
+    var script: Variant = node.get_script()
+    if script is Script:
+        var global_name := (script as Script).get_global_name()
+        if not global_name.is_empty():
+            return global_name
+    return node.get_class()
+
+
+## What the node commands work out about a node, none of which asks the editor.
+##
+## The second batch out of `plugin.gd`, and the larger one. Every function here takes a `Node`, a
+## `Dictionary` or a string and answers from it: which signals a node really has, which property a
+## near-miss meant, whether an instance would contain itself, what a swap has to give back to the
+## nodes it displaced. Not one of them reads `EditorInterface`, and all of them used to cost a
+## staged addon and an xvfb boot to exercise.
+##
+## What stayed behind is the three that reach `_edited_root` — a node path is relative to the scene
+## the editor has open, and that is the editor answering. Threading the root through as a parameter
+## would bring them here too, and is a separate decision from this move.
+
+## The hint string of a property whose type is an enum, and "" for every other property.
+##
+## Read off the instance rather than off `ClassDB`, so a property a script declares carries its own
+## hint the same way a built-in one does. A flags property is deliberately not matched: its hint is
+## PROPERTY_HINT_FLAGS and any combination of its bits is a legal value.
+static func enum_values(node: Object, property: String) -> String:
+    for entry in node.get_property_list():
+        if entry.get("name") == property and int(entry.get("hint", 0)) == PROPERTY_HINT_ENUM:
+            return String(entry.get("hint_string", ""))
+    return ""
+
+## Why a scene may not be instantiated here, or "" when it may.
+##
+## A scene that reaches itself cannot be loaded again once it is saved — the editor recurses until
+## it runs out of stack — and the failure lands on whoever opens the file next, not on the call that
+## caused it. Dependencies are followed, because A holding B holding A is the same trap.
+## `open_scene` is the scene the editor has open, passed in: which scene that is, is the editor's
+## answer, and following a dependency chain is not.
+static func instance_cycle(path: String, open_scene: String) -> String:
+    if open_scene.is_empty():
+        return ""
+    if path == open_scene:
+        return "A scene cannot be instantiated inside itself"
+    var seen := {}
+    var pending: Array[String] = [path]
+    while not pending.is_empty():
+        var next: String = pending.pop_back()
+        if seen.has(next):
+            continue
+        seen[next] = true
+        for dependency in ResourceLoader.get_dependencies(next):
+            # A dependency may be written as "type::uid::path"; the path is the last field.
+            var parts := String(dependency).split("::")
+            var resolved: String = parts[parts.size() - 1]
+            if resolved == open_scene:
+                return "%s depends on %s, so instantiating it here would make the scene contain itself" % [next, open_scene]
+            if resolved.ends_with(".tscn") or resolved.ends_with(".scn"):
+                pending.append(resolved)
+    return ""
+
+## Every stored property the outgoing node holds that the incoming one also declares.
+##
+## Named rather than positional: Godot's property names are the contract, and a name two classes
+## share is the same property in both. `name` and `owner` belong to where a node sits rather than to
+## what it is, and the swap sets both; `script` is already on the replacement, and re-setting it
+## from this list would put it back after its own exported values.
+static func carry_the_properties_over(outgoing: Node, incoming: Node) -> void:
+    var takes := {}
+    for entry in incoming.get_property_list():
+        if int(entry.get("usage", 0)) & PROPERTY_USAGE_STORAGE != 0:
+            takes[str(entry.get("name", ""))] = true
+    for entry in outgoing.get_property_list():
+        var name := str(entry.get("name", ""))
+        if name.is_empty() or not takes.has(name):
+            continue
+        if int(entry.get("usage", 0)) & PROPERTY_USAGE_STORAGE == 0:
+            continue
+        if name in ["name", "owner", "script"]:
+            continue
+        incoming.set(name, outgoing.get(name))
+
+## Checks that a tile a paint names is one the tileset actually defines.
+##
+## `set_cell` takes an atlas coordinate no tile occupies without complaint and draws nothing there,
+## so a whole level can be painted out of tiles that do not exist and look like an empty layer.
+static func require_tile(tile_set: TileSet, source_id: int, atlas: Vector2i) -> Dictionary:
+    if not tile_set.has_source(source_id):
+        var available: Array = []
+        for index in range(tile_set.get_source_count()):
+            available.append(tile_set.get_source_id(index))
+        return error(
+            "source_not_found",
+            "The tileset has no source %d; it has %s" % [source_id, str(available)],
+            {"source": source_id, "sources": available}
+        )
+    var source := tile_set.get_source(source_id)
+    if not source.has_tile(atlas):
+        return error(
+            "tile_not_defined",
+            (
+                "The tileset's source %d defines no tile at (%d, %d). resource.describe_tileset "
+                + "lists the tiles it does define."
+            ) % [source_id, atlas.x, atlas.y],
+            {"source": source_id, "tile": [atlas.x, atlas.y]}
+        )
+    return {}
+
+## The flags a live connection carries, so undoing a disconnection restores the same one.
+static func connection_flags(node: Node, signal_name: String, callable: Callable) -> int:
+    for connection in node.get_signal_connection_list(signal_name):
+        if (connection.get("callable", Callable()) as Callable) == callable:
+            return int(connection.get("flags", Object.CONNECT_PERSIST))
+    return Object.CONNECT_PERSIST
+
+## The signals a node can emit, named the way `node.connect_signal` takes them.
+##
+## A caller that cannot see this list has to guess a signal name, and `signal_not_found` is all the
+## help a guess gets — so the names come back with the node rather than from the documentation.
+static func node_signals(node: Node) -> Array:
+    var names: Array = []
+    for info in node.get_signal_list():
+        names.append(String(info.get("name", "")))
+    names.sort()
+    return names
+
+## A node the edited scene does not hold, and the spelling that would have found it.
+##
+## The signals a node really emits, said to a caller that named one it does not.
+##
+## The third of these — `node_not_found` and `property_not_found` were the first two — and the same
+## reasoning: naming the absence repairs nothing. A live turn asked to connect `/Main/ScoreLabel` to
+## `score_changed`, which is an autoload's signal rather than a Label's, and was told only that the
+## Label has no such signal.
+##
+## The near one first when there is one, and otherwise the list, because a node's signals are a
+## short closed set — a Label has about a dozen — unlike its properties.
+static func the_signals_it_does_have(node: Node, wanted: String) -> String:
+    var named: Array[String] = []
+    for entry in node.get_signal_list():
+        var name := str(entry.get("name", ""))
+        if not name.is_empty():
+            named.append(name)
+    if named.is_empty():
+        return ""
+    named.sort()
+    var plain := wanted.to_lower().replace("_", "")
+    for name in named:
+        var candidate := name.to_lower().replace("_", "")
+        if candidate == plain or (mini(candidate.length(), plain.length()) >= 4 \
+                and (candidate.begins_with(plain) or plain.begins_with(candidate))):
+            return ". Did you mean %s?" % name
+    if named.size() > 14:
+        named = named.slice(0, 14)
+    return ". It emits %s." % ", ".join(named)
+
+## The properties worth values, and the names of the ones still holding what the class ships with.
+##
+## Only for an answer nobody narrowed. A caller that named properties has chosen, and gets every one
+## it named.
+##
+## Measured on the pinned 4.7.2, against a Label carrying a text and a size: **4 of its 129
+## properties differ from `ClassDB.class_get_property_default_value`**, and a CharacterBody2D fresh
+## out of `create` has none that do. The values of the rest are the class reference restated once
+## per call — 15,885 characters in one recorded live turn, 81% of everything twelve tool calls
+## returned, of which the four the caller could not have known were about 400.
+##
+## A property the class has no default for is kept with its value, whatever it holds. That is the
+## whole of what makes this safe rather than a second `stored` filter: `script`, `owner`, `name`,
+## `global_position`, `theme_override_*` and every variable a script declares answer `null` here,
+## because `ClassDB` describes engine classes and knows nothing of any of them — so the half of the
+## inspector that laying out and styling a UI needs is exactly the half this cannot drop.
+##
+## `property_can_revert` is the inspector's own version of this question and is not the answer: on
+## the same Label it was true for 2 names of 129, measured, so it detects a default override rather
+## than a value equal to its default.
+static func split_off_class_defaults(node: Node, properties: Array) -> Dictionary:
+    var kept: Array = []
+    var untouched: Array[String] = []
+    var class_name_of := node.get_class()
+    for entry: Variant in properties:
+        var property: Dictionary = entry
+        var property_name := str(property["name"])
+        var shipped: Variant = ClassDB.class_get_property_default_value(class_name_of, property_name)
+        if shipped == null or node.get(property_name) != shipped:
+            kept.append(property)
+            continue
+        untouched.append(property_name)
+    return {"properties": kept, "atClassDefault": untouched}
+
+## Every property the editor would show for a node, tagged for the wire.
+##
+## Both halves of the inspector are reported, not only what the scene stores. `Control.position`,
+## `Control.size` and all 431 `theme_override_*` names carry no storage flag — a scene saves anchors
+## and offsets instead — so a list filtered to stored properties would hide exactly what laying out
+## and styling a UI needs, while `Object.set` writes them perfectly well. `stored` says which half
+## each one came from.
+##
+## Categories, groups and subgroups are inspector headings rather than values, and `script` is the
+## node's own script rather than a property of it; none of them are reported.
+##
+## `wanted` narrows the answer to the names it holds, and empty means every one of them. A Label
+## answers with 119 properties: one such answer was 15 885 characters, 81% of everything twelve tool
+## calls of a live turn returned, and the same turn read the running game's copy of the same node
+## through `runtime.inspect_node` for 300 characters, because only that one took a list of names.
+static func node_properties(node: Node, wanted: Array[String] = []) -> Array:
+    var properties: Array = []
+    for info in node.get_property_list():
+        var usage := int(info.get("usage", 0))
+        if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
+            continue
+        var property_name := str(info.get("name", ""))
+        if property_name.is_empty():
+            continue
+        # A name the caller asked for is answered, whatever the inspector would do with it. The
+        # filters below shape a list nobody chose; a caller who named `global_position` has chosen,
+        # and every one of those filters would answer them "this node has no such property" about a
+        # property `set_property` writes perfectly well — with the only pointer being `node.inspect`
+        # itself, which is the call that just refused it. `script` is the same case: left out of the
+        # whole list because it is the node's own script rather than a property of it, and answered
+        # the moment anybody names it.
+        if not wanted.is_empty():
+            if not wanted.has(property_name):
+                continue
+        else:
+            # Both halves of the inspector, and nothing that carries neither flag: `global_position`
+            # and friends are `PROPERTY_USAGE_NONE` and would otherwise be listed twice over, once
+            # as themselves and once as the `position` they are computed from.
+            if not (usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)):
+                continue
+            if property_name == "script":
+                continue
+        properties.append(
+            {
+                "name": property_name,
+                "value": Protocol.encode(node.get(property_name)),
+                "type": type_string(int(info.get("type", TYPE_NIL))),
+                "className": str(info.get("class_name", "")),
+                "stored": bool(usage & PROPERTY_USAGE_STORAGE),
+                "writable": not bool(usage & PROPERTY_USAGE_READ_ONLY),
+            }
+        )
+    return properties
+
+## The property nearest a name the node does not have, by the rule the router uses for parameters:
+## case and underscores ignored, and one a prefix of the other. Four characters at least, or `x`
+## would answer for anything beginning with it.
+static func nearest_property(node: Node, property: String) -> String:
+    var wanted := property.to_lower().replace("_", "")
+    if wanted.is_empty():
+        return ""
+    for entry in node.get_property_list():
+        var name := str(entry.get("name", ""))
+        if name.is_empty() or name.contains("/"):
+            continue
+        # The list carries the inspector's own headings — a Sprite2D's `Transform` sits in it beside
+        # its `transform` — and answering `Did you mean Transform?` sends a caller to a name that is
+        # not a property at all.
+        var usage := int(entry.get("usage", 0))
+        if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
+            continue
+        var plain := name.to_lower().replace("_", "")
+        if plain == wanted:
+            # Spelled the same way, so there is nothing to correct and `Did you mean script?` about
+            # `script` is what a caller was told. A near miss of case or underscores is still worth
+            # answering — `Position` for `position` is a real correction — so only an exact match
+            # is dropped.
+            return "" if name == property else name
+        if mini(plain.length(), wanted.length()) < 4:
+            continue
+        if plain.begins_with(wanted) or wanted.begins_with(plain):
+            return name
+    return ""
+
+## Refuses a property this node does not have, and says which one it could have meant.
+##
+## `Node /Arena has no property type` was the whole of what four live turns were told, in four
+## separate runs, about `type`, `spacing` and `transform_2d`. `transform_2d` is one edit from a
+## property the node really has; `spacing` on a VBoxContainer is a theme override, which is a name
+## no near miss reaches; `type` is not a property at all. So: the near one when there is one, and
+## otherwise the call that lists them all with what they hold.
+static func property_not_found_error(node: Node, path: String, property: String) -> Dictionary:
+    var message := "Node %s has no property %s" % [path, property]
+    var near := nearest_property(node, property)
+    if near.is_empty():
+        message += (
+            ". node.inspect with no `properties` lists every property this node has with its "
+            + "current value, including the theme_override_* ones a Control keeps — naming this "
+            + "one there is refused the same way"
+        )
+    else:
+        message += ". Did you mean %s?" % near
+    return {
+        "_gofer_error": {
+            "code": "property_not_found",
+            "message": message,
+            "retryable": false,
+            "readiness": "ready",
+            "details": {"property": property}
+        }
+    }
+
+## Why the editor's answer about a script's methods is out of date, and what to do about it.
+##
+## The method list a node reports comes from the compiled script, and the editor cannot compile
+## this one — so what it is really saying is "the last version that compiled had no such method",
+## which reads as a fact about the file and is not one. Measured against the pinned editor:
+## `Script.reload` answers `ERR_PARSE_ERROR` and leaves the old method list in place.
+##
+## The commonest cause has nothing to do with the file. An autoload registered while the editor has
+## been running is not in the map its compiler resolves global names from, so every script naming
+## one stops compiling *in the editor* while running perfectly in the game. One live turn met this:
+## it wrote the handler, registered the `Score` autoload, and was told three times that the script
+## declares only `_process`; it recovered by stopping and starting the whole session, which is the
+## only thing that rebuilds that map.
+## `added_here` is the autoloads this session registered, passed in: keeping that list is the
+## plugin's, and turning it into a sentence is not.
+static func why_the_editor_cannot_see_it(target: Node, added_here: Array[String]) -> String:
+    var named := ". The editor cannot compile its script, so the methods it reports are the last "
+    named += "version that compiled — read godot_script diagnostics for what is wrong with it."
+    if added_here.is_empty():
+        return named
+    return (
+        named
+        + " If the only thing wrong is a name from %s: an autoload registered while the editor has "
+        % ", ".join(added_here)
+        + "been running is not one the editor can resolve until it restarts, though the running "
+        + "game resolves it fine. Stop and start the session with godot_session, then connect."
+    )
+
+## Where a method the caller named would have to live, said to a caller that has not put one there.
+##
+## `\/Pickup has no method _on_body_entered to receive body_entered` is the whole of what two live
+## turns were told, twice each. It is true and it repairs nothing: the method belongs to whatever
+## script is on the *target*, which defaults to the scene root rather than to the node emitting the
+## signal, and the commonest reason there is no method is that there is no script on that node yet.
+static func where_a_method_would_be(target: Node, method: String = "") -> String:
+    var script: Variant = target.get_script()
+    if script == null:
+        return (
+            ". No script is attached to it, so it has no methods of its own — write one with "
+            + "godot_script save and set the node's script property to it first. `target` is the "
+            + "node carrying the method and defaults to the scene root, so name it if the method "
+            + "lives elsewhere."
+        )
+    var named: Array[String] = []
+    # `get_script_method_list` belongs to Script, not to Object: `node.get_script_method_list()`
+    # is a runtime error, and a runtime error inside a message builder is a message that never
+    # arrives. Measured against the pinned editor — `Node2D.has_method("get_script_method_list")`
+    # is false, and the same call on the script it carries answers the methods.
+    for entry in (script as Script).get_script_method_list():
+        var name := str(entry.get("name", ""))
+        if not name.is_empty() and not name.begins_with("@"):
+            named.append(name)
+    if named.is_empty():
+        return (
+            ". Its script declares no methods yet. `target` is the node carrying the method and "
+            + "defaults to the scene root, so name it if the method lives elsewhere."
+        )
+    named.sort()
+    # The script has it and the node does not, which is one situation rather than two facts that
+    # contradict each other. See `a_method_the_script_has_and_the_node_has_not`.
+    var stale := a_method_the_script_has_and_the_node_has_not(method, named)
+    if not stale.is_empty():
+        return stale
+    if named.size() > 12:
+        named = named.slice(0, 12)
+    return (
+        ". Its script declares %s. `target` is the node carrying the method and defaults to the "
+        + "scene root, so name it if the method lives elsewhere."
+    ) % ", ".join(named)
+
+## Fits a decoded value onto the type the node declares the property with.
+##
+## `Object.set` takes what it is given for a property whose type the engine does not enforce: a
+## `res://…` path written as a string landed in a CollisionShape2D's `shape` and was saved into the
+## scene, which then opened with a String where a Shape2D belongs. What the node says the property
+## is, is therefore checked before the value reaches it, so a mistyped write is an error naming the
+## type it wanted rather than a level that will not run.
+static func fit_to_property(node: Node, property: String, value: Variant) -> Dictionary:
+    var declared: Dictionary = {}
+    for info in node.get_property_list():
+        if str(info.get("name", "")) == property:
+            declared = info
+            break
+    # A property reachable through `in` but absent from the list is the script's own business.
+    if declared.is_empty():
+        return Protocol.decoded(value)
+    var wanted := int(declared.get("type", TYPE_NIL))
+    # Clearing a resource or a node reference is what null is for, and every object takes it.
+    if value == null and wanted == TYPE_OBJECT:
+        return Protocol.decoded(null)
+    var fitted := Protocol.fit_to_declared_type(value, wanted)
+    if not fitted["ok"]:
+        return fitted
+    var wanted_class := str(declared.get("class_name", ""))
+    # Only an engine class is checked: a property typed with a script's `class_name` reports that
+    # name here, and the resource carrying that script is an ordinary Resource to `is_class`.
+    if wanted != TYPE_OBJECT or wanted_class.is_empty() or not ClassDB.class_exists(wanted_class):
+        return fitted
+    var object: Object = fitted["value"]
+    if object != null and not object.is_class(wanted_class):
+        return Protocol.decode_failed("expected %s, received %s" % [wanted_class, object.get_class()])
+    return fitted
+
+## Who owned each node under this one, before any of them left the tree.
+##
+## Not "the scene owns everything". A node placed by `node.instantiate` owns its own contents, and
+## handing those to the edited scene writes an instance's insides into the file that instanced it.
+## The owners are read before the move and put back after, so what was there is what comes back.
+##
+## Keyed by the path down from the swapped node, never by name. Godot only makes a name unique
+## among its siblings, so a subtree walked whole collides the moment two branches agree: two
+## instanced scenes each holding a `Sprite2D`, or a `Player/CollisionShape2D` beside an
+## `Enemy/CollisionShape2D`. The second write won and both nodes were handed the same owner — and
+## where that owner was the edited root, an instance's insides went into the .tscn, which is the
+## exact failure the paragraph above says this exists to prevent. The children move across
+## unchanged, so one path names the same node on both sides of the swap.
+static func who_owned_what(node: Node, into: Dictionary, prefix: String = "") -> void:
+    for child in node.get_children():
+        var path := prefix + "/" + String(child.name)
+        into[path] = child.owner
+        who_owned_what(child, into, path)
+
+## The other half of [`_who_owned_what`]. A node keeps its owner while it is only moved and loses it
+## when it leaves the tree and comes back, and a node the edited scene does not own is a node the
+## save writes nothing about.
+static func give_them_back_their_owners(node: Node, owners: Dictionary, prefix: String = "") -> void:
+    for child in node.get_children():
+        var path := prefix + "/" + String(child.name)
+        if owners.has(path):
+            child.set_owner(owners[path])
+        give_them_back_their_owners(child, owners, path)

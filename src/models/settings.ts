@@ -61,7 +61,6 @@ export const SEARCH_PROVIDERS_NEEDING_KEY: readonly SearchProvider[] = ['brave']
 /** The shipped engine. Keyless, so a fresh install can search the moment it is opened. */
 export const DEFAULT_WEB_SETTINGS: WebSettings = {searchProvider: 'exa'}
 
-export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openrouter' | 'cerebras'
 export type AiApiDialect = 'openai-completions' | 'openai-codex-responses'
 
 /**
@@ -624,16 +623,13 @@ export function withActiveConnection(
     return withConnection(ai, ai.connectionType, change(connection))
 }
 
-/**
- * What each driver is called on screen. Separate from the stored id, and one-directional: a label
- * must never be written to the settings file. Same rule as `SEARCH_PROVIDER_LABELS`.
+/*
+ * The drivers, emitted from `protocol/drivers.json` — the union, the picker's order and the labels
+ * together, because they are one subject and used to sit six hundred lines apart. A type
+ * declaration hoists, so the union being down here changes nothing about what may reference it.
  */
-export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = {
-    'openai-compatible': 'Local model',
-    'openai-codex': 'ChatGPT subscription',
-    openrouter: 'OpenRouter',
-    cerebras: 'Cerebras'
-}
+// GENERATED-BEGIN drivers sha256:5fc29fea0e2f7ada
+export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openrouter' | 'cerebras'
 
 /** Every driver a build knows, in the order the pickers offer them. */
 export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [
@@ -642,6 +638,26 @@ export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [
     'openrouter',
     'cerebras'
 ]
+
+/**
+ * What each driver is called on screen. Separate from the stored id, and one-directional:
+ * a label must never be written to the settings file. Same rule as `SEARCH_PROVIDER_LABELS`.
+ */
+export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = {
+    // A llama.cpp or any other server speaking OpenAI completions, on an address the user types.
+    // The only driver whose key never leaves this machine.
+    'openai-compatible': 'Local model',
+    // Authenticates with an OAuth credential rather than a key, which is why a missing one reads as
+    // "Sign in with ChatGPT" rather than as an error. pi-ai ships the provider.
+    'openai-codex': 'ChatGPT subscription',
+    // A fixed host whose catalogue answers every question the local server cannot. Billed, and it
+    // reserves credit for the ceiling before it generates a token.
+    openrouter: 'OpenRouter',
+    // A fixed host whose endpoint publishes no capabilities at all, which is why what Gofer knows
+    // about its models is a table shipped in this directory rather than something asked for.
+    cerebras: 'Cerebras'
+}
+// GENERATED-END drivers
 
 /**
  * The drivers a picker may offer, which is the drivers that have somewhere to run.

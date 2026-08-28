@@ -273,7 +273,7 @@ func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
         "type": node.get_class(),
         # The class whose icon the editor would draw. The game has no editor theme to read, so the
         # name is all the running tree can carry: the editor side resolves it to artwork.
-        "icon": _runtime_icon_class(node),
+        "icon": Params.icon_class(node),
         "path": str(node.get_path()),
         "children": children,
     }
@@ -307,14 +307,6 @@ func _op_wait(params: Dictionary) -> Dictionary:
         await get_tree().process_frame
         frames += 1
     return _succeed({"frames": frames, "ms": Time.get_ticks_msec() - started})
-
-func _runtime_icon_class(node: Node) -> String:
-    var script: Variant = node.get_script()
-    if script is Script:
-        var global_name := (script as Script).get_global_name()
-        if not global_name.is_empty():
-            return global_name
-    return node.get_class()
 
 ## Freezes the running game, or lets it go again.
 ##
@@ -363,55 +355,20 @@ func _op_inspect(params: Dictionary) -> Dictionary:
         "name": node.name,
         "type": node.get_class(),
         "properties": properties,
-        "groups": _authored_groups(node),
+        "groups": Params.authored_groups(node),
     })
 
-## The groups a person put a node in, which is not everything `get_groups` answers.
+## The clause a refused property carries, naming the one the caller probably meant.
 ##
-## The same filter `node.inspect` applies on the editor side, and the same reason: the engine keeps
-## its own groups on a node behind a leading underscore, named after object ids that change every
-## run, and a caller reading one it never added has no way to know it is not its own.
-##
-## Answered without being asked for, because a group is not a property and there was no way to ask.
-## A live turn wanted to know whether a coin it had put in `coin` was still in it once the game was
-## up, wrote `inspect_node {properties: ["groups"]}` — the word `node.inspect` answers with — and
-## was told `Node '/root/Main/Coin' has no property 'groups'`, which is true and useless. Group
-## membership is the one part of a node that the running game and the edited scene disagree about
-## most, since `add_to_group` in a script is how half of them are joined.
-func _authored_groups(node: Node) -> Array:
-    var authored: Array = []
-    for group in node.get_groups():
-        if not str(group).begins_with("_"):
-            authored.append(str(group))
-    return authored
-
-## The property nearest a name this node does not have, as a clause, or "".
-##
-## The editor side says the same thing for the same reason: one live turn asked the running game for
-## `transform_2d`, which is one edit from `transform`, and was told only that it is absent. Case and
-## underscores are ignored and one has to be a prefix of the other, with four characters at least —
-## `x` would otherwise answer for everything beginning with it.
+## The matching is `Params.nearest_property`, which both halves of the addon now read. This was a
+## second copy of it — same lowering, same underscore strip, same category skip, same four-character
+## floor — that answered with the sentence rather than the name. It also still carried the mistake
+## the shared one had already been fixed for: a property spelled exactly right came back as
+## `Did you mean 'position'?` about `position`, because only the editor's copy learned to drop an
+## exact match.
 func _nearest_of(node: Node, property: String) -> String:
-    var wanted := property.to_lower().replace("_", "")
-    if wanted.is_empty():
-        return ""
-    for entry in node.get_property_list():
-        var name := str(entry.get("name", ""))
-        if name.is_empty() or name.contains("/"):
-            continue
-        # The inspector's own headings are in this list: a Sprite2D's `Transform` sits beside its
-        # `transform`, and a heading is not a property anyone can set.
-        var usage := int(entry.get("usage", 0))
-        if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
-            continue
-        var plain := name.to_lower().replace("_", "")
-        if plain == wanted:
-            return ". Did you mean '%s'?" % name
-        if mini(plain.length(), wanted.length()) < 4:
-            continue
-        if plain.begins_with(wanted) or wanted.begins_with(plain):
-            return ". Did you mean '%s'?" % name
-    return ""
+    var near := Params.nearest_property(node, property)
+    return "" if near.is_empty() else ". Did you mean '%s'?" % near
 
 ## Injects input events into the game as if the user produced them, then waits for the input to be
 ## dispatched and the reaction to be rendered, so the answer carries a frame that already shows
