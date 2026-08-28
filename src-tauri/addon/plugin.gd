@@ -22,7 +22,13 @@ const Params := preload("res://addons/gofer/params.gd")
 
 var _peer: StreamPeerTCP
 var _status: int = -1
-var _pending_line: String = ""
+## The bytes of the request line being read, decoded only once the whole line is in.
+##
+## Bytes, not a String. This was `_pending_line += String.chr(byte)`, which reads each byte as a
+## Unicode code point: `ü` arrives as the two bytes C3 BC and came out as two characters, so a node
+## called `Münze` was created, read back mangled, and could not be named again. Every non-ASCII name,
+## label or string value went through this. `get_string_from_utf8` decodes the line as what it is.
+var _pending_bytes: PackedByteArray = PackedByteArray()
 var _ready_notified: bool = false
 var _readiness: String = "starting"
 ## Frames the editor has been settled without opening the scene it opens for itself. See
@@ -505,12 +511,12 @@ func _process(_delta: float) -> void:
     while available > 0:
         var byte := _peer.get_8()
         if byte == 10:
-            var line := _pending_line
-            _pending_line = ""
+            var line := _pending_bytes.get_string_from_utf8()
+            _pending_bytes = PackedByteArray()
             _handle_line(line)
             available = _peer.get_available_bytes()
         else:
-            _pending_line += String.chr(byte)
+            _pending_bytes.append(byte)
             available -= 1
 
 func _rpc_port() -> int:

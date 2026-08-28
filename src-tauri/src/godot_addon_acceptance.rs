@@ -2721,3 +2721,119 @@ fn the_preset_no_scene_holds_names_the_anchors_that_do() {
     );
     assert!(!ordinary.contains("anchor_left"), "{ordinary}");
 }
+
+/// A node name that is not ASCII, written and read back.
+///
+/// `loc-27-inherit2` read `/GoldPickup/\u{fffd}\u{fffd}\u{fffd}` out of `get_tree`, sent that path
+/// straight back, and Gofer answered about `/GoldPickup/\u{ef}\u{bf}\u{bd}` — one replacement
+/// character's UTF-8 bytes read as Latin-1. Whether that is a property of U+FFFD or of every
+/// non-ASCII name is the whole question, and nothing in the suite asked it.
+#[test]
+fn a_node_named_outside_ascii_survives_the_round_trip() {
+    let mut session = Session::start();
+    let scene = "res://unicode.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Node2D", "rootName": "Unicode"}),
+    );
+    for named in ["Münze", "Монета", "コイン", "Pièce"] {
+        session.mutate(
+            "node.create",
+            json!({"scene": scene, "parent": "/Unicode", "name": named, "type": "Node2D"}),
+        );
+        let read = session.call(
+            "node.inspect",
+            json!({"scene": scene, "node": format!("/Unicode/{named}")}),
+        );
+        assert_eq!(
+            read["name"], named,
+            "the name has to come back as it went in: {read}"
+        );
+        assert_eq!(read["path"], format!("/Unicode/{named}"), "{read}");
+    }
+
+    // Saved and reopened from disk, because a name that only survives in memory is one the next
+    // session reads back broken out of the `.tscn`.
+    session.mutate("scene.save", json!({}));
+    session.call("scene.open", json!({"path": scene}));
+    for named in ["Münze", "Монета", "コイン", "Pièce"] {
+        let read = session.call(
+            "node.inspect",
+            json!({"scene": scene, "node": format!("/Unicode/{named}")}),
+        );
+        assert_eq!(read["name"], named, "after a save and a reopen: {read}");
+    }
+
+    // And the tree answers the same names, which is the path a caller copies back.
+    let tree = session.call("scene.get_tree", json!({}));
+    let listed = serde_json::to_string(&tree).expect("the tree as text");
+    for named in ["Münze", "Монета", "コイン", "Pièce"] {
+        assert!(
+            listed.contains(named),
+            "the tree must name {named}: {listed}"
+        );
+    }
+}
+
+/// The same seam, carrying the text a player reads and the name a project is called.
+///
+/// The mangled request line is how every string reaches the editor, and the sixty-two operations
+/// the addon answers carry more than node names: a Label's `text`, a group, an input action, the
+/// project's own title. `godot_script` and `godot_debug` are answered in Rust and never went
+/// through it, so a script's source was never at risk — this is what was.
+#[test]
+fn the_text_and_settings_outside_ascii_come_back_the_way_they_went_in() {
+    let mut session = Session::start();
+    let scene = "res://beschriftung.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control", "rootName": "Beschriftung"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/Beschriftung", "name": "Titel", "type": "Label"}),
+    );
+    let shown = "Münzen: 0 — счёт — スコア ✓";
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/Beschriftung/Titel",
+            "property": "text",
+            "value": {"type": "string", "value": shown},
+        }),
+    );
+    let read = session.call(
+        "node.inspect",
+        json!({"scene": scene, "node": "/Beschriftung/Titel", "properties": ["text"]}),
+    );
+    assert_eq!(
+        read["properties"][0]["value"]["value"], shown,
+        "the text a player reads must survive the round trip: {read}"
+    );
+
+    // A group is a name the caller invents, and it comes back in every tree.
+    session.mutate(
+        "node.add_to_group",
+        json!({"node": "/Beschriftung/Titel", "group": "Münzanzeige"}),
+    );
+    let grouped = session.call(
+        "node.inspect",
+        json!({"scene": scene, "node": "/Beschriftung/Titel"}),
+    );
+    assert_eq!(grouped["groups"][0], "Münzanzeige", "{grouped}");
+
+    // And the project's own title, which is what a window is called.
+    session.call(
+        "project.set_setting",
+        json!({
+            "name": "application/config/name",
+            "value": {"type": "string", "value": "Münzjäger"},
+        }),
+    );
+    let setting = session.call(
+        "project.get_setting",
+        json!({"name": "application/config/name"}),
+    );
+    assert_eq!(setting["value"]["value"], "Münzjäger", "{setting}");
+}
