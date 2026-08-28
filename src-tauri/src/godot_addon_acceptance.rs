@@ -730,9 +730,22 @@ fn a_file_the_importer_cannot_read_is_refused_rather_than_waited_out() {
     std::fs::write(worktree.join("broken.png"), &broken).expect("write the unreadable png");
 
     let started = std::time::Instant::now();
-    let refusal = session
-        .try_call("resource.rescan", json!({"path": "res://broken.png"}), None)
-        .expect_err("a file the importer cannot read has no successful rescan");
+    // The rescan is answered by `_paths_not_loadable`, which skips a file on three separate
+    // conditions, and a success here means one of them was met without saying which. Nightly
+    // Windows runs answered `scanned: true` about this file and the panic could only print the
+    // answer, so the two facts the addon read are read again here. The sidecar is the suspect: the
+    // walk deletes it and the editor writes a new one, and "no sidecar" is deliberately a skip so
+    // that a `.py` beside the assets is not called a failed import.
+    let refusal =
+        match session.try_call("resource.rescan", json!({"path": "res://broken.png"}), None) {
+            Err(refusal) => refusal,
+            Ok(answer) => panic!(
+                "a file the importer cannot read has no successful rescan: {answer}\n\
+             broken.png on disk: {}\nbroken.png.import beside it: {}",
+                worktree.join("broken.png").exists(),
+                worktree.join("broken.png.import").exists(),
+            ),
+        };
 
     assert!(
         refusal.starts_with("import_failed"),

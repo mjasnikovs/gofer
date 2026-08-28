@@ -228,7 +228,6 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
                 "variablesReference": result(11)["scopes"][0]["variablesReference"],
             }}),
         ),
-        13 => tool("godot_debug", json!({"op": "terminate", "params": {}})),
         // Disarming the breakpoint is part of finishing with the debugger, not tidiness. The
         // editor holds breakpoints, not the session, so it hands them to the next game it plays —
         // and the next game here is the one this turn wants a photograph of. Left armed, it stops
@@ -236,10 +235,26 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
         // whole twenty seconds against a game that is paused rather than slow. Measured: the
         // second game's `breaked` arrived every run, and the capture beat it about two runs in
         // three.
-        14 => tool(
+        //
+        // Both halves run **before** the terminate, and on the halted game rather than after it.
+        // This used to terminate first and then ask for no breakpoints, and the second order is
+        // the one every nightly Windows run and most macOS runs died on: `run` answered with its
+        // launch frame, the `capture` after it spent all twenty seconds, and the turn failed on
+        // "a captured frame must be a PNG". Linux never saw it — with the disarm replaced by a
+        // no-op the turn still passed three times out of three there, so the clear was not what
+        // was keeping it green, the machine was. `godot_journey_acceptance` has always asked in
+        // this order, and its own windowed game captures twice on the same Windows runner that
+        // fails this one, which is what says the game is halted rather than the window unable to
+        // draw. Clearing a breakpoint is a live-session operation; a game that is going anyway
+        // still has to be let go of first.
+        13 => tools(
             "godot_debug",
-            json!({"op": "set_breakpoints", "params": {"path": PROBE_PATH, "lines": []}}),
+            &[
+                json!({"op": "set_breakpoints", "params": {"path": PROBE_PATH, "lines": []}}),
+                json!({"op": "continue", "params": {}}),
+            ],
         ),
+        14 => tool("godot_debug", json!({"op": "terminate", "params": {}})),
         15 => tool("godot_runtime", json!({"op": "run", "params": {}})),
         16 => tool("godot_runtime", json!({"op": "capture", "params": {}})),
         17 => tool("godot_runtime", json!({"op": "stop", "params": {}})),

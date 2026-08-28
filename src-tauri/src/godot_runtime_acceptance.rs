@@ -571,6 +571,41 @@ fn unkillable_probe_script(port: u16) -> String {
     )
 }
 
+/// Whether the game's port has been let go, which is how these tests ask "is the process gone?".
+///
+/// A listening socket is bound for exactly as long as the process lives, so on Linux and macOS this
+/// answers on the first attempt or not at all: the game is reaped before the stop is answered, and
+/// any wait here would hide the asynchronous stop the assertion exists to catch. The budget below
+/// is zero on both.
+///
+/// Windows reaps asynchronously, and that is an operating-system fact rather than a contract Gofer
+/// can hold. The kill returns once it is scheduled; the kernel closes the process's handles, its
+/// sockets among them, during a teardown that runs afterwards. So the port outlives a stop the
+/// editor answered truthfully, by a few milliseconds, and `stopping_the_game_answers_only_once_the_game_is_gone`
+/// and `a_call_that_was_waiting_for_a_frame_says_so` were the two nightly Windows reds that came of
+/// it — never on Linux, never on macOS, and never on the contract they were written to check.
+///
+/// Two seconds is a teardown window, not a retry loop for a stop that did not happen. A game still
+/// running holds its port for every one of those milliseconds and the assertion still fails; what
+/// the window cannot do is turn a red into a green, only a flake into an answer.
+fn port_released(port: u16) -> bool {
+    let budget = if cfg!(windows) {
+        Duration::from_secs(2)
+    } else {
+        Duration::ZERO
+    };
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// A game that holds a port for as long as its process lives, and nothing else.
 ///
 /// The spinning probe above proves a stop is synchronous; this one asks a different question — who
@@ -629,7 +664,7 @@ fn quitting_the_editor_takes_the_game_with_it() {
     // No wait: the editor answers `session.quit` before it acts and only leaves a frame later, so
     // by the time it has actually gone the game it stopped first has been gone longer.
     assert!(
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        port_released(port),
         "the game outlived the editor that launched it: port {port} is still held"
     );
 }
@@ -738,7 +773,7 @@ fn a_call_that_was_waiting_for_a_frame_says_so() {
         .try_call("runtime.stop", json!({}), None)
         .expect("the wedged game must be stopped rather than left running");
     assert!(
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        port_released(port),
         "the spinning probe must be gone, not merely asked to go"
     );
 }
@@ -801,9 +836,11 @@ fn stopping_the_game_answers_only_once_the_game_is_gone() {
     let stopped = session.call("runtime.stop", json!({}));
     assert_eq!(stopped["running"], false, "{stopped}");
     // Nothing sleeps between the response and this bind: the answer has to be true when it is
-    // written, not true a moment later.
+    // written, not true a moment later. `port_released` holds that on Linux and macOS with a zero
+    // budget; only Windows, which closes a killed process's sockets after the kill returns, gets a
+    // teardown window, and it says there why.
     assert!(
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(),
+        port_released(port),
         "runtime.stop answered `running: false` while the game still held its port\n--- editor output ---\n{}",
         session.output()
     );
