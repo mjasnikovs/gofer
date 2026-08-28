@@ -769,8 +769,13 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     );
     assert_eq!(
         crate::read_ledger::recall(
-            // The ledger is keyed by the workspace's own root, which is canonical.
-            &std::fs::canonicalize(&session.worktree).expect("canonical worktree"),
+            // The ledger is keyed by the workspace's own root, so the key has to be spelled the
+            // way `Workspace::open` spells it: `paths::canonical`, which is `dunce`, and not
+            // `std::fs::canonicalize`. The two differ only on Windows, where std returns the
+            // extended-length `\\?\C:\…` form and dunce returns the plain one — a different
+            // `PathBuf`, so a different key, so `recall` answered `None` about a hash that had
+            // been recorded. It surfaced the first night this test got far enough to reach it.
+            &crate::paths::canonical(&session.worktree).expect("canonical worktree"),
             "main.tscn",
         )
         .as_deref(),
