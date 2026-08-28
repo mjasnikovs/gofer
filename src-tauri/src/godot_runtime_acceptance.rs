@@ -701,6 +701,20 @@ fn a_call_that_was_waiting_for_a_frame_says_so() {
         refused.contains("inspect_node") && refused.contains("get_tree"),
         "the refusal must name the calls that answer without a frame: {refused}"
     );
+    // And it names the debugger as *one* cause rather than as the cause, which the comment above
+    // asked for before the sentence did it. `loc-24-debug2` met the old wording three times, at
+    // twenty seconds each, on a game the debugger had let go four calls earlier — `terminate`,
+    // then a plain `godot_runtime run` that answered with a frame — and went looking for a debug
+    // stop that was not there. Gofer's own side appends the definite sentence when the debugger
+    // really does hold the game; this one must not claim it from inside the editor.
+    assert!(
+        !refused.contains("A game halted in the debugger"),
+        "the addon cannot know a debugger is holding this game: {refused}"
+    );
+    assert!(
+        refused.contains("If the debugger is holding it"),
+        "and it offers the debugger as a thing to check: {refused}"
+    );
 
     // And the asymmetry the sentence describes, on the very same game, so it can never become a
     // lie: the call that needs no frame answers while the one that needs a frame cannot. This is

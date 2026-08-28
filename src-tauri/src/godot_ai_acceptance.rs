@@ -810,6 +810,307 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
 /// The turn above cannot see this — it opens a scene first, which fills the ledger — and neither
 /// can the journey, which passes its own revision. Both start from a read, which is exactly the
 /// state this one refuses to start from.
+/// A frame-awaiting runtime call against a game the debugger has stopped is refused, not waited out.
+///
+/// The end of what `godot_session::a_game_the_debugger_has_halted` promises: the flag is set by a
+/// real adapter's `stopped` event (`godot_dap_acceptance`), the decision is unit-tested
+/// (`godot_session::tests`), and this is the two lines in `run_one` between them — on a real editor,
+/// a real debuggee and the real router.
+///
+/// The hazard is written down twice in this repository already. The turn above disarms its
+/// breakpoint before it captures, and says why: "Left armed, it stops on its first `_process` and
+/// renders nothing more, and the capture below waits out its whole twenty seconds against a game
+/// that is paused rather than slow." Across every recorded live trace that cost 21 calls and 420
+/// seconds.
+///
+/// **What this fixture proves, and what it does not.** The addon has a guard of its own —
+/// `_runtime_broke`, set from the editor's `breaked` signal — and here it is set, so without the
+/// router's guard this call comes back `runtime_broke` in milliseconds rather than timing out. So
+/// the assertion that matters is the *code*: the router decides before the addon is asked. The
+/// twenty seconds is what the corpus paid when the addon's flag was false, which is a state it
+/// clears on any message from the game and which those recorded turns were in — every one of the
+/// 21 answered `runtime_timeout`, not `runtime_broke`. Two guards on two different facts, and the
+/// second one exists because the first missed twenty-one calls.
+///
+/// The five-second deadline is kept anyway: it is not a benchmark, it is the difference between
+/// refusing and waiting, and without it the regression comes back as slowness nobody notices.
+#[test]
+fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+
+    call(
+        "godot_debug",
+        json!({"ops": [{
+            "op": "launch",
+            "playArgs": ["--headless"],
+            "breakpoints": [{"path": PROBE_PATH, "lines": [ASKED_LINE]}],
+        }]}),
+    )
+    .expect("the debugger launches the probe");
+    // The editor holds breakpoints, not this session, so Gofer keeps its own note of which files
+    // still have one. `godot_session::a_breakpoint_is_still_armed` is what reads it, and what it
+    // reads has to be filled in by a real `set_breakpoints` rather than only by a test's stand-in.
+    assert_eq!(
+        crate::debug::armed_breakpoints(),
+        vec![PROBE_PATH.to_owned()],
+        "a launch that sets a breakpoint has to be remembered as having set one"
+    );
+    let stopped = call(
+        "godot_debug",
+        json!({"ops": [{"op": "await_stop", "timeoutMs": 60000}]}),
+    )
+    .expect("the probe stops on its own first frame");
+    assert!(
+        !stopped["ops"][0]["result"]["stopped"].is_null(),
+        "the game must actually be halted for this test to be about anything: {stopped}"
+    );
+
+    let started = std::time::Instant::now();
+    let refused = call(
+        "godot_runtime",
+        json!({"ops": [{
+            "op": "input",
+            "events": [{"kind": "key", "key": "A", "pressed": true}],
+        }]}),
+    )
+    .expect_err("a halted game cannot answer a call that waits for a frame");
+    let waited = started.elapsed();
+
+    assert_eq!(refused.code, "game_halted", "{}", refused.message);
+    assert!(
+        refused.message.contains("godot_debug continue"),
+        "{}",
+        refused.message
+    );
+    // And it says what those two really come back with. It used to say they "answer while it is
+    // halted", which reads as the data and is not what arrives: `loc-24-debug2` called
+    // `inspect_node` against a game the debugger held and was refused `runtime_broke`, six times
+    // across that turn. The refusal *is* the distinguishing answer, and the sentence has to say so
+    // or it promises a read that cannot happen.
+    assert!(
+        refused.message.contains("runtime_broke"),
+        "the sentence must name what a frame-free call really answers here: {}",
+        refused.message
+    );
+    assert!(
+        !refused.message.contains("answer while it is halted"),
+        "and must not promise the data instead: {}",
+        refused.message
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(5),
+        "the refusal is the point and it took {waited:?}"
+    );
+
+    // The calls that need no frame are not refused *here* — they reach the addon and get its own
+    // answer, which is how a caller tells a halted game from a wedged one. Against a game the
+    // debugger is holding that answer is `runtime_broke`, naming the debugger; against a game that
+    // is merely not drawing it is the tree itself, which is
+    // `godot_runtime_acceptance::a_game_that_cannot_draw_answers_the_call_that_needs_no_frame`.
+    // Either way the distinguishing answer is what comes back, and never `game_halted`.
+    if let Err(failure) = call("godot_runtime", json!({"ops": [{"op": "get_tree"}]})) {
+        assert_ne!(
+            failure.code, "game_halted",
+            "a call that needs no frame must reach the game: {}",
+            failure.message
+        );
+        assert_eq!(failure.code, "runtime_broke", "{}", failure.message);
+        // And that answer names the call that gets the game moving. It used to say only "paused at
+        // an error … read the error in the session output", which is the wrong situation for a
+        // breakpoint — every break sets the same flag — and of the fifteen recorded callers that
+        // met it, eleven reached for the debugger and two did what the sentence asked.
+        assert!(
+            failure.message.contains("godot_debug continue")
+                && failure.message.contains("godot_debug stack_trace"),
+            "the paused-game answer must name the way out: {}",
+            failure.message
+        );
+        assert!(
+            !failure
+                .message
+                .starts_with("The game is paused at an error"),
+            "and must not call a breakpoint an error: {}",
+            failure.message
+        );
+    }
+
+    // The thirteenth operation no live turn has ever called, and the one
+    // `every_operation_no_turn_has_ever_used_still_answers` cannot reach: `step_in` needs a
+    // debuggee stopped in a frame, and this is the only test that has one.
+    call("godot_debug", json!({"ops": [{"op": "step_in"}]}))
+        .expect("step_in answers on a stopped debuggee");
+
+    // And with the game running on, the same call is no longer this situation.
+    call("godot_debug", json!({"ops": [{"op": "continue"}]})).expect("the game runs on");
+    let after = call(
+        "godot_runtime",
+        json!({"ops": [{
+            "op": "input",
+            "events": [{"kind": "key", "key": "A", "pressed": true}],
+        }]}),
+    );
+    if let Err(failure) = &after {
+        assert_ne!(
+            failure.code, "game_halted",
+            "a game told to run on is not halted: {}",
+            failure.message
+        );
+    }
+
+    let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
+    // Terminating does not take the breakpoint away — the editor still holds it, which is the whole
+    // reason that note exists — and asking for none in the file does.
+    assert_eq!(
+        crate::debug::armed_breakpoints(),
+        vec![PROBE_PATH.to_owned()]
+    );
+    call(
+        "godot_debug",
+        json!({"ops": [{"op": "set_breakpoints", "path": PROBE_PATH, "lines": []}]}),
+    )
+    .expect("clear the breakpoint");
+    assert!(crate::debug::armed_breakpoints().is_empty());
+}
+
+/*
+ * The operations no live turn has ever reached for, driven once each through the real router.
+ *
+ * Counted over all 132 recorded traces: **13 of the catalogue's 110 operations have never been
+ * called by any model**, and eight of the thirteen are `godot_script`'s language-server half —
+ * `completion`, `signature_help`, `declaration`, `highlights`, `document_symbols`, `references`,
+ * `format` and `update`. `godot_lsp_acceptance` drives some of them against the LSP client, and
+ * nothing drives any of them through `ai_tools::dispatch`, which is the door a model knocks on:
+ * the parameter contract, the read ledger, the session start, the answer shaping.
+ *
+ * So an operation Gofer advertises could be broken end to end and nothing here would know. This is
+ * the smoke test that closes that: one call each, on a real editor, asserting only that the router
+ * answers rather than refusing with a code. What each *means* is the language server's business and
+ * is tested where the language server is.
+ *
+ * `step_in` is left out and it is the only one: it needs a debuggee stopped in a frame, which
+ * `godot_dap_acceptance` already drives through `next`, and setting one up here would be a second
+ * copy of that test rather than coverage of this door.
+ */
+#[test]
+fn every_operation_no_turn_has_ever_used_still_answers() {
+    let session = start_session();
+    let app = mock_app();
+    let data = TempDir::new().expect("temporary application data");
+    let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
+        .expect("open project storage");
+    app.manage(crate::storage::StorageSlot::new(Ok(storage)));
+
+    let call = |tool: &str, params: Value| {
+        ai_tools::dispatch(
+            app.handle(),
+            ai_tools::ToolRequest {
+                tool: tool.to_owned(),
+                params,
+            },
+        )
+    };
+    // The ledger wants the file read before anything is asked about it, which is the router's rule
+    // rather than the language server's.
+    call(
+        "godot_script",
+        json!({"ops": [{"op": "open", "path": PROBE_PATH}]}),
+    )
+    .expect("open the probe script");
+
+    // `_tick(1)` on the eighth line, one tab in: a name with a declaration, a call site and a
+    // signature, so every position-taking operation below has something real under it.
+    let inside_the_call = json!({"line": 7, "character": 3});
+    let at = |op: &str| json!({"ops": [{"op": op, "path": PROBE_PATH, "position": inside_the_call.clone()}]});
+
+    for op in [
+        "completion",
+        "signature_help",
+        "declaration",
+        "highlights",
+        "references",
+    ] {
+        call("godot_script", at(op))
+            .unwrap_or_else(|failure| panic!("{op}: {} {}", failure.code, failure.message));
+    }
+    call(
+        "godot_script",
+        json!({"ops": [{"op": "document_symbols", "path": PROBE_PATH}]}),
+    )
+    .expect("document_symbols");
+    // `format` takes source rather than a path — it is the gdformat sidecar, not the language
+    // server. A machine without one refuses by name, which is an answer about the machine rather
+    // than about the call, so both endings are accepted and anything else is not.
+    match call(
+        "godot_script",
+        json!({"ops": [{"op": "format", "source": "extends Node\n"}]}),
+    ) {
+        Ok(_) => {}
+        Err(failure) => assert_eq!(failure.code, "formatter_unavailable", "{}", failure.message),
+    }
+    call(
+        "godot_script",
+        json!({"ops": [{"op": "update", "path": PROBE_PATH, "text": PROBE_SCRIPT}]}),
+    )
+    .expect("update");
+
+    call(
+        "godot_project",
+        json!({"ops": [{"op": "get_editor_setting", "name": "run/window_placement/game_embed_mode"}]}),
+    )
+    .expect("get_editor_setting");
+    // Nothing has set this action, and resetting one the project does not have is the case a
+    // caller reaches first.
+    let missing = call(
+        "godot_project",
+        json!({"ops": [{"op": "reset_input_action", "name": "ui_accept"}]}),
+    );
+    if let Err(failure) = &missing {
+        assert_ne!(failure.code, "unrouted_tool", "{}", failure.message);
+        assert_ne!(failure.code, "unknown_param", "{}", failure.message);
+    }
+
+    // The editor's own history, which a turn has never touched and the window's buttons do. It
+    // needs something in it: `undo` on a session that has changed nothing answers
+    // `undo_unavailable: Nothing to undo`, which is right and is not what this is asking.
+    call(
+        "godot_scene",
+        json!({"ops": [{"op": "open", "path": SCENE_PATH}]}),
+    )
+    .expect("open the fixture scene");
+    call(
+        "godot_node",
+        json!({"ops": [{
+            "op": "create",
+            "parent": "/AiFixture",
+            "name": "Undone",
+            "type": "Marker2D",
+        }]}),
+    )
+    .expect("something to undo");
+    call("godot_session", json!({"ops": [{"op": "undo"}]})).expect("undo");
+    call("godot_session", json!({"ops": [{"op": "redo"}]})).expect("redo");
+}
+
+/// The first mutation of a session needs no read before it.
+///
+/// Its own paragraph again: the comment that described it was left heading
+/// `a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits`, which was written in
+/// above it.
 #[test]
 fn the_first_mutation_of_a_session_needs_no_read_before_it() {
     let session = start_session();

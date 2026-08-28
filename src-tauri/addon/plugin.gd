@@ -1124,8 +1124,18 @@ func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
         _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
         return
     # A paused game reads the message and never runs the frame that would answer it.
+    #
+    # Every break sets `_runtime_broke`, not only the one a bad script causes: a breakpoint Gofer's
+    # own adapter set stops the game exactly the same way. The sentence used to say "paused at an
+    # error … read the error in the session output, then fix it and run again", which is the wrong
+    # situation for most of the calls that meet it, and it never named the debugger call that
+    # actually gets the game moving. Measured over the recorded runs: of the fifteen callers that
+    # met this and did something next, **eleven reached for the debugger** — five `set_breakpoints`,
+    # two `continue`, two `stack_trace`, one `attach`, one `terminate` — and two did what the
+    # sentence asked. So the debugger goes first and the error case stays, because a game that
+    # broke while starting really is waiting on the session output.
     if _runtime_broke:
-        _respond_error(id, "runtime_broke", "The game is paused at an error in the debugger and cannot answer; read the error in the session output, then fix it and run again", true)
+        _respond_error(id, "runtime_broke", "The game is paused in the debugger and cannot answer until it runs on. godot_debug continue lets it go, and godot_debug stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
         return
     # The op travels with the pending entry so the sweep can say what the call was waiting for.
     _runtime_pending.append({
@@ -1325,10 +1335,20 @@ func _sweep_runtime_pending() -> void:
                 # not drawing, which is a different thing from slow, and nothing said so — both
                 # agents that met it worked the asymmetry out for themselves and spent the turn
                 # doing it.
+                #
+                # The debugger is named as one cause rather than as the cause, which is a
+                # correction. This sentence used to open "A game halted in the debugger draws
+                # none", and `loc-24-debug2` met it three times — twenty seconds each — on a game
+                # the debugger had let go four calls earlier: `terminate`, then a plain
+                # `godot_runtime run` that answered with a frame, then three of these. Its
+                # `inspect_node` answered, its `get_tree` said `paused: false`, and the sentence
+                # sent it looking for a debug stop that was not there. Gofer's own side appends the
+                # definite sentence when the debugger really does hold the game, so this one does
+                # not have to guess from inside the editor.
                 _respond_error(
                     pending["id"],
                     "runtime_timeout",
-                    "The game did not answer in time. This call cannot answer until the game draws a frame. A game halted in the debugger draws none while still answering godot_runtime inspect_node and get_tree, which need no frame - so ask one of those to tell a halted game from a wedged one, and godot_debug stack_trace to say where it is stopped",
+                    "The game did not answer in time. This call cannot answer until the game draws a frame, and a game can be alive and drawing nothing - godot_runtime inspect_node and get_tree need no frame, so ask one of those: the tree itself means the game is alive and not drawing, and a runtime_broke means the debugger is holding it. If the debugger is holding it, godot_debug stack_trace says where it is stopped",
                     true
                 )
             else:

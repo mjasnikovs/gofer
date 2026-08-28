@@ -156,6 +156,14 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     client.await_launch(launching).expect("launch response");
     await_breakpoint(&client, &events, &editor);
 
+    // A real adapter's own `stopped` event is the only thing that sets this, and it is what stands
+    // between a caller and twenty seconds of waiting for a frame a halted game will never draw.
+    // See `godot_session::a_game_the_debugger_has_halted`.
+    assert!(
+        crate::godot_dap::debuggee_is_stopped(),
+        "a real breakpoint stop must be visible to the runtime router"
+    );
+
     // One thread, two frames: _tick called from _process, stopped on the probe line.
     let threads = client.threads().expect("threads");
     assert_eq!(threads.len(), 1, "Godot debugs exactly one thread");
@@ -231,6 +239,11 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         "the probe breakpoint must be gone, got {cleared:?}"
     );
     assert!(client.continue_execution(MAIN_THREAD_ID).expect("continue"));
+    assert!(
+        !crate::godot_dap::debuggee_is_stopped(),
+        "a game told to run on is not halted, and a router that still thinks it is refuses a call \
+         the game could have answered"
+    );
     while events.try_recv().is_ok() {}
     client.pause(MAIN_THREAD_ID).expect("pause");
     let paused = client

@@ -441,7 +441,7 @@ fn route<R: Runtime>(
     // as ten dialogs, of which they could only refuse the ones they had already been shown.
     approvals::require(app, domain.name, &gated)?;
 
-    run_in_order(entries, |operation, params| {
+    let step = |operation: &'static Operation, params: Value| {
         starting_the_session_if_there_is_none(
             domain,
             params,
@@ -452,7 +452,8 @@ fn route<R: Runtime>(
                     .map_err(ToolFailure::from)
             },
         )
-    })
+    };
+    run_in_order(entries, step)
 }
 
 /// Tells the editor's filesystem about GDScript this call just wrote.
@@ -819,6 +820,13 @@ fn run_one<R: Runtime>(
     match operation.route() {
         tool_params::Answers::Addon(command) => {
             a_path_that_climbs_out(&params)?;
+            // Before the call rather than after its deadline. A game halted in the debugger cannot
+            // draw, and three of this domain's operations wait for a frame — so the addon can only
+            // answer them by running out of time, twenty seconds later, with a sentence that reads
+            // as a slow game. See `godot_session::a_game_the_debugger_has_halted`.
+            if domain.name == "godot_runtime" {
+                godot_session::a_game_the_debugger_has_halted(op)?;
+            }
             let answered = rpc(app, command, params);
             // An autoload is a global name, and every script the language server already has open
             // was parsed without it. Nothing about those documents changed, so the server never

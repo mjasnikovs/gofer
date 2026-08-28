@@ -22,6 +22,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1526,8 +1527,12 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
             failure.message = format!("{}\n\n{crash}", failure.message.trim_end());
         } else if let Some(missing) = the_helper_is_not_installed() {
             failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
+        } else if let Some(broken) = the_games_own_scripts_did_not_compile() {
+            failure.message = format!("{}\n\n{broken}", failure.message.trim_end());
         } else if let Some(held) = the_debugger_holds_the_game() {
             failure.message = format!("{}\n\n{held}", failure.message.trim_end());
+        } else if let Some(armed) = a_breakpoint_is_still_armed() {
+            failure.message = format!("{}\n\n{armed}", failure.message.trim_end());
         }
     }
     let printed = last_session_errors(CARRIED_ERROR_LINES);
@@ -1540,6 +1545,69 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
         printed.join("\n")
     );
     failure
+}
+
+/// The runtime operations that cannot answer until the game draws a frame.
+///
+/// Read out of the addon rather than written again here. `FRAME_AWAITING_OPS` in `plugin.gd` is
+/// what decides which timeout a caller gets and it is where the wait actually happens, so a second
+/// copy in Rust would be a second thing to keep in step — and the one that drifted would refuse
+/// the wrong calls, silently, in the direction that costs a working call.
+static FRAME_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let source = include_str!("../addon/plugin.gd");
+    let Some(rest) = source.split_once("FRAME_AWAITING_OPS: Array[String] = [") else {
+        return Vec::new();
+    };
+    let Some((list, _)) = rest.1.split_once(']') else {
+        return Vec::new();
+    };
+    list.split(',')
+        .filter_map(|word| word.trim().strip_prefix('"')?.strip_suffix('"'))
+        .map(str::to_owned)
+        .collect()
+});
+
+/// Refuses a frame-awaiting runtime call against a game the debugger has halted.
+///
+/// The whole point is the twenty seconds it does not spend. A game stopped at a breakpoint is
+/// halted, not slow: `runtime.input`, `wait` and `capture` all wait on a frame it will never draw,
+/// and the addon can only answer them when their deadline runs out. Counted across every recorded
+/// live trace: **21 of those, 20 seconds each, 420 seconds** — one seventh of the time every tool
+/// call in the corpus took, in one percent of the calls. `R01-backwards` spent eight in a row
+/// against a breakpoint it had set itself, then tried to run the game again three times.
+///
+/// Both facts are needed and neither is enough. `holds_a_game` says the debugger started this game
+/// and not whether it is halted; `debuggee_is_stopped` says the adapter's last word was a stop and
+/// not whose game it was about. Together they are the one case where waiting cannot help.
+///
+/// `inspect_node` and `get_tree` are deliberately not refused: they answer off the debugger message
+/// pump, which a halted game still runs, and trying one is how a caller tells a halted game from a
+/// wedged one. That asymmetry is `godot_runtime_acceptance`'s
+/// `a_game_that_cannot_draw_answers_the_call_that_needs_no_frame`, on a real game.
+///
+/// Retryable, because it is: the call is right and the game is in the wrong state for it, which is
+/// exactly what `godot_debug continue` fixes.
+pub(crate) fn a_game_the_debugger_has_halted(op: &str) -> Result<(), ToolFailure> {
+    if !FRAME_AWAITING_OPS.iter().any(|frame_op| frame_op == op) {
+        return Ok(());
+    }
+    if !crate::debug::holds_a_game() || !crate::godot_dap::debuggee_is_stopped() {
+        return Ok(());
+    }
+    Err(ToolFailure {
+        retryable: true,
+        ..ToolFailure::new(
+            "game_halted",
+            format!(
+                "The game is stopped in the debugger, so it draws no frame and godot_runtime {op} \
+                 cannot be answered. Waiting will not change that. godot_debug continue lets it \
+                 run on, and godot_debug stack_trace says where it is stopped. godot_runtime \
+                 inspect_node and get_tree need no frame and are not refused here — they reach the \
+                 game, and while the debugger holds it they come back runtime_broke naming it, \
+                 which is how a stopped game is told apart from a wedged one."
+            ),
+        )
+    })
 }
 
 /// Says so when the game a runtime call is waiting on is one the debugger launched.
@@ -1560,6 +1628,80 @@ fn the_debugger_holds_the_game() -> Option<String> {
          through; godot_debug stack_trace says where it is stopped."
             .to_owned()
     })
+}
+
+/// Says so when the game is not slow, it is broken: its own scripts did not compile.
+///
+/// `runtime_slow_start` leads with "The game is running and its helper has not answered yet. Read
+/// godot_runtime get_state rather than running it again", which is the right sentence for a game
+/// that is starting and the wrong one for a game that will never finish.
+///
+/// **What this does not say, after two attempts at saying it.** The first draft claimed a game whose
+/// scripts fail to compile "never reaches the code that announces the Gofer helper", which is false:
+/// the helper announces from its own autoload's `_ready`, and an autoload runs before the main
+/// scene. The second claimed the project's own autoloads run *ahead* of Gofer's and can stop it
+/// loading — true of a project that already had autoloads when the addon was staged, and **false of
+/// the run this was written from**: `cer-41-arena`'s kept worktree has `GoferRuntime` first and its
+/// own broken `GameManager` second, because the agent registered it during the turn.
+///
+/// So the mechanism is not known, and this sentence does not invent one. What is known is what was
+/// watched: the errors are a compile failure, and the turn waited and re-ran nine times without the
+/// helper ever answering. That is what it says.
+///
+/// Measured on `cer-41-arena`, live: eight `runtime_slow_start` refusals and a forty-five-call
+/// loop — `run`, `stop`, `run`, `restart`, `wait` — while the editor printed
+/// `SCRIPT ERROR: Parse Error: Could not find type "Enemy" in the current scope` and eleven like
+/// it, and the game started cleanly on OpenGL every time. The parse errors were already being
+/// carried under the refusal by [`last_session_errors`]; what was missing is the sentence saying
+/// they are the cause rather than the background, against a leading sentence that says to wait.
+///
+/// Only what the engine itself calls a script failure. `SCRIPT ERROR:` covers a parse error and a
+/// compile error both, and it is the engine's own prefix — a warning, an `at:` frame or an editor
+/// diagnostic is not one, and `last_session_errors` has already dropped the engine's epilogue and
+/// the editor's own chatter before this reads them.
+fn the_games_own_scripts_did_not_compile() -> Option<String> {
+    let printed = last_session_errors(CARRIED_ERROR_LINES);
+    if !printed.iter().any(|line| line.starts_with("SCRIPT ERROR:")) {
+        return None;
+    }
+    Some(
+        "The game's own scripts did not compile — the errors below are the engine refusing to run \
+         them, not a slow start. Waiting for the helper and reading get_state again will not change \
+         that, and stopping and running again reaches the same place. Fix what the errors name and \
+         run once more."
+            .to_owned(),
+    )
+}
+
+/// Says so when a breakpoint this session set is still in the editor, holding a game it never
+/// launched.
+///
+/// The editor holds breakpoints, the debug session does not, and the editor hands them to the
+/// **next** game it plays — including one `godot_runtime run` starts, which the debug adapter never
+/// hears about. That game stops on its first `_process`, draws nothing, and every frame-awaiting
+/// call spends its whole deadline against a game that is not slow.
+///
+/// `godot_ai_acceptance` disarms its breakpoint before it captures for this reason and says so in
+/// its own comment. `sol-35-hud-xhigh` met it live: `godot_debug terminate`, `godot_runtime run`,
+/// then a `wait`/`capture`/`stop` that came back `runtime_timeout` twenty seconds later with
+/// `scripts/hud.gd` still holding a break — which the turn worked out for itself four calls later
+/// and cleared.
+///
+/// Second, not first. [`the_debugger_holds_the_game`] is about a game the debugger *is* holding and
+/// says so more precisely; this is the other case, where the debugger has let go and the breakpoint
+/// has not.
+fn a_breakpoint_is_still_armed() -> Option<String> {
+    let armed = crate::debug::armed_breakpoints();
+    if armed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "A breakpoint is still set in {}. The editor holds breakpoints rather than the debug \
+         session, so it hands them to the next game it plays — including one godot_runtime run \
+         starts — and a game stopped at one draws no frame. Clear it with godot_debug \
+         set_breakpoints and an empty lines list for that file, then run again.",
+        armed.join(", ")
+    ))
 }
 
 /// Says so when the game cannot possibly answer, because its helper is not in the project any more.
@@ -3123,6 +3265,172 @@ mod tests {
             "The game did not answer in time",
         ));
         assert_eq!(alone.message, "The game did not answer in time");
+    }
+
+    /// The three operations that wait for a frame are the addon's list, not a second copy of it.
+    ///
+    /// A drift here is silent and costs a working call: an operation this list gained that Rust
+    /// never heard of would go on spending its deadline, and one Rust invented would be refused
+    /// against a game that could have answered it.
+    #[test]
+    fn the_frame_awaiting_operations_are_the_addons_own() {
+        assert_eq!(
+            *FRAME_AWAITING_OPS,
+            vec!["input".to_owned(), "capture".to_owned(), "wait".to_owned()],
+            "plugin.gd's FRAME_AWAITING_OPS is what this reads, and the parse answered otherwise"
+        );
+    }
+
+    /// A frame-awaiting call against a halted game is refused now rather than in twenty seconds.
+    ///
+    /// Both flags are needed, and the test says so by turning each off in turn: a game the
+    /// debugger never started is not this situation whatever the adapter last said, and a game it
+    /// started and let run answers a frame like any other.
+    #[test]
+    fn a_frame_awaiting_call_against_a_halted_game_is_refused_at_once() {
+        let _test = session_test_lock();
+        crate::debug::pretend_it_holds_a_game(true);
+        crate::godot_dap::pretend_the_debuggee_is_stopped(true);
+
+        let refused = a_game_the_debugger_has_halted("input")
+            .expect_err("a halted game cannot answer a call that waits for a frame");
+        assert_eq!(refused.code, "game_halted");
+        assert!(refused.retryable, "continue is what makes this call work");
+        assert!(
+            refused.message.contains("godot_debug continue"),
+            "{}",
+            refused.message
+        );
+        // And the two that answer while it is halted are named, because trying one is how a caller
+        // tells a halted game from a wedged one.
+        assert!(
+            refused.message.contains("inspect_node") && refused.message.contains("get_tree"),
+            "{}",
+            refused.message
+        );
+
+        // The calls that need no frame are not refused at all.
+        assert!(a_game_the_debugger_has_halted("inspect_node").is_ok());
+        assert!(a_game_the_debugger_has_halted("get_tree").is_ok());
+
+        // A game the debugger launched and let run.
+        crate::godot_dap::pretend_the_debuggee_is_stopped(false);
+        assert!(a_game_the_debugger_has_halted("input").is_ok());
+
+        // And a game the debugger never started, whatever the adapter last said about one.
+        crate::godot_dap::pretend_the_debuggee_is_stopped(true);
+        crate::debug::pretend_it_holds_a_game(false);
+        assert!(a_game_the_debugger_has_halted("input").is_ok());
+
+        crate::godot_dap::pretend_the_debuggee_is_stopped(false);
+    }
+
+    /// A breakpoint the editor still holds is named when a runtime call cannot be answered.
+    ///
+    /// The case `the_debugger_holds_the_game` cannot reach: the debugger has let go — `terminate`,
+    /// then `godot_runtime run` — and the breakpoint has not, because the editor holds it and hands
+    /// it to the next game it plays. `sol-35-hud-xhigh` spent twenty seconds there.
+    #[test]
+    fn a_timeout_with_a_breakpoint_still_set_names_the_file_holding_it() {
+        let _test = session_test_lock();
+        let _armed = crate::debug::breakpoint_test_lock();
+        given_the_session_printed(&[(LogSource::Editor, "Godot Engine v4.7.2.stable")]);
+
+        crate::debug::pretend_a_breakpoint_is_armed(Some("scripts/hud.gd"));
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+        assert!(
+            carried.message.contains("scripts/hud.gd"),
+            "{}",
+            carried.message
+        );
+        assert!(
+            carried.message.contains("set_breakpoints"),
+            "{}",
+            carried.message
+        );
+
+        // A game the debugger is holding gets the sentence about *that*, which says more, and never
+        // both — they describe the same call from opposite ends.
+        crate::debug::pretend_it_holds_a_game(true);
+        let held = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+        crate::debug::pretend_it_holds_a_game(false);
+        assert!(
+            held.message.contains("godot_debug continue"),
+            "{}",
+            held.message
+        );
+        assert!(
+            !held.message.contains("still set in"),
+            "one sentence or the other, never both: {}",
+            held.message
+        );
+
+        // And with nothing armed there is nothing to say.
+        crate::debug::pretend_a_breakpoint_is_armed(None);
+        let alone = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_timeout",
+            "The game did not answer in time",
+        ));
+        assert_eq!(alone.message, "The game did not answer in time");
+    }
+
+    /// A game whose scripts did not compile is told it is broken, not that it is slow.
+    ///
+    /// `runtime_slow_start` leads with "read get_state rather than running it again", which is
+    /// advice for a game that is starting. `cer-41-arena` followed it into a forty-five-call loop —
+    /// `run`, `stop`, `run`, `restart`, `wait`, nine times over — while the editor printed twelve
+    /// parse errors and the game started cleanly on OpenGL every time.
+    #[test]
+    fn a_game_whose_scripts_did_not_compile_is_not_described_as_starting() {
+        let _test = session_test_lock();
+        given_the_session_printed(&[(
+            LogSource::EditorError,
+            "SCRIPT ERROR: Parse Error: Could not find type \"Enemy\" in the current scope.",
+        )]);
+
+        let carried = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet",
+        ));
+        assert!(
+            carried.message.contains("did not compile"),
+            "{}",
+            carried.message
+        );
+        // And it has to contradict the advice above it, or the caller has two sentences and
+        // follows the first.
+        assert!(
+            carried.message.contains("will not change that"),
+            "{}",
+            carried.message
+        );
+        // And it claims no mechanism. Two drafts did and both were wrong — see
+        // `the_games_own_scripts_did_not_compile`. What is pinned is that it stays out of the
+        // business of saying *why* the helper is missing, which nobody has measured.
+        assert!(
+            !carried.message.contains("autoload"),
+            "the sentence must not explain a mechanism nobody has measured: {}",
+            carried.message
+        );
+
+        // A session that printed no script failure keeps the sentence it had. The engine's own
+        // chatter is already dropped before this reads it, so a run with nothing wrong says
+        // nothing new.
+        given_the_session_printed(&[(LogSource::Editor, "Godot Engine v4.7.2.stable")]);
+        let quiet = carrying_the_error_that_ended_the_game(addon_failure(
+            "runtime_slow_start",
+            "The game is running and its helper has not answered yet",
+        ));
+        assert_eq!(
+            quiet.message,
+            "The game is running and its helper has not answered yet"
+        );
     }
 
     /// The engine's own shutdown accounting is not the error that ended the game.

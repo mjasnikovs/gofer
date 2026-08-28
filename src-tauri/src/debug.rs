@@ -21,6 +21,7 @@ use crate::godot_dap::{
 use crate::godot_session;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -241,6 +242,83 @@ struct Connection {
 
 static CONNECTION: Mutex<Option<Connection>> = Mutex::new(None);
 
+/// The breakpoints this session has asked for and not taken back, by workspace-relative path.
+///
+/// Kept because the editor keeps them and the debug session does not. A break Gofer set survives
+/// `terminate`, survives `disconnect`, and is handed to the **next** game the editor plays —
+/// including one `godot_runtime run` starts, which the debug adapter never hears about. That game
+/// stops on its first `_process` and draws nothing, and every frame-awaiting runtime call then
+/// spends its whole deadline against a game that is not slow.
+///
+/// `godot_ai_acceptance` disarms its breakpoint before it captures for exactly this reason and says
+/// so — "Measured: the second game's `breaked` arrived every run, and the capture beat it about two
+/// runs in three". `sol-35-hud-xhigh` met it live: `godot_debug terminate`, then
+/// `godot_runtime run`, then a `wait`/`capture`/`stop` that answered `runtime_timeout` twenty
+/// seconds later, with `scripts/hud.gd` still holding a break it cleared four calls afterwards.
+///
+/// Emptied only by the two things that really take a breakpoint away: asking for none in a file,
+/// and the editor going.
+static ARMED_BREAKPOINTS: Mutex<BTreeMap<String, Vec<i64>>> = Mutex::new(BTreeMap::new());
+
+/// The files that still hold a breakpoint this session set, in the order they were named.
+pub(crate) fn armed_breakpoints() -> Vec<String> {
+    ARMED_BREAKPOINTS
+        .lock()
+        .map(|armed| armed.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The same breakpoints written the way a caller set them — `scripts/player.gd:22`.
+///
+/// [`armed_breakpoints`] answers files, which is what a runtime failure needs: it is saying *some*
+/// break is in the way. A wait that ran out needs the lines, because the caller is being asked to
+/// look at what is on them.
+pub(crate) fn where_the_breakpoints_are() -> Vec<String> {
+    let Ok(armed) = ARMED_BREAKPOINTS.lock() else {
+        return Vec::new();
+    };
+    armed
+        .iter()
+        .flat_map(|(path, lines)| lines.iter().map(move |line| format!("{path}:{line}")))
+        .collect()
+}
+
+/// Records what a `set_breakpoints` asked for, and forgets a file it asked for none in.
+fn note_the_armed_breakpoints(path: &str, lines: &[i64]) {
+    let Ok(mut armed) = ARMED_BREAKPOINTS.lock() else {
+        return;
+    };
+    if lines.is_empty() {
+        armed.remove(path);
+    } else {
+        armed.insert(path.to_owned(), lines.to_vec());
+    }
+}
+
+/// Serializes the tests that share the one armed-breakpoint map.
+///
+/// Two of them, in two modules — what a runtime failure says while a break is set, and what a wait
+/// that ran out says — and each seeds the map before reading it. A poisoned lock is taken anyway,
+/// for the reason `session_test_lock` gives: every holder seeds from scratch.
+#[cfg(test)]
+pub(crate) fn breakpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Sets the armed breakpoints for a test about what a runtime failure says while one is set.
+#[cfg(test)]
+pub(crate) fn pretend_a_breakpoint_is_armed(path: Option<&str>) {
+    let Ok(mut armed) = ARMED_BREAKPOINTS.lock() else {
+        return;
+    };
+    armed.clear();
+    if let Some(path) = path {
+        armed.insert(path.to_owned(), vec![1]);
+    }
+}
+
 /// Whether a game is running because the debugger started one.
 ///
 /// `godot_runtime run` asks the editor `is_playing_scene()`, and a game the debug adapter launched
@@ -347,6 +425,7 @@ pub fn call(request: DebugRequest) -> Result<DebugResponse, DapError> {
     let answered = answer(request);
     if answered.as_ref().is_ok_and(answer_says_the_game_ended) {
         DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
+        crate::godot_dap::note_the_debuggee_is_running();
     }
     answered
 }
@@ -366,6 +445,79 @@ fn answer_says_the_game_ended(answer: &DebugResponse) -> bool {
         DebugResponse::Stopped { stopped } => stopped.is_none(),
         DebugResponse::Stepped { outcome } => matches!(outcome, StepOutcome::Terminated),
         _ => false,
+    }
+}
+
+/// Says whose deadline ran out, when a wait the caller shortened is the one that ended.
+///
+/// `No stopped event arrived within 5s` is true and reads as a game that will not stop. What one
+/// live turn did with it: `launch` with breakpoints, `await_stop` at `timeoutMs: 5000`, and then —
+/// on a game that had never stopped — a `stack_trace`, an `evaluate` that waited out its own
+/// timeout, a `step_over`, and a second `await_stop` at 5000 that timed out the same way. Two of
+/// these in one turn, which is this repo's line between a model's mistake and a sentence that does
+/// not do its job.
+///
+/// The default is thirty seconds and it is that long for exactly this reason: a game has to boot
+/// before it can reach a breakpoint. A caller that named six times less than that is told so, with
+/// both numbers, because it is the one fact that turns the answer around. A caller that named
+/// nothing, or more than the default, gets the sentence unchanged — its wait really did run out.
+/// What a wait that really did run out can still say: where the breakpoints are, and what makes one
+/// fire.
+///
+/// `loc-14-debug` spent its turn on this. It launched with a break on `scripts/player.gd:22`, was
+/// answered `verified: true`, read `running: true, broke: false` out of `get_state`, and waited the
+/// full thirty seconds — three times, re-setting the same breakpoint between each, before it worked
+/// out for itself that the line was inside a function the game only reaches when a key is pressed.
+/// The moment it sent `godot_runtime input`, the next `await_stop` returned and it read the stack.
+///
+/// Nothing in the refusal said a word about it. `No stopped event arrived within 30s` is true, and
+/// it describes a game that will not stop rather than a line that has not run.
+///
+/// Two shapes, and both are facts rather than guesses. A wait with **no** breakpoint set can never
+/// return, and saying so costs one clause. A wait with breakpoints set names them, because the
+/// caller is being asked to look at what is on those lines and ask what reaches them.
+fn saying_what_has_not_been_reached(error: DapError, asked: Option<u64>) -> DapError {
+    if error.code != "stop_timeout" || asked.is_some_and(|asked| asked < DEFAULT_STOP_TIMEOUT_MS) {
+        return error;
+    }
+    let armed = where_the_breakpoints_are();
+    let said = if armed.is_empty() {
+        " No breakpoint is set, so nothing here stops the game on a line and this wait had only \
+         an error or a pause to return on. Set one with set_breakpoints on the line you want \
+         to watch, then wait again."
+            .to_owned()
+    } else {
+        format!(
+            " The breakpoints set are {}. A breakpoint fires when its line runs, so a line inside \
+             a function the game only reaches on a key press, a signal or a collision needs \
+             that to happen before any wait can return — drive it with godot_runtime input, \
+             or watch a line that runs every frame, and wait again.",
+            armed.join(", ")
+        )
+    };
+    DapError {
+        message: format!("{}{said}", error.message.trim_end()),
+        ..error
+    }
+}
+
+fn saying_the_wait_was_the_callers_own(error: DapError, asked: Option<u64>) -> DapError {
+    let Some(asked) = asked.filter(|asked| *asked < DEFAULT_STOP_TIMEOUT_MS) else {
+        return error;
+    };
+    if error.code != "stop_timeout" {
+        return error;
+    }
+    DapError {
+        message: format!(
+            "{} This call asked to wait {asked}ms; the default is {DEFAULT_STOP_TIMEOUT_MS}ms, and \
+             it is that long because a game has to boot before it can reach a breakpoint. Send it \
+             again without timeoutMs before reading anything about where the game is stopped — \
+             stack_trace and evaluate describe a game that has stopped, and answer nothing useful \
+             about one that is still running.",
+            error.message.trim_end()
+        ),
+        ..error
     }
 }
 
@@ -460,11 +612,14 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             );
             let events = events.lock().map_err(|_| poisoned())?;
             Ok(DebugResponse::Stopped {
-                stopped: client.await_stop(
-                    &events,
-                    thread_id.unwrap_or(MAIN_THREAD_ID),
-                    timeout,
-                )?,
+                stopped: client
+                    .await_stop(&events, thread_id.unwrap_or(MAIN_THREAD_ID), timeout)
+                    .map_err(|error| {
+                        saying_what_has_not_been_reached(
+                            saying_the_wait_was_the_callers_own(error, timeout_ms),
+                            timeout_ms,
+                        )
+                    })?,
             })
         }
         DebugRequest::Restart => {
@@ -472,6 +627,7 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             // A restart is a launch by another name: it leaves a game running, and the refusal the
             // flag drives is the one that names restart as the way to replace one.
             DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
+            crate::godot_dap::note_the_debuggee_is_running();
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Terminate => {
@@ -480,12 +636,14 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             // launch for the rest of the session.
             let terminated = client.terminate();
             DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
+            crate::godot_dap::note_the_debuggee_is_running();
             terminated?;
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Disconnect { terminate_debuggee } => {
             let disconnected = client.disconnect(terminate_debuggee.unwrap_or(true));
             DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
+            crate::godot_dap::note_the_debuggee_is_running();
             disconnected?;
             Ok(DebugResponse::Acknowledged)
         }
@@ -496,6 +654,12 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
 /// the next debug request reconnects rather than talking to a dead editor.
 pub fn disconnect() {
     DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
+    // The editor is what holds a breakpoint, so this is one of only two things that takes one
+    // away: the editor going, and a `set_breakpoints` asking for none in that file.
+    if let Ok(mut armed) = ARMED_BREAKPOINTS.lock() {
+        armed.clear();
+    }
+    crate::godot_dap::note_the_debuggee_is_running();
     let previous = CONNECTION.lock().ok().and_then(|mut slot| slot.take());
     if let Some(connection) = previous {
         connection.client.shutdown();
@@ -563,6 +727,8 @@ fn launch(
         return Err(error);
     }
     DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
+    // A game that has just been launched is running, whatever the last one was doing when it went.
+    crate::godot_dap::note_the_debuggee_is_running();
     Ok(DebugResponse::Launched {
         breakpoints: verified,
     })
@@ -603,8 +769,12 @@ fn set_breakpoints(
     let text = std::fs::read_to_string(&absolute).unwrap_or_default();
     let moved: Vec<Moved> = lines.iter().map(|line| Moved::of(&text, *line)).collect();
     let asked: Vec<i64> = moved.iter().map(|one| one.line).collect();
-    Ok(client
-        .set_breakpoints(&absolute, &asked)?
+    // Noted after the adapter has taken them, not before. A `set_breakpoints` the adapter refuses
+    // used to leave lines recorded that were never set, and every later runtime failure then
+    // carried "a breakpoint is still set in <file>" about one that does not exist.
+    let taken = client.set_breakpoints(&absolute, &asked)?;
+    note_the_armed_breakpoints(&relative, &asked);
+    Ok(taken
         .into_iter()
         .zip(moved)
         .map(
@@ -1065,6 +1235,103 @@ mod tests {
             assert_eq!(error.code, "session_not_active");
             assert!(error.retryable);
         }
+    }
+
+    /// A wait the caller cut short says so, and one it did not is left alone.
+    ///
+    /// The turn this is written from asked for 5000ms against a game that had not finished booting,
+    /// read `No stopped event arrived within 5s` as a game that would not stop, and spent four more
+    /// calls describing a running game as a stopped one.
+    #[test]
+    fn a_stop_timeout_says_when_the_caller_named_the_deadline() {
+        let timed_out = DapError::new("stop_timeout", "No stopped event arrived within 5s");
+
+        let shortened = saying_the_wait_was_the_callers_own(timed_out.clone(), Some(5_000));
+        assert_eq!(shortened.code, "stop_timeout");
+        assert!(
+            shortened.message.contains("asked to wait 5000ms"),
+            "{shortened:?}"
+        );
+        assert!(
+            shortened
+                .message
+                .contains(&format!("default is {DEFAULT_STOP_TIMEOUT_MS}ms")),
+            "{shortened:?}"
+        );
+        // And what to do about it, which is the half a bare timeout never had.
+        assert!(
+            shortened.message.contains("without timeoutMs"),
+            "{shortened:?}"
+        );
+
+        // A caller that named nothing waited the default, and a caller that named more than the
+        // default waited longer than that: neither is this situation, and neither is told it is.
+        assert_eq!(
+            saying_the_wait_was_the_callers_own(timed_out.clone(), None).message,
+            timed_out.message
+        );
+        assert_eq!(
+            saying_the_wait_was_the_callers_own(timed_out.clone(), Some(60_000)).message,
+            timed_out.message
+        );
+        assert_eq!(
+            saying_the_wait_was_the_callers_own(timed_out.clone(), Some(DEFAULT_STOP_TIMEOUT_MS))
+                .message,
+            timed_out.message
+        );
+
+        // Only a timeout. A cancelled wait is a different situation and the deadline is not why.
+        let cancelled = DapError::new("cancelled", "The wait was stopped with its agent turn");
+        assert_eq!(
+            saying_the_wait_was_the_callers_own(cancelled.clone(), Some(5_000)).message,
+            cancelled.message
+        );
+    }
+
+    /// A wait that really did run out still says what has not been reached.
+    ///
+    /// `loc-14-debug` waited the full thirty seconds three times on `scripts/player.gd:22`, with
+    /// `verified: true` and `running: true, broke: false` in front of it, before working out that
+    /// the line was inside a function the game only reaches on a key press.
+    #[test]
+    fn a_wait_that_ran_its_full_course_names_the_breakpoints_and_what_makes_one_fire() {
+        let _armed = breakpoint_test_lock();
+        let timed_out = DapError::new("stop_timeout", "No stopped event arrived within 30s");
+
+        pretend_a_breakpoint_is_armed(Some("scripts/player.gd"));
+        let named = saying_what_has_not_been_reached(timed_out.clone(), None);
+        assert!(
+            named.message.contains("scripts/player.gd:1"),
+            "the breakpoint is named with its line: {named:?}"
+        );
+        assert!(
+            named.message.contains("godot_runtime input"),
+            "and what reaches a line the game does not run by itself: {named:?}"
+        );
+
+        // Nothing set at all is a wait that could never have returned, and says so instead.
+        pretend_a_breakpoint_is_armed(None);
+        let nothing = saying_what_has_not_been_reached(timed_out.clone(), None);
+        assert!(
+            nothing.message.contains("No breakpoint is set")
+                && nothing.message.contains("set_breakpoints"),
+            "{nothing:?}"
+        );
+
+        // A caller that named a short wait is answered by the other sentence, not this one: its
+        // wait did not run out, it was cut short, and the two must not both fire.
+        assert_eq!(
+            saying_what_has_not_been_reached(timed_out.clone(), Some(5_000)).message,
+            timed_out.message
+        );
+
+        // Only a timeout.
+        let cancelled = DapError::new("cancelled", "The wait was stopped with its agent turn");
+        assert_eq!(
+            saying_what_has_not_been_reached(cancelled.clone(), None).message,
+            cancelled.message
+        );
+        pretend_a_breakpoint_is_armed(None);
     }
 
     #[test]

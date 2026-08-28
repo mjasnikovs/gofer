@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -576,6 +576,7 @@ impl DapClient {
     /// the specification treats as true.
     pub fn continue_execution(&self, thread_id: i64) -> Result<bool, DapError> {
         let body = self.request("continue", json!({"threadId": thread_id}))?;
+        note_the_debuggee_is_running();
         Ok(body
             .get("allThreadsContinued")
             .and_then(Value::as_bool)
@@ -591,12 +592,14 @@ impl DapClient {
     /// Steps over the next statement. A `stopped` event with reason `step` follows.
     pub fn next(&self, thread_id: i64) -> Result<(), DapError> {
         self.request("next", json!({"threadId": thread_id}))?;
+        note_the_debuggee_is_running();
         Ok(())
     }
 
     /// Steps into the next call. A `stopped` event with reason `step` follows.
     pub fn step_in(&self, thread_id: i64) -> Result<(), DapError> {
         self.request("stepIn", json!({"threadId": thread_id}))?;
+        note_the_debuggee_is_running();
         Ok(())
     }
 
@@ -952,6 +955,47 @@ fn read_loop(
     }
 }
 
+/// Whether the debuggee is halted right now, as the adapter's own events report it.
+///
+/// A game stopped at a breakpoint is not a slow game: the process is halted, so every call that
+/// needs it to draw a frame waits its whole deadline and comes back
+/// `runtime_timeout: The game did not answer in time`. Counted across every recorded live trace:
+/// **21 such calls, 20 seconds each, 420 seconds** — one seventh of all the time every tool call in
+/// the corpus took, spent in one percent of them, waiting for an answer that could not come.
+/// `R01-backwards` spent eight of those in a row against a breakpoint it had set itself.
+///
+/// [`crate::debug::holds_a_game`] already says the debugger started this game, which is what the
+/// refusal's sentence is written from. It does not say the game is halted *this instant*, and that
+/// is the fact worth having: a game the debugger launched and let run answers a frame like any
+/// other.
+///
+/// Maintained here rather than in `debug.rs` because [`dispatch`] is the one place every adapter
+/// event passes through. `debug.rs` reads events only while something is waiting for a stop, so a
+/// `stopped` that arrives with nobody waiting sits in a queue and would be seen late or not at all.
+static DEBUGGEE_IS_STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the debuggee is halted, as far as the adapter's events have said.
+pub fn debuggee_is_stopped() -> bool {
+    DEBUGGEE_IS_STOPPED.load(Ordering::Relaxed)
+}
+
+/// Records that the debuggee is running again.
+///
+/// Called on the adapter's own `continued`, `terminated` and `exited` events, and on every request
+/// this client writes that resumes the game. Both, deliberately: Godot 4.7 does send `continued`,
+/// and a build that stopped would otherwise leave the flag stuck at halted — which is the one
+/// failure mode this must not have, because it would refuse a call that could have been answered.
+/// Clearing twice costs nothing; clearing never costs a working call.
+pub(crate) fn note_the_debuggee_is_running() {
+    DEBUGGEE_IS_STOPPED.store(false, Ordering::Relaxed);
+}
+
+/// Sets the flag for a test about what a caller is told while the debuggee is halted.
+#[cfg(test)]
+pub(crate) fn pretend_the_debuggee_is_stopped(stopped: bool) {
+    DEBUGGEE_IS_STOPPED.store(stopped, Ordering::Relaxed);
+}
+
 fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, message: Value) {
     match message.get("type").and_then(Value::as_str) {
         Some("response") => {
@@ -971,6 +1015,13 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, 
             let Some(name) = message.get("event").and_then(Value::as_str) else {
                 return;
             };
+            // Before the fan-out, so the flag is true by the time anything woken by this event
+            // can read it.
+            match name {
+                "stopped" => DEBUGGEE_IS_STOPPED.store(true, Ordering::Relaxed),
+                "continued" | "terminated" | "exited" => note_the_debuggee_is_running(),
+                _ => {}
+            }
             let event = DapEvent {
                 seq: message.get("seq").and_then(Value::as_u64).unwrap_or(0),
                 event: name.to_owned(),
