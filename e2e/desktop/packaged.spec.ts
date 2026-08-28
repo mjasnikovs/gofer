@@ -192,7 +192,27 @@ describe('packaged desktop application', () => {
         )
         const stopButton = browser.$('button[aria-label*="Stop"]')
         await stopButton.click()
-        await expect(browser.$('button*=Retry')).toBeDisplayed()
+        // Retry appears only once the last assistant message is `error` or `aborted`, so a Retry
+        // that never arrives is a stop that never landed — and "not displayed" says nothing about
+        // which half failed. The first Windows run to reach this line had no Retry and no evidence,
+        // so the state the assertion reads is printed with it: whether the stop was accepted, and
+        // what the stored conversation looks like from the backend's own side.
+        try {
+            await expect(browser.$('button*=Retry')).toBeDisplayed()
+        } catch (failure) {
+            const chat = await command<{messages: {text: string; status?: string}[]}>(
+                'load_chat',
+                {}
+            )
+            const stored = chat.messages.map(
+                message => `${message.status ?? 'no-status'}: ${message.text.slice(0, 60)}`
+            )
+            const body = await browser.$('body').getText()
+            throw new Error(
+                `--- stored messages ---\n${stored.join('\n')}\n--- body ---\n${body}`,
+                {cause: failure}
+            )
+        }
 
         // The restart journey asserts this conversation comes back, so the process must not be torn
         // down until it is durable. Reading the stored chat is what proves that; a pause only hopes.
