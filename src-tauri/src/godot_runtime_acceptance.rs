@@ -661,8 +661,11 @@ fn quitting_the_editor_takes_the_game_with_it() {
 
     session.quit_editor();
 
-    // No wait: the editor answers `session.quit` before it acts and only leaves a frame later, so
-    // by the time it has actually gone the game it stopped first has been gone longer.
+    // No wait of this test's own: the editor answers `session.quit` before it acts and only leaves
+    // a frame later, so by the time it has actually gone the game it stopped first has been gone
+    // longer. `port_released` is still what asks, because the Windows teardown it allows for is a
+    // property of how that operating system closes a killed process's sockets rather than of which
+    // test is asking — and on Linux and macOS its budget is zero, which is this comment exactly.
     assert!(
         port_released(port),
         "the game outlived the editor that launched it: port {port} is still held"

@@ -729,21 +729,32 @@ fn a_file_the_importer_cannot_read_is_refused_rather_than_waited_out() {
     broken.extend_from_slice(&[0u8; 64]);
     std::fs::write(worktree.join("broken.png"), &broken).expect("write the unreadable png");
 
+    let sidecar = worktree.join("broken.png.import");
+    let sidecar_before = sidecar.exists();
+
     let started = std::time::Instant::now();
-    // The rescan is answered by `_paths_not_loadable`, which skips a file on three separate
-    // conditions, and a success here means one of them was met without saying which. Nightly
-    // Windows runs answered `scanned: true` about this file and the panic could only print the
-    // answer, so the two facts the addon read are read again here. The sidecar is the suspect: the
-    // walk deletes it and the editor writes a new one, and "no sidecar" is deliberately a skip so
-    // that a `.py` beside the assets is not called a failed import.
+    // `_paths_not_loadable` skips a named file on three conditions — no file, no `.import` beside
+    // it, or a load that returns something — and a success here means one of them was met without
+    // saying which. Nightly Windows runs answered `scanned: true` about this file and the panic
+    // could only print the answer, so the sidecar is sampled on both sides of the call.
+    //
+    // What that can and cannot settle, stated rather than implied. The sweep deletes the sidecar
+    // before its walk and the editor writes a new one during it, so neither sample is the instant
+    // the addon read; `false` after a walk that has finished is still strong evidence, because the
+    // skip the sidecar causes is the one this test never intended — it is there so that a `.py`
+    // beside the assets is not called a failed import. Two samples that are both `true` leave the
+    // load as the remaining condition, and distinguishing that one needs the addon to carry its
+    // skip reason back in the answer, which is a change to the success payload and not a
+    // diagnostic.
     let refusal =
         match session.try_call("resource.rescan", json!({"path": "res://broken.png"}), None) {
             Err(refusal) => refusal,
             Ok(answer) => panic!(
                 "a file the importer cannot read has no successful rescan: {answer}\n\
-             broken.png on disk: {}\nbroken.png.import beside it: {}",
+             broken.png on disk: {}\nbroken.png.import before the rescan: {sidecar_before}\n\
+             broken.png.import after it: {}",
                 worktree.join("broken.png").exists(),
-                worktree.join("broken.png.import").exists(),
+                sidecar.exists(),
             ),
         };
 
