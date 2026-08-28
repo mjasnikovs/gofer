@@ -210,8 +210,40 @@ pub(crate) fn check_set(
                 json!({"op": op, "param": path(where_, key), "takes": shape}),
             ));
         }
-        let hint = nearest(key, spec)
-            .map(|name| format!(" Did you mean `{name}`?"))
+        // A spelling hint first: when one key is a word away from a parameter this operation has,
+        // that is the whole of it. Only when no word here reaches one is the operation itself
+        // worth questioning.
+        // The whole key set outranks any one key. A word that resembles a parameter is evidence
+        // about that word; a key set that is another operation's parameter list exactly, and only
+        // that operation's, is evidence about the call. `godot_scene create` sent
+        // `{parent, name, type}` is told ``Did you mean `rootName`?`` by the spelling rule — a real
+        // parameter, a plausible sentence, and the wrong thing to do with a node creation.
+        let hint = where_
+            .is_empty()
+            .then(|| the_operation_these_keys_belong_to(call, spec, object))
+            .flatten()
+            .map(|named| {
+                format!(
+                    " What this entry names is {named}'s parameter list exactly, so it is that \
+                     operation rather than a word chosen wrongly here — write it as {named} and \
+                     leave this one out."
+                )
+            })
+            .or_else(|| {
+                // A key that is the name of an operation next door. `capture` is not something
+                // `input` will ever take, and it is one entry away.
+                // Only for the call's own parameters. Inside `files[0]` there is no list of
+                // operations to add an entry to, and the sentence would also shadow the spelling
+                // hint, which is the useful one for a near-miss key in an entry.
+                (where_.is_empty() && an_operation_of_this_tool(call, key)).then(|| {
+                    format!(
+                        " `{key}` is an operation of this tool rather than a parameter of this one, \
+                         and a call carries a list of them — ask for it as its own entry beside \
+                         this one."
+                    )
+                })
+            })
+            .or_else(|| nearest(key, spec).map(|name| format!(" Did you mean `{name}`?")))
             .unwrap_or_default();
         return Err(failure(
             "unknown_param",
@@ -255,6 +287,104 @@ pub(crate) fn check_set(
 /// me fix the syntax. <tool_call>1;0;0}{` — its own harness's closing tags, in its own JSON — three
 /// times running, and the refusal read every one of them back into the conversation. The head says
 /// what tore; the tail is the thing not to repeat.
+/// Whether a key names another operation of the tool this call is for.
+///
+/// `godot_runtime input` was sent `{"events": […], "capture": true}` in two runs. `capture` is not
+/// a parameter of `input` and never will be — it is the operation next to it, and a call carries a
+/// list of operations, so the caller can simply ask for both. The refusal listed `input`'s
+/// parameters and left the word it had actually written unexplained.
+///
+/// The tool is read off the call's own name, which `check_set` is given as "godot_runtime input".
+fn an_operation_of_this_tool(call: &str, key: &str) -> bool {
+    let Some((tool, op)) = call.split_once(' ') else {
+        return false;
+    };
+    crate::ai_tools::CATALOG
+        .iter()
+        .filter(|domain| domain.name == tool)
+        .any(|domain| {
+            domain
+                .operations
+                .iter()
+                .any(|operation| operation.op == key && operation.op != op)
+        })
+}
+
+/// The one operation in the catalogue whose parameter list these keys are, when there is one.
+///
+/// A wrong key is usually a wrong word. Sometimes the whole operation is in the wrong place, and
+/// then no wording about the key can help. `loc-12-mainscene` wrote eight operations to
+/// `godot_scene`, seven of them node creations:
+///
+/// ```text
+/// {"op": "create", "parent": "/Platformer", "name": "Floor", "type": "StaticBody2D"}
+///   -> godot_scene create has no `parent` parameter. It takes {path, rootType, rootName?}.
+///      None of the 8 operations in this call ran. … send all 8 again with this one corrected.
+/// ```
+///
+/// It sent all eight again, byte for byte, and was refused again. There is no correction to that
+/// entry that makes it work: `{parent, name, type}` is `godot_node create`, and the sentence asked
+/// for something that does not exist.
+///
+/// So the keys are matched against every operation in the catalogue, both ways — every required
+/// parameter present, nothing held that the operation does not declare — and named only when
+/// exactly one fits. `{"path": …}` alone fits eleven operations and says nothing; `{parent, name,
+/// type}` fits one.
+fn the_operation_these_keys_belong_to(
+    call: &str,
+    spec: &[Param],
+    object: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    // A hidden parameter of the operation this was sent to is not something the caller wrote: the
+    // router supplies `expectedRevision` from the last answer that carried one, and it lands in the
+    // object before any of this runs. Counting it as a written key is what defeated this rule in
+    // `loc-71-autoload` — `{parent, name, type}` fits `godot_node create` exactly, and
+    // `{parent, name, type, expectedRevision}` fits nothing, so the call was read as three wrong
+    // words instead of one misplaced operation.
+    let supplied: Vec<&str> = spec
+        .iter()
+        .filter(|param| param.hidden)
+        .map(|param| param.name)
+        .collect();
+    let written: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| *key != "op" && !UNIVERSAL.contains(key) && !supplied.contains(key))
+        .collect();
+    if written.is_empty() {
+        return None;
+    }
+    let fitting: Vec<String> = crate::ai_tools::CATALOG
+        .iter()
+        .flat_map(|domain| {
+            domain.operations.iter().filter_map(|operation| {
+                let named = format!("{} {}", domain.name, operation.op);
+                let visible = || operation.params.iter().filter(|param| !param.hidden);
+                let holds_all = visible()
+                    .filter(|param| param.required)
+                    .all(|param| written.contains(&param.name));
+                // Hidden parameters count on this side: a candidate the caller could have
+                // written is one whose own router-supplied names are no objection to.
+                let nothing_extra = written
+                    .iter()
+                    .all(|key| operation.params.iter().any(|param| param.name == *key));
+                (holds_all && nothing_extra).then_some(named)
+            })
+        })
+        .collect();
+    // The operation it was sent to comes first. `godot_node add_to_group` and `remove_from_group`
+    // take the same two parameters, so every good call to one is the other's parameter list
+    // exactly — and a call that fits where it was sent is not misplaced, whatever else it also
+    // fits. Only a call its own operation refuses is looking for another one.
+    if fitting.iter().any(|named| named == call) {
+        return None;
+    }
+    let [only] = fitting.as_slice() else {
+        return None;
+    };
+    Some(only.clone())
+}
+
 fn as_much_of_the_key_as_is_evidence(key: &str) -> String {
     const LONGEST: usize = 40;
     if key.chars().count() <= LONGEST {
@@ -636,12 +766,54 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
     ))
 }
 
-/// [`Operation::repair`], for a caller holding two strings. Read only by tests, like the lookup
-/// behind it.
+/// Every repair a call gets, in the one place production reaches.
+///
+/// This used to be two functions: a `#[cfg(test)]` wrapper that held the misplaced-call guard, and
+/// `repair_set` underneath it, which is what `Operation::repair` actually calls. The guard was
+/// therefore **dead in the app** — every test that pinned it went through the wrapper, and a live
+/// `godot_scene create` sent `{parent, name, type}` had `name` renamed to `rootName` and `type` to
+/// `rootType` before `check` ever saw it, exactly as it did before the guard was written. Found in
+/// review, after two entries of this log had called it verified.
+///
+/// A call written to the wrong operation is left exactly as it was written. Every repair below
+/// reads one key at a time, and a key set that belongs to another operation reads as several small
+/// mistakes rather than as one big one — so the keys the caller wrote are the keys the refusal
+/// names, and `the_operation_these_keys_belong_to` can say where they belong.
+///
+/// One rename runs before the question is asked, because it changes the answer to it.
+/// `{"node": …, "properties": […]}` is `godot_runtime inspect_node` written with `godot_node`'s
+/// word for a node, and it is also `godot_node inspect`'s parameter list exactly — so the guard
+/// alone would call it a misplaced call and leave it. The catalogue disagrees: `inspect_node`'s
+/// `path` says in its own note that this is the same thing `godot_node` calls `node`. A synonym the
+/// surface declares outranks a shape that merely fits, so it is applied first and the guard then
+/// sees the call the caller meant.
+pub(crate) fn repair_call(tool: &str, op: &str, spec: &'static [Param], params: &mut Value) {
+    if let Some(object) = params.as_object_mut() {
+        the_word_the_operation_does_not_use(spec, object);
+    }
+    if params
+        .as_object()
+        .and_then(|object| {
+            the_operation_these_keys_belong_to(&format!("{tool} {op}"), spec, object)
+        })
+        .is_some()
+    {
+        return;
+    }
+    repair_set(spec, params);
+}
+
+/// [`repair_call`], for a caller holding two strings. Read only by tests, like the lookup behind it.
+/// The operation's own list, written under a name the operation does not have.
+///
+/// Its own paragraph again: this comment used to sit above `fold_a_lone_entry_into_the_list_it_belongs_to`,
+/// which was inserted between it and the function it describes. `edits` for `files` is the shape —
+/// a list of the right entries under the wrong word — and it is renamed only when every entry fits
+/// the target's declared entry exactly, and only when one parameter fits.
 #[cfg(test)]
 pub fn repair(domain: &str, op: &str, params: &mut Value) {
     if let Some(operation) = operation_of(domain, op) {
-        operation.repair(params);
+        repair_call(domain, op, operation.params, params);
     }
 }
 
@@ -667,7 +839,11 @@ pub(crate) fn repair_set(spec: &[Param], params: &mut Value) {
     a_pair_written_as_one_key(spec, object);
     drop_the_empty_claimant(spec, object);
     drop_the_wreckage_a_complete_call_can_spare(spec, object);
+    rename_a_list_written_under_another_name(spec, object);
     drop_a_value_the_call_already_carries(spec, object);
+    a_number_written_onto_its_own_name(spec, object);
+    the_word_the_operation_does_not_use(spec, object);
+    fold_a_lone_entry_into_the_list_it_belongs_to(spec, object);
     let wanted: Vec<(String, &'static str)> = object
         .keys()
         .filter(|key| {
@@ -942,6 +1118,273 @@ fn drop_the_wreckage_a_complete_call_can_spare(
     }
 }
 
+/// The operation's own list, written under a name the operation does not have.
+///
+/// ```text
+/// {"op": "edit", "edits": [{"path": "scripts/player.gd", "edits": [{"oldText": …}]}]}
+/// ```
+///
+/// `edit`'s list is `files`, and every entry the model put under `edits` *is* a `files` entry — a
+/// `path` and its own `edits`. The whole call is right except the word above it, and it was
+/// answered "godot_script edit has no `edits` parameter. It takes {files: list of {path: text,
+/// edits: …}}": a sentence that quotes back the shape the caller had already written and never says
+/// the shape is the part that is right. Three recorded live turns, in `N01-backwards`,
+/// `V02-backwards` and `s24-level`, each losing a whole batch of edits to the name.
+///
+/// [`only_one_meaning`] cannot reach it — `edits` is not a near miss for `files`, it is a different
+/// word — and [`drop_a_value_the_call_already_carries`] is right not to: there is no `files` here
+/// for the key to be a copy of.
+///
+/// The fit is what makes it a repair rather than a guess, and it is the same "exactly" every other
+/// rule in this file uses: every entry under the stray key holds every required field of the
+/// declared entry and holds nothing the declared entry does not. Narrow on every side — one stray
+/// key of that shape, exactly one declared list it fits, and that list not already written, because
+/// a stray beside a list that is already there is a second copy rather than a misspelling and
+/// choosing between two copies is not a repair.
+/// One entry of a required list, written without the list around it.
+///
+/// `godot_script edit` takes `files`, a list of `{path, edits}`. A caller changing one file has one
+/// entry to write, and two recorded turns wrote just the entry:
+///
+/// ```text
+/// {"op": "edit", "path": "scripts/player.gd", "edits": [{"oldText": …, "newText": …}]}
+/// {"op": "edit", "edit": {"path": "scripts/game_state.gd", "edits": [{"oldText": …, "newText": …}]}}
+/// ```
+///
+/// The first spreads the entry across the call; the second puts it under a name of its own. Both
+/// carry a complete entry and neither carries the list, and both are refused for a key — `path`,
+/// `edit` — that is beside the point: the call says exactly which file and exactly which edits.
+///
+/// So the entry is put in the list it belongs to, in either shape, and only when there is one
+/// reading: one required list parameter absent, an entry spec to match, and every field of that
+/// entry present with nothing left over. `exactly_fits` is the same both-ways match
+/// `rename_a_list_written_under_another_name` uses, and it is what keeps a call that merely
+/// resembles an entry out of this.
+fn fold_a_lone_entry_into_the_list_it_belongs_to(
+    spec: &[Param],
+    object: &mut serde_json::Map<String, Value>,
+) {
+    let absent: Vec<&Param> = spec
+        .iter()
+        .filter(|param| param.required && !param.hidden && param.kind == Kind::List)
+        .filter(|param| !param.entry.is_empty() && !object.contains_key(param.name))
+        .collect();
+    let [target] = absent.as_slice() else {
+        return;
+    };
+    let spread: serde_json::Map<String, Value> = object
+        .iter()
+        .filter(|(key, _)| !UNIVERSAL.contains(&key.as_str()) && key.as_str() != "op")
+        .map(|(key, held)| (key.clone(), held.clone()))
+        .collect();
+    let named: Vec<String> = spread.keys().cloned().collect();
+    let entry = if exactly_fits(target.entry, &Value::Object(spread.clone())) {
+        Value::Object(spread)
+    } else {
+        let [only] = named.as_slice() else {
+            return;
+        };
+        let held = object.get(only.as_str()).cloned().unwrap_or(Value::Null);
+        if !exactly_fits(target.entry, &held) {
+            return;
+        }
+        held
+    };
+    for key in named {
+        object.remove(&key);
+    }
+    object.insert(target.name.to_owned(), Value::Array(vec![entry]));
+}
+
+/// A number written onto the end of the parameter it belongs to.
+///
+/// `loc-63-resources` sent `godot_logs read` this, twice, byte for byte:
+///
+/// ```text
+/// {"op": "read", "contains": "AREA", "limit20": true, "sourceeditor": "editor"}
+/// ```
+///
+/// `sourceeditor` is already repaired — it reads as `source` by prefix and `"editor"` is a value
+/// `source` can hold. `limit20` is the same tear with the value on the wrong side of the quote: the
+/// name is `limit`, the number is in the key, and the `true` beside it is whatever the serialiser
+/// put there once it had written a key that needed one. The caller's own third attempt was
+/// `{"contains": "AREA", "limit": 20, "source": "editor"}`, which is what this writes.
+///
+/// It cannot collide with a real name: `no_parameter_is_named_with_a_number_on_the_end` holds the
+/// whole catalogue to that, so a key of digits past a parameter's name is always a tear.
+///
+/// And it never throws a usable value away. The value beside the key has to be one the parameter
+/// could not take — `true` for an `int` — because `{"limit20": 5}` is two readings and neither is
+/// this rule's to pick.
+fn a_number_written_onto_its_own_name(spec: &[Param], object: &mut serde_json::Map<String, Value>) {
+    let torn: Vec<(String, &'static str, i64)> = object
+        .iter()
+        .filter_map(|(key, held)| {
+            let digits = key.trim_end_matches(|c: char| c.is_ascii_digit());
+            if digits.len() == key.len() || digits.is_empty() {
+                return None;
+            }
+            let number: i64 = key[digits.len()..].parse().ok()?;
+            let param = spec
+                .iter()
+                .find(|param| !param.hidden && param.name == digits)
+                .filter(|param| matches!(param.kind, Kind::Int | Kind::Number))
+                .filter(|param| !object.contains_key(param.name))
+                .filter(|param| !could_become(param.kind, held))?;
+            Some((key.clone(), param.name, number))
+        })
+        .collect();
+    for (key, name, number) in torn {
+        object.remove(&key);
+        object.insert(name.to_owned(), Value::from(number));
+    }
+}
+
+/// Whether a name appears anywhere inside what a parameter holds, however deep.
+///
+/// A note is prose, and prose about a list talks about the list's contents. `godot_script edit`'s
+/// `files` says "Every `oldText` must match one region of that file exactly" — which reads, to a
+/// rule that only looks for backticks, exactly like a declared synonym. Probed: `{"oldText": [...]}`
+/// was renamed onto `files` and the call then refused for an entry that was a string. `oldText` is
+/// a field two levels down inside `files`, so it is what `files` is made of and never another word
+/// for it.
+fn a_field_of_its_own(entry: &[Param], name: &str) -> bool {
+    entry
+        .iter()
+        .any(|param| param.name == name || a_field_of_its_own(param.entry, name))
+}
+
+/// The one key nothing knows, onto the required parameter whose own note calls it that.
+///
+/// Every other rename here reads the key: `nodePath` reaches `node` because the letters get there,
+/// and `path:` reaches `path` because the colon is the only thing in the way. Some wrong keys are
+/// not misspellings at all. They are a different word for the same thing, and no amount of spelling
+/// crosses from one to the other:
+///
+/// ```text
+/// {"op": "inspect_node", "node": "/root/Game/Player", "properties": ["global_position"]}
+///   -> godot_runtime inspect_node has no `node` parameter. It takes {path: text, properties?: list}
+/// ```
+///
+/// Twelve runs wrote that, every one of them on a model that had just used `node` on the tool next
+/// door, where it is the right word. It is the largest single `unknown_param` shape in the
+/// recordings.
+///
+/// **The catalogue is what decides it, not the shape of the call.** `inspect_node`'s `path` carries
+/// a note that says "godot_node calls this same thing `node`" — the surface declaring its own
+/// synonym, in the sentence the model is already given. So a stray key is renamed only onto a
+/// missing required parameter whose note names that key in backticks, and adding a synonym means
+/// writing it where a reader can see it.
+///
+/// A looser rule was built first and measured against the whole corpus. It renamed the one stray
+/// key onto the one absent required parameter whenever the value could be one, which recovered
+/// thirteen calls — and the thirteenth was wrong:
+///
+/// ```text
+/// {"op": "instantiate", "node": "/Main/Coin", "path": "res://scenes/coin.tscn"}
+/// ```
+///
+/// `node` there is the path of the node about to exist, and the caller's own next call proves it:
+/// `{"parent": "/Main", "name": "Coin", "path": …}`. Renaming it onto `parent` writes a call
+/// nobody meant and answers it with `/Main/Coin` not found, which is further from the mistake than
+/// the refusal it replaced. `instantiate`'s `parent` says nothing about a node, and now that is the
+/// reason it is left alone.
+///
+/// A key the spelling rules can already read is left to them. `only_one_meaning` weighs the value
+/// against the parameter it names, and a key that reads as something has said what it means; this
+/// rule is for the keys that say nothing, and the two must never answer the same key differently.
+fn the_word_the_operation_does_not_use(
+    spec: &[Param],
+    object: &mut serde_json::Map<String, Value>,
+) {
+    let strays: Vec<String> = object
+        .keys()
+        .filter(|key| {
+            !spec.iter().any(|param| param.name == key.as_str())
+                && !UNIVERSAL.contains(&key.as_str())
+                && key.as_str() != "op"
+        })
+        .cloned()
+        .collect();
+    let [stray] = strays.as_slice() else {
+        return;
+    };
+    if the_one_it_reads_as(stray, spec).is_some() {
+        return;
+    }
+    let called_that = format!("`{stray}`");
+    let absent: Vec<&Param> = spec
+        .iter()
+        .filter(|param| param.required && !param.hidden && !object.contains_key(param.name))
+        .filter(|param| param.note.contains(&called_that))
+        .filter(|param| !a_field_of_its_own(param.entry, stray))
+        .collect();
+    let [target] = absent.as_slice() else {
+        return;
+    };
+    let Some(held) = object.get(stray.as_str()) else {
+        return;
+    };
+    if !could_become(target.kind, held) {
+        return;
+    }
+    let name = target.name;
+    let moved = object.remove(stray).unwrap_or(Value::Null);
+    object.insert(name.to_owned(), moved);
+}
+
+fn rename_a_list_written_under_another_name(
+    spec: &[Param],
+    object: &mut serde_json::Map<String, Value>,
+) {
+    let strays: Vec<String> = object
+        .keys()
+        .filter(|key| {
+            !spec.iter().any(|param| param.name == key.as_str())
+                && !UNIVERSAL.contains(&key.as_str())
+                && key.as_str() != "op"
+                && object
+                    .get(key.as_str())
+                    .and_then(Value::as_array)
+                    .is_some_and(|held| !held.is_empty() && held.iter().all(Value::is_object))
+        })
+        .cloned()
+        .collect();
+    let [stray] = strays.as_slice() else {
+        return;
+    };
+    let Some(held) = object.get(stray).and_then(Value::as_array).cloned() else {
+        return;
+    };
+    let fitting: Vec<&Param> = spec
+        .iter()
+        .filter(|param| param.kind == Kind::List && !param.entry.is_empty())
+        .filter(|param| !object.contains_key(param.name))
+        .filter(|param| held.iter().all(|entry| exactly_fits(param.entry, entry)))
+        .collect();
+    let [target] = fitting.as_slice() else {
+        return;
+    };
+    let name = target.name;
+    let moved = object.remove(stray).unwrap_or(Value::Null);
+    object.insert(name.to_owned(), moved);
+}
+
+/// One object against one declared entry, both ways: every required field held, and nothing held
+/// that the entry does not declare. The same "exactly" `check_set` enforces, asked rather than
+/// refused.
+fn exactly_fits(declared: &[Param], value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    declared
+        .iter()
+        .all(|param| !param.required || object.contains_key(param.name))
+        && object
+            .keys()
+            .all(|key| declared.iter().any(|param| param.name == key.as_str()))
+}
+
 /// A key the operation does not take, holding a value the call already carries inside its own list.
 ///
 /// Measured across three live turns, all of them `godot_script edit`:
@@ -966,6 +1409,22 @@ fn drop_the_wreckage_a_complete_call_can_spare(
 /// list's own entries declare, the list has to be there, and **every** entry in it has to hold that
 /// name with an equal value. A list whose entries name two different files keeps its refusal,
 /// because then the flat key really is saying something.
+///
+/// **The same thing one level flatter**, added after two live turns on `gemma-4-31b` sent
+/// `godot_node create` this, identically:
+///
+/// ```text
+/// {"op": "create", "name": "TickTimer", "node": "/ProtocolFixture",
+///  "parent": "/ProtocolFixture", "type": "Timer"}
+/// ```
+///
+/// `node` is what `set_property` and `connect_signal` call the node, and `create` calls it
+/// `parent` — so the model wrote the value under both names, correctly under one of them. The
+/// whole call was refused over a key holding a string the call already held. There is no list here
+/// to be a copy of an entry of, so the second clause below is value equality against a **required**
+/// parameter that is present: a stray repeating something the call cannot run without is a stray
+/// with no second meaning to lose. Anything else keeps its refusal, and the router's own sentence
+/// names the parameters the operation does take.
 fn drop_a_value_the_call_already_carries(
     spec: &[Param],
     object: &mut serde_json::Map<String, Value>,
@@ -987,7 +1446,8 @@ fn drop_a_value_the_call_already_carries(
             let Some(held) = object.get(key.as_str()) else {
                 return false;
             };
-            spec.iter()
+            let inside_a_list = spec
+                .iter()
                 .filter(|param| param.kind == Kind::List && !param.entry.is_empty())
                 .filter(|param| param.entry.iter().any(|inner| inner.name == key.as_str()))
                 .filter_map(|param| object.get(param.name)?.as_array())
@@ -996,7 +1456,12 @@ fn drop_a_value_the_call_already_carries(
                         && entries
                             .iter()
                             .all(|entry| entry.get(key.as_str()) == Some(held))
-                })
+                });
+            let beside_a_required_one = spec
+                .iter()
+                .filter(|param| param.required)
+                .any(|param| object.get(param.name) == Some(held));
+            inside_a_list || beside_a_required_one
         })
         .cloned()
         .collect();
@@ -1258,6 +1723,45 @@ fn unwrap_a_tag_written_twice(held: &mut Value) {
     }
 }
 
+/// A tagged value whose payload was written beside the tag instead of inside it.
+///
+/// `t11-platformer` attached a script with this:
+///
+/// ```text
+/// {"path": "res://scripts/player.gd", "type": "resource", "value": null}
+/// ```
+///
+/// Everything the call needs is there — the tag says `resource`, the path says which one — and the
+/// one slot that had to hold it is empty. What came back was "a resource value takes an object
+/// carrying a path, and this one was null", which describes the shape and not the mistake.
+///
+/// The payload goes back in its slot when there is nothing else it could be: a tag that is a name,
+/// a `value` that is null or absent, and at least one other key to move. A tagged value declares
+/// exactly two keys, so anything else beside them arrived by being written one level too high.
+fn put_the_payload_back_in_its_slot(held: &mut Value) {
+    let Some(object) = held.as_object_mut() else {
+        return;
+    };
+    if !object.get("type").is_some_and(Value::is_string) {
+        return;
+    }
+    if object.get("value").is_some_and(|inner| !inner.is_null()) {
+        return;
+    }
+    let beside: serde_json::Map<String, Value> = object
+        .iter()
+        .filter(|(key, _)| key.as_str() != "type" && key.as_str() != "value")
+        .map(|(key, inner)| (key.clone(), inner.clone()))
+        .collect();
+    if beside.is_empty() {
+        return;
+    }
+    for key in beside.keys() {
+        object.remove(key);
+    }
+    object.insert("value".to_owned(), Value::Object(beside));
+}
+
 /// The tag and the payload of a value wrapped in a second copy of its own tag, or nothing.
 ///
 /// "Exactly" the pair: the inner object holds a `type` and a `value` and nothing else, so a payload
@@ -1279,6 +1783,7 @@ fn repair_tagged(held: &mut Value) {
     // because what is inside a wrapper is what the payload repairs are about.
     fold_the_tag(held);
     unwrap_a_tag_written_twice(held);
+    put_the_payload_back_in_its_slot(held);
     let Some(tag) = held.get("type").and_then(Value::as_str) else {
         return;
     };
@@ -1782,6 +2287,524 @@ mod tests {
             .message
     }
 
+    /// One file's edits, written without the list they go in.
+    ///
+    /// `godot_script edit` takes `files`, a list of `{path, edits}`. A caller changing one file has
+    /// exactly one entry to write, and recorded turns wrote the entry rather than the list — spread
+    /// across the call, or under a name of its own. Both say which file and which edits, and both
+    /// were refused for the key that was beside the point.
+    #[test]
+    fn one_entry_of_a_required_list_is_put_in_the_list_it_belongs_to() {
+        let edits = json!([{"oldText": "extends Node\nclass_name GameState\n", "newText": "extends Node\n"}]);
+        let folded = json!({"files": [{"path": "scripts/game_state.gd", "edits": edits}]});
+
+        // Spread across the call. An earlier surface took this shape, and a live turn's `edit`
+        // answered `replaced: 1` for the file it names.
+        let mut spread = json!({"path": "scripts/game_state.gd", "edits": edits});
+        repair("godot_script", "edit", &mut spread);
+        assert_eq!(spread, folded, "one entry written flat is that entry");
+        check_ok("godot_script", "edit", spread);
+
+        // Under a name of its own. `g01-hud` wrote this, was refused, and resent
+        // `{"files": [{"path": …, "edits": …}]}` — which is what the fold writes.
+        let mut named = json!({"edit": {"path": "scripts/game_state.gd", "edits": edits}});
+        repair("godot_script", "edit", &mut named);
+        assert_eq!(named, folded, "one entry under one key is that entry");
+
+        // Not everything that resembles an entry is one. A call missing the entry's own required
+        // field says less than it needs to, and is refused by the name of what is absent.
+        let mut partial = json!({"edits": edits});
+        repair("godot_script", "edit", &mut partial);
+        assert!(
+            message("godot_script", "edit", partial).contains("files"),
+            "an entry with no path names no file, and nothing here invents one"
+        );
+    }
+
+    /// A whole operation written to the wrong tool, and the sentence that says which one it is.
+    ///
+    /// `loc-12-mainscene` wrote eight operations to `godot_scene`, seven of them node creations,
+    /// was refused for one key, and **resent all eight byte for byte**. The refusal had asked it to
+    /// correct one key and send the list again, and there is no correction to `{parent, name, type}`
+    /// that makes `godot_scene create` take it.
+    #[test]
+    fn an_operation_written_to_the_wrong_tool_is_told_which_tool_it_is() {
+        let misplaced = json!({"parent": "/Platformer", "name": "Floor", "type": "StaticBody2D"});
+
+        // Left exactly as written. Read one key at a time, `name` reads as `rootName` and `type` as
+        // `rootType` — both real parameters of the operation it was sent to, and both renames
+        // erase the one thing this call says clearly.
+        let mut untouched = misplaced.clone();
+        repair("godot_scene", "create", &mut untouched);
+        assert_eq!(
+            untouched, misplaced,
+            "a call in the wrong place is not repaired into one"
+        );
+
+        let refused = message("godot_scene", "create", misplaced);
+        assert!(
+            refused.contains("godot_node create's parameter list exactly"),
+            "the refusal names the operation these parameters are: {refused}"
+        );
+
+        // A key set that fits many operations names none of them. `{path}` alone is eleven
+        // operations, and a sentence that picked one would be a guess wearing a fact's clothes.
+        let vague = message(
+            "godot_scene",
+            "get_tree",
+            json!({"path": "res://main.tscn"}),
+        );
+        assert!(
+            !vague.contains("parameter list exactly"),
+            "a shape that fits everything says nothing: {vague}"
+        );
+
+        // And a synonym the catalogue declares still wins. `{node, properties}` is
+        // `godot_node inspect`'s parameter list exactly, and it is also `inspect_node` written with
+        // the word its own note says means the same thing.
+        let mut synonym = json!({"node": "/root/Game/Player", "properties": ["global_position"]});
+        repair("godot_runtime", "inspect_node", &mut synonym);
+        check_ok("godot_runtime", "inspect_node", synonym);
+    }
+
+    /// A tagged value's payload, written beside the tag instead of inside it.
+    ///
+    /// Twelve of these across four runs, every one attaching a script, a texture or a shape. The
+    /// tag says `resource` and the path says which one, and the slot that had to hold it is empty
+    /// or absent — so the refusal said "this one was null", which describes the shape and not the
+    /// mistake.
+    #[test]
+    fn a_payload_written_beside_its_tag_is_put_back_in_its_slot() {
+        let attached = json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}});
+        for written in [
+            json!({"path": "res://scripts/player.gd", "type": "resource", "value": null}),
+            json!({"path": "res://scripts/player.gd", "type": "resource"}),
+        ] {
+            let mut call =
+                json!({"node": "/Main/Player", "property": "script", "value": written.clone()});
+            repair("godot_node", "set_property", &mut call);
+            assert_eq!(call["value"], attached, "written as {written}");
+            check_ok("godot_node", "set_property", call);
+        }
+
+        // A tag holding its own payload is left alone, whatever the payload is.
+        for whole in [
+            json!({"type": "vector2", "value": [12, 34]}),
+            json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}}),
+            json!({"type": "null", "value": null}),
+        ] {
+            let mut call =
+                json!({"node": "/Main/Player", "property": "script", "value": whole.clone()});
+            repair("godot_node", "set_property", &mut call);
+            assert_eq!(
+                call["value"], whole,
+                "a whole tagged value is not rearranged"
+            );
+        }
+
+        // And nothing outside a tagged slot is read as one. A node creation carries `name`,
+        // `parent` and `type`, and folding those would build a scene nobody asked for.
+        let entry = json!({"name": "Player", "parent": "/Main", "type": "CharacterBody2D"});
+        let mut creation = json!({"nodes": [entry.clone()]});
+        repair("godot_node", "create_nodes", &mut creation);
+        assert_eq!(
+            creation["nodes"][0], entry,
+            "`type` here is a class, not a tag"
+        );
+        check_ok("godot_node", "create_nodes", creation);
+    }
+
+    /// A value of the smallest shape a parameter of this kind will take.
+    ///
+    /// Only what the kind needs to be legal — a path is `"a"` and a number is `1`, because what is
+    /// under test is whether `repair` leaves a whole call alone, not whether the value is sensible.
+    fn something_of(kind: Kind) -> Value {
+        match kind {
+            Kind::Text => json!("a"),
+            Kind::Hash => json!("0".repeat(64)),
+            Kind::Int => json!(1),
+            Kind::Number => json!(1.5),
+            Kind::Flag => json!(true),
+            Kind::List | Kind::ListOf(_) => json!([]),
+            Kind::Object => json!({}),
+            Kind::Tagged => json!({"type": "int", "value": 1}),
+            Kind::Choice(words) => json!(words.first().copied().unwrap_or("a")),
+            Kind::Either(kinds) => kinds
+                .first()
+                .map_or_else(|| json!("a"), |first| something_of(*first)),
+        }
+    }
+
+    /// The smallest call an operation accepts: every required parameter and nothing else.
+    fn the_least_call(params: &[Param]) -> Value {
+        let mut call = serde_json::Map::new();
+        for param in params
+            .iter()
+            .filter(|param| param.required && !param.hidden)
+        {
+            let held = if param.kind == Kind::List && !param.entry.is_empty() {
+                json!([the_least_call(param.entry)])
+            } else {
+                something_of(param.kind)
+            };
+            call.insert(param.name.to_owned(), held);
+        }
+        Value::Object(call)
+    }
+
+    /// A call the router already accepts is never rewritten, for any operation in the catalogue.
+    ///
+    /// Every repair here reads one key, or one shape, and asks whether it could have meant
+    /// something else. Applied to a call that is already right, the honest answer is always "no" —
+    /// and two of them got that wrong. `the_word_the_operation_does_not_use` renamed a field of a
+    /// parameter onto the parameter, because the parameter's note mentioned it. The misplaced-call
+    /// guard read every good `add_to_group` as a `remove_from_group`, because the two take the same
+    /// two parameters, and stopped repairing anything in it.
+    ///
+    /// Both were found by something else — a probe and two red tests — and neither had to be. This
+    /// asks all three questions of every operation in the catalogue: that nothing is rewritten,
+    /// that nothing moves on a second pass, and that no good call is read as belonging somewhere
+    /// else. The third is separate because the second one it caught was invisible to the first:
+    /// the guard did not rewrite the call, it stopped every repair from running on it, and a call
+    /// that came out equal is exactly what that looks like.
+    ///
+    /// Measured beside it, over the whole recorded corpus: of 4,949 operations, **not one call the
+    /// router accepts is touched by `repair`**, and none moves on a second pass.
+    #[test]
+    fn a_call_the_router_already_accepts_is_never_rewritten() {
+        let mut seen = 0usize;
+        for domain in CATALOG {
+            for operation in domain.operations {
+                let Some(params) = params_of(domain.name, operation.op) else {
+                    continue;
+                };
+                let least = the_least_call(params);
+                if check(domain.name, operation.op, &least).is_err() {
+                    // Not every operation's smallest call is legal — some refuse a value this
+                    // builder cannot know about. Those are not what this test is for.
+                    continue;
+                }
+                seen += 1;
+                // And it is never read as a call meant for somewhere else. This is the property
+                // that broke: `add_to_group` and `remove_from_group` take the same two parameters,
+                // so every good call to one fitted the other exactly, the guard called it misplaced
+                // and `repair` returned without doing anything. Nothing was rewritten, so an
+                // equality check below could not see it — the repairs simply stopped running.
+                assert_eq!(
+                    the_operation_these_keys_belong_to(
+                        &format!("{} {}", domain.name, operation.op),
+                        params,
+                        least.as_object().expect("an object")
+                    ),
+                    None,
+                    "{} {} was read as another operation's call",
+                    domain.name,
+                    operation.op
+                );
+                let mut once = least.clone();
+                repair(domain.name, operation.op, &mut once);
+                assert_eq!(
+                    once, least,
+                    "{} {} was rewritten though it was already right",
+                    domain.name, operation.op
+                );
+                let mut twice = once.clone();
+                repair(domain.name, operation.op, &mut twice);
+                assert_eq!(
+                    twice, once,
+                    "{} {} does not settle: repair moves its own output",
+                    domain.name, operation.op
+                );
+            }
+        }
+        assert!(
+            seen > 80,
+            "the builder has to reach most of the catalogue for this to mean anything: {seen}"
+        );
+        println!("checked {seen} operations");
+    }
+
+    /// A key that is the name of the operation next door.
+    ///
+    /// `godot_runtime input` was sent `capture` in two runs. It is not a parameter of `input` and
+    /// never will be; it is the operation beside it, and a call carries a list of operations.
+    #[test]
+    fn a_key_that_names_another_operation_of_this_tool_is_told_it_is_one() {
+        let refused = message(
+            "godot_runtime",
+            "input",
+            json!({"events": [{"kind": "key", "key": "Right"}], "capture": true}),
+        );
+        assert!(
+            refused.contains("`capture` is an operation of this tool")
+                && refused.contains("its own entry"),
+            "{refused}"
+        );
+
+        // Its own name is not another operation, so a repeated key is still just unknown.
+        let itself = message(
+            "godot_runtime",
+            "input",
+            json!({"events": [], "input": true}),
+        );
+        assert!(
+            !itself.contains("is an operation of this tool"),
+            "an operation is not next door to itself: {itself}"
+        );
+
+        // And a word that spells its way to a real parameter is answered by that, first.
+        let spelled = message("godot_runtime", "run", json!({"scenes": "res://a.tscn"}));
+        assert!(
+            spelled.contains("Did you mean `scene`?"),
+            "the spelling hint still wins where it applies: {spelled}"
+        );
+    }
+
+    /// A number written onto the end of the parameter it belongs to.
+    ///
+    /// `loc-63-resources` sent `{"limit20": true, "sourceeditor": "editor"}` twice and then wrote
+    /// `{"limit": 20, "source": "editor"}` itself, which is the reading this takes.
+    #[test]
+    fn a_number_glued_to_a_parameters_name_is_taken_off_it() {
+        let mut torn = json!({
+            "contains": "AREA",
+            "limit20": true,
+            "sourceeditor": "editor",
+        });
+        repair("godot_logs", "read", &mut torn);
+        assert_eq!(
+            torn,
+            json!({"contains": "AREA", "limit": 20, "source": "editor"}),
+            "the caller's own next call is the answer"
+        );
+        check_ok("godot_logs", "read", torn);
+
+        // A value the parameter could take is not this rule's to touch, and it does not: `5` is an
+        // int, so the guard declines. What happens to it then is the spelling rename that was here
+        // first — `limit20` reads as `limit` by prefix, and `5` is a value `limit` can hold. That
+        // is a different judgement, made before this rule existed. Asserted as it is rather than as
+        // I first expected it; either way the number the caller wrote is the one kept.
+        let mut usable = json!({"limit20": 5});
+        repair("godot_logs", "read", &mut usable);
+        assert_eq!(
+            usable,
+            json!({"limit": 5}),
+            "the number beside the key is kept, and the digits in the key are not read as a second"
+        );
+        // Nor onto a parameter that is already there.
+        let mut held = json!({"limit": 10, "limit20": true});
+        repair("godot_logs", "read", &mut held);
+        assert_eq!(
+            held,
+            json!({"limit": 10, "limit20": true}),
+            "the answer is already written"
+        );
+
+        // And only where digits can be the value. `contains` takes text, so `contains2` is a word
+        // the caller chose and `check` names it.
+        let mut wordy = json!({"contains2": true});
+        repair("godot_logs", "read", &mut wordy);
+        assert!(
+            message("godot_logs", "read", wordy).contains("`contains2`"),
+            "a text parameter's name with digits on it is not a torn number"
+        );
+    }
+
+    /// No parameter is named with a number on the end, which is what makes the repair above safe.
+    #[test]
+    fn no_parameter_is_named_with_a_number_on_the_end() {
+        let mut named = Vec::new();
+        fn walk(params: &[Param], named: &mut Vec<&'static str>) {
+            for param in params {
+                if param.name.ends_with(|c: char| c.is_ascii_digit()) {
+                    named.push(param.name);
+                }
+                walk(param.entry, named);
+            }
+        }
+        for domain in CATALOG {
+            for operation in domain.operations {
+                if let Some(params) = params_of(domain.name, operation.op) {
+                    walk(params, &mut named);
+                }
+            }
+        }
+        assert!(
+            named.is_empty(),
+            "a parameter whose name ends in a digit makes `a_number_written_onto_its_own_name` \
+             ambiguous, and the repair has to go before the name does: {named:?}"
+        );
+    }
+
+    /// The router's own parameter is not one the caller wrote.
+    ///
+    /// `expectedRevision` is supplied from the last answer that carried one and lands in the object
+    /// before any repair runs. Counted as a written key it made `{parent, name, type}` fit nothing,
+    /// and `loc-71-autoload` was answered about `parent` — three wrong words instead of one
+    /// misplaced operation. Adding that one key reproduces the live message exactly, which is how
+    /// the difference between the live run and a probe of the same object was finally read.
+    #[test]
+    fn a_parameter_the_router_supplies_does_not_hide_a_misplaced_operation() {
+        for call in [
+            json!({"name": "ScoreLabel", "parent": "/Main", "type": "Label"}),
+            json!({"name": "ScoreLabel", "parent": "/Main", "type": "Label", "expectedRevision": 3}),
+        ] {
+            let mut held = call.clone();
+            repair("godot_scene", "create", &mut held);
+            assert_eq!(held, call, "a misplaced call is left as written: {call}");
+            let said = message("godot_scene", "create", held);
+            assert!(
+                said.contains("godot_node create's parameter list exactly"),
+                "with or without the router's own key: {said}"
+            );
+        }
+    }
+
+    /// Every operation whose parameters name it uniquely, sent to a tool that cannot take them.
+    ///
+    /// The rule this exercises reads the whole key set, and iteration 140 found that a key the
+    /// router supplies — `expectedRevision`, `scene`, `expectedHash` — was counted as one the
+    /// caller wrote, which made the set fit nothing. The recorded corpus cannot show that: it holds
+    /// what the model sent, not what the router added on the way. So the question is asked of the
+    /// catalogue instead, and asked twice, once with the supplied keys in place.
+    #[test]
+    fn a_misplaced_call_is_named_with_or_without_the_keys_the_router_adds() {
+        let mut asked = 0usize;
+        for domain in CATALOG {
+            for operation in domain.operations {
+                let Some(params) = params_of(domain.name, operation.op) else {
+                    continue;
+                };
+                let least = the_least_call(params);
+                let Some(object) = least.as_object() else {
+                    continue;
+                };
+                // Only the shapes that name one operation and no other. Anything else is a set the
+                // rule is right to stay quiet about.
+                let named = format!("{} {}", domain.name, operation.op);
+                let mut fitting: Vec<(&str, &str)> = CATALOG
+                    .iter()
+                    .flat_map(|other| other.operations.iter().map(move |op| (other.name, op.op)))
+                    .filter(|(tool, op)| {
+                        let sent = format!("{tool} {op}");
+                        sent != named
+                            && params_of(tool, op).is_some_and(|spec| {
+                                the_operation_these_keys_belong_to(&sent, spec, object).as_deref()
+                                    == Some(named.as_str())
+                            })
+                    })
+                    .collect();
+                // The one with keys of its own to supply, where there is one. Taking the first
+                // match instead made this test pass with the fix removed: every operation it
+                // happened to pick had no hidden parameters, so the second half of the check
+                // compared a call with nothing added against a call with nothing added.
+                fitting.sort_by_key(|(tool, op)| {
+                    u8::from(
+                        !params_of(tool, op)
+                            .is_some_and(|spec| spec.iter().any(|param| param.hidden)),
+                    )
+                });
+                let Some((tool, op)) = fitting.first().copied() else {
+                    continue;
+                };
+                let spec = params_of(tool, op).expect("the operation it was sent to");
+                let mut carried = object.clone();
+                if spec.iter().any(|param| param.hidden) {
+                    asked += 1;
+                }
+                for param in spec.iter().filter(|param| param.hidden) {
+                    carried.insert(
+                        param.name.to_owned(),
+                        match param.kind {
+                            Kind::Int => json!(3),
+                            Kind::Hash => json!("0".repeat(64)),
+                            _ => json!("res://main.tscn"),
+                        },
+                    );
+                }
+                assert_eq!(
+                    the_operation_these_keys_belong_to(&format!("{tool} {op}"), spec, &carried)
+                        .as_deref(),
+                    Some(named.as_str()),
+                    "{tool} {op} stopped naming {named} once the router's own keys were in the call"
+                );
+            }
+        }
+        assert!(
+            asked > 5,
+            "the catalogue has to offer some of these: {asked}"
+        );
+        println!("checked {asked} misplaced shapes");
+    }
+
+    /// A word one tool uses for a thing the tool next door names differently.
+    ///
+    /// `godot_runtime inspect_node` takes `path`, and `path` everywhere else in the catalogue is a
+    /// file. Its note says so, and says what `godot_node` calls the same thing. Twelve recorded
+    /// runs wrote `node` there anyway. Nothing spells its way from `node` to `path`, so every
+    /// rename in this file walked past it.
+    #[test]
+    fn a_key_a_parameters_own_note_calls_it_by_is_renamed_onto_that_parameter() {
+        let mut written = json!({"node": "/root/Game/Player", "properties": ["global_position"]});
+        repair("godot_runtime", "inspect_node", &mut written);
+        assert_eq!(
+            written,
+            json!({"path": "/root/Game/Player", "properties": ["global_position"]}),
+            "the note names `node`, so the key it names is the one that moves"
+        );
+        check_ok("godot_runtime", "inspect_node", written);
+
+        // The note is the whole rule. `godot_node instantiate` is missing exactly one required
+        // parameter, `parent`, and one stray key, `node`, holds a value it could take — and a live
+        // turn's own next call proves `node` there was the path of the node about to exist,
+        // `/Main/Coin`, not the parent `/Main`. Nothing says `parent` is ever called `node`, so
+        // nothing moves and the refusal names the key that was written.
+        let mut elsewhere = json!({"node": "/Main/Coin", "path": "res://scenes/coin.tscn"});
+        repair("godot_node", "instantiate", &mut elsewhere);
+        assert_eq!(
+            elsewhere,
+            json!({"node": "/Main/Coin", "path": "res://scenes/coin.tscn"}),
+            "a parameter that has never been called `node` does not take one"
+        );
+        assert!(
+            message("godot_node", "instantiate", elsewhere).contains("has no `node` parameter"),
+            "and the caller is told about the key it wrote"
+        );
+
+        // A note is prose, and prose about a list talks about what is in the list. `godot_script
+        // edit`'s `files` says "Every `oldText` must match one region of that file exactly", which
+        // to a rule that only reads backticks is indistinguishable from a declared synonym. It
+        // renamed `{"oldText": […]}` onto `files`, and the call was then refused for an entry that
+        // was a string. `oldText` is a field two levels inside `files`: it is what `files` is made
+        // of, and never another word for it.
+        let mut inside = json!({"oldText": ["var speed := 1.0"]});
+        repair("godot_script", "edit", &mut inside);
+        assert_eq!(
+            inside,
+            json!({"oldText": ["var speed := 1.0"]}),
+            "a field of the parameter is not a second name for the parameter"
+        );
+
+        // The third note that declares a synonym, and the reason it is safe both ways.
+        // `godot_script apply_rename`'s `files` says "The list `rename` answered with", and
+        // `rename` really answers `{"files": [...]}` — an object. A caller that passes the list
+        // means `files` and gets it; a caller that passes the whole answer is not folded, because
+        // an object is not a list, and is refused by the name it wrote.
+        let mut planned = json!({"rename": [{"path": "a.gd"}]});
+        repair("godot_script", "apply_rename", &mut planned);
+        assert_eq!(
+            planned,
+            json!({"files": [{"path": "a.gd"}]}),
+            "the list is the plan"
+        );
+        let mut wrapped = json!({"rename": {"files": [{"path": "a.gd"}]}});
+        repair("godot_script", "apply_rename", &mut wrapped);
+        assert!(
+            message("godot_script", "apply_rename", wrapped).contains("has no `rename`"),
+            "the whole answer is not the list, and is not read as one"
+        );
+    }
+
     /// A colour may be written the way Godot writes one, and the way it always could.
     ///
     /// `resource.create_texture` takes "skyblue" and "#8b5a2b" because `Color.from_string` does,
@@ -2130,6 +3153,51 @@ mod tests {
         assert!(refused.contains("`size2`"), "{refused}");
     }
 
+    /// The list written under a name the operation does not have is renamed onto the one it fits.
+    ///
+    /// Three live turns sent `godot_script edit` its own `files` list under the name `edits`, and
+    /// each was answered with a signature quoting the shape it had already written correctly.
+    #[test]
+    fn a_list_written_under_another_name_is_renamed_onto_the_one_it_fits() {
+        let mut misnamed = json!({
+            "edits": [{
+                "path": "scripts/player.gd",
+                "edits": [{"oldText": "var travelled := 0.0", "newText": "var travelled := 1.0"}]
+            }]
+        });
+        repair("godot_script", "edit", &mut misnamed);
+        assert!(misnamed.get("edits").is_none(), "{misnamed}");
+        assert_eq!(misnamed["files"][0]["path"], json!("scripts/player.gd"));
+        check_ok("godot_script", "edit", misnamed);
+
+        // A list that is already written is not a name to be corrected: a stray beside it is a
+        // second copy, and `drop_a_value_the_call_already_carries` is what decides that.
+        let mut already_there = json!({
+            "files": [{"path": "a.gd", "edits": [{"oldText": "a", "newText": "b"}]}],
+            "somethings": [{"path": "b.gd", "edits": [{"oldText": "c", "newText": "d"}]}]
+        });
+        repair("godot_script", "edit", &mut already_there);
+        assert!(already_there.get("somethings").is_some(), "{already_there}");
+        assert!(message("godot_script", "edit", already_there).contains("`somethings`"));
+
+        // Entries that do not fit the declared entry exactly are not that list under another name.
+        // `{path}` alone is missing the `edits` every `files` entry requires.
+        let mut partial = json!({"somethings": [{"path": "a.gd"}]});
+        repair("godot_script", "edit", &mut partial);
+        assert!(partial.get("somethings").is_some(), "{partial}");
+
+        // And a stray carrying anything the entry does not declare is not it either.
+        let mut extra = json!({
+            "somethings": [{
+                "path": "a.gd",
+                "edits": [{"oldText": "a", "newText": "b"}],
+                "why": "because"
+            }]
+        });
+        repair("godot_script", "edit", &mut extra);
+        assert!(extra.get("somethings").is_some(), "{extra}");
+    }
+
     /// A path written flat beside the `files` list that already carries it is taken away.
     ///
     /// Three live turns sent `godot_script edit` this, each with the same path in both places:
@@ -2168,6 +3236,46 @@ mod tests {
         repair("godot_script", "edit", &mut disagrees);
         assert_eq!(disagrees["path"], json!("scripts/enemy.gd"), "{disagrees}");
         assert!(message("godot_script", "edit", disagrees).contains("`path`"));
+    }
+
+    /// The node written under the name a sibling operation gives it, beside the right one.
+    ///
+    /// Two live turns on `gemma-4-31b` sent `godot_node create` this, identically. `node` is what
+    /// `set_property` and `connect_signal` call the node; `create` calls it `parent`; the model
+    /// wrote the value under both. The whole call — five operations — was refused over a key
+    /// holding a string the call already held.
+    #[test]
+    fn a_key_repeating_a_required_parameter_is_dropped_as_the_copy_it_is() {
+        let mut said_twice = json!({
+            "name": "TickTimer",
+            "node": "/ProtocolFixture",
+            "parent": "/ProtocolFixture",
+            "type": "Timer"
+        });
+        repair("godot_node", "create", &mut said_twice);
+        assert!(said_twice.get("node").is_none(), "{said_twice}");
+        check_ok("godot_node", "create", said_twice);
+
+        // A stray naming somewhere else is saying something, and keeps its refusal.
+        let mut elsewhere = json!({
+            "name": "TickTimer",
+            "node": "/Somewhere",
+            "parent": "/ProtocolFixture",
+            "type": "Timer"
+        });
+        repair("godot_node", "create", &mut elsewhere);
+        assert_eq!(elsewhere["node"], json!("/Somewhere"), "{elsewhere}");
+        assert!(message("godot_node", "create", elsewhere).contains("`node`"));
+
+        // And a call that is not whole without the key is never made whole by taking it away: the
+        // refusal that names the missing parameter is the one worth having.
+        let mut incomplete = json!({"name": "TickTimer", "node": "/ProtocolFixture"});
+        repair("godot_node", "create", &mut incomplete);
+        assert_eq!(
+            incomplete["node"],
+            json!("/ProtocolFixture"),
+            "{incomplete}"
+        );
     }
 
     /// A value with the tear's own punctuation behind it is still the value.

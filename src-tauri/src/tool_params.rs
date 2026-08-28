@@ -328,7 +328,7 @@ impl Operation {
     /// and a fix that lives only in the worker reaches neither — which is what a tagged value
     /// wrapped in a second copy of its own tag did, unwrapped in JavaScript and refused here.
     pub fn repair(&self, params: &mut Value) {
-        crate::tool_repair::repair_set(self.params, params);
+        crate::tool_repair::repair_call(self.tool, self.op, self.params, params);
     }
 
     /// Refuses a call whose parameters cannot possibly be right, before it leaves this process.
@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:bab5e4d78fee616e
+// GENERATED-BEGIN operations sha256:07b7ba8e7dcec615
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -585,7 +585,7 @@ pub const GODOT_SCENE_OPERATIONS: &[Operation] = &[
     op(
         "godot_scene",
         "create",
-        "Creates a scene and opens it. It is checked against the revision of the scene being *replaced*, because creating a scene discards whatever is unsaved in the open one — which is what the check is for. The router holds that number already.",
+        "Creates a scene and opens it. It is checked against the revision of the scene being *replaced*, because creating a scene discards whatever is unsaved in the open one — which is what the check is for. The router holds that number already. A scene here is never inherited from another one: there is no base, and no call in this catalogue makes one scene extend another. To build on an existing scene, instantiate it with node.instantiate and set on the instance whatever differs — measured on 4.7.2, the instance keeps what is set on it and the scene it came from is unchanged.",
         Answers::Addon("scene.create"),
         &[
             need("path", Text),
@@ -1824,7 +1824,13 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
         "inspect_node",
         "Inspects a running node. `properties` is the list of property names to read, like [\"position\", \"velocity\"]; without it the answer carries the node's path, name and type and an empty property map, so name what you want to see. A name the node does not have is an error rather than a gap. The groups it is in come back whether or not anything was named, because a group is not a property and a script joining one at run time is how half of them are joined.",
         Answers::Addon("runtime.inspect_node"),
-        &[need("path", Text), opt("properties", List)],
+        &[
+            noted(
+                need("path", Text),
+                "The node to read, by its path in the running tree: every one of those starts at /root. godot_node calls this same thing `node`, and this is the one operation in this catalogue where `path` names a node rather than a file.",
+            ),
+            opt("properties", List),
+        ],
     ),
     op(
         "godot_runtime",
@@ -1924,7 +1930,7 @@ pub const GODOT_RUNTIME_OPERATIONS: &[Operation] = &[
 pub const GODOT_LOGS_OPERATIONS: &[Operation] = &[op(
     "godot_logs",
     "read",
-    "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse. Terminal colour is taken out, and the editor's own progress bar — `[  16% ] first_scan_filesystem | …` — is left out and counted in `terminalLinesOmitted`, because a terminal drawing itself is a fifth of this output and none of it is about the project.",
+    "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse. Terminal colour is taken out, and the editor's own progress bar — `[  16% ] first_scan_filesystem | …` — is left out and counted in `terminalLinesOmitted`, because a terminal drawing itself is a fifth of this output and none of it is about the project. One line in `editorError` is never about the project: an `ERROR:` naming a section like `res://scripts/player.gd` with the key `state` is the editor restoring which script tabs were open. It is dropped from the errors a failed call carries, and left here because this is the raw page.",
     Answers::Rust,
     &[
         opt("after", Int),

@@ -172,7 +172,7 @@
         {
             "tool": "godot_scene",
             "op": "create",
-            "summary": "Creates a scene and opens it. It is checked against the revision of the scene being *replaced*, because creating a scene discards whatever is unsaved in the open one — which is what the check is for. The router holds that number already.",
+            "summary": "Creates a scene and opens it. It is checked against the revision of the scene being *replaced*, because creating a scene discards whatever is unsaved in the open one — which is what the check is for. The router holds that number already. A scene here is never inherited from another one: there is no base, and no call in this catalogue makes one scene extend another. To build on an existing scene, instantiate it with node.instantiate and set on the instance whatever differs — measured on 4.7.2, the instance keeps what is set on it and the scene it came from is unchanged.",
             "params": [
                 {
                     "name": "path",
@@ -2306,7 +2306,8 @@
                 {
                     "name": "path",
                     "kind": "text",
-                    "required": true
+                    "required": true,
+                    "note": "The node to read, by its path in the running tree: every one of those starts at /root. godot_node calls this same thing `node`, and this is the one operation in this catalogue where `path` names a node rather than a file."
                 },
                 {
                     "name": "properties",
@@ -2469,7 +2470,7 @@
         {
             "tool": "godot_logs",
             "op": "read",
-            "summary": "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse. Terminal colour is taken out, and the editor's own progress bar — `[  16% ] first_scan_filesystem | …` — is left out and counted in `terminalLinesOmitted`, because a terminal drawing itself is a fifth of this output and none of it is about the project.",
+            "summary": "Reads a page. `editor` is the editor's stdout, which also carries what the game printed; `editorError` is where the engine reports its own failures, including a script that would not parse. Terminal colour is taken out, and the editor's own progress bar — `[  16% ] first_scan_filesystem | …` — is left out and counted in `terminalLinesOmitted`, because a terminal drawing itself is a fifth of this output and none of it is about the project. One line in `editorError` is never about the project: an `ERROR:` naming a section like `res://scripts/player.gd` with the key `state` is the editor restoring which script tabs were open. It is dropped from the errors a failed call carries, and left here because this is the raw page.",
             "params": [
                 {
                     "name": "after",

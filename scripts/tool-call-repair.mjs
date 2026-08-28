@@ -163,6 +163,20 @@ export function normalizeEntry(operations, args) {
  * parameter named after an operation of its own tool, so a lone key that is an operation name
  * cannot be a parameter written without its `op`. The guards are the whole rule — one key, that key
  * an operation this domain has, an object under it, and the operation named no other way.
+ *
+ * **"No other way" means no other way that disagrees.** An inner `op` saying the same word as the
+ * key is the model correcting itself into the wrapper it had already written, and there is nothing
+ * to choose between: both halves name `edit`.
+ *
+ * ```json
+ * {"ops": [{"edit": {"files": [{"path": "scripts/main.gd", "edits": […]}], "op": "edit"}}]}
+ * ```
+ *
+ * That call is recorded twice, in `g04-signal` and `g05-refactor`, and both times as the *second*
+ * try: the turn wrote `{"edit": {"files": […]}}`, was answered `ops.0.op: must have required
+ * properties op`, and added the word the sentence named — inside the wrapper, where the guard
+ * below then declined the repair and the same sentence came back. Two round trips for a call whose
+ * two halves already agreed.
  */
 export function unwrapOperationNamedKey(operations, entry) {
     if (!isObject(entry)) return entry
@@ -171,13 +185,22 @@ export function unwrapOperationNamedKey(operations, entry) {
     const [key] = keys
     if (OP_KEYS.includes(key) || !isObject(entry[key])) return entry
     if (!operations.some(operation => operation.op === key)) return entry
-    if (OP_KEYS.some(named => typeof entry[key][named] === 'string')) return entry
+    const inner = entry[key]
+    if (OP_KEYS.some(named => typeof inner[named] === 'string' && inner[named] !== key))
+        return entry
     // The key is the operation, so it is written last. Spread last, `{"create": {"op": 7, …}}`
     // came out as `{op: 7, …}` — the guard above only declines an inner `op` that is a *string*,
     // so a number went through and undid the repair. `refuseUnknownOperation` then skipped it too,
     // because that only speaks about a string, and the model got the generic enum refusal this
     // repair exists to replace.
-    return {...entry[key], op: key}
+    //
+    // Every naming key is dropped rather than only `op`, because `op: key` overwrites just the one
+    // it is spelled with: an agreeing `operation` or `action` would otherwise survive as a key no
+    // operation declares, and be refused as a stray parameter instead of the word it repeated.
+    return {
+        ...Object.fromEntries(Object.entries(inner).filter(([named]) => !OP_KEYS.includes(named))),
+        op: key
+    }
 }
 
 /**
@@ -347,6 +370,75 @@ export function trimPaddedKeys(params, entry) {
             return {...walked, [param.name]: trimPaddedKeys(param.entry, held)}
         return walked
     }, shaped)
+}
+
+/** The two names a tagged value is made of. Everything under `value` is the tag's own business. */
+const TAG_KEYS = ['type', 'value']
+
+/**
+ * A tagged value whose own key names arrived wearing quotation marks.
+ *
+ * ```json
+ * {"node": "/HUD", "property": "script",
+ *  "value": {"\"type\"": "resource", "value": {"\"path\"": "res://scripts/hud.gd"}}}
+ * ```
+ *
+ * The key is `"type"` *including the quotation marks* — a name that has been written twice, once by
+ * the model and once by whatever it was copying from. Validation answers
+ * `ops.0.value.type: must have required properties type`, which names the key it wanted and says
+ * nothing about the one that arrived, and the nested schema is closed so nothing downstream ever
+ * sees it. **Sixteen refused calls in one turn**, on `gemma-4-31b`, all of them this: the same
+ * mistake this file already repairs for whitespace, wearing different punctuation.
+ *
+ * `trimPaddedKeys` cannot reach it and is right not to: it walks the declared structure, and a
+ * tagged value has no declared entry to walk into — "whose payload may be a dictionary whose keys
+ * are the caller's own". That reasoning is exactly why this stops where it does.
+ *
+ * Two levels, and no more. The tag's own `type` and `value`, whose names are fixed; and `path`
+ * inside a `resource` tag, whose payload shape is fixed too and is the one every script attachment
+ * goes through. A `dictionary` or an `array` payload is left alone whatever its keys look like — a
+ * key wearing quotation marks there may be a key that means them.
+ *
+ * Here rather than in `tool_params.rs`, and this file's own membership rule is why: the generated
+ * schema for a tagged value is closed and answers `ops.0.value.type: must have required properties
+ * type` before the router is reached, so the table never sees this call at all. A caller that
+ * reaches the table directly — an acceptance suite, a `dispatch` — is refused there by
+ * `Protocol.decode`, which is the answer that shape has always had and is not what the sixteen
+ * refused calls were.
+ */
+export function unquoteATaggedKey(params, entry) {
+    if (!Array.isArray(params) || !isObject(entry)) return entry
+    return params.reduce((walked, param) => {
+        const held = walked[param.name]
+        if (param.kind === 'list' && Array.isArray(param.entry) && Array.isArray(held))
+            return {...walked, [param.name]: held.map(one => unquoteATaggedKey(param.entry, one))}
+        if (param.kind === 'object' && Array.isArray(param.entry) && isObject(held))
+            return {...walked, [param.name]: unquoteATaggedKey(param.entry, held)}
+        if (param.kind !== 'tagged' || !isObject(held)) return walked
+        return {...walked, [param.name]: withoutQuotedTagKeys(held)}
+    }, entry)
+}
+
+/** One tagged value with the two names it is made of unwrapped, and a resource's `path` with them. */
+function withoutQuotedTagKeys(tagged) {
+    const named = renamedWithoutQuotes(tagged, TAG_KEYS)
+    if (named.type !== 'resource' || !isObject(named.value)) return named
+    return {...named, value: renamedWithoutQuotes(named.value, ['path'])}
+}
+
+/**
+ * The same rename [`trimPaddedKeys`] makes, for quotation marks rather than whitespace, and only
+ * onto one of the names given. Every guard is the one that one uses: the bare name has to differ
+ * from the key, has to be a name this shape expects, and must not already be there.
+ */
+function renamedWithoutQuotes(object, wanted) {
+    return Object.fromEntries(
+        Object.entries(object).map(([key, held]) => {
+            const bare = key.replace(/^["'\s]+|["'\s]+$/gu, '')
+            const renameable = bare !== key && !(bare in object) && wanted.includes(bare)
+            return [renameable ? bare : key, held]
+        })
+    )
 }
 
 /**
@@ -580,6 +672,40 @@ export function refuseUnknownOperation(operations, entry, elsewhere) {
 }
 
 /**
+ * The sentence for an unnamed entry whose keys are not any one operation's parameters.
+ *
+ * Two shapes reach here and each gets its own middle clause. The operation name is *in* the entry,
+ * misplaced — under a key of its own (`{"type": "save", …}`) or as the key its parameters were
+ * written under (`{"edit": {…}}`, where [`unwrapOperationNamedKey`] declined because the inner
+ * naming disagreed) — or it is nowhere, and all the entry can be told is which words this tool
+ * knows.
+ *
+ * A value is only read as an operation name when it is the *only* one in the entry. Two candidates
+ * is two words to choose between, and this function refuses rather than chooses; the list of the
+ * tool's operations is then the honest answer.
+ */
+function refusalForAnEntryFittingNothing(operations, entry) {
+    const known = operations.map(operation => operation.op)
+    const asKey = Object.keys(entry).filter(key => known.includes(key))
+    const asValue = Object.entries(entry).filter(
+        ([, value]) => typeof value === 'string' && known.includes(value)
+    )
+    const misplaced =
+        asKey.length === 1 ?
+            ` \`${asKey[0]}\` is an operation of this tool: write it as \`"op": "${asKey[0]}"\``
+            + ' with its parameters beside it rather than under it.'
+        : asValue.length === 1 ?
+            ` \`${asValue[0][0]}\` holds "${asValue[0][1]}", which is an operation of this tool:`
+            + ` write it as \`"op": "${asValue[0][1]}"\`.`
+        :   ` This tool's operations are: ${known.join(', ')}.`
+    return (
+        `This entry names no operation, and its keys — ${asSentenceList(Object.keys(entry))} —`
+        + ` are not the parameters of any one operation of this tool.${misplaced}`
+        + ' Every entry of an ops list names its own operation.'
+    )
+}
+
+/**
  * An entry whose parameters fit more than one operation, refused by naming them.
  *
  * `{"ops": [{"path": "scripts/coin.gd", "text": "extends Area2D…"}]}` is `godot_script save`
@@ -591,8 +717,28 @@ export function refuseUnknownOperation(operations, entry, elsewhere) {
  *
  * [`nameTheOperation`] repairs the entry when exactly one operation fits, and declines when
  * several do, which is right — a guess between two is a call the caller never made. This is what
- * to say instead. Only where at least two fit: an entry fitting none is a shape nothing here can
- * name, and no live turn has written one.
+ * to say instead.
+ *
+ * **An entry that fits none is refused too, and it was not.** The rule used to be "at least two
+ * fit", on the reading that an entry fitting no operation is a shape nothing here can name and
+ * that no live turn had written one. Replaying every schema refusal in `logs/oxloop` against this
+ * file found three that had:
+ *
+ * ```json
+ * {"path": "scripts/player.gd", "text": "extends Node2D…", "type": "save"}
+ * {"edit": {"files": […], "op": "edit"}}
+ * ```
+ *
+ * Neither fits an operation exactly — `type` and `edit` are not parameters — so every repair
+ * declined, this refusal stayed silent, and the entry reached the generated schema unchanged. What
+ * the model was answered was `ops.0.op: must have required properties op`: pi's own sentence, and
+ * the one sentence this whole file exists to replace. Silence is the worst of the three outcomes,
+ * because the two above are each one word away from a call that runs.
+ *
+ * So the refusal always speaks, and says which of the two situations it is. Where an operation
+ * name is somewhere in the entry — as a key, or as a value — it is named, because that is the word
+ * the caller already wrote and only put in the wrong place. Naming it is not a repair: nothing is
+ * run on a guess, and the caller sends the entry again saying what it meant.
  */
 export function refuseUnnamedOperation(operations, entry) {
     if (entry.op !== undefined) return
@@ -601,6 +747,7 @@ export function refuseUnnamedOperation(operations, entry) {
     const fitting = operations.filter(
         operation => Array.isArray(operation.params) && exactFit(operation.params, keys)
     )
+    if (fitting.length === 0) throw new Error(refusalForAnEntryFittingNothing(operations, entry))
     if (fitting.length < 2) return
     const named = fitting.map(operation => operation.op)
     // A concrete `op` to copy only where there are two to choose between. `named` is catalogue
@@ -751,7 +898,10 @@ export function normalizeToolCalls(operations, args, elsewhere) {
                         params,
                         readAValueWrittenAsAString(
                             params,
-                            splitKeyThatCarriesItsValue(params, trimPaddedKeys(params, entry))
+                            splitKeyThatCarriesItsValue(
+                                params,
+                                unquoteATaggedKey(params, trimPaddedKeys(params, entry))
+                            )
                         )
                     )
                     refuseSiblingParameter(operations, shaped)

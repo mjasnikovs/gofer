@@ -70,6 +70,86 @@ test('a call the router repairs reaches it as the model wrote it', async () => {
     }
 })
 
+/** A value of the smallest shape a parameter of this kind will take. */
+function somethingOf(kind, param) {
+    switch (kind) {
+        case 'text':
+            return 'a'
+        case 'hash':
+            return '0'.repeat(64)
+        case 'int':
+            return 1
+        case 'number':
+            return 1.5
+        case 'flag':
+            return true
+        case 'list':
+        case 'listOf':
+            return []
+        case 'object':
+            return {}
+        case 'tagged':
+            return {type: 'int', value: 1}
+        case 'choice':
+            return param.of?.[0] ?? 'a'
+        case 'either':
+            return somethingOf(param.of?.[0]?.kind ?? 'text', param.of?.[0] ?? {})
+        default:
+            return 'a'
+    }
+}
+
+/** The smallest entry an operation accepts: its `op`, every required parameter, nothing else. */
+function theLeastEntry(operation) {
+    const entry = {op: operation.op}
+    for (const param of operation.params ?? []) {
+        if (!param.required || param.hidden) continue
+        entry[param.name] =
+            param.kind === 'list' && (param.entry ?? []).length > 0 ?
+                [theLeastEntry({op: undefined, params: param.entry})]
+            :   somethingOf(param.kind, param)
+        if (param.kind === 'list' && (param.entry ?? []).length > 0) {
+            delete entry[param.name][0].op
+        }
+    }
+    return entry
+}
+
+/**
+ * A call the router would accept is never rewritten here, for any operation in the catalogue.
+ *
+ * The Rust half got this check tonight and found two rules that rewrote calls that were already
+ * right. This layer runs *before* the router, so a wrong rewrite here is one nothing downstream can
+ * see — the router is handed a call the model never wrote and refuses it by a name the model never
+ * used. The round-trip test above is the same promise over a fixture of recorded shapes; this one
+ * asks it of every operation there is.
+ *
+ * Asked twice, because a repair that is not stable on its own output is one that would keep moving.
+ */
+test('a call the router would accept is never rewritten, for every operation', async () => {
+    const domains = await declaredDomains()
+    let asked = 0
+    for (const domain of domains) {
+        for (const operation of domain.operations) {
+            const call = {ops: [theLeastEntry(operation)]}
+            const written = sortedKeys(call)
+            const once = normalizeToolCalls(domain.operations, structuredClone(call))
+            assert.equal(
+                sortedKeys(once),
+                written,
+                `${domain.name} ${operation.op} was rewritten though it was already right`
+            )
+            assert.equal(
+                sortedKeys(normalizeToolCalls(domain.operations, structuredClone(once))),
+                sortedKeys(once),
+                `${domain.name} ${operation.op} does not settle: the repair moves its own output`
+            )
+            asked += 1
+        }
+    }
+    assert.ok(asked > 100, `the catalogue has to be reached for this to mean anything: ${asked}`)
+})
+
 /** One value written out with every object's keys in order, so key order is not a difference. */
 function sortedKeys(value) {
     return JSON.stringify(value, (key, held) =>
@@ -510,21 +590,20 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }
     )
 
-    // A stray that does not fit the list is left where it is. The router names the operation it is
-    // missing, which is a better sentence than a file folded into an edit it was never part of.
-    assert.deepEqual(
-        normalizeToolCalls(script, {
-            ops: [
-                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
-                {path: 'b.gd', text: 'extends Node'}
-            ]
-        }),
-        {
-            ops: [
-                {op: 'edit', files: [{path: 'a.gd', edits: []}]},
-                {path: 'b.gd', text: 'extends Node'}
-            ]
-        }
+    // A stray that does not fit the list is not folded into it — a file folded into an edit it was
+    // never part of is the one outcome worse than a refusal. It is refused by name rather than left
+    // where it is: `required: ['op']` in `jsonSchemaOfEntry` means an entry with no operation never
+    // reaches the router at all, so "left for the router" was pi's `ops.1.op: must have required
+    // properties op` and nothing else.
+    assert.throws(
+        () =>
+            normalizeToolCalls(script, {
+                ops: [
+                    {op: 'edit', files: [{path: 'a.gd', edits: []}]},
+                    {path: 'b.gd', text: 'extends Node'}
+                ]
+            }),
+        /names no operation, and its keys — path and text —/su
     )
 
     // Nothing to fold into — the first entry of a call is nobody's stray — and still not left as
@@ -666,6 +745,93 @@ test('a parameter set parked under an invented key is read as the wrapper it is'
         two: {name: 'Other', path: 'b.gd'}
     }
     assert.deepEqual(normalizeToolCalls(project, {ops: [both]}), {ops: [both]})
+})
+
+/**
+ * The tagged value whose own key names arrived wearing quotation marks.
+ *
+ * `gemma-4-31b` sent `godot_node set_property` this **sixteen times in one turn**, and it is the
+ * mistake `a parameter named with whitespace around it is named without it` already repairs one
+ * punctuation mark over. Validation answered `ops.0.value.type: must have required properties type`
+ * every time — the name it wanted, and nothing about the name that arrived.
+ */
+test('a tagged value whose keys wear quotation marks is read without them', async () => {
+    const domains = await declaredDomains()
+    const node = domains.find(domain => domain.name === 'godot_node').operations
+
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/HUD',
+                    property: 'script',
+                    value: {'"type"': 'resource', value: {'"path"': 'res://scripts/hud.gd'}}
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'set_property',
+                    node: '/HUD',
+                    property: 'script',
+                    value: {type: 'resource', value: {path: 'res://scripts/hud.gd'}}
+                }
+            ]
+        }
+    )
+
+    // Through a list of tagged values as well, because `set_properties` is where a turn writing a
+    // whole screen puts them.
+    assert.deepEqual(
+        normalizeToolCalls(node, {
+            ops: [
+                {
+                    op: 'set_properties',
+                    properties: [
+                        {
+                            node: '/A',
+                            property: 'position',
+                            value: {'"type"': 'vector2', value: [1, 2]}
+                        }
+                    ]
+                }
+            ]
+        }),
+        {
+            ops: [
+                {
+                    op: 'set_properties',
+                    properties: [
+                        {node: '/A', property: 'position', value: {type: 'vector2', value: [1, 2]}}
+                    ]
+                }
+            ]
+        }
+    )
+
+    // A dictionary's payload is the caller's own, and a key there wearing quotation marks may be a
+    // key that means them. Only the tag's two names, and a resource's `path`, are ever touched.
+    const dictionary = {
+        op: 'set_property',
+        node: '/A',
+        property: 'metadata',
+        value: {
+            type: 'dictionary',
+            value: [{key: {type: 'string', value: '"quoted"'}, value: {type: 'int', value: 1}}]
+        }
+    }
+    assert.deepEqual(normalizeToolCalls(node, {ops: [dictionary]}), {ops: [dictionary]})
+
+    // And a name that is already there is never written over.
+    const both = {
+        op: 'set_property',
+        node: '/A',
+        property: 'script',
+        value: {'"type"': 'resource', type: 'texture', value: {path: 'res://a.png'}}
+    }
+    assert.deepEqual(normalizeToolCalls(node, {ops: [both]}), {ops: [both]})
 })
 
 test('a parameter named with whitespace around it is named without it', async () => {
@@ -1148,13 +1314,34 @@ test('an operation written as the key of its own parameters is read as the opera
     )
 
     // A key that is not an operation, a second key beside it, and a value that is not an object.
-    // None of the three can be read as an operation, so all three are left for the router.
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{save: 'a.gd'}]}), {ops: [{save: 'a.gd'}]})
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{write: {path: 'a.gd'}}]}), {
-        ops: [{write: {path: 'a.gd'}}]
+    // None of the three can be read as an operation, so none is unwrapped — and each is refused by
+    // name rather than passed on, because an entry with no `op` never reaches the router. Where the
+    // key is one of this tool's operations the refusal says so, which is the word the caller wrote.
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{save: 'a.gd'}]}),
+        /`save` is an operation of this tool: write it as `"op": "save"`/su
+    )
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{write: {path: 'a.gd'}}]}),
+        /This tool's operations are: list, open/su
+    )
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{save: {path: 'a.gd'}, why: 'x'}]}),
+        /its keys — save and why —.*`save` is an operation of this tool/su
+    )
+
+    // The inner naming the model reached for after the first refusal, agreeing with the key it had
+    // already written. Both halves say `edit`, so there is nothing to choose between and the unwrap
+    // runs. Recorded twice — `g04-signal` and `g05-refactor` — each as a second try that cost the
+    // same sentence again.
+    const files = [{path: 'main.gd', edits: [{oldText: 'a', newText: 'b'}]}]
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{edit: {files, op: 'edit'}}]}), {
+        ops: [{op: 'edit', files}]
     })
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{save: {path: 'a.gd'}, why: 'x'}]}), {
-        ops: [{save: {path: 'a.gd'}, why: 'x'}]
+    // The other two spellings of the same word, dropped rather than left as a stray key: `op: key`
+    // overwrites only the one it is spelled with.
+    assert.deepEqual(normalizeToolCalls(script, {ops: [{edit: {files, operation: 'edit'}}]}), {
+        ops: [{op: 'edit', files}]
     })
 })
 
@@ -1200,10 +1387,15 @@ test('an entry that fits two operations is refused by naming both', async () => 
         /search and ask both take/su
     )
 
-    // An entry no operation fits is left for the schema to answer, because nothing here can name
-    // it. An entry exactly one fits is still named rather than refused, which is
+    // An entry no operation fits is refused too, and it used to be left for the schema to answer —
+    // which meant `ops.0.op: must have required properties op`, the sentence this file replaces.
+    // Nothing here can name it, so the refusal names the words the tool does have and stops. An
+    // entry exactly one operation fits is still named rather than refused, which is
     // `an entry written as an operation name, and one written as its own list entry`.
-    assert.deepEqual(normalizeToolCalls(script, {ops: [{nonsense: 1}]}), {ops: [{nonsense: 1}]})
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{nonsense: 1}]}),
+        /its keys — nonsense — are not the parameters of any one operation.*operations are: list, open/su
+    )
 })
 
 /**
@@ -1215,6 +1407,37 @@ test('an entry that fits two operations is refused by naming both', async () => 
  * is catalogue order, not likelihood. A model that takes that literally sends `hover` when it meant
  * `definition`, and the refusal has cost a round trip to say something untrue.
  */
+/**
+ * The operation written under a key that is not `op`, and why it is named rather than repaired.
+ *
+ * `{"path": "scripts/player.gd", "text": "extends Node2D…", "type": "save"}` is what `g33-input`
+ * wrote. `type` cannot join `OP_KEYS` — `godot_node create` takes a `type`, and reading that as the
+ * operation would throw away the node class — so nothing names the entry, and until this refusal it
+ * fell through every repair to `ops.0.op: must have required properties op`.
+ *
+ * The word the caller wants is sitting in the entry. Saying which key holds it is not a guess: the
+ * entry is refused, nothing runs, and the caller sends it again spelled the way the schema asks.
+ */
+test('an operation written under a key that is not `op` is named where it sits', async () => {
+    const domains = await declaredDomains()
+    const script = domains.find(domain => domain.name === 'godot_script').operations
+
+    assert.throws(
+        () =>
+            normalizeToolCalls(script, {
+                ops: [{path: 'scripts/player.gd', text: 'extends Node2D\n', type: 'save'}]
+            }),
+        /`type` holds "save", which is an operation of this tool: write it as `"op": "save"`/su
+    )
+
+    // Two candidates is two words to choose between, and this refusal chooses nothing. The list of
+    // the tool's own operations is what is left to say.
+    assert.throws(
+        () => normalizeToolCalls(script, {ops: [{was: 'open', now: 'save'}]}),
+        /This tool's operations are: list, open/su
+    )
+})
+
 test('an entry that fits more than two operations is named without being told which to pick', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script').operations
@@ -1259,9 +1482,16 @@ test('the operation the key names survives whatever the object it wraps holds', 
     assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 7, parent: '/Main'}}]}), {
         ops: [{op: 'create', parent: '/Main'}]
     })
-    // A string still declines the repair outright, because then the model named an operation and
-    // guessing which of the two it meant is not this function's to do.
-    assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 'rename', parent: '/Main'}}]}), {
-        ops: [{create: {op: 'rename', parent: '/Main'}}]
+    // A string that disagrees with the key still declines the repair outright, because then the
+    // model named two operations and guessing which it meant is not this function's to do. It is
+    // refused rather than passed on — the entry reaches the schema with no `op` either way, so the
+    // choice is between this sentence and pi's.
+    assert.throws(
+        () => normalizeToolCalls(node, {ops: [{create: {op: 'rename', parent: '/Main'}}]}),
+        /`create` is an operation of this tool/su
+    )
+    // A string that agrees with it is the model repeating itself, not choosing, and unwraps.
+    assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 'create', parent: '/Main'}}]}), {
+        ops: [{op: 'create', parent: '/Main'}]
     })
 })

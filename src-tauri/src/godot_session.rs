@@ -1834,7 +1834,7 @@ fn is_the_engines_own_epilogue(message: &str) -> bool {
 ///
 /// It is [`is_a_thumbnail_the_headless_editor_cannot_draw`] now, which is given the entry and reads
 /// that frame — so the editor's own noise goes and a game's identical sentence stays.
-fn is_the_editor_talking_to_itself(message: &str) -> bool {
+pub(crate) fn is_the_editor_talking_to_itself(message: &str) -> bool {
     message.contains("Couldn't find the given section") && message.contains("key \"state\"")
 }
 

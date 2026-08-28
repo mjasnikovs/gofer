@@ -502,6 +502,61 @@ fn addon_command_behind(domain: &str, op: &str) -> Option<String> {
     }
 }
 
+/// `path` names a file everywhere but one operation, and that one says so.
+///
+/// Counted over the whole catalogue: 29 operations declare a `path`, and in 28 of them it is a file
+/// — a scene, a script, a resource. In `godot_runtime inspect_node` it is a **node**, and
+/// `godot_node` calls that same thing `node`. So a model reading `path` has 28 reasons to write a
+/// file and one operation where that is wrong.
+///
+/// It writes `node` there instead: **seven times across seven live runs**, every one refused with
+/// `godot_runtime inspect_node has no \`node\` parameter`, every one corrected on the next call.
+/// That is the most persistent unrepaired shape in the recorded corpus, and repairing it is a
+/// guess — "one required parameter missing, one stray of the same kind" renames `colour` onto
+/// `name` sooner or later. What is not a guess is saying, in the description the model reads before
+/// it writes anything, that this one is the exception.
+///
+/// This test is what stops the exception growing a second member quietly. A new operation whose
+/// `path` is a node either says so in its note or fails here.
+#[test]
+fn the_one_path_that_names_a_node_says_so() {
+    let mut noted = Vec::new();
+    let mut bare = Vec::new();
+    for domain in CATALOG {
+        for operation in domain.operations {
+            let Some(params) = crate::tool_params::params_of(domain.name, operation.op) else {
+                continue;
+            };
+            for param in params {
+                if param.name != "path" {
+                    continue;
+                }
+                let where_ = format!("{}.{}", domain.name, operation.op);
+                // Backticked, because `tool_repair`'s synonym rename reads the note for exactly
+                // this — `` `node` `` in a required parameter's note is what moves a key called
+                // `node` onto it. A note rewritten to say "node" in prose would leave that rename
+                // silently dead, and this test green.
+                if param.note.contains("`node`") {
+                    noted.push(where_);
+                } else {
+                    bare.push(where_);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        noted,
+        vec!["godot_runtime.inspect_node".to_owned()],
+        "`path` names a node in exactly one operation, and that one has to say so in the \
+         description the model reads. Anything else here is a second exception nobody wrote down."
+    );
+    assert!(
+        bare.len() > 20,
+        "the other twenty-eight are files and say nothing, which is what makes the one worth \
+         saying: {bare:?}"
+    );
+}
+
 /// Every parameter the addon reads has to be named where the model reads about it, and every
 /// parameter named there has to be one the addon reads.
 ///
@@ -1026,4 +1081,39 @@ fn mutating_operations_document_the_revision_they_require() {
             crate::tool_params::signature(params)
         );
     }
+}
+
+/// The one line the log summary promises is never about the project.
+///
+/// `is_the_editor_talking_to_itself` drops it from the errors a failed call carries, and
+/// `godot_logs read` still answers with it because that page is raw. Thirteen recorded runs carry
+/// it, forty-five times, and one spent 66 seconds and a sub-agent call working out what in the
+/// project was calling `ConfigFile.get_value` — nothing was; it is the editor restoring its script
+/// tabs. The summary now says so, and the two have to name the same line or the sentence is
+/// pointing at nothing.
+#[test]
+fn the_line_the_editor_talks_to_itself_with_is_the_one_the_summary_names() {
+    let summary = crate::tool_params::operation_of("godot_logs", "read")
+        .expect("godot_logs read")
+        .summary;
+    for named in ["`state`", "script tabs", "editorError"] {
+        assert!(
+            summary.contains(named),
+            "the summary must name {named}: {summary}"
+        );
+    }
+    // And the filter really drops the line the summary describes.
+    assert!(
+        crate::godot_session::is_the_editor_talking_to_itself(
+            "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \"state\", \
+             and no default was given."
+        ),
+        "the filter and the sentence have to be about one line"
+    );
+    assert!(
+        !crate::godot_session::is_the_editor_talking_to_itself(
+            "ERROR: Failed loading resource: res://scenes/level_one.tscn."
+        ),
+        "and a real project error is not it"
+    );
 }
