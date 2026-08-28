@@ -33,6 +33,9 @@ function shapeOf(message) {
 
 const failures = new Map()
 const runs = []
+/** Per refusal code: how many there were, how many were followed by a call that worked, and how
+ * many by the same code again. */
+const recovery = new Map()
 
 for (const name of traces) {
     const run = name.replace(/\.jsonl$/u, '')
@@ -43,6 +46,8 @@ for (const name of traces) {
     let fresh = 0
     let cached = 0
     let requests = 0
+    /** Every call of this run in order, as `[code or null, wasRefused]`. */
+    const sequence = []
     for (const line of readFileSync(join(directory, name), 'utf8').trim().split('\n')) {
         let record
         try {
@@ -63,6 +68,7 @@ for (const name of traces) {
         const output =
             typeof event.output === 'string' ? event.output : JSON.stringify(event.output ?? '')
         answered += output.length
+        sequence.push([/^([a-z_]+):/u.exec(output)?.[1] ?? null, Boolean(event.isError)])
         if (!event.isError) continue
         refused += 1
         const shape = shapeOf(output)
@@ -75,6 +81,17 @@ for (const name of traces) {
         row.occurrences += 1
         row.runs.add(run)
         failures.set(shape, row)
+    }
+    // What the caller's very next call did. The closest thing this corpus holds to whether a
+    // refusal's sentence worked: a message that says what to do next is one the next call acts on.
+    for (const [index, [code, wasRefused]] of sequence.entries()) {
+        if (!wasRefused || code === null) continue
+        const row = recovery.get(code) ?? {total: 0, recovered: 0, repeated: 0}
+        row.total += 1
+        const next = sequence[index + 1]
+        if (next && !next[1]) row.recovered += 1
+        else if (next && next[0] === code) row.repeated += 1
+        recovery.set(code, row)
     }
     if (calls > 0) runs.push({run, calls, refused, answered, requests, fresh, cached})
 }
@@ -102,5 +119,20 @@ for (const row of ranked) {
     console.log(
         `${String(row.runs.size).padStart(2)} runs  ${String(row.occurrences).padStart(3)}x  `
             + `${row.tool.padEnd(18)} ${row.sample.slice(0, 120).replace(/\n/gu, ' ')}`
+    )
+}
+
+// Ranked worst first, because a code every caller recovers from is one nobody has to work on.
+console.log("\nrefusal codes, by what the caller's next call did\n")
+console.log('code'.padEnd(24), 'n'.padStart(4), 'next ok'.padStart(8), 'same again'.padStart(11))
+const scored = [...recovery.entries()]
+    .filter(([, row]) => row.total >= 3)
+    .sort((a, b) => a[1].recovered / a[1].total - b[1].recovered / b[1].total)
+for (const [code, row] of scored) {
+    console.log(
+        code.padEnd(24),
+        String(row.total).padStart(4),
+        `${Math.round((100 * row.recovered) / row.total)}%`.padStart(8),
+        `${Math.round((100 * row.repeated) / row.total)}%`.padStart(11)
     )
 }

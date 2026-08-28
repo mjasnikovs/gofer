@@ -325,6 +325,20 @@ pub(crate) fn questions_open() -> bool {
     QUESTIONS.is_open()
 }
 
+/// The questions currently waiting for an answer, for a suite that has no window to ask in.
+///
+/// The twin of [`crate::approvals::pending_approvals`], and it exists for the same reason: a live
+/// turn has no user, and everything a turn can stop and wait for has to be answerable by the run
+/// itself. Approvals had that half and questions did not, so a turn that asked one waited out
+/// `QUESTION_TIMEOUT` — **thirty minutes**, in a harness that answers approvals in milliseconds.
+/// One live run spent them, on a task whose fixture did not hold what the task described.
+///
+/// Absent from every non-test build.
+#[cfg(all(test, feature = "godot-acceptance"))]
+pub fn pending_questions() -> Vec<String> {
+    QUESTIONS.waiting()
+}
+
 /// An identifier for a question nobody has asked yet.
 ///
 /// Handed out here rather than minted by the caller so it cannot collide with one already waiting,
@@ -708,6 +722,7 @@ fn reply_answer(
     json!({
         "questionId": question_id,
         "skipped": reply.skipped,
+        "note": skipping_is_a_decision(reply),
         "approved": reply.approved,
         "again": reply.again,
         "answer": reply.text,
@@ -717,6 +732,26 @@ fn reply_answer(
         "blocked": reply.blocked,
         "unresolved": unresolved,
     })
+}
+
+/// What a skip means, in the answer rather than only in this file's comments.
+///
+/// [`ask_user`] says it at length — "a skip is a decision, the user read the question and left it
+/// to the implementer" — and until now the model was told it as `"skipped": true` and nothing else.
+/// A boolean with no word beside it is a boolean a reader has to guess at, and one live turn
+/// guessed the other way: asked whether to delete a script it had just unregistered, it was skipped,
+/// and it finished with "`scripts/old_save_system.gd` remains orphaned because file-deletion
+/// approval was not provided". A skip is not a refusal, and nothing had refused it.
+///
+/// Nothing is loosened by saying so. What a caller may actually do is decided by the approval gate,
+/// which is a different registry with a different answer — a skipped question cannot make a
+/// `godot_resource delete` happen, and this sentence does not claim it can.
+fn skipping_is_a_decision(reply: &Reply) -> Option<&'static str> {
+    reply.skipped.then_some(
+        "The user read this and left the decision to you. Nothing was refused and nothing is \
+         blocked by it: choose what you judge best, do it, and say which way you went. Anything \
+         that needs their permission asks for it separately.",
+    )
 }
 
 /// Keeps the revision the user reacted to, so what was agreed outlives the turn that agreed it.
@@ -1823,6 +1858,44 @@ mod tests {
         assert_eq!(skipped["sketch"], Value::Null);
         let wordy = reply_answer("question-1", &[], &Reply::default(), Vec::new());
         assert_eq!(wordy["sketch"], Value::Null);
+    }
+
+    /// A skip says what it means, and an answer says nothing extra.
+    ///
+    /// This file has always said a skip is a decision — "the user read the question and left it to
+    /// the implementer" — in a doc comment the model never sees. What it saw was `"skipped": true`
+    /// and no words, and one live turn read that as a refusal: skipped on whether to delete a script
+    /// it had just unregistered, it finished with "remains orphaned because file-deletion approval
+    /// was not provided". Nothing had refused it.
+    #[test]
+    fn a_skip_carries_the_sentence_saying_what_a_skip_is() {
+        let skipped = reply_answer(
+            "question-1",
+            &[],
+            &Reply {
+                skipped: true,
+                ..Reply::default()
+            },
+            Vec::new(),
+        );
+        let note = skipped["note"].as_str().expect("a skip says what it is");
+        assert!(note.contains("left the decision to you"), "{note}");
+        assert!(note.contains("Nothing was refused"), "{note}");
+        // And it does not claim to have unlocked anything: what a caller may do is the approval
+        // gate's to answer, and that is a different registry.
+        assert!(note.contains("permission asks for it separately"), "{note}");
+
+        // An answer the user actually wrote carries no note at all — the words are the answer.
+        let said = reply_answer(
+            "question-1",
+            &[],
+            &Reply {
+                text: "use a pause menu".to_owned(),
+                ..Reply::default()
+            },
+            Vec::new(),
+        );
+        assert_eq!(said["note"], Value::Null, "{said}");
     }
 
     /**

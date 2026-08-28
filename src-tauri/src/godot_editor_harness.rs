@@ -315,6 +315,19 @@ pub(crate) fn copy_tree(source: &Path, target: &Path) {
 /// into the returned worktree before starting the editor, so the editor's first import scan sees
 /// it. What is deliberately *not* here is any of those additions: the fixture stays free of a
 /// parse error, because the Node journeys scan editor output for script errors.
+///
+/// **The addon is dropped, and the reason is a second suite.** `scripts/godot-test.mjs` copies
+/// `protocol.gd` and `params.gd` into `fixtures/godot-project/addons/gofer` for the length of its
+/// run and removes them afterwards — GDScript resolves a `preload` against `res://` at parse time,
+/// so the two have to sit where the shipped addon sits before either can be loaded at all. That
+/// directory is this function's source, so a run that copies it while those seconds are passing
+/// gets half an addon nothing here staged, and the staging that follows refuses it:
+/// `addon_unmanaged: addons/gofer exists but was not installed by Gofer`. One live turn died that
+/// way, five seconds in.
+///
+/// `npm run check` cannot reach it — its Godot lane runs both suites one after the other — and a
+/// developer running `npm run test:godot` beside a live turn can. A worktree must hold the addon
+/// this run staged and never one another suite left lying about, so it starts with none.
 pub(crate) fn fixture_worktree(directory: &TempDir) -> PathBuf {
     let worktree = directory.path().join("worktree");
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -322,7 +335,17 @@ pub(crate) fn fixture_worktree(directory: &TempDir) -> PathBuf {
         .join("fixtures")
         .join("godot-project");
     copy_tree(&fixture, &worktree);
+    without_a_foreign_addon(&worktree);
     crate::paths::canonical(&worktree).expect("canonical worktree")
+}
+
+/// Takes away an addon this run did not stage, leaving everything else where it is.
+///
+/// Split out of [`fixture_worktree`] so the rule can be stated against a directory that actually
+/// holds one — the fixture in git does not, and a check that passes because the source happens to
+/// be clean is not a check.
+fn without_a_foreign_addon(worktree: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(worktree.join("addons"));
 }
 
 /// Which transports the editor should open, and whether its output feeds the session log.
@@ -847,5 +870,38 @@ impl Session {
         self.try_call(command, params, expected_revision)
             .err()
             .unwrap_or_else(|| panic!("{command} was expected to fail"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A worktree holds the addon its own run staged, never one another suite left in the fixture.
+    ///
+    /// `scripts/godot-test.mjs` copies `protocol.gd` and `params.gd` into
+    /// `fixtures/godot-project/addons/gofer` for the length of its run — GDScript resolves a
+    /// `preload` against `res://` at parse time, so they have to sit where the shipped addon sits.
+    /// That directory is [`fixture_worktree`]'s source. A live turn copied it mid-run and died five
+    /// seconds later on `addon_unmanaged: addons/gofer exists but was not installed by Gofer`.
+    #[test]
+    fn a_worktree_starts_with_no_addon_but_its_own() {
+        let directory = TempDir::new().expect("temporary directory");
+        let worktree = directory.path().join("worktree");
+        let left_behind = worktree.join("addons").join("gofer");
+        std::fs::create_dir_all(&left_behind).expect("another suite's staged addon");
+        std::fs::write(left_behind.join("params.gd"), "extends Node\n").expect("its half");
+        std::fs::write(worktree.join("project.godot"), "config_version=5\n").expect("the project");
+
+        without_a_foreign_addon(&worktree);
+
+        assert!(
+            !worktree.join("addons").exists(),
+            "an addon this run did not stage must not survive into the worktree"
+        );
+        assert!(
+            worktree.join("project.godot").exists(),
+            "and nothing else may go with it"
+        );
     }
 }

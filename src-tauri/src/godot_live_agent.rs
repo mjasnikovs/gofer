@@ -64,7 +64,7 @@ fn live_worktree(directory: &TempDir) -> PathBuf {
     worktree
 }
 
-/// Answers the approval prompts a turn raises, because nothing else here can.
+/// Answers the prompts a turn raises, because nothing else here can.
 ///
 /// `godot_resource delete` and `move`, addon and plugin changes, and machine-wide editor settings
 /// all stop and wait for the user — and there is no user in a live turn. `APPROVAL_TIMEOUT` is 300
@@ -75,6 +75,18 @@ fn live_worktree(directory: &TempDir) -> PathBuf {
 /// Allowed, not refused: the point of a live turn is to watch the agent work, and the worktree it
 /// works in is a temporary directory this file made. `GOFER_LIVE_APPROVE=refuse` answers no
 /// instead, for a run about what the agent does when it is told no.
+///
+/// **A question is the other half, and it used to cost half an hour.** `ask_user` waits on
+/// `QUESTION_TIMEOUT`, which is thirty minutes, and this loop answered only approvals — so a turn
+/// that asked anything stopped dead until that ran out and then carried on with nothing. Measured:
+/// `sol-12-refactor` asked "should you provide the intended player project, or should I add a new
+/// player implementation here?" at its sixth call, against a fixture that has no player script, and
+/// the run had thirty minutes of nothing left in it.
+///
+/// A skip rather than an answer, because a skip is what this run actually means: the question was
+/// read and the decision is left to the implementer. Inventing prose would put words in a user's
+/// mouth and make the turn a measurement of this file's opinions. See `respond_question` — a reply
+/// with nothing in it is a skip either way, and saying so is clearer than relying on that.
 fn answer_the_prompts_nobody_is_watching(finished: Arc<std::sync::atomic::AtomicBool>) {
     let allow = std::env::var("GOFER_LIVE_APPROVE").as_deref() != Ok("refuse");
     std::thread::spawn(move || {
@@ -82,6 +94,19 @@ fn answer_the_prompts_nobody_is_watching(finished: Arc<std::sync::atomic::Atomic
             for asked in crate::approvals::pending_approvals() {
                 let _ = crate::approvals::respond(&asked, allow);
                 println!("live approval {asked} -> {allow}");
+            }
+            for asked in crate::ask::pending_questions() {
+                let skipped = crate::ask::QuestionResponse {
+                    question_id: asked.clone(),
+                    answer: None,
+                    picked: None,
+                    blocked: Vec::new(),
+                    skipped: true,
+                    approved: false,
+                    again: false,
+                };
+                let _ = crate::ask::respond_question(skipped);
+                println!("live question {asked} -> skipped");
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
@@ -127,6 +152,13 @@ fn named_fixture(named: &str) -> PathBuf {
 /// Failures are ignored on purpose. This is the harness making its fixture look like a real
 /// checkout, and a machine without `git` should still be able to run a turn.
 fn make_it_a_repository(worktree: &std::path::Path) {
+    // A fixture that is itself a kept worktree brings its own `.git` along — `copy_tree` copies
+    // everything — and `git init` on a directory that already has one keeps the history and stays
+    // on whatever branch it was left on. `loc-41-modify`, run against `loc-31-unicode`'s worktree,
+    // therefore opened on a branch called `gofer/task-01a0461b2099` and concluded that the scene it
+    // was looking at "existed only on the sibling branch". The file was in front of it the whole
+    // time. One commit, no foreign history, which is what the message below already promises.
+    let _ = std::fs::remove_dir_all(worktree.join(".git"));
     let git = |arguments: &[&str]| {
         let _ = std::process::Command::new("git")
             .args(arguments)
@@ -175,6 +207,67 @@ fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
         .build()
         .expect("build mock webview");
     app
+}
+
+/// A fixture that is already a repository starts the turn on one commit of its own.
+///
+/// A kept worktree used as the next run's fixture brings its `.git` with it, and `git init` on a
+/// directory that has one keeps the branch and the history. The turn then opens on a branch named
+/// after somebody else's task, which is what `loc-41-modify` reported back as the reason it could
+/// not find a file that was sitting in front of it.
+#[test]
+fn a_fixture_that_carries_its_own_history_starts_the_turn_without_it() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = directory.path().join("worktree");
+    std::fs::create_dir_all(&worktree).expect("the worktree");
+    std::fs::write(worktree.join("kept.txt"), "from the run before\n").expect("a file");
+    let git = |arguments: &[&str]| {
+        std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(&worktree)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git runs");
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.email", "before@gofer.test"]);
+    git(&["config", "user.name", "The run before"]);
+    git(&["checkout", "--quiet", "-b", "gofer/task-01a0461b2099"]);
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "what the run before did"]);
+
+    make_it_a_repository(&worktree);
+
+    let read = |arguments: &[&str]| -> String {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(&worktree)
+            .output()
+            .expect("git runs");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+    assert_eq!(
+        read(&["log", "--oneline"]),
+        {
+            let one = read(&["log", "--oneline", "-1"]);
+            one
+        },
+        "one commit, not the run before's as well"
+    );
+    assert!(
+        read(&["log", "-1", "--format=%s"]).contains("as the turn found it"),
+        "and it is this turn's own"
+    );
+    assert!(
+        !read(&["branch", "--show-current"]).starts_with("gofer/task-"),
+        "on a branch of its own rather than somebody else's task"
+    );
+    // What the fixture carried is still there. Only the history went.
+    assert!(
+        worktree.join("kept.txt").exists(),
+        "the files are the fixture"
+    );
 }
 
 #[test]
@@ -426,6 +519,58 @@ fn keep_the_worktree(worktree: &std::path::Path, keep: &std::path::Path) {
 /// retry was pointed at the same `GOFER_LIVE_KEEP` directory, and `copy_tree` overwrites without
 /// deleting. The kept tree then held the dead run's script beside the live run's `project.godot`
 /// and `.git`, which reads exactly like an agent whose verified edit never reached disk.
+/// A question nobody is watching is skipped, rather than waited out for half an hour.
+///
+/// The failure this pins cost a live run its whole budget. `sol-12-refactor` asked "should you
+/// provide the intended player project, or should I add a new player implementation here?" at its
+/// sixth call, against a fixture that has no player script — and this loop answered approvals only,
+/// so the turn stopped there with `QUESTION_TIMEOUT`'s thirty minutes ahead of it.
+///
+/// The wait is bounded here rather than joined, because the regression is a question that is never
+/// answered: joined, this test would reproduce the defect by hanging for half an hour instead of
+/// failing.
+#[test]
+fn a_question_nobody_is_watching_is_skipped_rather_than_waited_out() {
+    let _gate = crate::approvals::serialize_gate_tests();
+    let app = mock_app();
+    crate::ask::open_user_prompts();
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    answer_the_prompts_nobody_is_watching(Arc::clone(&finished));
+
+    let handle = app.handle().clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let answered = crate::ask::ask_question(
+            &handle,
+            "question-nobody-is-watching",
+            "Which of these did you mean?",
+            Vec::new(),
+            Vec::new(),
+            "there is nobody to ask",
+            None,
+            false,
+        );
+        let _ = sender.send(answered);
+    });
+
+    let answered = receiver
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("a question nobody is watching is answered by the run itself");
+    finished.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::ask::cancel_user_prompts();
+
+    // A skip, not prose: the question was read and the decision is left to the implementer.
+    // Inventing an answer would make the turn a measurement of this file's opinions.
+    match answered {
+        crate::ask::Answer::Answered(reply) => assert!(reply.skipped, "{reply:?}"),
+        other => panic!("the run must answer its own question, and it answered {other:?}"),
+    }
+}
+
+/// A kept worktree holds one acceptance run and not two.
+///
+/// Its own paragraph again: the comment about `GOFER_LIVE_KEEP` and `copy_tree` was left heading
+/// `a_question_nobody_is_watching_is_skipped_rather_than_waited_out`, which was written in above it.
 #[test]
 fn a_kept_worktree_holds_one_acceptance_run_and_not_two() {
     let source = TempDir::new().expect("a worktree to keep");

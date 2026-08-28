@@ -228,6 +228,21 @@ impl AiSettings {
             if let Some(base_url) = base_url {
                 connection.base_url = base_url;
             }
+            // Named before the level is applied, because naming a model replaces the whole row and
+            // the level is the one fact on it a run chose.
+            connection.model.name.clone_from(&model);
+            if let Some(facts) = shipped_model_facts(driver, &model) {
+                connection.model.name = facts.name;
+                connection.model.context_window = facts.context_window;
+                connection.model.max_tokens = facts.max_tokens;
+                connection.model.reasoning = facts.reasoning;
+                connection.model.supports_reasoning_effort = facts.supports_reasoning_effort;
+                connection.model.reasoning_mandatory = facts.reasoning_mandatory;
+                connection.model.thinking_levels = facts.thinking_levels;
+                connection.model.input = facts.input;
+                connection.model.off_effort = facts.off_effort;
+            }
+            connection.model.id = model;
             if let Some(level) = thinking_level {
                 // A named level has to reach the wire, and for a llama.cpp host it only reaches it
                 // as a chat-template argument: the server takes `chat_template_kwargs`, ignores
@@ -255,8 +270,6 @@ impl AiSettings {
                 }
                 connection.model.thinking_level = level;
             }
-            connection.model.name.clone_from(&model);
-            connection.model.id = model;
         }
         settings
     }
@@ -1197,6 +1210,34 @@ fn cerebras_model_option(model: &CerebrasModel) -> AiModelOption {
         input: model.input.iter().map(|&s| s.to_owned()).collect(),
         off_effort: model.off_effort.map(str::to_owned),
     }
+}
+
+/// What Gofer already knows about a model an acceptance run named, where it knows anything.
+///
+/// `served_by` starts from the shipped settings, so every fact on the live connection is the seed
+/// model's until something replaces it — and only the id and the label ever were. In the
+/// application that gap does not exist: a model arrives from a picker filled by `chatgpt_models`,
+/// `openrouter_model_options` or `cerebras_model_options`, and the whole row travels with it. A
+/// run names a bare string and has no picker to have chosen from.
+///
+/// What that cost: every Cerebras turn in this repo's measurement log ran as `gemma-4-31b` and
+/// inherited `CEREBRAS_MODELS[0]` — gpt-oss-120b's text-only input, its 131,000-token window and
+/// its missing `offEffort`. Gemma reads images, so each captured frame reached the model as
+/// `[a image/png you cannot see: this model takes text only]`, and `off` sent no effort field
+/// where that model has a word for it.
+///
+/// Cerebras is the only driver with an answer here, and that is the point rather than an omission:
+/// its endpoint publishes no capabilities, so the table in this file is the catalogue. The other
+/// three read theirs off the wire, which an offline `served_by` cannot do.
+#[cfg(all(test, feature = "godot-acceptance"))]
+fn shipped_model_facts(driver: AiConnectionType, id: &str) -> Option<AiModelOption> {
+    if driver != AiConnectionType::Cerebras {
+        return None;
+    }
+    CEREBRAS_MODELS
+        .iter()
+        .find(|known| known.id == id)
+        .map(cerebras_model_option)
 }
 
 /// The Cerebras models this key can reach, which is the live list narrowed to the ones Gofer knows.
@@ -3927,6 +3968,81 @@ mod tests {
             .expect("the OpenRouter connection is live");
         assert_eq!(profile.base_url, OPENROUTER_BASE_URL);
         assert_eq!(profile.model.id, "stealth/ox-alpha");
+    }
+
+    /// Naming a model a run wants replaces the whole row, not the two strings a report prints.
+    ///
+    /// The failure this pins is measured, and it is in this repo's own log: every Cerebras turn
+    /// recorded here ran as `gemma-4-31b` and carried `CEREBRAS_MODELS[0]`'s facts. Gemma reads
+    /// images and gpt-oss-120b does not, so each captured frame reached the model as
+    /// `[a image/png you cannot see: this model takes text only]` — the one thing a run watching a
+    /// game cannot afford to get wrong — and `off` sent no effort field where Gemma has a word for
+    /// it. Nothing about the report said so, because the id and the name were right.
+    ///
+    /// The two shipped models differ on every fact asserted below, which is what makes the seed
+    /// visible. See `shipped_model_facts`.
+    #[cfg(feature = "godot-acceptance")]
+    #[test]
+    fn a_named_model_brings_the_facts_shipped_with_it() {
+        let seed = AiSettings::served_by(
+            AiConnectionType::Cerebras,
+            None,
+            "gpt-oss-120b".to_owned(),
+            None,
+        );
+        let profile = seed.connection().expect("the Cerebras connection is live");
+        assert_eq!(profile.model.input, vec!["text".to_owned()]);
+        assert_eq!(profile.model.off_effort, None);
+        assert!(profile.model.reasoning_mandatory);
+        assert_eq!(profile.model.context_window, 131_000);
+
+        let other = AiSettings::served_by(
+            AiConnectionType::Cerebras,
+            None,
+            "gemma-4-31b".to_owned(),
+            None,
+        );
+        let profile = other.connection().expect("the Cerebras connection is live");
+        assert_eq!(
+            profile.model.input,
+            vec!["text".to_owned(), "image".to_owned()],
+            "a model with eyes is told it has them"
+        );
+        assert_eq!(profile.model.off_effort.as_deref(), Some("none"));
+        assert!(!profile.model.reasoning_mandatory);
+        assert_eq!(profile.model.context_window, 131_072);
+        assert_eq!(profile.model.name, "Gemma 4 31B IT");
+
+        // The level a run named still wins. It is the one fact on the row the run chose itself,
+        // and the catalogue's own three efforts would put it back out of pi-ai's reach — the clamp
+        // `served_by` already writes at length about.
+        let asked = AiSettings::served_by(
+            AiConnectionType::Cerebras,
+            None,
+            "gemma-4-31b".to_owned(),
+            Some("high".to_owned()),
+        );
+        let profile = asked.connection().expect("the Cerebras connection is live");
+        assert_eq!(profile.model.thinking_levels, vec!["high".to_owned()]);
+        assert_eq!(profile.model.thinking_level, "high");
+        assert_eq!(
+            profile.model.input,
+            vec!["text".to_owned(), "image".to_owned()]
+        );
+
+        // A model the table has never seen keeps the seed's facts, because nothing knows better.
+        // The run still reaches it: the endpoint is the authority on what a key may ask for.
+        let unknown = AiSettings::served_by(
+            AiConnectionType::Cerebras,
+            None,
+            "something-unshipped".to_owned(),
+            None,
+        );
+        let profile = unknown
+            .connection()
+            .expect("the Cerebras connection is live");
+        assert_eq!(profile.model.id, "something-unshipped");
+        assert_eq!(profile.model.name, "something-unshipped");
     }
 
     #[test]
