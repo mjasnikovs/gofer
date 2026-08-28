@@ -197,8 +197,16 @@ describe('packaged desktop application', () => {
         // which half failed. The first Windows run to reach this line had no Retry and no evidence,
         // so the state the assertion reads is printed with it: whether the stop was accepted, and
         // what the stored conversation looks like from the backend's own side.
+        // A minute, against the suite's 15-second default, and the number is measured rather than
+        // picked. Two Windows runs failed here at exactly 15 seconds and the diagnostic below then
+        // found the button already drawn and the stored message already `aborted` — so the stop had
+        // landed and the wait was simply short. The same journey takes under seven seconds end to
+        // end on Linux. What has not been explained is why: both Windows runs also logged
+        // `WebDriverError: The request timed out when running "execute/sync"` about twenty seconds
+        // in, which stalls every command queued behind it, and that stall is the thing still worth
+        // chasing. This wait is long enough to survive it, not an excuse not to.
         try {
-            await expect(browser.$('button*=Retry')).toBeDisplayed()
+            await expect(browser.$('button*=Retry')).toBeDisplayed({wait: 60_000})
         } catch (failure) {
             const chat = await command<{messages: {text: string; status?: string}[]}>(
                 'load_chat',
