@@ -340,6 +340,47 @@ static func decode_items(payload: Variant) -> Dictionary:
         items.append(item["value"])
     return decoded(items)
 
+## The tag a value of a given Godot type is written under.
+##
+## Every entry is held to `decode` itself by `protocol_test.gd`, so a tag named here is one the
+## codec really reads. Only the types a property commonly declares are listed: a type with no tag
+## gains no sentence rather than an invented one.
+const TAG_FOR_TYPE := {
+    TYPE_BOOL: "bool",
+    TYPE_INT: "int",
+    TYPE_FLOAT: "float",
+    TYPE_STRING: "string",
+    TYPE_VECTOR2: "vector2",
+    TYPE_VECTOR2I: "vector2i",
+    TYPE_VECTOR3: "vector3",
+    TYPE_VECTOR3I: "vector3i",
+    TYPE_VECTOR4: "vector4",
+    TYPE_VECTOR4I: "vector4i",
+    TYPE_QUATERNION: "quaternion",
+    TYPE_COLOR: "color",
+    TYPE_RECT2: "rect2",
+    TYPE_RECT2I: "rect2i",
+    TYPE_OBJECT: "resource",
+}
+
+## What a value written under the wrong tag is told, past the two type names.
+##
+## `expected Color, received String` is true and says nothing about the one thing that would have
+## worked. `loc-21-platformer` wrote `{"type": "string", "value": "#5c8a3c"}` for two ColorRects:
+## the colour was right, the tag was not, and `{"type": "color", "value": "#5c8a3c"}` takes that
+## exact text — `Color.from_string` reads names and hex, which is why the `color` arm above accepts
+## a string at all. So the colour case names the value back, and every other type names its tag.
+static func under_the_tag_it_takes(declared: int, value: Variant) -> String:
+    if not TAG_FOR_TYPE.has(declared):
+        return ""
+    var tag: String = TAG_FOR_TYPE[declared]
+    if declared == TYPE_COLOR and typeof(value) in [TYPE_STRING, TYPE_STRING_NAME]:
+        return (
+            '. The colour is right and the tag is not: send {"type": "color", "value": "%s"} —'
+            + " a colour tag reads a name or a hex string as well as four numbers."
+        ) % str(value)
+    return '. This property takes a %s: send {"type": "%s", "value": …}.' % [type_string(declared), tag]
+
 ## Fits a decoded value onto the type a property or setting was declared with.
 ##
 ## The wire has one array tag, so a value the engine declared as a packed array is written back as
@@ -389,7 +430,14 @@ static func fit_to_declared_type(value: Variant, declared: int) -> Dictionary:
             )
         return decoded(type_convert(value, declared))
     return decode_failed(
-        "expected %s, received %s" % [type_string(declared), type_string(typeof(value))]
+        (
+            "expected %s, received %s%s"
+            % [
+                type_string(declared),
+                type_string(typeof(value)),
+                under_the_tag_it_takes(declared, value)
+            ]
+        )
     )
 
 ## Rebuilds a Dictionary from the `{"key": ..., "value": ...}` entries `encode` writes.

@@ -379,29 +379,263 @@ static func made_unique(wanted: Variant, found: Variant) -> String:
         + "rather than refusing the clash. Rename or remove that one first, or choose another name."
     ) % asked
 
-## The properties a caller reaches for that no scene can hold, and the ones that do the same job.
+## The properties a caller reaches for that read back as something else, and the way to get what
+## they wanted.
 ##
-## `anchors_preset` is the inspector's own control rather than a value a node stores. Measured on a
-## real 4.7.2 editor: a `Panel` under a `Control`, a `VBoxContainer`, a `Panel` inside one, and a
-## preset out of range — every write reads back 0, and the four anchors under it do not move either.
-## Setting those four directly works exactly as asked. So the write is honestly refused; what was
-## missing is the sentence saying which four to write instead.
+## `anchors_preset` is the one everybody reaches for, because a full-screen panel is the commonest
+## thing anyone asks a `Control` for. Watched in four live turns, all of them laying out a UI.
 ##
-## Watched in three live turns, all of them laying out a UI: a full-screen panel is the commonest
-## thing anyone asks a Control for, and this is the property everybody reaches for to get one.
+## **It is not the inspector's own control, and a scene does store it.** That is what this sentence
+## used to say, and it was measured on children only. Measured again on a real 4.7.2 editor, root
+## and child both:
+##
+## * A scene root takes the write, reads back 15, and the saved `.tscn` holds
+##   `anchors_preset = 15` with `anchor_right = 1.0`, `anchor_bottom = 1.0` under it. Godot gives a
+##   `Control` with no `Control` parent `layout_mode = 3`, uncontrolled, and the preset applies.
+## * A child of a plain `Control` starts at `layout_mode = 0`, position, where the preset has
+##   nowhere to go: it reads back 0 and the anchors under it do not move.
+## * The same child, sent `layout_mode = 1` first, takes the same write, reads back 15, and is
+##   saved with it.
+## * A child of a **Container** cannot be put there at all: `layout_mode` is held at 2 and a write
+##   of 1 reads back 2. `anchors_preset` reads back 0 there whatever is tried. Individual anchors
+##   are still stored, and `size_flags_horizontal` is what the container actually reads.
+##
+## The last of those four is the one this sentence got wrong on its first writing, which is the
+## same mistake it was replacing: measured on children of a plain Control and generalised to every
+## child. A caller inside a container, told to "set layout_mode to 1 first", is told to make a write
+## that cannot take either.
+##
+## So the refusal is still right — that write did not take — and what it says about *why* has to be
+## the fact rather than the guess, because a model told "this can never take" stops looking for the
+## one line that makes it take, and a model told the wrong line spends a call on it.
 const NO_SCENE_HOLDS := {
     "anchors_preset":
     (
-        " `anchors_preset` is the editor inspector's own control and no scene stores it, so this"
-        + " write can never take. Set anchor_left, anchor_top, anchor_right and anchor_bottom"
-        + " instead — 0 and 1 are the edges, so 0, 0, 1, 1 is the whole parent — with offset_right"
-        + " and offset_bottom at 0 to sit flush."
+        " `anchors_preset` only applies to a Control whose `layout_mode` is anchors, and reads back"
+        + " 0 when it is not. A scene root is already there: Godot gives a Control with no Control"
+        + " parent layout_mode 3, uncontrolled, and stores the preset. A Control under a plain"
+        + " Control starts at 0, position — set `layout_mode` to 1 first and the same write takes."
+        + " A Control inside a Container cannot be put there at all: the container holds"
+        + " `layout_mode` at 2 and places the node itself, so size that one with"
+        + " size_flags_horizontal, size_flags_vertical and custom_minimum_size. Where anchors do"
+        + " apply, setting anchor_left, anchor_top, anchor_right and anchor_bottom works without"
+        + " the preset — 0 and 1 are the edges, so 0, 0, 1, 1 is the whole parent — with"
+        + " offset_right and offset_bottom at 0 to sit flush."
+    ),
+    # The property the sentence above tells a caller to set, which most nodes will not take either.
+    # Measured on 4.7.2, every shape, every value: a Control with no Control parent holds 3 whatever
+    # is written; a Control inside a Container holds 2 whatever is written; a Control under a plain
+    # Control takes 0 and 1, and 2 and 3 there fall back to 0. So the parent decides it and the
+    # write only reports whether the caller agreed.
+    "layout_mode":
+    (
+        " `layout_mode` says where a Control already sits, and its parent decides it — a write"
+        + " that disagrees is dropped with no error. A Control with no Control parent is held at"
+        + " 3, uncontrolled. A Control inside a Container is held at 2, container, and the"
+        + " container places it: size that one with size_flags_horizontal, size_flags_vertical and"
+        + " custom_minimum_size. Only a Control under a plain Control takes a write, and only 0,"
+        + " position, or 1, anchors — 2 and 3 there fall back to 0. Moving the node to a different"
+        + " parent with node.reparent is what changes this; writing the property again is not."
     ),
 }
 
-static func instead_of(property: String, wanted: Variant, found: Variant) -> String:
+## What follows the text of a dialog the editor is waiting on, and it is not the same sentence twice.
+##
+## `_respond_dialog_open` answers two situations with one message. Before the launch — an editor
+## already asking something when `run` arrives — **nothing has started**. In the sweep, after
+## `_runtime_play()` has been pressed and the editor turned the launch into a question, **the game
+## is queued behind the dialog** and answering it starts one.
+##
+## Watched on `loc-06-recover`: four dialogs, four `session.answer_dialog` calls, and then a `run`
+## answered `already_running` — because the launch behind the last dialog had gone through while
+## the caller thought its `run` had been refused. Neither did the message name the call that
+## answers a dialog, which every caller needs and this one had to find for itself.
+static func after_a_dialog(launch_is_waiting: bool) -> String:
+    if launch_is_waiting:
+        return (
+            " The game was already asked to start and is waiting behind this dialog: answer it with"
+            + " session.answer_dialog and it starts by itself. Running it again would ask for a"
+            + " second one."
+        )
+    return (
+        " Nothing has started. Answer it with session.answer_dialog — the buttons do what they say —"
+        + " and then send this again."
+    )
+
+## What to say when the script has the method and the node does not, which reads as a contradiction.
+##
+## `node.connect_signal` refuses on `target.has_method(method)` — the **node's** view — and then
+## lists what the script declares, which is the **resource's** view. When the two disagree the
+## message says both in consecutive clauses and means neither:
+##
+## ```text
+## method_not_found: /Coin has no method _on_body_entered to receive body_entered.
+## Its script declares _on_body_entered.
+## ```
+##
+## Watched once, live, on a local Qwen3.8 turn writing a coin scene. Once is below the bar for a
+## repair — a repair guesses at what the caller meant — and a sentence that contradicts itself is
+## wrong at any count, so this is not a repair.
+##
+## What is actually true: the file and the script resource are up to date, and the node in the
+## edited scene is still holding an older instance of it. The turn found the way out for itself on
+## the next two calls — `godot_scene save`, then `godot_scene reload` — and that is what this says.
+static func a_method_the_script_has_and_the_node_has_not(method: String, named: Array) -> String:
+    if method.is_empty() or not named.has(method):
+        return ""
+    return (
+        ". Its script does declare %s — the node in the edited scene is still holding an older"
+        + " instance of that script, which is why it answers that it has no such method. Save the"
+        + " scene with scene.save and reload it with scene.reload, then connect."
+    ) % method
+
+## What to add when the scene a caller is trying to create is the one the project starts with.
+##
+## `scene.create` refuses a path that already holds a scene, and says to open it or to save over it
+## with `save_as`. Watched four times across four turns, and **three of the four named
+## `res://main.tscn`** — an arena, a shooter and a 3D scene, each of them building the game the
+## project starts with and reaching for the path it starts at.
+##
+## Neither way onward is what they wanted. Opening it keeps the old scene; `save_as` writes the
+## scene currently being edited, which is the old one until something else is made first. What they
+## wanted is the editor's own Set As Main Scene: a scene of its own, and the project pointed at it.
+## That leaves the fixture's scene where it is, which is also the honest outcome — nothing has to be
+## destroyed to start somewhere new.
+##
+## `main_scene` is passed in rather than read here, because everything in this file is decided
+## before the editor is touched and `ProjectSettings` is the editor.
+static func also_the_main_scene(path: String, main_scene: String) -> String:
+    if main_scene.is_empty() or path != main_scene:
+        return ""
+    return (
+        " %s is also this project's main scene. If you are replacing what the game starts with,"
+        + " make your scene at its own path and then point the project at it with"
+        + " project.set_setting on application/run/main_scene — that is what the editor's own Set"
+        + " As Main Scene does, and it leaves this scene where it is."
+    ) % path
+
+## What to say when a caller wrote a scene path where a node type belongs.
+##
+## `ClassDB.instantiate("res://pickup.tscn")` answers null, like any other name the class database
+## does not have, and the refusal that follows says only "Could not instantiate res://pickup.tscn".
+## That is true and it is the wrong shape of true: the caller did not misspell a class, it reached
+## for something this tool does not do.
+##
+## Watched once, on a task asking for a scene inheritance chain. The turn wrote
+## `{"op": "create", "rootType": "res://pickup.tscn"}`, was told the sentence above, tried the same
+## thing at another path, then reached for `bash godot --headless --script` — refused by the
+## workspace rule — and then asked the user to let it enable an editor plugin. Four calls and a
+## question, spent on a refusal that named nothing to do next.
+##
+## Two facts are needed and both are cheap: a type here is a class name, and a scene goes *inside*
+## another scene with `node.instantiate`. The third — that nothing here makes one scene inherit
+## from another — is what stops the next call being the same call.
+static func a_type_that_is_a_scene(node_type: String) -> String:
+    var lowered := node_type.to_lower()
+    if not (
+        lowered.begins_with("res://")
+        or lowered.ends_with(".tscn")
+        or lowered.ends_with(".scn")
+    ):
+        return ""
+    return (
+        " %s is a scene, and a type here is a Godot class name — Node2D, Area2D, Control. To put"
+        + " that scene inside this one, use node.instantiate, which takes the scene's path. No"
+        + " call here makes one scene inherit from another."
+    ) % node_type
+
+## The numbers an enum property takes, read out of the hint string the engine publishes for it.
+##
+## Two shapes, both measured on 4.7.2: bare names counting from zero — `Left,Right,Both` — and
+## explicit pairs — `Custom:-1,Full Rect:15,Top Left:0`. A pair sets where whatever follows it
+## counts from, which is why `next` is assigned rather than incremented.
+static func _the_numbers_an_enum_takes(hint_string: String) -> Dictionary:
+    var values := {}
+    var next := 0
+    for piece in hint_string.split(",", false):
+        var named := piece
+        var number := next
+        var colon := piece.rfind(":")
+        if colon > 0 and piece.substr(colon + 1).is_valid_int():
+            named = piece.substr(0, colon)
+            number = int(piece.substr(colon + 1))
+        values[number] = named.strip_edges()
+        next = number + 1
+    return values
+
+## What a readback mismatch says when the write named a number the property's enum does not have.
+##
+## Godot refuses an out-of-range enum inside the property's own setter: `set_h_grow_direction` calls
+## it "Index is out of bounds", writes that to the editor's stderr where no caller can read it, and
+## leaves the property where it was. What comes back is a readback mismatch naming two numbers and
+## nothing about the set either belongs to. Measured on 4.7.2: `grow_horizontal` asked for 3 holds
+## 1, `mouse_filter` asked for 9 holds 0.
+##
+## Only a number outside the set gets this. `anchors_preset` asked for 15 is asking for Full Rect,
+## which the enum has — that write is refused for its layout_mode, and NO_SCENE_HOLDS answers it.
+## A flags property is not an enum either: `size_flags_horizontal` publishes `Fill:1,Expand:2` as a
+## bitmask, where a combination no name lists is still a legal value.
+static func outside_the_values_it_takes(
+    property: String, hint_string: String, wanted: Variant
+) -> String:
+    if hint_string.is_empty() or typeof(wanted) != TYPE_INT:
+        return ""
+    var values := _the_numbers_an_enum_takes(hint_string)
+    if values.is_empty() or values.has(int(wanted)):
+        return ""
+    var listed := PackedStringArray()
+    for number in values:
+        listed.append("%d %s" % [number, values[number]])
+    return (
+        " %d is not one of `%s`'s values. It takes %s. Godot refuses a number outside that set"
+        + " inside the property's own setter, so the property still holds what it held before and"
+        + " nothing about the write said so."
+    ) % [int(wanted), property, ", ".join(listed)]
+
+## How many children a refusal lists before it says how many are left.
+##
+## Enough that a real scene's node is in the list, short enough that the sentence is still read. The
+## widest node in the fixtures holds nine.
+const NAMES_AT_MOST := 12
+
+## What a node path reached before it stopped matching, and what was there instead.
+##
+## `node_not_found` repeats the path back, which is the one thing the caller already knew. Four
+## refusals in the recordings say nothing else, and two of them are consecutive — `/PauseMenu/Box`
+## and then `/PauseMenu/Title` — a caller guessing at names under a node it could not see. A third
+## asked for `@Area2D@214/@CollisionShape2D@212`, guessing at names the engine had made up. The
+## deepest part of the path that does exist, and the names under it, ends all three in one answer.
+static func as_far_as_the_path_goes(
+    reached: String, present: PackedStringArray, missing: String
+) -> String:
+    if reached.is_empty() or missing.is_empty():
+        return ""
+    if present.is_empty():
+        return (
+            " %s is there and has no children at all, so nothing under it is called %s."
+            % [reached, missing]
+        )
+    var shown := present
+    var rest := 0
+    if present.size() > NAMES_AT_MOST:
+        shown = present.slice(0, NAMES_AT_MOST)
+        rest = present.size() - NAMES_AT_MOST
+    var listed := ", ".join(shown)
+    if rest > 0:
+        listed += " and %d more" % rest
+    return (
+        " %s is there and holds %s, and nothing under it is called %s."
+        % [reached, listed, missing]
+    )
+
+static func instead_of(
+    property: String, wanted: Variant, found: Variant, hint_string: String = ""
+) -> String:
     if NO_SCENE_HOLDS.has(property):
         return String(NO_SCENE_HOLDS[property])
+    var outside := outside_the_values_it_takes(property, hint_string, wanted)
+    if not outside.is_empty():
+        return outside
     return grew_to_its_minimum(property, wanted, found)
 
 ## Whether a `size` that came back larger than it was asked for hit the node's own floor.

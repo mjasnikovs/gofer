@@ -267,6 +267,65 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
     # the value that came back is the larger one.
     if not str(params.call("instead_of", "anchors_preset", 3, 0)).contains("anchor_left"):
         failures.append("anchors_preset names the four properties to write instead")
+    if not str(params.call("instead_of", "anchors_preset", 3, 0)).contains("layout_mode"):
+        failures.append("anchors_preset names the mode that makes the same write take")
+    # And the case that mode cannot reach. Measured on a real editor: a Control inside a Container
+    # is held at layout_mode 2, a write of 1 reads back 2, and the preset reads back 0 whatever is
+    # tried — so a caller there needs the container's own sizing, not the mode.
+    if not str(params.call("instead_of", "anchors_preset", 3, 0)).contains("size_flags_horizontal"):
+        failures.append("anchors_preset names what to do inside a Container")
+
+    # A dialog with a launch queued behind it is not the same situation as one that stopped a call
+    # before it started anything, and the two used to share a sentence.
+    var waiting := str(params.call("after_a_dialog", true))
+    for named in ["waiting behind this dialog", "session.answer_dialog", "second one"]:
+        if not waiting.contains(named):
+            failures.append("a dialog holding a launch must name %s" % named)
+    var nothing := str(params.call("after_a_dialog", false))
+    if not nothing.contains("Nothing has started"):
+        failures.append("a dialog that stopped a call before it started anything must say so")
+    if not nothing.contains("session.answer_dialog"):
+        failures.append("every dialog must name the call that answers one")
+    if nothing.contains("waiting behind"):
+        failures.append("a call that started nothing must not claim a launch is queued")
+
+    # The script has the method and the node does not, which the refusal used to state as two
+    # clauses that contradict each other.
+    var stale := str(params.call("a_method_the_script_has_and_the_node_has_not", "_on_body_entered", ["_on_body_entered", "_ready"]))
+    for named in ["_on_body_entered", "older instance", "scene.save", "scene.reload"]:
+        if not stale.contains(named):
+            failures.append("a stale script instance must name %s" % named)
+    # A method the script really does not declare is the ordinary case and gains nothing here.
+    if not str(params.call("a_method_the_script_has_and_the_node_has_not", "_on_area_entered", ["_on_body_entered", "_ready"])).is_empty():
+        failures.append("a method the script does not declare is not a stale instance")
+    if not str(params.call("a_method_the_script_has_and_the_node_has_not", "", ["_ready"])).is_empty():
+        failures.append("no method named is not a stale instance")
+
+    # The scene a caller is creating is the one the project starts with. Three of the four turns
+    # that met `already_exists` named exactly this path.
+    var main_again := str(params.call("also_the_main_scene", "res://main.tscn", "res://main.tscn"))
+    for named in ["main scene", "application/run/main_scene", "project.set_setting"]:
+        if not main_again.contains(named):
+            failures.append("replacing the main scene must name %s" % named)
+    # Any other path, and a project that names none, gain nothing.
+    if not str(params.call("also_the_main_scene", "res://coin.tscn", "res://main.tscn")).is_empty():
+        failures.append("a scene that is not the main scene gains no sentence")
+    if not str(params.call("also_the_main_scene", "res://main.tscn", "")).is_empty():
+        failures.append("a project with no main scene gains no sentence")
+
+    # A scene path written where a class name belongs. Every clause is what the turn that met this
+    # went looking for and did not find: what a type is here, where a scene goes instead, and that
+    # inheriting one scene from another is not something this tool does.
+    var as_scene := str(params.call("a_type_that_is_a_scene", "res://pickup.tscn"))
+    for named in ["res://pickup.tscn", "class name", "node.instantiate", "inherit"]:
+        if not as_scene.contains(named):
+            failures.append("a scene path written as a type must name %s" % named)
+    if not str(params.call("a_type_that_is_a_scene", "scenes/coin.tscn")).contains("node.instantiate"):
+        failures.append("a scene path without the scheme is still a scene path")
+    # And a real class name is left entirely alone, or every mistyped type gains a paragraph.
+    for plain in ["Node2D", "Area2D", "CharacterBody2D", "Contrl"]:
+        if not str(params.call("a_type_that_is_a_scene", plain)).is_empty():
+            failures.append("%s is a class name and must gain no sentence" % plain)
     var grew: String = params.call(
         "grew_to_its_minimum", "size", Vector2(0, 0), Vector2(1, 23)
     )
@@ -276,3 +335,81 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
         failures.append("A size that came back smaller is a different thing entirely")
     if not str(params.call("grew_to_its_minimum", "position", Vector2(0, 0), Vector2(1, 1))).is_empty():
         failures.append("Only `size` has this floor")
+
+    # The hint strings are the ones a real 4.7.2 engine publishes for these properties.
+    var out_of_range: String = params.call(
+        "outside_the_values_it_takes", "grow_horizontal", "Left,Right,Both", 3
+    )
+    for named in ["3 is not one", "grow_horizontal", "0 Left", "1 Right", "2 Both"]:
+        if not out_of_range.contains(named):
+            failures.append("an out-of-range enum must name %s" % named)
+    # In range is not this refusal, whichever shape the hint string is written in.
+    for held in [0, 1, 2]:
+        if not str(
+            params.call("outside_the_values_it_takes", "grow_horizontal", "Left,Right,Both", held)
+        ).is_empty():
+            failures.append("%d is one of grow_horizontal's values" % held)
+    # `anchors_preset` numbers its own names, and 15 is Full Rect — a value it has. Its refusal is
+    # about layout_mode, and a list of seventeen numbers would bury the sentence that says so.
+    var presets := (
+        "Custom:-1,Full Rect:15,Top Left:0,Top Right:1,Bottom Right:3,Bottom Left:2,Center Left:4"
+    )
+    for held in [-1, 15, 0, 3]:
+        if not str(
+            params.call("outside_the_values_it_takes", "anchors_preset", presets, held)
+        ).is_empty():
+            failures.append("anchors_preset holds %d and must gain no list" % held)
+    if not str(
+        params.call("outside_the_values_it_takes", "anchors_preset", presets, 99)
+    ).contains("-1 Custom"):
+        failures.append("an explicitly numbered enum keeps the numbers it publishes")
+    if not str(params.call("instead_of", "anchors_preset", 15, 0, presets)).contains("layout_mode"):
+        failures.append("the property with its own sentence keeps it")
+    if not str(params.call("instead_of", "grow_horizontal", 3, 1, "Left,Right,Both")).contains(
+        "2 Both"
+    ):
+        failures.append("instead_of reaches the enum sentence")
+    # A property with no enum hint, and a value that is not a number, are both left alone.
+    if not str(params.call("outside_the_values_it_takes", "text", "", 3)).is_empty():
+        failures.append("a property with no enum hint gains nothing")
+    if not str(
+        params.call("outside_the_values_it_takes", "grow_horizontal", "Left,Right,Both", "Both")
+    ).is_empty():
+        failures.append("a value that is not a number is a type_mismatch, not this")
+
+    var reached: String = params.call(
+        "as_far_as_the_path_goes",
+        "/Main/PauseMenu",
+        PackedStringArray(["Panel", "Title"]),
+        "Box"
+    )
+    for named in ["/Main/PauseMenu", "Panel, Title", "called Box"]:
+        if not reached.contains(named):
+            failures.append("a path that stopped matching must name %s" % named)
+    if not str(
+        params.call("as_far_as_the_path_goes", "/Main/Player", PackedStringArray(), "Sprite")
+    ).contains("no children at all"):
+        failures.append("a node with nothing under it says so rather than listing nothing")
+    # Long enough to be cut, and the count of what was cut is part of the sentence.
+    var many := PackedStringArray()
+    for index in range(20):
+        many.append("Child%d" % index)
+    var trimmed: String = params.call("as_far_as_the_path_goes", "/Main", many, "Missing")
+    for named in ["Child0", "Child11", "and 8 more"]:
+        if not trimmed.contains(named):
+            failures.append("a long list must name %s" % named)
+    if trimmed.contains("Child12"):
+        failures.append("and it must stop at twelve")
+    # Nothing to say is said as nothing, so the caller's sentence is unchanged.
+    if not str(
+        params.call("as_far_as_the_path_goes", "", PackedStringArray(["A"]), "B")
+    ).is_empty():
+        failures.append("a path that reached nowhere gains no clause")
+
+    # `layout_mode` is decided by the parent, so the sentence is about the three shapes rather than
+    # about the number written. It answers whatever value came in, in range or not.
+    for asked in [1, 9]:
+        var placed: String = params.call("instead_of", "layout_mode", asked, 3)
+        for named in ["node.reparent", "Container", "size_flags_horizontal", "uncontrolled"]:
+            if not placed.contains(named):
+                failures.append("layout_mode asked %d must name %s" % [asked, named])

@@ -1345,6 +1345,19 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         "the refusal must quote what the editor asked, which is the only thing that tells the \
          caller what to fix: {error}"
     );
+    // Which call answers a dialog, and — this is the launch path, so — that a game is queued behind
+    // it. `loc-06-recover` answered four of these and then asked for a fifth run, and was told
+    // `already_running`: the launch behind the last dialog had gone through while the caller
+    // thought its `run` had been refused outright. See `Params.after_a_dialog`.
+    assert!(
+        error.contains("session.answer_dialog"),
+        "the refusal has to name the call that answers a dialog: {error}"
+    );
+    assert!(
+        error.contains("waiting behind this dialog"),
+        "a launch the editor turned into a question is still a launch, and the caller has to be \
+         told so before it asks for a second one: {error}"
+    );
     assert!(
         waited < Duration::from_secs(20),
         "the failure took {waited:?}, which is the deadline rather than the dialog"
@@ -1559,4 +1572,70 @@ fn a_game_continued_after_a_break_answers_again() {
     let stopped = session.call("runtime.stop", json!({}));
     assert_eq!(stopped["running"], false, "{stopped}");
     session.await_stopped();
+}
+
+/// A running path that stops matching names what it reached and what is under it.
+///
+/// The twin of the editor-side check, and it also proves the game process can load `params.gd`:
+/// `runtime.gd` preloads it for this wording, and a preload the game cannot resolve stops the whole
+/// helper script from parsing — which reaches a caller as every runtime call timing out rather than
+/// as a parse error.
+#[test]
+fn a_running_path_that_stops_matching_names_what_is_under_the_node_it_reached() {
+    let directory = TempDir::new().expect("temporary directory");
+    let worktree = godot_editor_harness::fixture_worktree(&directory);
+    std::fs::create_dir_all(worktree.join("scripts")).expect("create scripts directory");
+    std::fs::write(
+        worktree.join("scripts/runtime_probe.gd"),
+        MOVING_PROBE_SCRIPT,
+    )
+    .expect("write the probe script");
+    std::fs::write(worktree.join("main.tscn"), MOVING_PROBE_SCENE).expect("write the scene");
+    let ledger = directory.path().join("ledger.json");
+    let session = Session::start_on_worktree(worktree, ledger, Some(directory));
+
+    session
+        .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
+        .unwrap_or_else(|error| panic!("runtime.run failed: {error}\n{}", session.output()));
+
+    // The helper answers at all, which is what says `params.gd` loaded in the game process.
+    session.call(
+        "runtime.inspect_node",
+        json!({"path": "/root/RuntimeProbe", "properties": ["position"]}),
+    );
+
+    let refused = session
+        .try_call(
+            "runtime.inspect_node",
+            json!({"path": "/root/RuntimeProbe/Scoreboard"}),
+            None,
+        )
+        .expect_err("a node that is not there");
+    assert!(
+        refused.contains("node_not_found") && refused.contains("/root/RuntimeProbe"),
+        "the refusal names how far the path got: {refused}"
+    );
+    assert!(
+        refused.contains("no children at all") || refused.contains("is there and holds"),
+        "and what is under it: {refused}"
+    );
+
+    // The other shape it was written for: a name the engine made up, guessed at rather than read.
+    // `NodePath("@Area2D@214")` resolves like any other name — measured on 4.7.2, an unnamed child
+    // really is reachable as `@Node2D@2` — so a made-up one is simply absent, and the walk stops at
+    // the node above it and says what is there.
+    let invented = session
+        .try_call(
+            "runtime.inspect_node",
+            json!({"path": "/root/RuntimeProbe/@Area2D@214"}),
+            None,
+        )
+        .expect_err("a node the engine never made");
+    assert!(
+        invented.contains("/root/RuntimeProbe")
+            && (invented.contains("no children at all") || invented.contains("is there and holds")),
+        "an engine name nothing has is answered the same way: {invented}"
+    );
+
+    session.call("runtime.stop", json!({}));
 }

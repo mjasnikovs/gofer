@@ -2615,23 +2615,304 @@ fn a_size_under_a_controls_floor_says_which_floor() {
         }),
         Some(session.revision()),
     );
-    assert!(!elsewhere.contains("custom_minimum_size"), "{elsewhere}");
+    // The size refusal's own sentence, and not the string `custom_minimum_size`, which the anchors
+    // refusal now names too — a Control a Container places is sized by the container, and that is
+    // one of the three things it says. What must not happen is `anchors_preset` being answered as
+    // though it were a size that had grown to its floor.
+    assert!(
+        !elsewhere.contains("held at its own minimum"),
+        "{elsewhere}"
+    );
+    assert!(elsewhere.contains("layout_mode"), "{elsewhere}");
 }
 
 /*
- * A full-screen panel: the refusal names the four properties that do the job.
+ * The preset a child cannot take is one its `layout_mode` refuses, and a root takes it outright.
  *
- * `anchors_preset` is the inspector's own control and no scene stores it. Measured here and in
- * three shapes beside it — a `Panel` under a `Control`, a `VBoxContainer`, a `Panel` inside one,
- * and a preset out of range — every write reads back 0, and the anchors under it do not move. It is
- * also the property every model reaches for, because a full-screen panel is the commonest thing
- * anyone asks a `Control` for: three live UI turns hit it.
- *
- * So the write stays refused, and the refusal carries the way onward. The second half of this test
- * is that way onward actually working.
+ * A live UI turn sent nine properties across four Controls in one `set_properties`, and the same
+ * `anchors_preset = 15` was accepted on the scene root and refused on the node under it. The
+ * refusal said `anchors_preset` "is the editor inspector's own control and no scene stores it, so
+ * this write can never take" — measured on children only, and untrue of both halves. This is the
+ * measurement that says what the property actually does, so the sentence can.
  */
 #[test]
-fn the_preset_no_scene_holds_names_the_anchors_that_do() {
+fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
+    let mut session = Session::start();
+    let scene = "res://anchorroot.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control"}),
+    );
+
+    // The root takes it. Godot gives a Control with no Control parent `layout_mode` 3 —
+    // uncontrolled — and the preset applies there.
+    let root = session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/anchorroot",
+            "property": "anchors_preset",
+            "value": {"type": "int", "value": 15},
+        }),
+    );
+    assert_eq!(root["value"]["value"], json!(15));
+
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/anchorroot", "name": "Child", "type": "Panel"}),
+    );
+
+    // The child does not, because it starts at `layout_mode` 0, position.
+    let refused = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/anchorroot/Child",
+            "property": "anchors_preset",
+            "value": {"type": "int", "value": 15},
+        }),
+        Some(session.revision()),
+    );
+    assert!(refused.starts_with("readback_mismatch"), "{refused}");
+    assert!(
+        refused.contains("layout_mode"),
+        "the refusal must name the one line that makes the same write take: {refused}"
+    );
+    // And the other way onward is still named, because a caller wanting one edge rather than a
+    // preset needs those four anyway.
+    for named in ["anchor_left", "anchor_top", "anchor_right", "anchor_bottom"] {
+        assert!(refused.contains(named), "{refused}");
+    }
+    assert!(
+        !refused.contains("can never take"),
+        "the write can take, and a caller told otherwise stops looking: {refused}"
+    );
+
+    // On anchors, the same write takes.
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/anchorroot/Child",
+            "property": "layout_mode",
+            "value": {"type": "int", "value": 1},
+        }),
+    );
+    let taken = session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/anchorroot/Child",
+            "property": "anchors_preset",
+            "value": {"type": "int", "value": 15},
+        }),
+    );
+    assert_eq!(taken["value"]["value"], json!(15));
+
+    // And a scene does store it — both of them — which is the other half of what the sentence used
+    // to claim.
+    session.mutate("scene.save", json!({}));
+    let saved =
+        std::fs::read_to_string(session.worktree.join("anchorroot.tscn")).expect("saved scene");
+    assert_eq!(
+        saved.matches("anchors_preset = 15").count(),
+        2,
+        "the root and the child must both be saved with the preset: {saved}"
+    );
+}
+
+/*
+ * Creating a scene where the project's own starting scene already is.
+ *
+ * `scene.create` has always refused a path that already holds a scene. Watched four times across
+ * four live turns, and three of the four named `res://main.tscn` — an arena, a shooter and a 3D
+ * scene, each building the game the project starts with and reaching for the path it starts at.
+ * Neither way onward the refusal offered was what they wanted: opening it keeps the old scene, and
+ * `save_as` writes whatever is being edited, which is that same old scene until something else is
+ * made first.
+ */
+#[test]
+fn creating_over_the_projects_main_scene_names_the_setting_that_moves_it() {
+    let mut session = Session::start();
+    let mine = "res://mine.tscn";
+    session.mutate("scene.create", json!({"path": mine, "rootType": "Node2D"}));
+    session
+        .try_call(
+            "project.set_setting",
+            json!({"name": "application/run/main_scene", "value": {"type": "string", "value": mine}}),
+            None,
+        )
+        .expect("point the project at the new scene");
+
+    let refused = session.error(
+        "scene.create",
+        json!({"path": mine, "rootType": "Node3D"}),
+        Some(session.revision()),
+    );
+    assert!(refused.starts_with("already_exists"), "{refused}");
+    assert!(
+        refused.contains("application/run/main_scene") && refused.contains("project.set_setting"),
+        "the way onward the turns actually wanted has to be named: {refused}"
+    );
+
+    // Another path that happens to exist is the plain refusal, or every collision grows a
+    // paragraph about a setting it has nothing to do with.
+    let elsewhere = "res://elsewhere.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": elsewhere, "rootType": "Node2D"}),
+    );
+    let plain = session.error(
+        "scene.create",
+        json!({"path": elsewhere, "rootType": "Node2D"}),
+        Some(session.revision()),
+    );
+    assert!(plain.starts_with("already_exists"), "{plain}");
+    assert!(!plain.contains("main_scene"), "{plain}");
+}
+
+/*
+ * The Control a Container places, which is the case `layout_mode` cannot reach.
+ *
+ * `the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed` measured a child of a plain
+ * `Control`, and the sentence it produced said "set `layout_mode` to 1 first and the same write
+ * takes". Inside a `Container` that is false — and it is the same over-generalisation that sentence
+ * was written to replace, measured on one shape and told to every caller. Measured here on the
+ * other shape, from a fresh node with nothing set first:
+ *
+ * * `anchors_preset = 15` reads back 0.
+ * * `layout_mode = 1` reads back **2**: the container holds it.
+ * * `size_flags_horizontal` is what the container actually reads, and it takes.
+ */
+#[test]
+fn a_control_a_container_places_is_held_at_the_layout_mode_it_has() {
+    let mut session = Session::start();
+    let scene = "res://boxed.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/boxed", "name": "Box", "type": "VBoxContainer"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/boxed/Box", "name": "Inside", "type": "Panel"}),
+    );
+    let inside = |property: &str, value: i64| {
+        json!({
+            "scene": scene,
+            "node": "/boxed/Box/Inside",
+            "property": property,
+            "value": {"type": "int", "value": value},
+        })
+    };
+
+    let refused = session.error(
+        "node.set_property",
+        inside("anchors_preset", 15),
+        Some(session.revision()),
+    );
+    assert!(refused.starts_with("readback_mismatch"), "{refused}");
+    assert!(
+        refused.contains("Container") && refused.contains("size_flags_horizontal"),
+        "a caller a container is placing needs the container's own sizing: {refused}"
+    );
+
+    // And the mode the sentence sends a *Control's* child after is one this node cannot have.
+    let held = session.error(
+        "node.set_property",
+        inside("layout_mode", 1),
+        Some(session.revision()),
+    );
+    assert!(held.contains("Godot holds 2"), "{held}");
+
+    // What the container does read.
+    let sized = session.mutate("node.set_property", inside("size_flags_horizontal", 3));
+    assert_eq!(sized["value"]["value"], json!(3));
+}
+
+/*
+ * A scene path written where a node type belongs, on all three calls that take one.
+ *
+ * `ClassDB.instantiate("res://pickup.tscn")` answers null like any unknown class, and the refusal
+ * said only "Could not instantiate res://pickup.tscn". A live turn asked for a scene inheritance
+ * chain, wrote that, was told that, wrote it again at another path, reached for
+ * `bash godot --headless --script` — refused by the workspace rule — and then asked the user to let
+ * it enable an editor plugin. Four calls and a question, against a refusal that named nothing to do
+ * next.
+ *
+ * The sentence is decided in `params.gd` and proven from source in a second by
+ * `fixtures/godot-project/tests`. What this holds is that all three call sites carry it, on a real
+ * editor, which source cannot say.
+ */
+#[test]
+fn a_scene_path_written_as_a_node_type_is_told_what_a_type_is() {
+    let mut session = Session::start();
+    let scene = "res://typed.tscn";
+    session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/typed", "name": "Holder", "type": "Node2D"}),
+    );
+
+    let refusals = [
+        session.error(
+            "scene.create",
+            json!({"path": "res://inherited.tscn", "rootType": "res://typed.tscn"}),
+            Some(session.revision()),
+        ),
+        session.error(
+            "node.create_nodes",
+            json!({
+                "scene": scene,
+                "nodes": [{"parent": "/typed", "name": "Coin", "type": "res://typed.tscn"}],
+            }),
+            Some(session.revision()),
+        ),
+        session.error(
+            "node.change_type",
+            json!({"scene": scene, "node": "/typed/Holder", "type": "res://typed.tscn"}),
+            Some(session.revision()),
+        ),
+    ];
+    for refused in refusals {
+        assert!(refused.starts_with("invalid_node_type"), "{refused}");
+        assert!(
+            refused.contains("class name") && refused.contains("node.instantiate"),
+            "every call that takes a type must say what a type is: {refused}"
+        );
+        // The third clause, and it is the one that stops the next call being the same call.
+        assert!(refused.contains("inherit"), "{refused}");
+    }
+
+    // A class name nobody has is still the short refusal, or every typo grows a paragraph.
+    let typo = session.error(
+        "node.create",
+        json!({"scene": scene, "parent": "/typed", "name": "Oops", "type": "Contrl"}),
+        Some(session.revision()),
+    );
+    assert!(typo.starts_with("invalid_node_type"), "{typo}");
+    assert!(!typo.contains("node.instantiate"), "{typo}");
+}
+
+/*
+ * A full-screen panel: the refusal names the four properties that do the job, and they do it.
+ *
+ * The commonest thing anyone asks a `Control` for, and `anchors_preset` is the property every model
+ * reaches for to get one — four live UI turns. On a child at its default `layout_mode` the write
+ * reads back 0 and the anchors under it do not move, in every shape measured: a `Panel` under a
+ * `Control`, a `VBoxContainer`, a `Panel` inside one, and a preset out of range.
+ *
+ * *Why* it does not take is
+ * `the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed`, above, and it is not what
+ * this test used to say in its name. What this one holds is the other way onward: the four anchors
+ * the refusal names, working on their own, which is what a caller wanting one edge rather than a
+ * preset needs anyway.
+ */
+#[test]
+fn the_anchors_a_refused_preset_names_do_the_job_it_wanted() {
     let mut session = Session::start();
     let scene = "res://anchors.tscn";
     session.mutate(
@@ -2655,7 +2936,7 @@ fn the_preset_no_scene_holds_names_the_anchors_that_do() {
     );
     assert!(
         refused.starts_with("readback_mismatch"),
-        "a write no scene can hold is still a failed write: {refused}"
+        "a write the node did not take is still a failed write: {refused}"
     );
     for named in [
         "anchor_left",
@@ -2720,6 +3001,326 @@ fn the_preset_no_scene_holds_names_the_anchors_that_do() {
         Some(session.revision()),
     );
     assert!(!ordinary.contains("anchor_left"), "{ordinary}");
+}
+
+/// A number outside an enum's range is refused, and the refusal says which numbers are in it.
+///
+/// `grow_horizontal` takes 0, 1 or 2. Godot refuses 3 inside `set_h_grow_direction`, writes "Index
+/// is out of bounds" to its own stderr, and leaves the property at what it held. A live turn met
+/// exactly this, guessed twice — the second guess sent the value as a String — and then spent a
+/// documentation search finding what the whole set was.
+#[test]
+fn a_number_outside_an_enums_range_is_told_the_numbers_inside_it() {
+    let mut session = Session::start();
+    let scene = "res://grow.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/grow", "name": "Target", "type": "Panel"}),
+    );
+
+    let refused = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/grow/Target",
+            "property": "grow_horizontal",
+            "value": {"type": "int", "value": 3},
+        }),
+        Some(session.revision()),
+    );
+    assert!(
+        refused.starts_with("readback_mismatch"),
+        "an out-of-range enum is a write that did not take: {refused}"
+    );
+    for named in ["0 Left", "1 Right", "2 Both", "grow_horizontal"] {
+        assert!(
+            refused.contains(named),
+            "the refusal must name {named}: {refused}"
+        );
+    }
+
+    // And the number it names takes, which is what makes the list worth reading.
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/grow/Target",
+            "property": "grow_horizontal",
+            "value": {"type": "int", "value": 2},
+        }),
+    );
+
+    // A flags property publishes its names the same way and is not an enum: any combination of the
+    // bits is legal, so nothing here lists them.
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/grow/Target",
+            "property": "size_flags_horizontal",
+            "value": {"type": "int", "value": 3},
+        }),
+    );
+}
+
+/// `layout_mode` is decided by a Control's parent, and the refusal says so for all three shapes.
+///
+/// Measured on 4.7.2 across every parent and every value: a Control with no Control parent holds 3
+/// whatever is written, a Control inside a Container holds 2 whatever is written, and a Control
+/// under a plain Control is the only one that takes a write — and only 0 or 1. `cer-09-ui` met the
+/// first of the three, asked for 1, was told two numbers and nothing else.
+#[test]
+fn the_layout_mode_a_control_is_held_at_is_the_one_its_parent_gives_it() {
+    let mut session = Session::start();
+    let scene = "res://layout.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/layout", "name": "Plain", "type": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/layout/Plain", "name": "Free", "type": "Panel"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/layout", "name": "Box", "type": "VBoxContainer"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/layout/Box", "name": "Held", "type": "Panel"}),
+    );
+
+    let anchors = json!({"type": "int", "value": 1});
+
+    // The root: no Control parent, so the engine keeps it uncontrolled and drops the write.
+    let refused = session.error(
+        "node.set_property",
+        json!({"scene": scene, "node": "/layout", "property": "layout_mode", "value": anchors}),
+        Some(session.revision()),
+    );
+    assert!(
+        refused.starts_with("readback_mismatch") && refused.contains("node.reparent"),
+        "a root Control is held at 3 and the refusal must say what moves it: {refused}"
+    );
+
+    // Inside a Container: the container places it, and the refusal names how to size one there.
+    let placed = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/layout/Box/Held",
+            "property": "layout_mode",
+            "value": anchors,
+        }),
+        Some(session.revision()),
+    );
+    assert!(
+        placed.contains("size_flags_horizontal") && placed.contains("custom_minimum_size"),
+        "a Control a container places is sized by flags, not by anchors: {placed}"
+    );
+
+    // Under a plain Control: the one shape that takes the write the other two are refused.
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/layout/Plain/Free",
+            "property": "layout_mode",
+            "value": anchors,
+        }),
+    );
+}
+
+/// A path that is under the right root and simply names something that is not there.
+///
+/// Four recorded refusals said only that the path was absent, which is what the caller already
+/// knew. Two are consecutive — `/PauseMenu/Box`, then `/PauseMenu/Title` — a caller guessing at
+/// names under a node it could not see.
+#[test]
+fn a_path_that_stops_matching_names_what_it_reached_and_what_is_under_it() {
+    let mut session = Session::start();
+    let scene = "res://missing.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Control"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/missing", "name": "PauseMenu", "type": "Panel"}),
+    );
+    for named in ["Title", "Resume"] {
+        session.mutate(
+            "node.create",
+            json!({
+                "scene": scene,
+                "parent": "/missing/PauseMenu",
+                "name": named,
+                "type": "Label",
+            }),
+        );
+    }
+
+    let refused = session.error(
+        "node.inspect",
+        json!({"scene": scene, "node": "/missing/PauseMenu/Box"}),
+        None,
+    );
+    assert!(
+        refused.starts_with("node_not_found"),
+        "the node is still absent: {refused}"
+    );
+    for named in ["/missing/PauseMenu", "Title", "Resume", "called Box"] {
+        assert!(
+            refused.contains(named),
+            "the refusal must name {named}: {refused}"
+        );
+    }
+
+    // A node with nothing under it says so, rather than listing nothing.
+    let leaf = session.error(
+        "node.inspect",
+        json!({"scene": scene, "node": "/missing/PauseMenu/Title/Icon"}),
+        None,
+    );
+    assert!(
+        leaf.contains("no children at all") && leaf.contains("/missing/PauseMenu/Title"),
+        "a leaf is named as a leaf: {leaf}"
+    );
+
+    // And a path under the wrong tree keeps the sentence that repairs it, with no list of children
+    // buried under it.
+    let elsewhere = session.error(
+        "node.inspect",
+        json!({"scene": scene, "node": "/root"}),
+        None,
+    );
+    assert!(
+        elsewhere.contains("godot_runtime") && !elsewhere.contains("is there and holds"),
+        "the tree-confusion sentence still answers on its own: {elsewhere}"
+    );
+}
+
+/// What a caller wanting one scene to inherit from another can do instead.
+///
+/// Two live turns were given that task. One sent `godot_scene create` a `base`, was told the
+/// operation has no such parameter, and never found a route; the other **wrote and enabled a Godot
+/// editor plugin of its own** to do it. Nothing in the catalogue says the surface has no inherited
+/// scenes, and nothing names what works — so this measures what works before anything claims it.
+#[test]
+fn an_instance_keeps_the_properties_set_on_it_over_the_scene_it_came_from() {
+    let mut session = Session::start();
+    let base = "res://pickup.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": base, "rootType": "Area2D", "rootName": "Pickup"}),
+    );
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": base,
+            "node": "/Pickup",
+            "property": "monitoring",
+            "value": {"type": "bool", "value": false},
+        }),
+    );
+    session.mutate("scene.save", json!({}));
+
+    let holder = "res://coin.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": holder, "rootType": "Node2D", "rootName": "Coin"}),
+    );
+    session.mutate(
+        "node.instantiate",
+        json!({"scene": holder, "parent": "/Coin", "name": "Body", "path": base}),
+    );
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": holder,
+            "node": "/Coin/Body",
+            "property": "monitoring",
+            "value": {"type": "bool", "value": true},
+        }),
+    );
+    session.mutate("scene.save", json!({}));
+
+    // Reopened from disk: the override is the instancing scene's, and the scene it came from is
+    // untouched.
+    session.call("scene.open", json!({"path": holder}));
+    let held = session.call(
+        "node.inspect",
+        json!({"scene": holder, "node": "/Coin/Body", "properties": ["monitoring"]}),
+    );
+    assert_eq!(
+        held["properties"][0]["value"]["value"], true,
+        "an instance keeps what was set on it: {held}"
+    );
+
+    session.call("scene.open", json!({"path": base}));
+    let source = session.call(
+        "node.inspect",
+        json!({"scene": base, "node": "/Pickup", "properties": ["monitoring"]}),
+    );
+    assert_eq!(
+        source["properties"][0]["value"]["value"], false,
+        "and the scene it came from is unchanged: {source}"
+    );
+}
+
+/// A colour written under the wrong tag, and the refusal that names the right one.
+///
+/// `loc-21-platformer` sent two ColorRects `{"type": "string", "value": "#5c8a3c"}` and was told
+/// `expected Color, received String` — true, and silent about the fact that the colour was right
+/// and `{"type": "color", "value": "#5c8a3c"}` takes that exact text.
+#[test]
+fn a_value_under_the_wrong_tag_is_told_the_tag_the_property_takes() {
+    let mut session = Session::start();
+    let scene = "res://tagged.tscn";
+    session.mutate(
+        "scene.create",
+        json!({"path": scene, "rootType": "Node2D", "rootName": "Tagged"}),
+    );
+    session.mutate(
+        "node.create",
+        json!({"scene": scene, "parent": "/Tagged", "name": "Paint", "type": "ColorRect"}),
+    );
+
+    let refused = session.error(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/Tagged/Paint",
+            "property": "color",
+            "value": {"type": "string", "value": "#5c8a3c"},
+        }),
+        Some(session.revision()),
+    );
+    for named in ["expected Color", "\"type\": \"color\"", "#5c8a3c"] {
+        assert!(
+            refused.contains(named),
+            "the refusal must name {named}: {refused}"
+        );
+    }
+
+    // And what it names takes, with the same text the caller already wrote.
+    session.mutate(
+        "node.set_property",
+        json!({
+            "scene": scene,
+            "node": "/Tagged/Paint",
+            "property": "color",
+            "value": {"type": "color", "value": "#5c8a3c"},
+        }),
+    );
 }
 
 /// A node name that is not ASCII, written and read back.

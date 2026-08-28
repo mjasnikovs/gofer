@@ -17,6 +17,9 @@ const PROTOCOL_VERSION := 2
 ## Tagged values and PNG frames must read the same whichever process produced them, so both halves
 ## of the addon encode them through this one script.
 const Protocol := preload("res://addons/gofer/protocol.gd")
+## The same wording the editor half uses for a path that stopped matching. Static, and it reads
+## nothing but its arguments, so loading it in the game process costs a parse.
+const Params := preload("res://addons/gofer/params.gd")
 ## A tree dump larger than this risks the 1 MiB envelope cap; truncation is reported, never fatal.
 const MAX_TREE_NODES := 2048
 const MAX_TREE_DEPTH := 32
@@ -171,6 +174,29 @@ func _is_an_engine_name(segment: String) -> bool:
     var parts := segment.split("@", false)
     return parts.size() == 2 and parts[1].is_valid_int()
 
+## Walks a running path from `/root` and asks `Params` to word where it stopped.
+##
+## `/root/Main/Scoreboard/ScoreLabel` and `/root/Main/@Area2D@214/@CollisionShape2D@212` were both
+## answered by repeating them back. The first is a caller guessing at a name; the second is one
+## guessing at a name the engine made up. Naming what is actually under the deepest node that does
+## exist answers both.
+func _as_far_as_the_path_goes(raw: String) -> String:
+    var parts := raw.strip_edges().trim_prefix("/").split("/", false)
+    if parts.size() < 2 or parts[0] != "root":
+        return ""
+    var here: Node = get_tree().root
+    var reached := "/root"
+    for index in range(1, parts.size()):
+        var next := here.get_node_or_null(NodePath(parts[index]))
+        if next == null:
+            var present := PackedStringArray()
+            for child in here.get_children():
+                present.append(String(child.name))
+            return Params.as_far_as_the_path_goes(reached, present, parts[index])
+        here = next
+        reached += "/" + parts[index]
+    return ""
+
 func _node_not_found(parameter: String, path: String) -> Dictionary:
     var plain := "No running node at '%s'" % path
     # A path read out of `get_tree` and used on the next call is the ordinary way to reach a node,
@@ -184,7 +210,7 @@ func _node_not_found(parameter: String, path: String) -> Dictionary:
             + "something that outlives it, or name the node where it is created"
         )
     if path.begins_with("/root/"):
-        return _failure("node_not_found", plain)
+        return _failure("node_not_found", plain + _as_far_as_the_path_goes(path))
     var spelled := "/root/" + path.trim_prefix("/")
     if get_tree().root.get_node_or_null(NodePath(spelled)) == null:
         return _failure("node_not_found", plain)

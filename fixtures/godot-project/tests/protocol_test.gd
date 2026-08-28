@@ -233,6 +233,30 @@ func _test_frame_composite(failures: Array[String]) -> void:
     if alone.get_pixel(4, 4) != red:
         failures.append("A capture with no windows over it must be the window itself")
 
+    # A value under the wrong tag is told which tag the property takes, and every tag named here is
+    # one `decode` really reads — checked against `decode` rather than against a list.
+    var tags: Dictionary = protocol.get("TAG_FOR_TYPE")
+    for declared in tags:
+        var tag: String = tags[declared]
+        var answered: Dictionary = protocol.call("decode", {"type": tag, "value": null})
+        if str(answered.get("message", "")).contains("Unknown value type"):
+            failures.append("%s is not a tag decode knows" % tag)
+    var wrong: Dictionary = protocol.call(
+        "fit_to_declared_type", "#5c8a3c", TYPE_COLOR
+    )
+    if wrong.get("ok", true):
+        failures.append("a string is not a Color")
+    for named in ["expected Color", '"type": "color"', "#5c8a3c", "hex string"]:
+        if not str(wrong.get("message", "")).contains(named):
+            failures.append("a colour under the wrong tag must name %s" % named)
+    # Every other type names its tag rather than the value, because the value is not the answer.
+    var number: Dictionary = protocol.call("fit_to_declared_type", "3", TYPE_INT)
+    if not str(number.get("message", "")).contains('"type": "int"'):
+        failures.append("an int under the wrong tag names the int tag")
+    # A type with no tag gains no sentence rather than an invented one.
+    if not str(protocol.call("under_the_tag_it_takes", TYPE_CALLABLE, "x")).is_empty():
+        failures.append("a type with no tag must gain nothing")
+
 ## A solid image of one colour, in the format a viewport texture is read back as.
 func _filled(width: int, height: int, colour: Color) -> Image:
     var image := Image.create(width, height, false, Image.FORMAT_RGBA8)

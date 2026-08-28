@@ -805,6 +805,14 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
                 "details": {}
             }
         }
+    # Measured on 2026-08-28, by taking this guard out and watching what happens: a `node.create`
+    # while the game plays is accepted, the edited scene gains the node, the running game does not
+    # change, `scene.save` writes the file the running game already loaded, and the game afterwards
+    # reports `broke: false, running: true, runtimeReady: true`. **Nothing breaks.** So this is a
+    # choice rather than a necessity — an agent should not rewrite the scene a person is watching
+    # play — and it is written down here because it was not written down anywhere, and the next
+    # reader will otherwise measure it again. It costs one round trip in sixteen recorded runs,
+    # across four models.
     if _playing:
         return {
             "_gofer_error": {
@@ -1082,13 +1090,19 @@ func _runtime_play() -> void:
 ## Not retryable: the same request asks the same question again, and the dialog it opens has to be
 ## answered in the editor before anything else can happen. The text is in the message because that
 ## is what tells the caller what to fix — every code on its own reads as "try later".
-func _respond_dialog_open(id: String, dialog: Dictionary) -> void:
+func _respond_dialog_open(id: String, dialog: Dictionary, launch_is_waiting: bool = false) -> void:
     _respond_error(
         id,
         "editor_dialog_open",
-        "The editor is waiting for an answer to '%s': %s (choices: %s)" % [
-            dialog["title"], dialog["text"], ", ".join(dialog["buttons"])
-        ],
+        (
+            "The editor is waiting for an answer to '%s': %s (choices: %s)%s"
+            % [
+                dialog["title"],
+                dialog["text"],
+                ", ".join(dialog["buttons"]),
+                Params.after_a_dialog(launch_is_waiting)
+            ]
+        ),
         false,
         {"dialog": dialog}
     )
@@ -1288,7 +1302,7 @@ func _sweep_runtime_pending() -> void:
             # or one the editor cannot build, turns the launch into a dialog and the editor then
             # waits for a person — while this list waited for a game, and answered `runtime_timeout`
             # about one that was never started.
-            _respond_dialog_open(pending["id"], asking)
+            _respond_dialog_open(pending["id"], asking, true)
         elif int(pending["deadline"]) < now:
             if launching and playing:
                 # The game is up; only its helper is late. Answered apart from a timeout because
@@ -1715,6 +1729,17 @@ func _save_project_or_error() -> Dictionary:
         return Params.error("project_save_failed", "Could not save project.godot (error %d)" % error)
     return {}
 
+## The hint string of a property whose type is an enum, and "" for every other property.
+##
+## Read off the instance rather than off `ClassDB`, so a property a script declares carries its own
+## hint the same way a built-in one does. A flags property is deliberately not matched: its hint is
+## PROPERTY_HINT_FLAGS and any combination of its bits is a legal value.
+func _enum_values(node: Object, property: String) -> String:
+    for entry in node.get_property_list():
+        if entry.get("name") == property and int(entry.get("hint", 0)) == PROPERTY_HINT_ENUM:
+            return String(entry.get("hint_string", ""))
+    return ""
+
 ## The error a mutating command answers when Godot does not hold what the command just wrote.
 ##
 ## Every mutating command ends by asking Godot for the thing it named — the setting, the node, the
@@ -1737,7 +1762,12 @@ func _readback_error(
                 str(wanted),
                 str(found),
                 (
-                    Params.instead_of(String(details.get("property", "")), wanted, found)
+                    Params.instead_of(
+                        String(details.get("property", "")),
+                        wanted,
+                        found,
+                        String(details.get("enumValues", ""))
+                    )
                     + Params.made_unique(wanted, found)
                 )
             ]
@@ -3434,7 +3464,10 @@ func _scene_create(params: Dictionary) -> Dictionary:
             "already_exists",
             "%s is already a scene, and create writes a new one over whatever is there. " % path
             + "Open it with scene.open to work on it, or save this one over it with scene.save_as "
-            + "if replacing it is what you meant.",
+            + "if replacing it is what you meant."
+            + Params.also_the_main_scene(
+                path, String(ProjectSettings.get_setting_with_override("application/run/main_scene"))
+            ),
             {"path": path}
         )
     _set_readiness("importing")
@@ -3444,7 +3477,10 @@ func _scene_create(params: Dictionary) -> Dictionary:
         return {
             "_gofer_error": {
                 "code": "invalid_node_type",
-                "message": "Could not instantiate %s" % root_type,
+                "message": (
+                    "Could not instantiate %s" % root_type
+                    + Params.a_type_that_is_a_scene(root_type)
+                ),
                 "retryable": false,
                 "readiness": "ready",
                 "details": {"rootType": root_type}
@@ -3948,7 +3984,9 @@ func _node_create_nodes(params: Dictionary) -> Dictionary:
         var node: Node = ClassDB.instantiate(node_type) as Node
         if node == null:
             return Params.error(
-                "invalid_node_type", "Could not instantiate %s" % node_type, {"type": node_type}
+                "invalid_node_type",
+                "Could not instantiate %s" % node_type + Params.a_type_that_is_a_scene(node_type),
+                {"type": node_type}
             )
         node.name = node_name
         plan.append([parent, node, int(spec.get("index", -1)), node_type])
@@ -4359,7 +4397,9 @@ func _node_change_type(params: Dictionary) -> Dictionary:
     var replacement: Node = ClassDB.instantiate(node_type) as Node
     if replacement == null:
         return Params.error(
-            "invalid_node_type", "Could not instantiate %s" % node_type, {"type": node_type}
+            "invalid_node_type",
+            "Could not instantiate %s" % node_type + Params.a_type_that_is_a_scene(node_type),
+            {"type": node_type}
         )
 
     # The script first, so the properties it declares are properties the replacement has by the
@@ -4559,7 +4599,11 @@ func _node_set_property(params: Dictionary) -> Dictionary:
             "node.set_property %s.%s" % [node_path_str, property],
             new_value,
             stored,
-            {"node": node_path_str, "property": property}
+            {
+                "node": node_path_str,
+                "property": property,
+                "enumValues": _enum_values(node, property)
+            }
         )
 
     _bump_revision()
@@ -4656,7 +4700,11 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
                 "node.set_properties %s.%s" % [wanted[1], property],
                 wanted[3],
                 stored,
-                {"node": wanted[1], "property": property}
+                {
+                    "node": wanted[1],
+                    "property": property,
+                    "enumValues": _enum_values(node, property)
+                }
             )
         written.append(
             {
@@ -5047,7 +5095,7 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
                         method,
                         signal_name,
                         (
-                            _where_a_method_would_be(target) if recompiled
+                            _where_a_method_would_be(target, method) if recompiled
                             else _why_the_editor_cannot_see_it(target)
                         )
                     ]
@@ -5616,7 +5664,7 @@ func _why_the_editor_cannot_see_it(target: Node) -> String:
 ## turns were told, twice each. It is true and it repairs nothing: the method belongs to whatever
 ## script is on the *target*, which defaults to the scene root rather than to the node emitting the
 ## signal, and the commonest reason there is no method is that there is no script on that node yet.
-func _where_a_method_would_be(target: Node) -> String:
+func _where_a_method_would_be(target: Node, method: String = "") -> String:
     var script: Variant = target.get_script()
     if script == null:
         return (
@@ -5640,6 +5688,11 @@ func _where_a_method_would_be(target: Node) -> String:
             + "defaults to the scene root, so name it if the method lives elsewhere."
         )
     named.sort()
+    # The script has it and the node does not, which is one situation rather than two facts that
+    # contradict each other. See `Params.a_method_the_script_has_and_the_node_has_not`.
+    var stale := Params.a_method_the_script_has_and_the_node_has_not(method, named)
+    if not stale.is_empty():
+        return stale
     if named.size() > 12:
         named = named.slice(0, 12)
     return (
@@ -5705,6 +5758,31 @@ func _nearest_property(node: Node, property: String) -> String:
             return name
     return ""
 
+## Walks a path from the scene's root and asks `Params` to word where it stopped.
+##
+## Only for a path that is under the right root and simply names something that is not there — the
+## four clauses above answer every path that is under the wrong tree, and adding a list of children
+## to one of those would bury the sentence that repairs it.
+func _as_far_as_the_path_goes(raw: String) -> String:
+    var root := _edited_root()
+    if root == null:
+        return ""
+    var parts := raw.strip_edges().trim_prefix("/").split("/", false)
+    if parts.size() < 2 or parts[0] != String(root.name):
+        return ""
+    var here := root
+    var reached := "/" + String(root.name)
+    for index in range(1, parts.size()):
+        var next := here.get_node_or_null(NodePath(parts[index]))
+        if next == null:
+            var present := PackedStringArray()
+            for child in here.get_children():
+                present.append(String(child.name))
+            return Params.as_far_as_the_path_goes(reached, present, parts[index])
+        here = next
+        reached += "/" + parts[index]
+    return ""
+
 ## The mirror of `runtime.gd`'s funnel, for the mistake made the other way round. `godot_runtime`
 ## names the running game's tree, whose every path starts at `/root`; this names the scene the
 ## editor has open, whose paths start at the scene's own root. Two trees, two processes, one node
@@ -5750,6 +5828,8 @@ func _node_not_found_error(raw: String) -> Dictionary:
         message = (
             "%s. Every node path here starts at the scene's own root, which is %s."
         ) % [message, root_path]
+    else:
+        message += _as_far_as_the_path_goes(path)
     return {
         "_gofer_error": {
             "code": "node_not_found",
