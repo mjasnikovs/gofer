@@ -48,6 +48,13 @@ const PROJECT_DATABASE_FILE_NAME: &str = "project.sqlite";
 const PROJECT_ID_KEY: &str = "project.id";
 /// The project's own agent prompt, absent while the project follows the shipped one.
 const AGENT_PROMPT_KEY: &str = "agent.system_prompt";
+
+/// Which of this project's skills the user has turned off, as a JSON array of names.
+///
+/// Off is stored and on is not, so a project that has never opened the Skills tab has no row and
+/// every skill it holds is live. It shares `project_state` with the prompt for the same reason the
+/// prompt is there: it is what the agent is told, and it is not the renderer's to write blind.
+const DISABLED_SKILLS_KEY: &str = "agent.skills.disabled";
 const MEMORY_EMBEDDING_DIMENSIONS: usize = 1024;
 /// Read from the worker that produces the vectors rather than written again here.
 ///

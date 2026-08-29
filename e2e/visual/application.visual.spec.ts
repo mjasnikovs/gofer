@@ -579,6 +579,27 @@ test('sketches tab', async ({page}) => {
     await stableScreenshot(page, 'sketches-tab.png', false, true)
 })
 
+/**
+ * The skills this project gives its agent.
+ *
+ * Three rows on purpose: one sent, one turned off, and one file that is not a skill at all. The
+ * third is the one worth looking at — a SKILL.md with no description loads as no skill, so without
+ * the warning the row would simply never appear.
+ */
+test('skills tab', async ({page}) => {
+    // Wider than the suite's 1280, and the reason is the strip rather than this view: seven tab
+    // labels need 404 pixels and a 1280-wide window gives this panel 358, so the last one is
+    // clipped. 1600 gives it 678. The panel is resizable and every real window has the room; a
+    // shot taken where the tab cannot be clicked would be measuring the default split, not the
+    // screen this test is about.
+    await page.setViewportSize({width: 1600, height: 900})
+    await openSession(page)
+    await page.getByRole('button', {name: 'Skills', exact: true}).click()
+    await expect(page.getByText('tile-levels', {exact: true})).toBeVisible()
+    await expect(page.getByText('One file needs attention')).toBeVisible()
+    await stableScreenshot(page, 'skills-tab.png')
+})
+
 /** The viewer that makes a 1280-wide layout readable in a 330-wide column. */
 test('sketch viewer', async ({page}) => {
     await openSession(page)

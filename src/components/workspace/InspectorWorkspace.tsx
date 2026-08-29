@@ -36,6 +36,7 @@ import {BottomPanel} from './BottomPanel'
 import {DocsView} from './DocsView'
 import {MemoryView} from './MemoryView'
 import {SketchesView} from './SketchesView'
+import {SkillsView} from './SkillsView'
 import {ExplorerPanel} from './ExplorerPanel'
 import {GameView} from './GameView'
 import {InspectorPanel} from './InspectorPanel'
@@ -533,47 +534,68 @@ function FrameRegions({
                                 onDismiss={clearFailure}
                             />
                         )}
-                        <TabList
-                            size='sm'
-                            hasDivider
-                            aria-label='Workspace views'
-                            value={layout.centerTab}
-                            onChange={value => {
-                                dispatch({type: 'center-tab', tab: value as CenterTab})
-                            }}
+                        {/*
+                         * Scrollable, because seven labels need 404 pixels and a 1280-wide window
+                         * gives this panel 358 at the default split. 1600 gives it 678 and 2560
+                         * gives it 1638, so on every wider screen this does nothing at all — but
+                         * 1280 is the width `tauri.conf.json` opens at, and without this the
+                         * seventh tab is drawn where nobody can reach it.
+                         */}
+                        <HStack
+                            gap={0}
+                            isScrollable
                         >
-                            <Tab
-                                value='chat'
-                                label='Chat'
-                            />
-                            <Tab
-                                value='scripts'
-                                label='Scripts'
-                            />
-                            <Tab
-                                value='game'
-                                label='Game'
-                            />
-                            <Tab
-                                value='docs'
-                                label='Docs'
-                            />
-                            <Tab
-                                value='memory'
-                                label='Memory'
-                            />
-                            {/*
-                             * "Design" rather than "Sketches", and the reason is measured rather
-                             * than stylistic: at the default panel widths this strip has 358 pixels
-                             * and six labels, and "Sketches" needs 373. There is no slack left, so
-                             * a seventh view — or a longer label on any of these six — needs the
-                             * overflow `TabMenu` rather than another word.
-                             */}
-                            <Tab
-                                value='sketches'
-                                label='Design'
-                            />
-                        </TabList>
+                            <TabList
+                                size='sm'
+                                hasDivider
+                                aria-label='Workspace views'
+                                value={layout.centerTab}
+                                onChange={value => {
+                                    dispatch({type: 'center-tab', tab: value as CenterTab})
+                                }}
+                            >
+                                <Tab
+                                    value='chat'
+                                    label='Chat'
+                                />
+                                <Tab
+                                    value='scripts'
+                                    label='Scripts'
+                                />
+                                <Tab
+                                    value='game'
+                                    label='Game'
+                                />
+                                <Tab
+                                    value='docs'
+                                    label='Docs'
+                                />
+                                <Tab
+                                    value='memory'
+                                    label='Memory'
+                                />
+                                {/*
+                                 * "Design" rather than "Sketches": at the narrowest panel width this
+                                 * strip is drawn at, "Sketches" needs 373 pixels and there are 358.
+                                 *
+                                 * Seven labels need 404, and that is not the reason to hide any of
+                                 * them. 358 is what a 1280-wide window gives this panel at the default
+                                 * split, and the panel is resizable: 1600 gives it 678 and 2560 gives
+                                 * it 1638, so on every real screen the strip has room to spare. An
+                                 * overflow `TabMenu` was tried here and was worse in both directions —
+                                 * it is wider than the label it replaces, so it clipped the strip at
+                                 * 1280 anyway, and it put two views behind a click for everybody else.
+                                 */}
+                                <Tab
+                                    value='sketches'
+                                    label='Design'
+                                />
+                                <Tab
+                                    value='skills'
+                                    label='Skills'
+                                />
+                            </TabList>
+                        </HStack>
                         <StackItem size='fill'>
                             {layout.centerTab === 'chat' ?
                                 <VStack
@@ -603,6 +625,8 @@ function FrameRegions({
                                 <DocsView />
                             : layout.centerTab === 'memory' ?
                                 <MemoryView />
+                            : layout.centerTab === 'skills' ?
+                                <SkillsView />
                             :   <SketchesView />}
                         </StackItem>
                         <Divider />

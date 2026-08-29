@@ -174,7 +174,7 @@ describe('InspectorWorkspace', () => {
 
         for (const label of ['Scene', 'Runtime', 'Files'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
-        for (const label of ['Chat', 'Scripts', 'Game', 'Docs', 'Memory', 'Design'])
+        for (const label of ['Chat', 'Scripts', 'Game', 'Docs', 'Memory', 'Design', 'Skills'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
         for (const label of ['Node', 'Project', 'Editor'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
@@ -671,6 +671,17 @@ describe('InspectorWorkspace', () => {
         await user.click(screen.getByRole('button', {name: 'Design'}))
 
         expect(screen.getByRole('radio', {name: /All/u})).toBeInTheDocument()
+    })
+
+    /** The seventh view, drawn by its own tab like the six beside it. */
+    it('opens the skills panel from its own tab', async () => {
+        backend()
+        const user = userEvent.setup()
+        await renderWorkspace()
+
+        await user.click(screen.getByRole('button', {name: 'Skills'}))
+
+        expect(await screen.findByRole('button', {name: 'Add folder…'})).toBeInTheDocument()
     })
 
     it('cites documentation by chapter, because retrieval exposes no URL', async () => {

@@ -26,6 +26,7 @@ import type {
     ProjectMemory
 } from '../models/memory'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
+import type {SkillsResponse} from '../models/skills'
 import type {UnsavedWork} from '../models/unsaved-work'
 import type {
     DeleteWorkspacePathRequest,
@@ -194,12 +195,17 @@ export type DesktopCommandMap = Readonly<{
     // Forgetting one memory, so no later turn is given it again.
     delete_project_memory: CommandSpec<{id: string}, void>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
+    // Every skills command answers with the whole list: an import can add a warning instead of a
+    // row, and a save can turn a warning back into one, so a caller cannot patch a single row.
+    delete_skill: CommandSpec<{name: string}, SkillsResponse>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
     format_gdscript: CommandSpec<{request: FormatGdscriptRequest}, FormatGdscriptResponse>
     get_godot_session: CommandSpec<undefined, GodotSessionSummary | undefined>
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>
+    // The path of a Markdown file the user picked. The backend copies it in and names it.
+    import_skill: CommandSpec<{sourcePath: string}, SkillsResponse>
     initialize_rag: CommandSpec<undefined, void>
     // Runs as a turn, so it takes the channel one does — that is what Stop reaches. Its own
     // progress rides `ai-memory-judge` window events instead: the panel is not the chat timeline.
@@ -215,6 +221,7 @@ export type DesktopCommandMap = Readonly<{
     // looked at has the project's artwork inlined into it.
     list_project_sketches: CommandSpec<undefined, readonly ProjectSketch[]>
     list_project_tasks: CommandSpec<undefined, readonly TaskSummary[]>
+    list_skills: CommandSpec<undefined, SkillsResponse>
     list_workspace_files: CommandSpec<undefined, readonly WorkspaceEntry[]>
     load_chat: CommandSpec<{taskId: string | undefined}, StoredChat>
     load_settings: CommandSpec<undefined, SettingsResponse>
@@ -238,6 +245,8 @@ export type DesktopCommandMap = Readonly<{
     // Remembered interface state, as the JSON the renderer wrote. Absent when nothing is stored.
     read_project_sketch: CommandSpec<{id: string}, SketchHtml>
     read_project_state: CommandSpec<{key: string}, string | null>
+    // A skill's own Markdown, for the editor. Read on the row the user opened, not with the list.
+    read_skill: CommandSpec<{name: string}, string>
     read_task_brief: CommandSpec<{taskId: string}, BriefRun | null>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
     // A small `data:` square for a worktree picture. `null` for every file that is not one.
@@ -279,6 +288,7 @@ export type DesktopCommandMap = Readonly<{
         {ids: readonly string[]; state: MemoryState},
         readonly ProjectMemory[]
     >
+    set_skill_enabled: CommandSpec<{name: string; enabled: boolean}, SkillsResponse>
     start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionSummary>
     stop_godot_session: CommandSpec<undefined, void>
     subscribe_godot_events: CommandSpec<{events: Channel<GodotSessionEvent>}, void>
@@ -300,6 +310,7 @@ export type DesktopCommandMap = Readonly<{
     watch_workspace_files: CommandSpec<{changes: Channel<readonly WorkspaceFileChange[]>}, void>
     // No `value` forgets the key, which is how a task's draft goes when the draft is emptied.
     write_project_state: CommandSpec<{key: string; value?: string}, void>
+    write_skill: CommandSpec<{name: string; text: string}, SkillsResponse>
     write_workspace_file: CommandSpec<{request: WriteWorkspaceFileRequest}, WorkspaceFileStamp>
 }>
 

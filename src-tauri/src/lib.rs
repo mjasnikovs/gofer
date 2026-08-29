@@ -77,6 +77,7 @@ mod rag;
 mod read_ledger;
 mod script;
 mod settings;
+mod skills;
 mod storage;
 mod task_switch;
 /// The catalogue's parameter contract, checked against everything that reads it. Tests only.
@@ -99,6 +100,7 @@ use settings::{
     run_connection_test, save_godot_settings as store_godot_settings, settings_response,
     validate_settings, write_settings,
 };
+use skills::{delete_skill, import_skill, list_skills, read_skill, set_skill_enabled, write_skill};
 use storage::{
     BackupResult, MaintenanceResult, MergeTaskResult, ResolveTaskResult, StorageSlot, StoredChat,
     TaskRecord,
@@ -1217,20 +1219,24 @@ pub fn run() {
         delete_chat_task,
         delete_project_memory,
         delete_rag_cache,
+        delete_skill,
         delete_workspace_path,
         edit_workspace_file,
         format_gdscript,
         get_godot_session,
         get_rag_cache_status,
         import_legacy_chat,
+        import_skill,
         initialize_rag,
         list_ai_models,
         judge_project_memory,
         set_memory_states,
+        set_skill_enabled,
         sweep_project_memory,
         list_project_memory,
         list_project_sketches,
         list_project_tasks,
+        list_skills,
         list_workspace_files,
         load_chat,
         load_settings,
@@ -1247,6 +1253,7 @@ pub fn run() {
         read_task_brief,
         read_project_sketch,
         read_project_state,
+        read_skill,
         read_workspace_file,
         read_workspace_thumbnail,
         resolve_task_merge,
@@ -1275,6 +1282,7 @@ pub fn run() {
         update_script_document,
         watch_workspace_files,
         write_project_state,
+        write_skill,
         write_workspace_file,
     ]);
 

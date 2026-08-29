@@ -12,7 +12,7 @@
  */
 
 import {readFile, realpath} from 'node:fs/promises'
-import {basename, dirname, extname, isAbsolute, relative, resolve, sep} from 'node:path'
+import {basename, dirname, extname, isAbsolute, normalize, relative, resolve, sep} from 'node:path'
 
 import {nearMiss, refusedAnchorIndex} from './anchor-near-miss.mjs'
 import {refuseFrozenShellWrite, refuseFrozenWrite} from './frozen-paths.mjs'
@@ -56,8 +56,62 @@ const EDITOR_OWNED = [
             + 'which anchors on the text you are replacing and answers with the diagnostics for '
             + 'what it wrote, or create it with godot_script save. A .gd written as text leaves '
             + 'Godot running the old code.'
+    },
+    {
+        // Not the editor's, but owned all the same. A skill reaches the model as a path to read,
+        // so the read has to work — and the write has to not, because an agent that can rewrite
+        // the rules it was handed is an agent with no rules. Measured before this was written:
+        // `write` overwrote a SKILL.md, and `echo … >` with a relative path did too.
+        matches: path => SKILLS_DIRECTORY.test(path),
+        instead:
+            "Skills are the instructions this project gives you, and they are the user's to "
+            + 'change, in the Skills tab. Read one with the read tool; nothing writes one.'
     }
 ]
+
+/**
+ * The skills directory, matched against a path that has already been resolved.
+ *
+ * The first version of this guard read the string the model typed, and both
+ * `.gofer/./skills/a/SKILL.md` and `.gofer/x/../skills/a/SKILL.md` walked through it and overwrote
+ * the file — measured, not supposed. A pattern cannot do path arithmetic, so the path is resolved
+ * and made relative to the workspace before this reads it.
+ *
+ * `skills/` and not the whole of `.gofer`, which was tried and was wrong: `.gofer/checks/<name>.gd`
+ * is where `verify-points.mjs` tells a verification point to put the script it boots the game with,
+ * and a rule over the whole directory refuses the one thing in there the agent is meant to write.
+ */
+const SKILLS_DIRECTORY = /^\.gofer[\\/]+skills(?:[\\/]|$)/u
+
+/**
+ * Whether a shell command names that directory, in any spelling.
+ *
+ * Every token mentioning `.gofer` is normalised before it is tested, because `sed -i s/a/b/
+ * .gofer/x/../skills/a/SKILL.md` is the same file as `.gofer/skills/a/SKILL.md` and no regular
+ * expression knows that. Splitting on the shell's own separators is what makes `>.gofer/skills/a`
+ * and a quoted path into tokens rather than parts of one.
+ *
+ * A path does not have to start its token. `dd of=.gofer/skills/a/SKILL.md`, `tar -C.gofer/skills`
+ * and `cp x --target-directory=.gofer/skills/a` each carry the path behind a flag, and each one
+ * walked through a rule anchored at the start of a token — measured, all three allowed. So the
+ * token is tested from every `.gofer` in it as well as whole.
+ */
+function namesTheSkillsDirectory(command) {
+    return command
+        .split(/[\s;&|<>"'()]+/u)
+        .filter(token => token.includes('.gofer'))
+        .flatMap(token => spellingsOf(token))
+        .some(token => SKILLS_DIRECTORY.test(token))
+}
+
+/** The token itself and each path inside it, each one normalised. */
+function spellingsOf(token) {
+    const spellings = [normalize(token)]
+    for (let at = token.indexOf('.gofer'); at > 0; at = token.indexOf('.gofer', at + 1)) {
+        spellings.push(normalize(token.slice(at)))
+    }
+    return spellings
+}
 
 /** Tools that put text on disk. Reading an editor-owned file is always fine. */
 const WRITING_TOOLS = ['write', 'edit']
@@ -248,6 +302,9 @@ async function validateToolPath(workspacePath, path) {
     if (!isInside(root, target)) throw new Error('Tool path is outside the workspace')
     const existing = await nearestExistingAncestor(root, target)
     if (!isInside(root, existing)) throw new Error('Tool path resolves outside the workspace')
+    // The path as the project names it, which is what every rule after this one reads. A rule that
+    // reads the string the model typed is a rule with a `./` in front of it.
+    return relative(root, target)
 }
 
 /**
@@ -345,6 +402,15 @@ export function validateBashCommand(command) {
                 + 'on unobserved, and costs a whole request to do nothing. Let the game advance '
                 + 'with godot_runtime wait, which renders the frames before it answers — '
                 + '{"op": "wait", "frames": 30} or {"op": "wait", "ms": 500}.'
+        )
+    // A shell command is a string, so nothing tells `cat x` from `cat > x`. What can be done is
+    // normalising the paths inside it, and that is the half that matters: a pattern alone let
+    // `.gofer/./skills/a` and `.gofer/x/../skills/a` through.
+    if (namesTheSkillsDirectory(command))
+        throw new Error(
+            'Shell commands cannot name the skills directory. Skills are the instructions this '
+                + "project gives you, and they are the user's to change, in the Skills tab. Read "
+                + 'one with the read tool, at the location the skill list gave you.'
         )
     if (EDITOR_OWNED_IN_SHELL.test(withoutASearchGlob(command)) && !readsOnlyThroughGit(command))
         throw new Error(
@@ -444,9 +510,11 @@ export function confineTool(tool, workspacePath, frozen = []) {
                 return tool.execute(id, withADeadline(params), signal, onUpdate, context)
             }
             const resolved = {...params, path: worktreePath(params.path)}
-            await validateToolPath(workspacePath, resolved.path)
-            refuseEditorOwnedWrite(tool.name, resolved.path)
-            refuseFrozenWrite(tool.name, resolved.path, frozen)
+            const named = await validateToolPath(workspacePath, resolved.path)
+            refuseEditorOwnedWrite(tool.name, named)
+            // The normalised path, like the rule above it. Handed the raw one, a frozen
+            // `docs/DESIGN.md` was written by asking for `docs/./DESIGN.md` — measured.
+            refuseFrozenWrite(tool.name, named, frozen)
             return tool
                 .execute(id, resolved, signal, onUpdate, context)
                 .catch(async error =>

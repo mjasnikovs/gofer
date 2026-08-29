@@ -177,6 +177,58 @@ impl Project<'_> {
         Ok(())
     }
 
+    /// The skills this project has turned off, or an empty list while it has turned off none.
+    ///
+    /// A row that cannot be parsed reads as nothing turned off, which is the safe direction: a
+    /// corrupt value silently hiding the instructions a project relies on is far worse than one
+    /// showing a skill the user meant to hide, and the next write repairs it.
+    pub fn read_disabled_skills(&self) -> Result<Vec<String>, CommandError> {
+        let stored: Option<String> = self
+            .storage
+            .connection()?
+            .query_row(
+                "SELECT value FROM project_state WHERE key = ?1",
+                [DISABLED_SKILLS_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+            .map_err(CommandError::or_coded("skills_unreadable"))?;
+        Ok(stored
+            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
+            .unwrap_or_default())
+    }
+
+    /// Records the whole set. An empty set forgets the row, so a project that turned everything
+    /// back on is indistinguishable from one that never turned anything off.
+    pub fn write_disabled_skills(&self, names: &[String]) -> Result<(), CommandError> {
+        self.store_disabled_skills(names)
+            .map_err(CommandError::or_coded("skills_unwritable"))
+    }
+
+    fn store_disabled_skills(&self, names: &[String]) -> Result<(), CommandError> {
+        let (_write_guard, connection) = self.storage.write_connection()?;
+        if names.is_empty() {
+            connection
+                .execute(
+                    "DELETE FROM project_state WHERE key = ?1",
+                    [DISABLED_SKILLS_KEY],
+                )
+                .map_err(database_error)?;
+            return Ok(());
+        }
+        let value = serde_json::to_string(names)
+            .map_err(|error| CommandError::from(format!("Could not record the skills: {error}")))?;
+        connection
+            .execute(
+                "INSERT INTO project_state (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![DISABLED_SKILLS_KEY, value],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     pub fn create_backup(&self) -> Result<BackupResult, CommandError> {
         self.write_backup()
             .map_err(CommandError::or_coded("backup_not_created"))
@@ -545,6 +597,72 @@ mod tests {
                 .project()
                 .write_ui_state("ui.workspace", Some(&"x".repeat(MAX_UI_STATE_BYTES + 1)))
                 .is_err()
+        );
+    }
+
+    /// Off is stored and on is not, so a project that has never opened the tab hides nothing.
+    #[test]
+    fn the_skills_a_project_turned_off_round_trip_and_can_be_turned_back_on() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+
+        assert!(
+            storage
+                .project()
+                .read_disabled_skills()
+                .expect("read")
+                .is_empty()
+        );
+        storage
+            .project()
+            .write_disabled_skills(&["sound-design".to_owned(), "tile-levels".to_owned()])
+            .expect("write");
+        assert_eq!(
+            storage.project().read_disabled_skills().expect("read"),
+            vec!["sound-design".to_owned(), "tile-levels".to_owned()]
+        );
+
+        // Turning everything back on forgets the row rather than storing an empty list, so the
+        // project is indistinguishable from one that never turned anything off.
+        storage
+            .project()
+            .write_disabled_skills(&[])
+            .expect("write none");
+        assert!(
+            storage
+                .project()
+                .read_disabled_skills()
+                .expect("read")
+                .is_empty()
+        );
+    }
+
+    /// A value nothing can parse reads as "nothing is off", which is the safe direction: a corrupt
+    /// row silently hiding the instructions a project relies on is worse than one showing a skill
+    /// the user meant to hide, and the next write repairs it.
+    #[test]
+    fn an_unreadable_disabled_list_hides_nothing() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        storage
+            .project()
+            .write_ui_state("ui.throwaway", Some("x"))
+            .expect("a write connection exists");
+        let (_guard, connection) = storage.write_connection().expect("write connection");
+        connection
+            .execute(
+                "INSERT INTO project_state (key, value) VALUES (?1, ?2)",
+                rusqlite::params![super::DISABLED_SKILLS_KEY, "not json at all"],
+            )
+            .expect("write the corrupt row");
+        drop(connection);
+
+        assert!(
+            storage
+                .project()
+                .read_disabled_skills()
+                .expect("read")
+                .is_empty()
         );
     }
 

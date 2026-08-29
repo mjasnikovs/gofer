@@ -53,7 +53,15 @@ describe('toWorkspaceLayout', () => {
      * Chat the next time the project is opened — which reads as the window losing its place.
      */
     it('remembers every tab the centre column has', () => {
-        for (const tab of ['chat', 'scripts', 'game', 'docs', 'memory', 'sketches'] as const)
+        for (const tab of [
+            'chat',
+            'scripts',
+            'game',
+            'docs',
+            'memory',
+            'sketches',
+            'skills'
+        ] as const)
             expect(toWorkspaceLayout({...STORED, centerTab: tab}).centerTab).toBe(tab)
     })
 

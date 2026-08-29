@@ -1,7 +1,7 @@
 [[permission]]
 identifier = "main-window-commands"
 description = "Allows the main window to use Gofer's user-facing application commands."
-# GENERATED-BEGIN allow-list sha256:9cc1d33a7a630221
+# GENERATED-BEGIN allow-list sha256:547ce2c612601b6f
 commands.allow = [
     "abandon_task_merge",
     "activate_chat_task",
@@ -19,18 +19,21 @@ commands.allow = [
     "delete_chat_task",
     "delete_project_memory",
     "delete_rag_cache",
+    "delete_skill",
     "delete_workspace_path",
     "edit_workspace_file",
     "format_gdscript",
     "get_godot_session",
     "get_rag_cache_status",
     "import_legacy_chat",
+    "import_skill",
     "initialize_rag",
     "judge_project_memory",
     "list_ai_models",
     "list_project_memory",
     "list_project_sketches",
     "list_project_tasks",
+    "list_skills",
     "list_workspace_files",
     "load_chat",
     "load_settings",
@@ -47,6 +50,7 @@ commands.allow = [
     "read_godot_logs",
     "read_project_sketch",
     "read_project_state",
+    "read_skill",
     "read_task_brief",
     "read_workspace_file",
     "read_workspace_thumbnail",
@@ -66,6 +70,7 @@ commands.allow = [
     "search_godot_log_history",
     "send_ai_message",
     "set_memory_states",
+    "set_skill_enabled",
     "start_godot_session",
     "stop_godot_session",
     "subscribe_godot_events",
@@ -78,6 +83,7 @@ commands.allow = [
     "update_script_document",
     "watch_workspace_files",
     "write_project_state",
+    "write_skill",
     "write_workspace_file",
 ]
 # GENERATED-END allow-list

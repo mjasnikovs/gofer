@@ -246,6 +246,13 @@ pub(crate) enum WorkerJob {
         ///
         /// `None` when Git does not know the worktree, which leaves the turn exactly as it was.
         inventory: Option<String>,
+        /// The skills this project has turned off, by name.
+        ///
+        /// Only the off ones travel, because a project that has turned none off is the ordinary
+        /// case and an empty list says it. The worker reads the skills themselves off the
+        /// workspace with the library that also parses them for the Skills tab, so the only thing
+        /// Rust has to send is the part that lives in the database rather than on disk.
+        disabled_skills: Vec<String>,
     },
     Brief {
         /// The raw ask, as the user typed it when they made the task.
@@ -435,6 +442,9 @@ pub(crate) struct JobContext {
     /// Read once per job, beside the session, because both answer a question the model would
     /// otherwise spend a call on. `None` for a worktree Git does not know.
     inventory: Option<String>,
+    /// The skills this project has turned off, read beside the prompt because it is part of the
+    /// same answer: what this project's agent is told. Empty for a job that composes no prompt.
+    disabled_skills: Vec<String>,
 }
 
 impl JobContext {
@@ -467,6 +477,17 @@ impl JobContext {
         let inventory = composes
             .then(|| crate::git::tracked_files(std::path::Path::new(&workspace_path)))
             .flatten();
+        // Read only for a job that sends a prompt, for the same reason the prompt is: a brief
+        // composes its own inside the worker, and a project-row read spent on a value nothing
+        // sends is a locked database aborting a job that never wanted it.
+        let disabled_skills = if composes {
+            storage
+                .project()
+                .read_disabled_skills()
+                .map_err(|failure| failure.message)?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             ai: settings.ai,
             credentials: Credentials::read()?,
@@ -475,6 +496,7 @@ impl JobContext {
             system_prompt,
             session_context: describe_session(app),
             inventory,
+            disabled_skills,
         })
     }
 
@@ -530,6 +552,12 @@ impl JobContext {
                             .expect("GOFER_LIVE_OAUTH holds the JSON the keyring stores")
                     }),
             ),
+            // Read the same way a turn in the application reads it, so a suite that seeded a
+            // skill into its checkout composes the prompt the application would compose.
+            disabled_skills: storage
+                .project()
+                .read_disabled_skills()
+                .map_err(|failure| failure.message)?,
             storage,
             inventory: crate::git::tracked_files(std::path::Path::new(&workspace_path)),
             workspace_path,
@@ -572,6 +600,7 @@ impl JobContext {
                     system_prompt: self.system_prompt.clone(),
                     session_context: Some(self.session_context.clone()),
                     inventory: self.inventory.clone().map(describe_inventory),
+                    disabled_skills: self.disabled_skills.clone(),
                 },
             ),
             Job::Brief {
@@ -2684,6 +2713,7 @@ mod tests {
                 session_context: Some("Editor session: offline. No editor is running.".to_owned()),
                 system_prompt: Some("the shipped agent prompt".to_owned()),
                 inventory: Some("scripts/player.gd".to_owned()),
+                disabled_skills: vec!["sound-design".to_owned()],
             },
             ..worker_request()
         };
@@ -2707,6 +2737,10 @@ mod tests {
             serde_json::json!("Editor session: offline. No editor is running.")
         );
         assert_eq!(encoded["inventory"], serde_json::json!("scripts/player.gd"));
+        assert_eq!(
+            encoded["disabledSkills"],
+            serde_json::json!(["sound-design"])
+        );
         // Named once, not twice: a snake_case key beside the camelCase one is a worker reading the
         // one it understands while the other rides along unused.
         for stale in [
@@ -2715,6 +2749,7 @@ mod tests {
             "memory_context",
             "session_context",
             "system_prompt",
+            "disabled_skills",
         ] {
             assert!(
                 encoded.get(stale).is_none(),
@@ -2747,6 +2782,7 @@ mod tests {
                 system_prompt: None,
                 session_context: None,
                 inventory: None,
+                disabled_skills: Vec::new(),
             },
         }
     }
@@ -2780,6 +2816,7 @@ mod tests {
             system_prompt: Some(system_prompt.to_owned()),
             session_context: describe_session(app),
             inventory: None,
+            disabled_skills: Vec::new(),
         }
     }
 

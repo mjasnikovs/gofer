@@ -2,7 +2,7 @@ import type {GodotLogSeverity} from './godot'
 import type {GodotSelection} from './workspace'
 
 /** The centre column's views. */
-export type CenterTab = 'chat' | 'scripts' | 'game' | 'docs' | 'memory' | 'sketches'
+export type CenterTab = 'chat' | 'scripts' | 'game' | 'docs' | 'memory' | 'sketches' | 'skills'
 /** The explorer column's views. */
 export type ExplorerTab = 'scene' | 'runtime' | 'files'
 /** The inspector column's views. */
@@ -124,7 +124,15 @@ export const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayout = {
     breakpoints: {}
 }
 
-const CENTER_TABS: readonly CenterTab[] = ['chat', 'scripts', 'game', 'docs', 'memory', 'sketches']
+const CENTER_TABS: readonly CenterTab[] = [
+    'chat',
+    'scripts',
+    'game',
+    'docs',
+    'memory',
+    'sketches',
+    'skills'
+]
 const EXPLORER_TABS: readonly ExplorerTab[] = ['scene', 'runtime', 'files']
 const INSPECTOR_TABS: readonly InspectorTab[] = ['node', 'project', 'editor']
 const BOTTOM_TABS: readonly BottomTab[] = ['problems', 'debugger', 'output', 'import']

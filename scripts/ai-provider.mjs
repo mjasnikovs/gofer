@@ -15,6 +15,7 @@ import {
 import {createModels, createProvider} from '@earendil-works/pi-ai'
 import {runVerifyPoints, verifyPointsIn, verifyReport, verifySummary} from './verify-points.mjs'
 import {frozenPathsIn} from './frozen-paths.mjs'
+import {promptWithSkills} from './skills.mjs'
 import {isContextOverflow} from '@earendil-works/pi-ai/compat'
 import {openAICompletionsApi} from '@earendil-works/pi-ai/api/openai-completions.lazy'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
@@ -705,6 +706,7 @@ export async function runAgent({
     memoryContext,
     sessionContext,
     inventory,
+    disabledSkills = [],
     tools: domains,
     host,
     credentialHost,
@@ -888,15 +890,22 @@ export async function runAgent({
      */
     let transcript
     const turnText = turnContextText({memoryContext, sessionContext, inventory})
+    const prompt = await promptWithSkills(env, workspacePath, systemPrompt, disabledSkills)
     /** Which message this turn hung its context on, so a re-prompt mid-turn does not move it. */
     const turnAnchor = {}
     const agent = new Agent({
         initialState: {
-            // The prompt arrives whole: the backend composes what it ships, the settings page
-            // shows that text, and a project that edited it sends its own. Nothing is appended:
-            // what this turn knows goes on the tail of the conversation, in `transformContext`
-            // below, because the system message is where every provider's cache prefix begins.
-            systemPrompt,
+            // The prompt arrives composed: the backend builds what it ships, the settings page
+            // shows that text, and a project that edited it sends its own. The one thing added
+            // here is the skills block, because it is read off the project's own files with the
+            // library that also parses them for the Skills tab.
+            //
+            // It goes in the system message and not on the tail, which is the opposite of what
+            // everything else this turn knows does. The rule is not "nothing may be appended", it
+            // is that the cache prefix must not move: what a turn knows changes every turn, and
+            // what skills a project has changes when the user edits one. Editing one should
+            // invalidate the cache. A turn happening should not.
+            systemPrompt: prompt,
             model,
             thinkingLevel: parentThinkingLevel(settings),
             tools,

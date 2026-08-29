@@ -42,6 +42,14 @@ declare namespace NodeJS {
         GOFER_CHROME_BINARY?: string
         /** The driver for that browser. */
         GOFER_CHROMEDRIVER_BINARY?: string
+        /** Where the skills smoke keeps its workspace and fixture, so its worker finds the same one. */
+        GOFER_SKILLS_SMOKE_ROOT?: string
+        /** A skill folder of your own for the skills smoke, instead of the fixture it writes. */
+        GOFER_SKILL_FOLDER?: string
+        /** The workspace the skills smoke imports into, handed to the spec by its runner. */
+        GOFER_SKILLS_SMOKE_WORKSPACE?: string
+        /** The folder the skills smoke imports, handed to the spec by its runner. */
+        GOFER_SKILLS_SMOKE_FOLDER?: string
     }
 }
 

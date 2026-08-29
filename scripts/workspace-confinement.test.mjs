@@ -110,6 +110,76 @@ test('refuses to let the raw file tools write what the editor owns', async conte
     }
 })
 
+/**
+ * Skills: read freely, write never.
+ *
+ * A skill reaches the model as a path to read, so the read has to keep working — that is the whole
+ * mechanism. The write has to not: an agent that can rewrite the instructions it was handed is an
+ * agent with no instructions.
+ *
+ * Every spelling below is here because it was measured getting through. The first version of this
+ * guard matched the string the model typed, so `.gofer/./skills/…` and `.gofer/x/../skills/…` both
+ * overwrote the file. Paths are resolved and shell tokens normalised before the rule reads them.
+ */
+test('refuses every way of writing a skill, and keeps reading one', async context => {
+    const current = await workspace()
+    context.after(current.remove)
+    await mkdir(join(current.path, '.gofer', 'skills', 'tile-levels'), {recursive: true})
+    const relative = '.gofer/skills/tile-levels/SKILL.md'
+    const spellings = [
+        relative,
+        '.gofer/./skills/tile-levels/SKILL.md',
+        '.gofer/x/../skills/tile-levels/SKILL.md',
+        join(current.path, relative)
+    ]
+
+    for (const name of ['write', 'edit']) {
+        const tool = confineTool(fakeTool(name), current.path)
+        for (const path of spellings) {
+            await assert.rejects(tool.execute('1', {path, text: 'mine now'}), /Skills tab/u)
+        }
+    }
+    const shell = confineTool(fakeTool('bash'), current.path)
+    for (const command of [
+        `echo x > ${relative}`,
+        `cat >${relative}`,
+        'sed -i s/a/b/ .gofer/./skills/tile-levels/SKILL.md',
+        'sed -i s/a/b/ .gofer/x/../skills/tile-levels/SKILL.md',
+        `cat "${relative}"`,
+        // A path does not have to start its token. All three were measured getting through a rule
+        // anchored at the start of one.
+        `dd of=${relative} if=/dev/stdin`,
+        'tar -xzf skills.tgz -C.gofer/skills',
+        'cp mine.md --target-directory=.gofer/skills/tile-levels'
+    ]) {
+        await assert.rejects(shell.execute('2', {command}), /skills directory/u)
+    }
+
+    // The rest of `.gofer` is not this rule's business. A verification point is told to put the
+    // script it boots the game with in `.gofer/checks/`, and refusing that refuses the feature.
+    assert.deepEqual(
+        await shell.execute('3', {command: 'godot --headless --script .gofer/checks/boss.gd'}),
+        asRun('godot --headless --script .gofer/checks/boss.gd')
+    )
+
+    // The read is the point of the whole feature.
+    const reader = confineTool(fakeTool('read'), current.path)
+    for (const path of [relative, join(current.path, relative)]) {
+        assert.deepEqual(await reader.execute('4', {path}), {path})
+    }
+    // A path that only looks like one is nobody's business but the agent's.
+    const writer = confineTool(fakeTool('write'), current.path)
+    assert.deepEqual(await writer.execute('5', {path: 'my.gofer-notes.txt', text: 'x'}), {
+        path: 'my.gofer-notes.txt',
+        text: 'x'
+    })
+    // And a flag that happens to end in the letters is still not a path into the store.
+    assert.deepEqual(
+        await shell.execute('6', {command: 'tar -czf out.tgz --exclude=build .gofer-notes'}),
+        asRun('tar -czf out.tgz --exclude=build .gofer-notes')
+    )
+})
+
 test('lets a write make the directories it needs', async context => {
     const current = await workspace()
     context.after(current.remove)
@@ -684,4 +754,17 @@ test('refuses a write to a path the task froze, and still reads it', async conte
     // A file the specification did not name is untouched by the rule.
     assert.equal(await tool('write').execute('4', {path: 'inside.txt', content: 'x'}), 'ok')
     assert.deepEqual(seen, ['read:DESIGN.md', 'write:inside.txt'])
+
+    // The same file spelled with a `./` in it. The rule reads the normalised path, like the
+    // editor-owned rule above it — handed the raw one, a nested frozen path was written by asking
+    // for `docs/./spec.md`.
+    const nested = name =>
+        confineTool({name, execute: () => Promise.resolve('ok')}, current.path, ['docs/spec.md'])
+    for (const path of ['docs/spec.md', 'docs/./spec.md', 'docs/x/../spec.md']) {
+        await assert.rejects(
+            nested('write').execute('5', {path, content: 'x'}),
+            /specification freezes docs\/spec\.md/u,
+            path
+        )
+    }
 })

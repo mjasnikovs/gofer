@@ -12,7 +12,7 @@
  * import graph inlined, written to `src-tauri/workers/`, which `tauri.conf.json` bundles as an
  * application resource. `workers.rs` resolves them from there.
  *
- * All five workers are bundled. `memory-worker.mjs`, `rag-warmup.mjs` and
+ * All six workers are bundled. `memory-worker.mjs`, `rag-warmup.mjs` and
  * `rag-retrieve-worker.mjs` reach `onnxruntime-node`, `@lancedb/lancedb` and `sharp`, which load
  * `.node` binaries through a computed `require` no bundler can follow. Those three packages are
  * left external and their dependency closure is copied into `src-tauri/workers/node_modules`, so
@@ -127,6 +127,12 @@ const ENTRIES = [
     // Warmup downloads 1.8 GiB of models and the embedder needs one loaded, so neither has an
     // offline operation to be asked for. `NATIVE_PROBE` is their whole proof.
     {name: 'rag-warmup.mjs', external: NATIVE_PACKAGES, probes: []},
+    // Skills parse YAML and read ignore files through two small pure-JavaScript dependencies of
+    // pi's, so this one inlines cleanly and can be asked a real question offline.
+    {
+        name: 'skills-worker.mjs',
+        probes: [{input: '{"probe":true}\n', status: 0, stdout: /skills-worker-reachable/u}]
+    },
     {name: 'memory-worker.mjs', external: NATIVE_PACKAGES, probes: []}
 ]
 

@@ -196,6 +196,34 @@ export async function installDesktop(
                                 savedAt: 1_600_000_000_000
                             }
                         ]
+                    if (command === 'list_skills')
+                        return {
+                            skills: [
+                                {
+                                    name: 'tile-levels',
+                                    description:
+                                        'How to build a 2D level from tiles: make the TileSet first, then set cells on a TileMapLayer.',
+                                    path: '/project/.gofer/skills/tile-levels/SKILL.md',
+                                    enabled: true,
+                                    hidden: false
+                                },
+                                {
+                                    name: 'sound-design',
+                                    description:
+                                        'Where this project puts its audio buses, and which one a new sound belongs on.',
+                                    path: '/project/.gofer/skills/sound-design/SKILL.md',
+                                    enabled: false,
+                                    hidden: false
+                                }
+                            ],
+                            warnings: [
+                                {
+                                    code: 'invalid_metadata',
+                                    message: 'description is required',
+                                    path: '/project/.gofer/skills/half-written/SKILL.md'
+                                }
+                            ]
+                        }
                     if (command === 'read_project_sketch')
                         return {
                             shown: sketch('#4f8cff', 'Centered Overlay'),

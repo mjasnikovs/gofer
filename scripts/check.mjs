@@ -89,6 +89,10 @@ const NODE_COVERAGE_EXCLUDES = [
     'memory-worker.mjs',
     'rag-warmup.mjs',
     'rag-retrieve-worker.mjs',
+    // The wire around `skills.mjs`, which is where the coverage is. The build spawns this one and
+    // refuses to ship a bundle that cannot answer its probe, which is a stronger check than a line
+    // count on twenty lines of stdin handling.
+    'skills-worker.mjs',
     // Every `bench-*.mjs` is a measurement harness: run by hand against a real model, never
     // imported, never shipped. `bench-alone.mjs` was excluded by name and the family has since
     // grown to eight, which left the gate 0.53 of a point above its own line — one more

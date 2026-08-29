@@ -20,6 +20,7 @@ import type {TaskSummary} from '../models/app'
 import type {HealthReport} from '../models/health'
 import type {MemoryEdit, MemoryState, ProjectMemory} from '../models/memory'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
+import type {Skill, SkillsResponse} from '../models/skills'
 import type {BriefRun} from '../models/brief'
 
 /**
@@ -67,6 +68,8 @@ export interface BackendState {
     memories: ProjectMemory[]
     /** The saved sketches the panel names. */
     sketches: ProjectSketch[]
+    /** This project's skills, keyed by name, with the Markdown each one holds. */
+    skills: Map<string, {skill: Skill; text: string}>
     /** The markup every sketch is read as. One copy, because a fake needs one. */
     sketchHtml: SketchHtml
     /** The stored settings, which a save replaces and a load answers with. */
@@ -149,6 +152,8 @@ export type BackendOptions = Readonly<{
     /** The sketches the project holds, and the markup each one reads as. */
     sketches?: readonly ProjectSketch[]
     sketchHtml?: SketchHtml
+    /** The skills the project holds. Each carries the text `read_skill` answers with. */
+    skills?: readonly {skill: Skill; text: string}[]
     /** The worktree listing, for a suite that needs different files in the explorer. */
     files?: readonly {path: string; bytes: number}[]
     /** The `data:` squares `read_workspace_thumbnail` answers with, by path. */
@@ -373,6 +378,11 @@ interface Channels {
  * The fake answers `undefined` for a command it does not model, which is what the real backend does
  * for the commands that return nothing. A test that needs more names it in `answers`.
  */
+/** The list as the backend answers it, which is the whole of it every time. */
+function skillsResponse(state: BackendState): SkillsResponse {
+    return {skills: [...state.skills.values()].map(one => one.skill), warnings: []}
+}
+
 export function installBackend(fake: DesktopFake, options: BackendOptions = {}): Backend {
     const state: BackendState = {
         session: {started: false, state: 'ready'},
@@ -391,6 +401,7 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
         briefs: new Map(Object.entries(options.briefs ?? {})),
         memories: [...(options.memories ?? [])],
         sketches: [...(options.sketches ?? [])],
+        skills: new Map((options.skills ?? []).map(one => [one.skill.name, one])),
         sketchHtml: options.sketchHtml ?? SKETCH_HTML,
         settings: options.settings ?? SETTINGS
     }
@@ -666,6 +677,33 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
             }
             case 'list_project_sketches':
                 return [...state.sketches]
+
+            // Every skills command answers with the whole list, the way the backend does: an
+            // import can add a warning instead of a row, so a caller cannot patch one row.
+            case 'list_skills':
+                return skillsResponse(state)
+            case 'set_skill_enabled': {
+                const name = payload['name'] as string
+                const held = state.skills.get(name)
+                if (held) {
+                    state.skills.set(name, {
+                        ...held,
+                        skill: {...held.skill, enabled: payload['enabled'] as boolean}
+                    })
+                }
+                return skillsResponse(state)
+            }
+            case 'read_skill':
+                return state.skills.get(payload['name'] as string)?.text ?? ''
+            case 'write_skill': {
+                const name = payload['name'] as string
+                const held = state.skills.get(name)
+                if (held) state.skills.set(name, {...held, text: payload['text'] as string})
+                return skillsResponse(state)
+            }
+            case 'delete_skill':
+                state.skills.delete(payload['name'] as string)
+                return skillsResponse(state)
             case 'read_project_sketch':
                 log.sketchReads.push(payload['id'] as string)
                 return state.sketchHtml

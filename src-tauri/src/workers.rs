@@ -17,7 +17,7 @@
 //! whole point of a dev build. A release binary cannot reach the source tree at all, so what it
 //! runs is fixed the moment it is built.
 //!
-//! All five workers are bundled. `memory-worker.mjs`, `rag-warmup.mjs` and
+//! All six workers are bundled. `memory-worker.mjs`, `rag-warmup.mjs` and
 //! `rag-retrieve-worker.mjs` load `onnxruntime-node`, `@lancedb/lancedb` and `sharp` through a
 //! require computed at run time, so those three packages are left external and copied into
 //! `workers/node_modules`, which Node finds by walking up from the bundle.
