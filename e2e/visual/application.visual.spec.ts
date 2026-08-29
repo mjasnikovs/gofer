@@ -102,6 +102,30 @@ test('names a worktree file from the composer with @ @interaction', async ({page
     await expect(page.getByRole('log').getByText(/@scripts\/player\.gd/u)).toBeVisible()
 })
 
+/**
+ * The view strip keeps its height while a long turn runs.
+ *
+ * The strip scrolls sideways, and `overflow: auto` costs a flex child its automatic minimum size.
+ * That made it the only sibling in the centre column that could give way, so a seeded conversation
+ * plus a running turn squeezed it from thirty-three pixels to two and every view but Chat became
+ * unreachable exactly when the agent was working.
+ */
+test('the view tabs survive a long running turn @interaction', async ({page}) => {
+    await installDesktop(page, 'streaming', {seededMessages: 40})
+    await page.goto('/')
+    await expect(page.getByRole('img', {name: 'Local AI connected'})).toBeVisible()
+    await page.evaluate(() => {
+        window.__GOFER_TEST_HOLD_TURN__ = true
+    })
+    await page.getByRole('combobox', {name: 'Message input'}).fill('Run the tests')
+    await page.getByRole('combobox', {name: 'Message input'}).press('Enter')
+    await expect(page.getByText('Working', {exact: true})).toBeVisible()
+    const strip = page.getByRole('navigation', {name: 'Workspace views'})
+    const box = await strip.boundingBox()
+    expect(box?.height ?? 0, 'the view strip is drawn at its full height').toBeGreaterThan(28)
+    await expect(page.getByRole('button', {name: 'Design'})).toBeVisible()
+})
+
 test('streaming conversation with tool activity', async ({page}) => {
     await installDesktop(page, 'streaming')
     await page.goto('/')

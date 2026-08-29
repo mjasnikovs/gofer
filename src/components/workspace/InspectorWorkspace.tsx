@@ -540,62 +540,69 @@ function FrameRegions({
                          * gives it 1638, so on every wider screen this does nothing at all — but
                          * 1280 is the width `tauri.conf.json` opens at, and without this the
                          * seventh tab is drawn where nobody can reach it.
+                         *
+                         * Wrapped so it cannot shrink. `overflow: auto` costs a flex child its
+                         * automatic minimum size, which made this the only sibling in the column
+                         * that could give way. A long conversation sizes the fill item below, and
+                         * the strip was squeezed to two pixels while the agent answered.
                          */}
-                        <HStack
-                            gap={0}
-                            isScrollable
-                        >
-                            <TabList
-                                size='sm'
-                                hasDivider
-                                aria-label='Workspace views'
-                                value={layout.centerTab}
-                                onChange={value => {
-                                    dispatch({type: 'center-tab', tab: value as CenterTab})
-                                }}
+                        <StackItem size='static'>
+                            <HStack
+                                gap={0}
+                                isScrollable
                             >
-                                <Tab
-                                    value='chat'
-                                    label='Chat'
-                                />
-                                <Tab
-                                    value='scripts'
-                                    label='Scripts'
-                                />
-                                <Tab
-                                    value='game'
-                                    label='Game'
-                                />
-                                <Tab
-                                    value='docs'
-                                    label='Docs'
-                                />
-                                <Tab
-                                    value='memory'
-                                    label='Memory'
-                                />
-                                {/*
-                                 * "Design" rather than "Sketches": at the narrowest panel width this
-                                 * strip is drawn at, "Sketches" needs 373 pixels and there are 358.
-                                 *
-                                 * Seven labels need 404, and that is not the reason to hide any of
-                                 * them. 358 is what a 1280-wide window gives this panel at the default
-                                 * split, and the panel is resizable: 1600 gives it 678 and 2560 gives
-                                 * it 1638, so on every real screen the strip has room to spare. An
-                                 * overflow `TabMenu` was tried here and was worse in both directions —
-                                 * it is wider than the label it replaces, so it clipped the strip at
-                                 * 1280 anyway, and it put two views behind a click for everybody else.
-                                 */}
-                                <Tab
-                                    value='sketches'
-                                    label='Design'
-                                />
-                                <Tab
-                                    value='skills'
-                                    label='Skills'
-                                />
-                            </TabList>
-                        </HStack>
+                                <TabList
+                                    size='sm'
+                                    hasDivider
+                                    aria-label='Workspace views'
+                                    value={layout.centerTab}
+                                    onChange={value => {
+                                        dispatch({type: 'center-tab', tab: value as CenterTab})
+                                    }}
+                                >
+                                    <Tab
+                                        value='chat'
+                                        label='Chat'
+                                    />
+                                    <Tab
+                                        value='scripts'
+                                        label='Scripts'
+                                    />
+                                    <Tab
+                                        value='game'
+                                        label='Game'
+                                    />
+                                    <Tab
+                                        value='docs'
+                                        label='Docs'
+                                    />
+                                    <Tab
+                                        value='memory'
+                                        label='Memory'
+                                    />
+                                    {/*
+                                     * "Design" rather than "Sketches": at the narrowest panel width this
+                                     * strip is drawn at, "Sketches" needs 373 pixels and there are 358.
+                                     *
+                                     * Seven labels need 404, and that is not the reason to hide any of
+                                     * them. 358 is what a 1280-wide window gives this panel at the default
+                                     * split, and the panel is resizable: 1600 gives it 678 and 2560 gives
+                                     * it 1638, so on every real screen the strip has room to spare. An
+                                     * overflow `TabMenu` was tried here and was worse in both directions —
+                                     * it is wider than the label it replaces, so it clipped the strip at
+                                     * 1280 anyway, and it put two views behind a click for everybody else.
+                                     */}
+                                    <Tab
+                                        value='sketches'
+                                        label='Design'
+                                    />
+                                    <Tab
+                                        value='skills'
+                                        label='Skills'
+                                    />
+                                </TabList>
+                            </HStack>
+                        </StackItem>
                         <StackItem size='fill'>
                             {layout.centerTab === 'chat' ?
                                 <VStack
