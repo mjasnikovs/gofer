@@ -31,6 +31,13 @@ export function iconClasses(root: GodotNode | null | undefined): string[] {
  * otherwise re-fetch the same artwork on every keystroke. A request that fails leaves its classes
  * unasked, so the next refetch tries again — the icons are decoration, never a reason to fail the
  * tree, and the panel draws without them until they arrive.
+ *
+ * Nothing here is cancelled on cleanup. A class icon is not an answer to the tree that asked for
+ * it, so a newer tree never makes it stale — and this effect re-runs on every tree, because the
+ * editor hands back a new object each time it touches the scene. Dropping the answer there lost
+ * the artwork for good: the classes were already marked asked, so no later tree asked again, and
+ * a scene built while the agent was editing it came out with icons on the nodes added between
+ * edits and blank rows for every node added during one.
  */
 export function useGodotClassIcons(
     call: GodotCall,
@@ -47,10 +54,8 @@ export function useGodotClassIcons(
             .slice(0, MAX_CLASSES_PER_REQUEST)
         if (missing.length === 0) return
         for (const name of missing) asked.current.add(name)
-        let cancelled = false
         void call('editor.get_class_icons', {classes: missing})
             .then(answer => {
-                if (cancelled) return
                 const fetched: Record<string, string> = {}
                 // An addon too old to know the command answers an empty result rather than a map.
                 for (const [name, data] of Object.entries(answer.icons ?? {})) {
@@ -61,9 +66,6 @@ export function useGodotClassIcons(
             .catch(() => {
                 for (const name of missing) asked.current.delete(name)
             })
-        return () => {
-            cancelled = true
-        }
     }, [call, isEnabled, root])
 
     return icons
