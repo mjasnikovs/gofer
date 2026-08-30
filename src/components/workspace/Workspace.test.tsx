@@ -10,6 +10,7 @@ import {createManualScheduler, immediateScheduler, setScheduler} from '../../ser
 import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../../test/desktop-driver'
 import {flush} from '../../test/flush'
 import {installBackend} from '../../test/backend'
+import {setTurnRunning} from '../../services/turn-activity'
 import type {BriefEvent} from '../../models/brief'
 import type {Backend, BackendAnswers} from '../../test/backend'
 import {sketchMessage} from '../../models/sketch'
@@ -793,5 +794,182 @@ describe('Workspace composer actions', () => {
         await flush()
 
         expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId})
+    })
+})
+
+describe('Workspace while a turn is running', () => {
+    type Steered = Readonly<{id: string; text: string}>
+    type HeldTurn = Readonly<{
+        steers: readonly Steered[]
+        play: (event: unknown) => void
+        end: () => Promise<void>
+    }>
+
+    function holdTurnOpen(refuse = false): HeldTurn {
+        let release: (() => void) | undefined
+        let live: {requestId: number; channel: StreamChannel} | undefined
+        const steers: Steered[] = []
+        server = installBackend(tauri, {
+            answers: {
+                send_ai_message: ({request, stream}) => {
+                    live = {
+                        requestId: request.requestId,
+                        channel: stream as unknown as StreamChannel
+                    }
+                    return new Promise<void>(resolve => {
+                        release = resolve
+                    })
+                },
+                steer_ai_request: ({request}) => {
+                    if (refuse) throw new Error('no turn to steer')
+                    steers.push({id: request.id, text: request.text})
+                    return undefined
+                }
+            }
+        })
+        return {
+            steers,
+            play: event => {
+                if (live) live.channel.onmessage({requestId: live.requestId, event})
+            },
+            end: async () => {
+                release?.()
+                await flush()
+            }
+        }
+    }
+
+    async function type(user: ReturnType<typeof userEvent.setup>, text: string) {
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.paste(text)
+        await user.keyboard('{Enter}')
+        await flush()
+    }
+
+    it('keeps what was typed instead of destroying it, and steers the running turn', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'also check the audio bus')
+
+        expect(turn.steers.map(request => request.text)).toEqual(['also check the audio bus'])
+        expect(await screen.findByText('also check the audio bus')).toBeInTheDocument()
+        expect(screen.getByText('Queued')).toBeInTheDocument()
+
+        await turn.end()
+    })
+
+    it('clears the composer once the message is queued', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'also check the audio bus')
+
+        expect((await screen.findByRole('combobox', {name: 'Message input'})).textContent).toBe('')
+
+        await turn.end()
+    })
+
+    it('stops calling it queued once the model has taken it', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'also check the audio bus')
+        act(() => {
+            turn.play({type: 'steered', id: turn.steers[0]?.id})
+        })
+        await flush()
+
+        expect(screen.queryByText('Queued')).not.toBeInTheDocument()
+        expect(screen.getByText('also check the audio bus')).toBeInTheDocument()
+
+        await turn.end()
+    })
+
+    it('hands the message back to the composer when the steer is refused', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen(true)
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'also check the audio bus')
+
+        expect((await screen.findByRole('combobox', {name: 'Message input'})).textContent).toBe(
+            'also check the audio bus'
+        )
+
+        await turn.end()
+    })
+
+    it('hands the message back when the turn ends without taking it', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'also check the audio bus')
+        await turn.end()
+
+        expect((await screen.findByRole('combobox', {name: 'Message input'})).textContent).toBe(
+            'also check the audio bus'
+        )
+    })
+
+    it('never stores a message the model has not taken', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'also check the audio bus')
+
+        expect(
+            server.log.saved.every(
+                chat => storedTexts(chat)?.includes('also check the audio bus') !== true
+            )
+        ).toBe(true)
+
+        await turn.end()
+    })
+})
+
+describe('Workspace while another job is running', () => {
+    it('keeps what was typed when there is no turn to steer, and says why', async () => {
+        const user = userEvent.setup()
+        server = installBackend(tauri)
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.paste('also check the audio bus')
+        act(() => {
+            setTurnRunning('memory', true)
+        })
+        await flush()
+        await user.keyboard('{Enter}')
+        await flush()
+
+        expect((await screen.findByRole('combobox', {name: 'Message input'})).textContent).toBe(
+            'also check the audio bus'
+        )
+        expect(screen.getByText(/could not be queued/u)).toBeInTheDocument()
+
+        act(() => {
+            setTurnRunning('memory', false)
+        })
     })
 })

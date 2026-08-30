@@ -27,7 +27,8 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
     const [runner] = useState(() =>
         createTurnRunner({
             send: sendAiMessage,
-            cancel: requestId => invoke('cancel_ai_request', {requestId})
+            cancel: requestId => invoke('cancel_ai_request', {requestId}),
+            steer: request => invoke('steer_ai_request', {request})
         })
     )
     const state = useSyncExternalStore(runner.subscribe, runner.state)
@@ -104,7 +105,9 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         if (!isChatLoaded || !isTauri()) return
         const snapshot: StoredChat = {
             ...(state.taskId !== undefined && {taskId: state.taskId}),
-            messages: state.messages,
+            // A queued message is not a fact about the conversation until the model has taken it;
+            // stored, it would be replayed into context as though it had been asked.
+            messages: state.messages.filter(message => message.status !== 'queued'),
             agentMessages: state.agentMessages
         }
         latestChat.current = snapshot
@@ -130,7 +133,10 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         isStreaming: state.isStreaming,
         turnError: state.error,
         isChatLoaded,
+        handBack: state.handBack,
+        takeHandBack: runner.takeHandBack,
         start: runner.start,
+        queue: runner.queue,
         retry: runner.retry,
         stop: runner.stop
     }

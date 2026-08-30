@@ -62,6 +62,10 @@ type MergeOffer = Readonly<{
 
 const NOTHING_TO_OFFER: MergeOffer = {mode: 'clashed', paths: []}
 
+function joinDraft(previous: string, text: string): string {
+    return previous.trim() === '' ? text : `${previous.trimEnd()}\n\n${text}`
+}
+
 function mergeOffer(failure: CommandError): MergeOffer {
     const mode = MERGE_FAILURE_MODES[failure.code]
     if (!mode) return NOTHING_TO_OFFER
@@ -116,11 +120,19 @@ export function Workspace({
         setWorkspaceError(undefined)
     }, [])
 
-    const {messages, taskId, turnError, isChatLoaded, start, retry, stop} = useConversation({
-        taskId: openTaskId,
-        onError: report,
-        onTasksChanged
-    })
+    const {
+        messages,
+        taskId,
+        turnError,
+        isChatLoaded,
+        isStreaming,
+        handBack,
+        takeHandBack,
+        start,
+        queue,
+        retry,
+        stop
+    } = useConversation({taskId: openTaskId, onError: report, onTasksChanged})
     const streamError = workspaceError ?? turnError
     const {attachmentPreviews, addPreviews} = useAttachmentPreviews({messages, isChatLoaded})
     const {settings, models, connectionState, connect, applyModel, applyThinkingLevel} =
@@ -142,6 +154,11 @@ export function Workspace({
         isEmpty: value => value === ''
     })
     const draft = storedDraft ?? ''
+    // A queued message the turn never carried comes back to where it was typed.
+    useEffect(() => {
+        if (handBack.length === 0) return
+        for (const text of takeHandBack()) setDraft(previous => joinDraft(previous, text))
+    }, [handBack, setDraft, takeHandBack])
     const {briefState, isPlanStarted, startPlan, stopBrief, startWithoutPlan} = useTaskBrief({
         taskId: openTaskId,
         onStartTurn: start,
@@ -199,9 +216,28 @@ export function Workspace({
         }))
     }
 
+    // A running turn takes the message rather than eating it: queued here, steered into the turn by
+    // the worker at its next boundary.
+    const queueMessage = (prompt: string) => {
+        if (draftAttachments.length > 0) {
+            setWorkspaceError('Images can only go with a message that starts a new turn.')
+            return
+        }
+        if (!isStreaming || !queue(prompt)) {
+            setWorkspaceError('Gofer is busy with another job, so this could not be queued.')
+            return
+        }
+        setWorkspaceError(undefined)
+        setDraft('')
+    }
+
     const submitMessage = async (value: string) => {
         const prompt = value.trim()
-        if ((!prompt && draftAttachments.length === 0) || isBusy || !isTauri()) return
+        if ((!prompt && draftAttachments.length === 0) || !isTauri()) return
+        if (isBusy) {
+            queueMessage(prompt)
+            return
+        }
         setIsSavingAttachments(true)
         setWorkspaceError(undefined)
         try {
@@ -436,6 +472,7 @@ export function Workspace({
             actions,
             meta: {
                 canAttachImages: supportsImages && !isBusy && !isSavingAttachments && isTauri(),
+                canQueue: isStreaming,
                 contextWindow: model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
                 isSavingAttachments,
                 isPlanOffered: isChatLoaded && !hasConversation && !isPlanStarted,
@@ -453,6 +490,7 @@ export function Workspace({
             hasConversation,
             isBusy,
             isChatLoaded,
+            isStreaming,
             isPlanStarted,
             isSavingAttachments,
             model,
@@ -470,10 +508,9 @@ export function Workspace({
                 setDraft(previous => appendReference(previous, reference))
             },
             paste: (text: string) => {
-                setDraft(previous => {
-                    if (previous.includes(text)) return previous
-                    return previous.trim() === '' ? text : `${previous.trimEnd()}\n\n${text}`
-                })
+                setDraft(previous =>
+                    previous.includes(text) ? previous : joinDraft(previous, text)
+                )
             }
         }),
         [setDraft]

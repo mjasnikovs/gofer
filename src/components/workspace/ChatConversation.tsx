@@ -403,6 +403,18 @@ type ConversationMessageProps = Readonly<{
     onRetry: (assistantId: number) => void
 }>
 
+// Typed while the turn was running, so it is waiting on the agent's next boundary, not sent.
+function QueuedNote() {
+    return (
+        <Text
+            type='supporting'
+            color='secondary'
+        >
+            Queued
+        </Text>
+    )
+}
+
 const ConversationMessage = memo(
     ({attachmentPreviews, isLast, message, onRetry}: ConversationMessageProps) => {
         if (message.sender === 'assistant') {
@@ -425,7 +437,10 @@ const ConversationMessage = memo(
         }
         return (
             <ChatMessage sender='user'>
-                <ChatMessageBubble variant='filled'>
+                <ChatMessageBubble
+                    variant='filled'
+                    {...(message.status === 'queued' && {metadata: <QueuedNote />})}
+                >
                     <VStack
                         gap={2}
                         hAlign='start'

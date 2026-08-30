@@ -6,6 +6,7 @@ import {
     EVENT_PREFIX,
     TOOL_PREFIX,
     createCancellation,
+    createSteering,
     createToolHost
 } from './ai-host.mjs'
 import {runAgent} from './ai-provider.mjs'
@@ -18,10 +19,10 @@ function write(prefix, message) {
     process.stdout.write(`${prefix}${JSON.stringify(message)}\n`)
 }
 
-async function runRequest(request, {host, credentialHost, emit, signal}) {
+async function runRequest(request, {host, credentialHost, emit, signal, steering}) {
     const mode = request.mode ?? 'turn'
     if (mode === 'turn') {
-        await runAgent({...request, host, credentialHost, emit, signal})
+        await runAgent({...request, host, credentialHost, emit, signal, steering})
         return
     }
     if (mode === 'brief') {
@@ -58,11 +59,13 @@ try {
     const host = createToolHost(call => write(TOOL_PREFIX, call))
     const credentialHost = createToolHost(call => write(CREDENTIAL_PREFIX, call), 'credential')
     const cancellation = createCancellation()
+    const steering = createSteering()
     void (async () => {
         for await (const line of lines) {
             if (line.trim() === '') continue
             const response = JSON.parse(line)
             if (cancellation.deliver(response)) continue
+            if (steering.deliver(response)) continue
             host.deliver(response)
             credentialHost.deliver(response)
         }
@@ -78,7 +81,8 @@ try {
             host,
             credentialHost,
             emit: event => write(EVENT_PREFIX, event),
-            signal: cancellation.signal
+            signal: cancellation.signal,
+            steering
         })
     } finally {
         host.close('The agent turn ended')

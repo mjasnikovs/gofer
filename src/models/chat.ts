@@ -16,7 +16,7 @@ export type Message = Readonly<{
     parts?: readonly MessagePart[]
     usage?: TokenUsage
     model?: string
-    status?: 'streaming' | 'complete' | 'error' | 'aborted'
+    status?: 'streaming' | 'complete' | 'error' | 'aborted' | 'queued'
     activity?: string
     attachments?: readonly ChatAttachment[]
     verifyPoints?: readonly VerifyPoint[]
@@ -108,6 +108,7 @@ export type AiStreamEvent =
           errorMessage: string
       }>
     | Readonly<{type: 'retry-start'; attempt: number; maxAttempts: number}>
+    | Readonly<{type: 'steered'; id: string}>
     | Readonly<{type: 'aborted'}>
 
 export type AiStreamPayload = Readonly<{

@@ -76,8 +76,8 @@ mod workers;
 mod workspace;
 
 use ai_turn::{
-    ChatAttachment, ChatAttachmentUpload, cancel_ai_request_with, read_chat_attachment_in,
-    save_chat_attachment_in,
+    ChatAttachment, ChatAttachmentUpload, SteerRequest, cancel_ai_request_with,
+    read_chat_attachment_in, save_chat_attachment_in, steer_ai_request_with,
 };
 use process::SystemProcessSpawner;
 use settings::{
@@ -866,6 +866,15 @@ fn cancel_ai_request(request_id: u64) -> Result<bool, CommandError> {
     cancel_ai_request_with(request_id).map_err(CommandError::coded("cancel_refused"))
 }
 
+/// Hands the running turn a message the user typed while it was working.
+///
+/// A separate command rather than a second `send_ai_message`, because the provider holds one turn
+/// at a time and a second send is refused. This one reaches the turn already in flight.
+#[tauri::command(async)]
+fn steer_ai_request(app: AppHandle, request: SteerRequest) -> Result<(), CommandError> {
+    steer_ai_request_with(&app, request)
+}
+
 /// Streams one turn of the conversation.
 ///
 /// The deltas ride a channel rather than an event: they are high-rate, they are tied to this one
@@ -1229,6 +1238,7 @@ pub fn run() {
         search_godot_log_history,
         send_ai_message,
         start_godot_session,
+        steer_ai_request,
         stop_godot_session,
         subscribe_godot_events,
         subscribe_script_diagnostics,

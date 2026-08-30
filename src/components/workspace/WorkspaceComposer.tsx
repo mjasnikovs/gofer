@@ -8,6 +8,7 @@ import {
 } from '@astryxdesign/core/Chat'
 import {DropdownMenu} from '@astryxdesign/core/DropdownMenu'
 import {Icon} from '@astryxdesign/core/Icon'
+import {isImeKeyEvent} from '@astryxdesign/core/utils'
 import {ProgressBar} from '@astryxdesign/core/ProgressBar'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Heading, Text} from '@astryxdesign/core/Text'
@@ -345,6 +346,8 @@ export function WorkspaceComposer() {
                 density='spacious'
                 placeholder={
                     meta.isSavingAttachments ? 'Attaching images…'
+                    : meta.canQueue ?
+                        'Gofer is working — press Enter to queue a message'
                     : meta.isStreaming ?
                         'Gofer is working…'
                     :   'Ask anything'
@@ -378,17 +381,18 @@ export function WorkspaceComposer() {
                             void actions.attachClipboardImage()
                             return true
                         }}
+                        hasHistory={false}
                         onKeyDown={event => {
-                            if (
-                                event.key !== 'Enter'
-                                || event.shiftKey
-                                || state.draft.trim()
-                                || state.draftAttachments.length === 0
-                                || event.nativeEvent.isComposing
-                            )
-                                return
+                            if (event.key !== 'Enter' || event.shiftKey) return
+                            // Taking the whole Enter takes the input's own IME guard with it, and
+                            // isComposing alone misses the IMEs that only report keyCode 229.
+                            if (isImeKeyEvent(event.nativeEvent)) return
+                            if (!state.draft.trim() && state.draftAttachments.length === 0) return
+                            // The input clears itself the moment it hands the text over, and only
+                            // Gofer knows whether that text is being sent or queued. So Gofer owns
+                            // the whole Enter, clearing included.
                             event.preventDefault()
-                            void actions.submit('')
+                            void actions.submit(state.draft)
                         }}
                     />
                 }

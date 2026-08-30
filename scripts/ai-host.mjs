@@ -6,6 +6,8 @@ export const CANCEL_TYPE = 'cancel'
 
 export const STOP_REASON = 'the turn was stopped'
 
+export const STEER_TYPE = 'steer'
+
 export function createCancellation() {
     const controller = new AbortController()
     return {
@@ -14,6 +16,31 @@ export function createCancellation() {
             if (message?.type !== CANCEL_TYPE) return false
             controller.abort(new Error(STOP_REASON))
             return true
+        }
+    }
+}
+
+// Buffers until the agent exists, because a line arrives whenever the user pressed Enter and the
+// worker reads stdin before it has built anything to steer.
+export function createSteering() {
+    const waiting = []
+    let queue
+    return {
+        deliver(message) {
+            if (message?.type !== STEER_TYPE) return false
+            const asked = {
+                id: message.id,
+                text: message.text,
+                images: message.images ?? [],
+                timestamp: message.timestamp
+            }
+            if (queue) queue(asked)
+            else waiting.push(asked)
+            return true
+        },
+        drainInto(next) {
+            queue = next
+            for (const asked of waiting.splice(0, waiting.length)) next(asked)
         }
     }
 }

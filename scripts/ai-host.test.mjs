@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {CANCEL_TYPE, createCancellation, createToolHost} from './ai-host.mjs'
+import {
+    CANCEL_TYPE,
+    STEER_TYPE,
+    createCancellation,
+    createSteering,
+    createToolHost
+} from './ai-host.mjs'
 
 test('the tool host correlates results, failures, cancellation, and closure', async () => {
     const sent = []
@@ -79,4 +85,29 @@ test('two hosts reading one stream never answer each other', async () => {
 
     assert.deepEqual(await tool, {revision: 7})
     assert.equal(await stored, undefined)
+})
+
+test('a steer typed before the agent exists is held, then handed over in order', () => {
+    const steering = createSteering()
+
+    assert.equal(steering.deliver({type: 'tool-result', id: 'call-1', ok: true}), false)
+    assert.equal(steering.deliver(undefined), false)
+    assert.equal(
+        steering.deliver({type: STEER_TYPE, id: 'steer-1', text: 'first', timestamp: 10}),
+        true
+    )
+    assert.equal(
+        steering.deliver({type: STEER_TYPE, id: 'steer-2', text: 'second', timestamp: 20}),
+        true
+    )
+
+    const taken = []
+    steering.drainInto(asked => taken.push(asked))
+    assert.deepEqual(taken, [
+        {id: 'steer-1', text: 'first', images: [], timestamp: 10},
+        {id: 'steer-2', text: 'second', images: [], timestamp: 20}
+    ])
+
+    steering.deliver({type: STEER_TYPE, id: 'steer-3', text: 'third', timestamp: 30})
+    assert.deepEqual(taken.at(-1), {id: 'steer-3', text: 'third', images: [], timestamp: 30})
 })

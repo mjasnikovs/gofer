@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest'
 import {createTurnRunner} from './turn'
 import type {TurnRunner} from './turn'
 import type {AiStreamEvent, Message, TokenUsage} from '../models/chat'
-import type {SendAiMessageRequest} from './desktop'
+import type {SendAiMessageRequest, SteerAiRequest} from './desktop'
 
 const USAGE: TokenUsage = {
     input: 10,
@@ -16,12 +16,15 @@ const USAGE: TokenUsage = {
 type Script = Readonly<{
     events?: readonly AiStreamEvent[]
     throws?: unknown
+    during?: (play: (event: AiStreamEvent) => void) => void
 }>
 
 type Harness = Readonly<{
     runner: TurnRunner
     sent: SendAiMessageRequest[]
     cancelled: number[]
+    steered: SteerAiRequest[]
+    refuseSteer: (reason: unknown) => void
     idle: () => Promise<void>
 }>
 
@@ -32,24 +35,42 @@ async function settled() {
 function harness(...scripts: readonly Script[]): Harness {
     const sent: SendAiMessageRequest[] = []
     const cancelled: number[] = []
+    const steered: SteerAiRequest[] = []
     let turn = 0
+    let steerFailure: unknown
 
     const runner = createTurnRunner({
         send: async (request, receive) => {
             sent.push(request)
             const script = scripts[turn++] ?? {}
-            for (const event of script.events ?? []) {
+            const play = (event: AiStreamEvent) => {
                 receive({requestId: request.requestId, event})
             }
+            script.during?.(play)
+            for (const event of script.events ?? []) play(event)
             // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/prefer-promise-reject-errors
             if (script.throws !== undefined) throw script.throws
         },
         cancel: async requestId => {
             cancelled.push(requestId)
+        },
+        steer: async request => {
+            steered.push(request)
+            // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/prefer-promise-reject-errors
+            if (steerFailure !== undefined) throw steerFailure
         }
     })
 
-    return {runner, sent, cancelled, idle: settled}
+    return {
+        runner,
+        sent,
+        cancelled,
+        steered,
+        refuseSteer: reason => {
+            steerFailure = reason
+        },
+        idle: settled
+    }
 }
 
 function reply(state: {messages: readonly Message[]}): Message {
@@ -61,7 +82,13 @@ function reply(state: {messages: readonly Message[]}): Message {
 describe('createTurnRunner', () => {
     it('starts with an empty conversation that is not streaming', () => {
         const {runner} = harness()
-        expect(runner.state()).toEqual({messages: [], agentMessages: [], isStreaming: false})
+        expect(runner.state()).toEqual({
+            messages: [],
+            agentMessages: [],
+            queued: [],
+            handBack: [],
+            isStreaming: false
+        })
     })
 
     it('appends the prompt and the reply, and folds the stream into the reply', async () => {
@@ -186,7 +213,8 @@ describe('createTurnRunner', () => {
                 sent.push(request)
                 receive(stale)
             },
-            cancel: async () => undefined
+            cancel: async () => undefined,
+            steer: async () => undefined
         })
 
         runner.start('go')
@@ -202,7 +230,8 @@ describe('createTurnRunner', () => {
                 receive({requestId: request.requestId, event: {type: 'nonsense'} as never})
                 receive({requestId: request.requestId, event: {type: 'text-delta'} as never})
             },
-            cancel: async () => undefined
+            cancel: async () => undefined,
+            steer: async () => undefined
         })
 
         runner.start('go')
@@ -257,7 +286,8 @@ describe('createTurnRunner', () => {
                     }),
                 cancel: async requestId => {
                     cancelled.push(requestId)
-                }
+                },
+                steer: async () => undefined
             })
 
             runner.start('go')
@@ -384,5 +414,181 @@ describe('createTurnRunner', () => {
             await idle()
             expect(listener).toHaveBeenCalledTimes(seen)
         })
+    })
+})
+
+describe('a message typed while the turn is running', () => {
+    it('is queued rather than lost, and steered into the turn that is running', async () => {
+        const {runner, steered, sent, idle} = harness({
+            during: () => {
+                runner.queue('also check the audio bus')
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        expect(steered.map(request => request.text)).toEqual(['also check the audio bus'])
+        expect(steered[0]?.requestId).toBe(sent[0]?.requestId)
+        expect(sent).toHaveLength(1)
+    })
+
+    it('shows as queued until the model takes it', async () => {
+        let queuedText: string | undefined
+        const {runner, idle} = harness({
+            during: () => {
+                runner.queue('and the audio bus')
+                queuedText = runner.state().messages.at(-1)?.text
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        expect(queuedText).toBe('and the audio bus')
+    })
+
+    it('stops being queued and opens a fresh answer when the model takes it', async () => {
+        const {runner, steered, idle} = harness({
+            during: play => {
+                runner.queue('and the audio bus')
+                play({type: 'text-delta', delta: 'working'})
+                play({type: 'steered', id: steered[0]?.id ?? ''})
+                play({type: 'text-delta', delta: 'on it'})
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        const {messages, queued} = runner.state()
+        expect(messages.map(message => message.sender)).toEqual([
+            'user',
+            'assistant',
+            'user',
+            'assistant'
+        ])
+        expect(messages[1]?.text).toBe('working')
+        expect(messages[2]?.status).toBeUndefined()
+        expect(messages[3]?.text).toBe('on it')
+        expect(queued).toEqual([])
+    })
+
+    it('is handed back to the caller when the turn ends without taking it', async () => {
+        const {runner, idle} = harness({
+            during: () => {
+                runner.queue('too late')
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        expect(runner.takeHandBack()).toEqual(['too late'])
+        expect(runner.state().messages.map(message => message.sender)).toEqual([
+            'user',
+            'assistant'
+        ])
+    })
+
+    it('is handed back when the steer is refused', async () => {
+        const {runner, refuseSteer, idle} = harness({
+            during: () => {
+                refuseSteer(new Error('no turn to steer'))
+                runner.queue('nowhere to go')
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        expect(runner.takeHandBack()).toEqual(['nowhere to go'])
+    })
+
+    it('says why the steer was refused, rather than the bubble just vanishing', async () => {
+        const {runner, refuseSteer, idle} = harness({
+            during: () => {
+                refuseSteer({
+                    code: 'steer_undelivered',
+                    message: 'The AI agent did not take the message.'
+                })
+                runner.queue('nowhere to go')
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        expect(runner.state().error).toBe('The AI agent did not take the message.')
+    })
+
+    it('is refused outright when no turn is running', () => {
+        const {runner, steered} = harness()
+
+        expect(runner.queue('nobody is listening')).toBe(false)
+        expect(steered).toEqual([])
+    })
+})
+
+describe('the timeline a steered turn leaves behind', () => {
+    it('puts the answer under the message it answers, not under a later queued one', async () => {
+        let order: readonly string[] = []
+        const {runner, steered, idle} = harness({
+            during: play => {
+                play({type: 'text-delta', delta: 'working'})
+                runner.queue('first follow-up')
+                runner.queue('second follow-up')
+                play({type: 'steered', id: steered[0]?.id ?? ''})
+                order = runner.state().messages.map(message => message.text)
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        expect(order).toEqual([
+            'build the level',
+            'working',
+            'first follow-up',
+            '',
+            'second follow-up'
+        ])
+    })
+
+    it('leaves the last answer retryable after a steer', async () => {
+        const {runner, steered, idle} = harness({
+            during: play => {
+                runner.queue('follow-up')
+                play({type: 'steered', id: steered[0]?.id ?? ''})
+                play({type: 'text-delta', delta: 'on it'})
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        const {messages} = runner.state()
+        expect(messages.at(-1)?.sender).toBe('assistant')
+        expect(messages.at(-2)?.sender).toBe('user')
+    })
+
+    it('never leaves an empty answer above a message steered in before any reply', async () => {
+        const {runner, steered, idle} = harness({
+            during: play => {
+                runner.queue('actually, the audio bus')
+                play({type: 'steered', id: steered[0]?.id ?? ''})
+                play({type: 'text-delta', delta: 'on it'})
+            }
+        })
+
+        runner.start('build the level')
+        await idle()
+
+        const {messages} = runner.state()
+        expect(messages.map(message => message.text)).toEqual([
+            'build the level',
+            'actually, the audio bus',
+            'on it'
+        ])
     })
 })

@@ -76,6 +76,8 @@ export const verifyPoint = declare(
     ({name, command, status, index, of, output}) => ({name, command, status, index, of, output})
 )
 
+export const steered = declare([TURN_EVENTS], 'steered', id => ({id}))
+
 export const aborted = declare([TURN_EVENTS], 'aborted', () => ({}))
 
 export const turnDone = declare(

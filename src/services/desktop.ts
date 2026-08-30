@@ -91,6 +91,14 @@ export type SendAiMessageRequest = Readonly<{
     isRetry: boolean
 }>
 
+export type SteerAiRequest = Readonly<{
+    requestId: number
+    id: string
+    text: string
+    timestamp: number
+    attachments: readonly ChatAttachment[]
+}>
+
 type AttachmentUpload = Readonly<{
     attachment: ChatAttachment
     data: string
@@ -246,6 +254,7 @@ export type DesktopCommandMap = Readonly<{
     >
     set_skill_enabled: CommandSpec<{name: string; enabled: boolean}, SkillsResponse>
     start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionSummary>
+    steer_ai_request: CommandSpec<{request: SteerAiRequest}, void>
     stop_godot_session: CommandSpec<undefined, void>
     subscribe_godot_events: CommandSpec<{events: Channel<GodotSessionEvent>}, void>
     subscribe_script_diagnostics: CommandSpec<{diagnostics: Channel<ScriptDiagnosticsEvent>}, void>

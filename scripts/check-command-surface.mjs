@@ -363,6 +363,20 @@ async function cancelLineAgreement() {
         )
 }
 
+async function steerLineAgreement() {
+    const rustPath = 'src-tauri/src/ai_turn.rs'
+    const kind = /const AI_STEER_TYPE: &str = "([a-z-]+)";/u.exec(await read(rustPath))
+    if (!kind) throw new Error(`${rustPath} no longer declares AI_STEER_TYPE`)
+    const hostPath = 'scripts/ai-host.mjs'
+    const word = /export const STEER_TYPE = '([a-z-]+)'/u.exec(await read(hostPath))
+    if (!word) throw new Error(`${hostPath} no longer declares STEER_TYPE`)
+    if (kind[1] !== word[1])
+        fail(
+            `${rustPath} steers a worker with ${JSON.stringify(kind[1])} but ${hostPath} `
+                + `recognises ${JSON.stringify(word[1])}`
+        )
+}
+
 async function noneOfItRanAgreement() {
     const rustPath = 'src-tauri/src/ai_tools.rs'
     const jsPath = 'scripts/tool-call-repair.mjs'
@@ -573,6 +587,7 @@ checkAgreement('AI completion event', [
 ])
 await everyEmitSiteBuildsItsEvent()
 await cancelLineAgreement()
+await steerLineAgreement()
 
 const efforts = [
     await rustList('settings/mod.rs', 'NAMED_EFFORTS'),

@@ -40,6 +40,12 @@ const AI_CREDENTIAL_PREFIX: &str = "GOFER_AI_CREDENTIAL:";
 /// together by `scripts/check-command-surface.mjs`.
 const AI_CANCEL_LINE: &str = r#"{"type":"cancel"}"#;
 
+/// How a message typed during a running turn is named on the way into the worker.
+///
+/// Spelled once, and `scripts/ai-host.mjs` spells it once as `STEER_TYPE`; the two are held
+/// together by `scripts/check-command-surface.mjs`.
+const AI_STEER_TYPE: &str = "steer";
+
 /// How each job mode says it has finished, one name per mode.
 ///
 /// It was one name for all three. `done` came off a chat turn carrying `{text, usage, model,
@@ -82,7 +88,22 @@ static AI_CHILD: Mutex<Option<SharedChildProcess>> = Mutex::new(None);
 /// itself, and the process to kill if it does not. `take_stdin` moves the handle out of the child,
 /// so the child alone is not enough to reach it.
 type SharedWorkerInput = Arc<Mutex<crate::process::ProcessWriter>>;
-static AI_WORKER_INPUT: Mutex<Option<SharedWorkerInput>> = Mutex::new(None);
+
+/// The way into the running worker, and the lines waiting for there to be one.
+///
+/// One lock over both, because a steer that arrives while the worker is still being spawned has to
+/// either be written or be held, and deciding that under two locks is how a line gets queued just
+/// after the drain that would have carried it.
+struct WorkerChannel {
+    input: Option<SharedWorkerInput>,
+    /// Steer lines that arrived before the worker existed, oldest first.
+    pending: Vec<Vec<u8>>,
+}
+
+static AI_WORKER_CHANNEL: Mutex<WorkerChannel> = Mutex::new(WorkerChannel {
+    input: None,
+    pending: Vec::new(),
+});
 /// The stream the running turn writes to. Held here so that `cancel_ai_request` — a command of its
 /// own, with no channel of its own — can report the abort down the same ordered stream the deltas
 /// rode, rather than out of band where it could arrive before the text it ends.
@@ -854,19 +875,35 @@ impl WorkerRun {
     ///
     /// Both, and in one call, because a stop is two asks and it needs one of them for each: the
     /// line that lets the worker end its own turn, and the process to kill if it does not answer.
-    /// Registered together so no window exists in which a cancellation can ask but not enforce.
+    /// The child goes first: a cancellation that lands mid-registration should be able to enforce
+    /// without asking, never the other way round.
+    ///
+    /// The input is published only once nothing is held for it. Everything typed while the worker
+    /// was being spawned is written first, in order, and the loop re-checks under the lock because
+    /// a steer can arrive during the writes — which is the whole window this exists to close.
     fn register_worker(
         &self,
         child: SharedChildProcess,
         input: SharedWorkerInput,
     ) -> Result<(), String> {
-        *AI_WORKER_INPUT
-            .lock()
-            .map_err(|_| "The AI worker input lock is poisoned".to_owned())? = Some(input);
         *AI_CHILD
             .lock()
             .map_err(|_| "The AI process lock is poisoned".to_owned())? = Some(child);
-        Ok(())
+        loop {
+            let held = {
+                let mut channel = AI_WORKER_CHANNEL
+                    .lock()
+                    .map_err(|_| "The AI worker input lock is poisoned".to_owned())?;
+                if channel.pending.is_empty() {
+                    channel.input = Some(input);
+                    return Ok(());
+                }
+                std::mem::take(&mut channel.pending)
+            };
+            for line in held {
+                write_worker_line_within(&input, &line);
+            }
+        }
     }
 
     /// Closes the gate before the tool threads are joined.
@@ -885,8 +922,9 @@ impl Drop for WorkerRun {
         if let Ok(mut active) = AI_CHILD.lock() {
             *active = None;
         }
-        if let Ok(mut input) = AI_WORKER_INPUT.lock() {
-            *input = None;
+        if let Ok(mut channel) = AI_WORKER_CHANNEL.lock() {
+            channel.input = None;
+            channel.pending.clear();
         }
     }
 }
@@ -1312,27 +1350,120 @@ const WORKER_ASK_TIMEOUT: Duration = Duration::from_secs(1);
 /// kills instead, which is what stopping a turn has always been.
 ///
 /// Two things are kept away from the calling thread, and both used to wedge Stop on exactly the
-/// worker the kill exists for. The `AI_WORKER_INPUT` guard is dropped before anything is written —
-/// it used to be shadowed, so it was held across the write. And the write runs on a thread with a
+/// worker the kill exists for. The `AI_WORKER_CHANNEL` guard is dropped before anything is written
+/// — it used to be shadowed, so it was held across the write. And the write runs on a thread with a
 /// deadline on it, because `write_worker_line` takes the shared `ProcessWriter` mutex that every
 /// tool-answer thread takes, and a thread parked in `write_all` against a worker that stopped
 /// reading its stdin holds that mutex for as long as the worker lives. Waited on rather than
 /// forgotten: whether the line went out is what decides between granting the grace and killing now.
 fn ask_worker_to_stop() -> bool {
-    let registered = {
-        let Ok(input) = AI_WORKER_INPUT.lock() else {
-            return false;
-        };
-        input.clone()
-    };
-    let Some(input) = registered else {
+    let Some(input) = registered_worker_input() else {
         return false;
     };
+    write_worker_line_within(&input, AI_CANCEL_LINE.as_bytes())
+}
+
+/// The way into the running worker, or `None` while there is not one.
+fn registered_worker_input() -> Option<SharedWorkerInput> {
+    AI_WORKER_CHANNEL.lock().ok()?.input.clone()
+}
+
+/// Puts one line down the worker's stdin under [`WORKER_ASK_TIMEOUT`], and says whether it went out.
+///
+/// See [`ask_worker_to_stop`] for why the write runs on a thread with a deadline.
+fn write_worker_line_within(input: &SharedWorkerInput, line: &[u8]) -> bool {
+    let input = Arc::clone(input);
+    let line = line.to_vec();
     let (wrote, written) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = wrote.send(write_worker_line(&input, AI_CANCEL_LINE.as_bytes()).is_ok());
+        let _ = wrote.send(write_worker_line(&input, &line).is_ok());
     });
     written.recv_timeout(WORKER_ASK_TIMEOUT).unwrap_or(false)
+}
+
+/// Writes one steer line, or holds it until [`WorkerRun::register_worker`] has a worker to write to.
+///
+/// Holding is the common case, not an edge: `steer_ai_request_with` has already established that
+/// the turn named is the running one, and a turn is running from the moment it is admitted — which
+/// is before the history is hydrated, before memory is retrieved, and before the worker is spawned.
+/// That is seconds, and it is exactly the seconds in which someone who just pressed Enter types the
+/// thing they forgot. `false` means there is a worker and the line did not reach it.
+fn send_or_hold_steer(line: &[u8]) -> bool {
+    let input = {
+        let Ok(mut channel) = AI_WORKER_CHANNEL.lock() else {
+            return false;
+        };
+        match channel.input.clone() {
+            Some(input) => input,
+            None => {
+                channel.pending.push(line.to_vec());
+                return true;
+            }
+        }
+    };
+    write_worker_line_within(&input, line)
+}
+
+/// A message the user typed while a turn was already running.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SteerRequest {
+    pub(crate) request_id: u64,
+    pub(crate) id: String,
+    pub(crate) text: String,
+    pub(crate) timestamp: u64,
+    #[serde(default)]
+    pub(crate) attachments: Vec<ChatAttachment>,
+}
+
+/// The line the worker reads. Built here so the renderer never spells the worker's wire shape.
+#[derive(Serialize)]
+struct SteerLine<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    id: &'a str,
+    text: &'a str,
+    timestamp: u64,
+    images: Vec<AiWorkerImage>,
+}
+
+/// Hands one typed message to the running worker, which steers the turn with it.
+///
+/// Refused rather than queued when the turn it names is not the one running: a message meant for a
+/// finished turn is a new turn's prompt, and only the renderer knows that.
+pub(crate) fn steer_ai_request_with<R: Runtime>(
+    app: &AppHandle<R>,
+    request: SteerRequest,
+) -> Result<(), CommandError> {
+    if ACTIVE_AI_REQUEST_ID.load(Ordering::Acquire) != request.request_id {
+        return Err(CommandError::new(
+            "no_turn_to_steer",
+            "That turn is no longer running, so there is nothing to steer.",
+        ));
+    }
+    let images = hydrate_chat_attachments(app, &request.attachments)
+        .map_err(CommandError::coded("attachment_unreadable"))?;
+    let line = serde_json::to_vec(&SteerLine {
+        kind: AI_STEER_TYPE,
+        id: &request.id,
+        text: &request.text,
+        timestamp: request.timestamp,
+        images,
+    })
+    .map_err(|error| {
+        CommandError::new(
+            "steer_unserializable",
+            format!("Could not send the message to the AI agent: {error}"),
+        )
+    })?;
+    if !send_or_hold_steer(&line) {
+        return Err(CommandError::new(
+            "steer_undelivered",
+            "The AI agent did not take the message. Stop the turn and send it again.",
+        )
+        .retryable());
+    }
+    Ok(())
 }
 
 // coverage-critical-start: cancellation
@@ -1436,8 +1567,8 @@ fn validate_chat_attachment_id(id: &str) -> Result<(), String> {
 }
 // coverage-critical-end: attachment
 
-fn read_chat_attachment_bytes(
-    app: &AppHandle,
+fn read_chat_attachment_bytes<R: Runtime>(
+    app: &AppHandle<R>,
     attachment: &ChatAttachment,
 ) -> Result<Vec<u8>, String> {
     crate::workspace::project_storage(app)?
@@ -1451,8 +1582,8 @@ fn read_chat_attachment_bytes(
 /// One reader for both jobs. A turn hydrates the attachments hanging off each message and a brief
 /// hydrates the ones hanging off its ask, and neither should own a second copy of "read it, then
 /// base64 it".
-fn hydrate_chat_attachments(
-    app: &AppHandle,
+fn hydrate_chat_attachments<R: Runtime>(
+    app: &AppHandle<R>,
     attachments: &[ChatAttachment],
 ) -> Result<Vec<AiWorkerImage>, String> {
     attachments
@@ -3575,6 +3706,143 @@ mod tests {
         assert_eq!(answer.expect("a stopped turn is not a failed one"), "");
 
         crate::cancel::clear_if_cancelled(91);
+    }
+
+    /// Driven against a running worker for the same reason the cancellation test is: a steer only
+    /// happens while a turn is in flight.
+    #[test]
+    fn a_steer_reaches_the_running_worker_on_its_own_channel() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let _gate = crate::approvals::serialize_gate_tests();
+        let app = mock_app();
+        let (stream, events) = signalling_stream();
+
+        let (worker_stdout, mut say) = std::io::pipe().expect("worker stdout pipe");
+        let (worker_stderr, quiet) = std::io::pipe().expect("worker stderr pipe");
+        drop(quiet);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let spawner = PreparedSpawner(Mutex::new(Some(FakeChildProcess {
+            stdin: Some(Box::new(RecordingWriter(Arc::clone(&written)))),
+            stdout: Some(Box::new(worker_stdout)),
+            stderr: Some(Box::new(worker_stderr)),
+            status: ProcessStatus {
+                success: true,
+                code: Some(0),
+                description: "exit status: 0".to_owned(),
+            },
+            killed: Arc::new(AtomicBool::new(false)),
+        })));
+
+        let turn = a_turn(92, &stream);
+        let handle = app.handle().clone();
+        std::thread::scope(|scope| {
+            let running =
+                scope.spawn(|| run_ai_worker_with(&handle, &turn, worker_request(), &spawner));
+            say.write_all(b"GOFER_AI_EVENT:{\"type\":\"text-delta\",\"delta\":\"Half an \"}\n")
+                .expect("stream a delta");
+            events.recv().expect("the turn streams its first delta");
+
+            steer_ai_request_with(
+                &handle,
+                SteerRequest {
+                    request_id: 92,
+                    id: "steer-1".to_owned(),
+                    text: "also check the audio bus".to_owned(),
+                    timestamp: 1_700_000_000,
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("steer the running turn");
+
+            say.write_all(
+                b"GOFER_AI_EVENT:{\"type\":\"done\",\"text\":\"\",\"thinking\":\"\",\"agentMessages\":[],\"usage\":{},\"model\":\"fake\"}\n",
+            )
+            .expect("stream the completion");
+            drop(say);
+            let _ = running.join().expect("the worker run ends");
+        });
+
+        let sent = String::from_utf8(written.lock().expect("recorded stdin").clone())
+            .expect("the worker channel is UTF-8");
+        let steer: serde_json::Value = serde_json::from_str(
+            sent.lines()
+                .nth(1)
+                .expect("the steer line follows the startup context"),
+        )
+        .expect("the steer line is JSON");
+        assert_eq!(steer["type"], AI_STEER_TYPE);
+        assert_eq!(steer["id"], "steer-1");
+        assert_eq!(steer["text"], "also check the audio bus");
+        assert_eq!(steer["timestamp"], 1_700_000_000_u64);
+        assert_eq!(steer["images"], serde_json::json!([]));
+    }
+
+    /// The window the hold exists for. `AiTurn::begin` marks the turn running, and only then does
+    /// the history get hydrated, the memory retrieved and the worker spawned — seconds in which
+    /// someone who just pressed Enter types the thing they forgot. Both lines are written, in the
+    /// order they were typed, the moment there is somewhere to write them.
+    #[test]
+    fn a_steer_typed_before_the_worker_exists_is_held_until_it_does() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let _gate = crate::approvals::serialize_gate_tests();
+        let (stream, _streamed) = recording_stream();
+        let turn = a_turn(93, &stream);
+        let run = WorkerRun::enter(&turn);
+
+        assert!(send_or_hold_steer(br#"{"type":"steer","id":"steer-1"}"#));
+        assert!(send_or_hold_steer(br#"{"type":"steer","id":"steer-2"}"#));
+        assert!(
+            registered_worker_input().is_none(),
+            "nothing is registered until the worker is spawned"
+        );
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let input: SharedWorkerInput =
+            Arc::new(Mutex::new(Box::new(RecordingWriter(Arc::clone(&written)))));
+        let child: SharedChildProcess = Arc::new(Mutex::new(Box::new(FakeChildProcess {
+            stdin: None,
+            stdout: None,
+            stderr: None,
+            status: ProcessStatus {
+                success: true,
+                code: Some(0),
+                description: "exit status: 0".to_owned(),
+            },
+            killed: Arc::new(AtomicBool::new(false)),
+        })));
+        run.register_worker(child, input)
+            .expect("register the spawned worker");
+
+        let sent = String::from_utf8(written.lock().expect("recorded stdin").clone())
+            .expect("the worker channel is UTF-8");
+        assert_eq!(
+            sent.lines().collect::<Vec<_>>(),
+            [
+                r#"{"type":"steer","id":"steer-1"}"#,
+                r#"{"type":"steer","id":"steer-2"}"#
+            ]
+        );
+
+        drop(run);
+        drop(turn);
+    }
+
+    #[test]
+    fn a_steer_for_a_turn_that_is_no_longer_running_is_refused() {
+        let _test = AI_TEST_LOCK.lock().expect("AI test lock");
+        let app = mock_app();
+        let refused = steer_ai_request_with(
+            app.handle(),
+            SteerRequest {
+                request_id: 4_242,
+                id: "steer-1".to_owned(),
+                text: "nobody is listening".to_owned(),
+                timestamp: 1,
+                attachments: Vec::new(),
+            },
+        )
+        .expect_err("a steer for a finished turn is refused");
+        assert_eq!(refused.code, "no_turn_to_steer");
     }
 
     /// The backstop, which the ask does not replace: a worker that will not answer still dies.

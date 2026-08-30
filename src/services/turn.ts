@@ -9,16 +9,26 @@ import {
     settleStoredChat,
     settleStreaming,
     withFallbackText,
-    withoutActivity
+    withoutActivity,
+    withoutStatus
 } from '../models/chat-timeline'
 import type {AiStreamPayload, ChatAttachment, Message, StoredChat} from '../models/chat'
-import type {SendAiMessageRequest} from './desktop'
+import type {SendAiMessageRequest, SteerAiRequest} from './desktop'
 
 const UNFINISHED_TOOL_REASON = 'The turn ended before this call finished.'
+
+export type QueuedSteer = Readonly<{
+    steerId: string
+    requestId: number
+    messageId: number
+    text: string
+}>
 
 export type TurnState = Readonly<{
     messages: readonly Message[]
     agentMessages: readonly unknown[]
+    queued: readonly QueuedSteer[]
+    handBack: readonly string[]
     taskId?: string | undefined
     isStreaming: boolean
     error?: string
@@ -30,6 +40,7 @@ export type TurnDependencies = Readonly<{
         receive: (payload: AiStreamPayload) => void
     ) => Promise<void>
     cancel: (requestId: number) => Promise<unknown>
+    steer: (request: SteerAiRequest) => Promise<unknown>
 }>
 
 export type TurnRunner = Readonly<{
@@ -37,6 +48,8 @@ export type TurnRunner = Readonly<{
     subscribe: (listener: () => void) => () => void
     open: (chat: StoredChat) => void
     start: (prompt: string, attachments?: readonly ChatAttachment[]) => void
+    queue: (prompt: string) => boolean
+    takeHandBack: () => readonly string[]
     retry: (assistantId: number) => void
     stop: () => void
 }>
@@ -49,15 +62,31 @@ type PlannedTurn = Readonly<{
     isRetry: boolean
 }>
 
-const EMPTY: TurnState = {messages: [], agentMessages: [], isStreaming: false}
+function isUnanswered(message: Message): boolean {
+    return (
+        message.text === ''
+        && (message.parts?.length ?? 0) === 0
+        && (message.tools?.length ?? 0) === 0
+    )
+}
+
+const EMPTY: TurnState = {
+    messages: [],
+    agentMessages: [],
+    queued: [],
+    handBack: [],
+    isStreaming: false
+}
 
 let nextRequestId = 1
 
-export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
+export function createTurnRunner({send, cancel, steer}: TurnDependencies): TurnRunner {
     let current: TurnState = EMPTY
     const listeners = new Set<() => void>()
     let nextMessageId = 1
     let activeRequestId: number | undefined
+    let nextSteerId = 1
+    const takeSteerId = () => nextSteerId++
 
     const FRAME_MS = 16
     let isNotificationPending = false
@@ -97,6 +126,18 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
 
     const takeMessageId = () => nextMessageId++
 
+    // Offers back a message the turn never carried, so nothing typed is lost to a refusal or a stop.
+    const drop = (steerId: string) => {
+        const queued = current.queued.find(one => one.steerId === steerId)
+        if (!queued) return
+        publish({
+            ...current,
+            messages: current.messages.filter(message => message.id !== queued.messageId),
+            queued: current.queued.filter(one => one.steerId !== steerId),
+            handBack: [...current.handBack, queued.text]
+        })
+    }
+
     const settle = (message: Message) =>
         withoutActivity(settleStreaming(settleRunningTools(message, UNFINISHED_TOOL_REASON)))
 
@@ -107,24 +148,69 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
         return rest
     }
 
+    const streamingAssistant = (): Message => ({
+        id: takeMessageId(),
+        sender: 'assistant',
+        text: '',
+        timestamp: Date.now(),
+        tools: [],
+        parts: [],
+        status: 'streaming'
+    })
+
     const run = (turn: PlannedTurn) => {
         const requestId = nextRequestId++
         const requestMessages = [...turn.history, turn.prompt]
         const agentMessages = current.agentMessages
+        // One turn now answers more than once: a steered message opens a fresh assistant beneath it.
+        let assistantId = turn.assistantId
 
         activeRequestId = requestId
         publish({...cleared(current), messages: turn.conversation, isStreaming: true})
+
+        // The steered message reached the model, so it stops being queued, and the answer it
+        // interrupted settles. Its tools have all ended by this point, so nothing is errored.
+        //
+        // The message and its answer move to sit under the answer they interrupted, because a later
+        // message still queued is already at the end and would otherwise come between the two.
+        const injectSteer = (steerId: string) => {
+            const queued = current.queued.find(one => one.steerId === steerId)
+            if (!queued) return
+            const taken = current.messages.find(message => message.id === queued.messageId)
+            if (!taken) return
+            const rest = current.messages.filter(message => message.id !== queued.messageId)
+            const at = rest.findIndex(message => message.id === assistantId)
+            const answering = rest[at]
+            if (!answering) return
+            const promoted = withoutStatus(taken)
+            // Nothing was said before the steer arrived, so it takes the answer already open rather
+            // than settling an empty one above it.
+            const replacing =
+                isUnanswered(answering) ?
+                    [promoted, answering]
+                :   [withoutActivity(settleStreaming(answering)), promoted, streamingAssistant()]
+            publish({
+                ...current,
+                messages: [...rest.slice(0, at), ...replacing, ...rest.slice(at + 1)],
+                queued: current.queued.filter(one => one.steerId !== steerId)
+            })
+            assistantId = replacing[replacing.length - 1]?.id ?? assistantId
+        }
 
         const receive = (payload: AiStreamPayload) => {
             if (payload.requestId !== requestId) return
             if (!isAiStreamEvent(payload.event)) return
             const event = payload.event
+            if (event.type === 'steered') {
+                injectSteer(event.id)
+                return
+            }
             if (event.type === 'turn-state' || event.type === 'done') {
                 publish({...current, agentMessages: event.agentMessages})
             }
             const isProseDelta = event.type === 'text-delta' || event.type === 'thinking-delta'
             amend(
-                turn.assistantId,
+                assistantId,
                 message => applyStreamEvent(message, event),
                 isProseDelta ? publishSoon : publish
             )
@@ -154,7 +240,7 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
                     failure.code === 'ai_request_in_progress' ?
                         'Gofer is still working on the previous message.'
                     :   'The AI response could not be completed.'
-                amend(turn.assistantId, message => ({
+                amend(assistantId, message => ({
                     ...withFallbackText(
                         settleRunningTools(message, UNFINISHED_TOOL_REASON),
                         reason
@@ -162,8 +248,10 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
                     status: 'error'
                 }))
             } finally {
-                amend(turn.assistantId, settle)
+                amend(assistantId, settle)
                 if (activeRequestId === requestId) activeRequestId = undefined
+                for (const left of current.queued.filter(one => one.requestId === requestId))
+                    drop(left.steerId)
                 publish({...current, isStreaming: false})
             }
         }
@@ -183,6 +271,8 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
             publish({
                 messages: settleStoredChat(chat.messages),
                 agentMessages: chat.agentMessages,
+                queued: [],
+                handBack: [],
                 ...(chat.taskId !== undefined && {taskId: chat.taskId}),
                 isStreaming: false
             })
@@ -212,6 +302,44 @@ export function createTurnRunner({send, cancel}: TurnDependencies): TurnRunner {
                 assistantId: assistantMessage.id,
                 isRetry: false
             })
+        },
+        queue(prompt) {
+            if (activeRequestId === undefined) return false
+            const requestId = activeRequestId
+            const steerId = `steer-${String(takeSteerId())}`
+            const message: Message = {
+                id: takeMessageId(),
+                sender: 'user',
+                text: prompt,
+                timestamp: Date.now(),
+                status: 'queued'
+            }
+            publish({
+                ...current,
+                messages: [...current.messages, message],
+                queued: [
+                    ...current.queued,
+                    {steerId, requestId, messageId: message.id, text: prompt}
+                ]
+            })
+            void steer({
+                requestId,
+                id: steerId,
+                text: prompt,
+                timestamp: message.timestamp,
+                attachments: []
+            }).catch((error: unknown) => {
+                // Without this the bubble just disappears: the backend's sentence is the only
+                // thing that says the message was refused rather than sent.
+                publish({...current, error: toCommandError(error).message})
+                drop(steerId)
+            })
+            return true
+        },
+        takeHandBack() {
+            const taken = current.handBack
+            if (taken.length > 0) publish({...current, handBack: []})
+            return taken
         },
         retry(assistantId) {
             const plan = retryPlan(current.messages, assistantId)

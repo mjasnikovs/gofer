@@ -36,6 +36,7 @@ export type ComposerActions = Readonly<{
 
 export type ComposerMeta = Readonly<{
     canAttachImages: boolean
+    canQueue: boolean
     contextWindow: number
     isSavingAttachments: boolean
     isPlanOffered: boolean

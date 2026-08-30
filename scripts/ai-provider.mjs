@@ -37,6 +37,7 @@ import {
     contextRebuilt,
     retryScheduled,
     retryStart,
+    steered,
     textDelta,
     thinkingDelta,
     toolCost,
@@ -453,6 +454,7 @@ export async function runAgent({
     credentialHost,
     emit,
     signal,
+    steering,
     timers = realTimers,
     world = LIVE_WORLD
 }) {
@@ -602,6 +604,13 @@ export async function runAgent({
     if (signal?.aborted) agent.abort()
     else signal?.addEventListener('abort', () => agent.abort(), {once: true})
 
+    const steeredIds = new Map()
+    steering?.drainInto(asked => {
+        const message = contextMessage({sender: 'user', ...asked}, model)
+        steeredIds.set(message, asked.id)
+        agent.steer(message)
+    })
+
     const state = {
         finalMessage: undefined,
         attempt: 0,
@@ -616,6 +625,13 @@ export async function runAgent({
     }
 
     const unsubscribe = agent.subscribe(event => {
+        // message_end is the edge the steered message enters the transcript on, so it is the only
+        // point the renderer may stop calling it queued.
+        if (event.type === 'message_end' && steeredIds.has(event.message)) {
+            emit(steered(steeredIds.get(event.message)))
+            steeredIds.delete(event.message)
+            return
+        }
         if (event.type === 'message_update') {
             const update = event.assistantMessageEvent
             if (update.type === 'text_delta') emit(textDelta(update.delta))
@@ -688,13 +704,16 @@ export async function runAgent({
         return attemptState
     }
 
-    const gateOnVerifyPoints = async attemptState => {
+    const gateOnVerifyPoints = async (attemptState, steerPending) => {
         if (
             !attemptState.finalMessage
             || attemptState.finalMessage.stopReason === 'error'
             || answeredNothing(attemptState.finalMessage)
         )
             return 'nothing'
+        // Verify points describe a finished turn, and a message waiting to be drained says it is
+        // not finished. Running them here costs a whole suite per steer, and delays the steer by it.
+        if (steerPending) return 'answered'
         if (!verifyPoints) return 'answered'
         attemptState.verifyResults = await runVerifyPoints({
             points: verifyPoints,
@@ -757,9 +776,17 @@ export async function runAgent({
         for (;;) {
             await state.resume()
             await recoverOverflow(state)
-            const verdict = await gateOnVerifyPoints(state)
-            if (verdict === 'answered') break
+            const verdict = await gateOnVerifyPoints(
+                state,
+                agent.hasQueuedMessages() && !signal?.aborted
+            )
             if (verdict === 'again') continue
+            if (verdict === 'answered') {
+                if (!agent.hasQueuedMessages() || signal?.aborted) break
+                // Typed while the last turn was ending, so the loop's own drain point had gone.
+                state.resume = () => agent.continue()
+                continue
+            }
             if (wasStopped(state)) break
             await classifyAndBackoff(state)
             if (wasStopped(state)) break

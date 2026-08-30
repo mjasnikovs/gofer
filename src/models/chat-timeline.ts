@@ -191,6 +191,8 @@ export function isAiStreamEvent(value: unknown): value is AiStreamEvent {
         case 'compaction-end':
         case 'aborted':
             return true
+        case 'steered':
+            return isText(value['id'])
         case 'turn-state':
             return Array.isArray(value['agentMessages'])
         case 'context-rebuilt':
@@ -224,6 +226,12 @@ export function isAiStreamEvent(value: unknown): value is AiStreamEvent {
         default:
             return false
     }
+}
+
+export function withoutStatus(message: Message): Message {
+    if (message.status === undefined) return message
+    const {status: _dropped, ...rest} = message
+    return rest
 }
 
 function withoutStep(tool: ToolActivity): ToolActivity {
@@ -361,5 +369,8 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
                 ),
                 status: 'aborted'
             }
+        // Not an amendment to one assistant message: the runner splits the timeline on it.
+        case 'steered':
+            return message
     }
 }
