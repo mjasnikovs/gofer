@@ -15,8 +15,6 @@ test-results
 
 tsconfig.node.tsbuildinfo
 
-.vscode/*
-!.vscode/extensions.json
 .idea
 .DS_Store
 *.suo
