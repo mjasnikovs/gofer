@@ -551,9 +551,19 @@ function FrameRegions({
                                 gap={0}
                                 isScrollable
                             >
+                                {/*
+                                 * Grown, because `hasDivider` draws the rail on the nav and the
+                                 * nav hugs its tabs — so the underline stopped after "Skills" and
+                                 * the rest of the panel had no rail at all. `layout='fill'` would
+                                 * span it too, but it spreads seven tabs across 1638 pixels on a
+                                 * wide screen. Growing the nav keeps the labels together on the
+                                 * left and still caps at the visible width, so the scroll above
+                                 * behaves as it did.
+                                 */}
                                 <TabList
                                     size='sm'
                                     hasDivider
+                                    style={{flexGrow: 1}}
                                     aria-label='Workspace views'
                                     value={layout.centerTab}
                                     onChange={value => {
