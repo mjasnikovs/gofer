@@ -186,6 +186,7 @@ pub fn cache_path() -> Result<PathBuf, String> {
     }
 }
 
+// coverage-critical-start: cache
 fn validate_cache_path(path: PathBuf) -> Result<PathBuf, String> {
     if path
         .components()
@@ -253,6 +254,7 @@ fn delete_cache_path(path: &Path) -> Result<(), String> {
     fs::remove_dir_all(path)
         .map_err(|error| format!("Could not delete the Gofer RAG cache: {error}"))
 }
+// coverage-critical-end: cache
 
 /// Mirrors the model definitions gofer-rag downloads, so a cache missing any of
 /// them reads as `Incomplete` rather than claiming a retrieval that cannot run.

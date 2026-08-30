@@ -49,6 +49,7 @@ fn embed(mode: &str, texts: &[String], cache_dir: &Path) -> Result<Vec<Vec<f32>>
     embed_with(mode, texts, cache_dir, &WORKER, &SystemProcessSpawner)
 }
 
+// coverage-critical-start: protocol
 fn embed_with(
     mode: &str,
     texts: &[String],
@@ -103,6 +104,7 @@ fn embed_with(
             .ok_or_else(|| "The memory worker returned no vectors".to_owned());
     }
 }
+// coverage-critical-end: protocol
 
 fn start_worker(spawner: &impl ProcessSpawner) -> Result<MemoryWorker, String> {
     let node = crate::workers::node_binary();

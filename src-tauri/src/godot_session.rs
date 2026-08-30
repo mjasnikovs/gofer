@@ -975,6 +975,7 @@ pub fn stop() -> Result<(), SessionError> {
     }
 }
 
+// coverage-critical-start: version
 fn verify_version(spawner: &impl ProcessSpawner, binary: &str) -> Result<String, SessionError> {
     let output = command_text(spawner, binary, &["--version"]).map_err(|error| {
         SessionError::new(
@@ -1005,6 +1006,7 @@ fn is_supported_version(version: &str) -> bool {
     let required = format!("{REQUIRED_ENGINE_VERSION}.{REQUIRED_CHANNEL}");
     version == required || version.starts_with(&format!("{required}."))
 }
+// coverage-critical-end: version
 
 fn discover_binary(
     spawner: &impl ProcessSpawner,
@@ -1143,6 +1145,7 @@ fn canonical_worktree(worktree: &Path) -> Result<PathBuf, SessionError> {
         })
 }
 
+// coverage-critical-start: network
 fn bind_loopback_listener() -> std::io::Result<TcpListener> {
     TcpListener::bind("127.0.0.1:0")
 }
@@ -1181,6 +1184,7 @@ fn allocate_loopback_port(purpose: &str) -> Result<u16, SessionError> {
 fn is_loopback_host(host: &str) -> bool {
     host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
+// coverage-critical-end: network
 
 fn generate_token() -> String {
     use std::hash::{Hash, Hasher};

@@ -1244,6 +1244,7 @@ pub(crate) async fn run_brief(
     .map_err(CommandError::coded("brief_failed"))
 }
 
+// coverage-critical-start: attachment
 pub(crate) fn save_chat_attachment_in(
     storage: &ProjectStorage,
     request: ChatAttachmentUpload,
@@ -1274,6 +1275,7 @@ pub(crate) fn save_chat_attachment_in(
         .chats()
         .save_attachment(&request.attachment.as_stored(), &bytes)
 }
+// coverage-critical-end: attachment
 
 pub(crate) fn read_chat_attachment_in(
     storage: &ProjectStorage,
@@ -1333,6 +1335,7 @@ fn ask_worker_to_stop() -> bool {
     written.recv_timeout(WORKER_ASK_TIMEOUT).unwrap_or(false)
 }
 
+// coverage-critical-start: cancellation
 pub(crate) fn cancel_ai_request_with(request_id: u64) -> Result<bool, String> {
     if ACTIVE_AI_REQUEST_ID.load(Ordering::Acquire) != request_id {
         return Ok(false);
@@ -1371,7 +1374,9 @@ pub(crate) fn cancel_ai_request_with(request_id: u64) -> Result<bool, String> {
     }
     Ok(true)
 }
+// coverage-critical-end: cancellation
 
+// coverage-critical-start: attachment
 fn validate_chat_attachment(attachment: &ChatAttachment) -> Result<(), String> {
     if attachment.name.trim().is_empty() || attachment.name.len() > 255 {
         return Err("Attachment names must contain between 1 and 255 bytes".to_owned());
@@ -1429,6 +1434,7 @@ fn validate_chat_attachment_id(id: &str) -> Result<(), String> {
     }
     Ok(())
 }
+// coverage-critical-end: attachment
 
 fn read_chat_attachment_bytes(
     app: &AppHandle,
@@ -1990,6 +1996,7 @@ pub(crate) fn credential_answer(payload: &str) -> Result<Vec<u8>, String> {
 /// bounds the calls that cannot be interrupted — starting an editor, retrieving documentation.
 const TOOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+// coverage-critical-start: cancellation
 /// Waits for the turn's tool calls to finish before the turn is declared over.
 ///
 /// A turn that ended normally waits as long as it takes: the calls are the work it was asked to do,
@@ -2019,6 +2026,7 @@ fn drain_tool_workers_within(workers: Vec<std::thread::JoinHandle<()>>, limit: D
         let _ = wait.recv();
     }
 }
+// coverage-critical-end: cancellation
 
 /// Runs one tool request off the stdout loop and answers it on the duplex channel.
 ///

@@ -124,6 +124,7 @@ pub(crate) fn configured_app_data_path() -> Result<Option<PathBuf>, String> {
     validate_app_data_path(PathBuf::from(configured)).map(Some)
 }
 
+// coverage-critical-start: path
 fn validate_app_data_path(path: PathBuf) -> Result<PathBuf, String> {
     validate_configured_directory(
         path,
@@ -142,6 +143,7 @@ fn validate_configured_directory(path: PathBuf, message: &str) -> Result<PathBuf
     }
     Ok(path)
 }
+// coverage-critical-end: path
 
 pub(crate) fn app_data_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = configured_app_data_path()? {

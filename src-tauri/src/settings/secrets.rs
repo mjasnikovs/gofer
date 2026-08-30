@@ -361,6 +361,7 @@ pub(super) fn restore_saved_secrets_with(
     Ok(())
 }
 
+// coverage-critical-start: credential
 /// The three-way rule a settings page's key box is saved by, for any of the four secrets.
 ///
 /// `Keep` is what an untouched box means, because the page never reads a stored secret back and so
@@ -430,3 +431,4 @@ pub(super) fn resolve(
         ApiKeyUpdate::Clear => Ok(None),
     }
 }
+// coverage-critical-end: credential

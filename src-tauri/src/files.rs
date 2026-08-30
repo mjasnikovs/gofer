@@ -301,6 +301,7 @@ impl Workspace {
         &self.root
     }
 
+    // coverage-critical-start: path
     /// Maps a workspace-relative path onto disk, refusing traversal, absolute paths, and every
     /// symlink whose real location leaves the worktree.
     pub fn resolve(&self, relative: &str) -> Result<PathBuf, FileError> {
@@ -326,6 +327,7 @@ impl Workspace {
             }
         }
     }
+    // coverage-critical-end: path
 
     pub fn read(&self, relative: &str) -> Result<FileContents, FileError> {
         let path = self.resolve(relative)?;
@@ -610,6 +612,7 @@ impl Workspace {
     }
 }
 
+// coverage-critical-start: path
 /// Cleans one worktree-relative path, and refuses one that is not.
 ///
 /// It takes `res://` off as well, and that is the confinement backstop rather than the place the
@@ -645,6 +648,7 @@ fn validate_relative(relative: &str) -> Result<PathBuf, FileError> {
     }
     Ok(cleaned)
 }
+// coverage-critical-end: path
 
 pub fn hash_text(text: &str) -> String {
     hash_bytes(text.as_bytes())

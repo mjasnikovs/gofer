@@ -260,6 +260,7 @@ impl ProtocolError {
     }
 }
 
+// coverage-critical-start: protocol
 /// Validates one decoded version 2 envelope and reports the kind it turned out to be.
 pub fn validate_envelope(payload: &Value) -> Result<EnvelopeKind, ProtocolError> {
     let object = object_at(Some(payload), "payload")?;
@@ -623,6 +624,7 @@ fn object_at<'a>(
         .and_then(Value::as_object)
         .ok_or_else(|| ProtocolError::invalid(format!("{name} must be an object")))
 }
+// coverage-critical-end: protocol
 
 #[cfg(test)]
 mod tests {
