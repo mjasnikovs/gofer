@@ -1,8 +1,10 @@
 import {spawn} from 'node:child_process'
-import {cpus} from 'node:os'
-import {delimiter, resolve} from 'node:path'
+import {cpus, tmpdir} from 'node:os'
+import {delimiter, join, resolve} from 'node:path'
 
 const script = name => [name, `npm run --silent ${name}`]
+
+const coverage = name => join(tmpdir(), 'gofer-c8-coverage', name)
 
 const CORES = Math.max(4, cpus().length)
 const GODOT_JOBS = Math.floor((CORES * 5) / 8)
@@ -67,15 +69,15 @@ const OTHER_LANE = [
     ['test:coverage:frontend', `vitest run --coverage --maxWorkers=${OTHER_JOBS}`],
     [
         'test:coverage:node',
-        `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=coverage/node/tmp --reports-dir=coverage/node --reporter=text --check-coverage --lines 90 --branches 80 npm run --silent test:worker`
+        `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=${coverage('node')}/tmp --reports-dir=${coverage('node')} --reporter=text --check-coverage --lines 90 --branches 80 npm run --silent test:worker`
     ],
     [
         'test:coverage:node-critical',
-        "c8 --include='scripts/workspace-confinement.mjs' --temp-directory=coverage/node-critical/tmp --reports-dir=coverage/node-critical --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/workspace-confinement.test.mjs"
+        `c8 --include='scripts/workspace-confinement.mjs' --temp-directory=${coverage('node-critical')}/tmp --reports-dir=${coverage('node-critical')} --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/workspace-confinement.test.mjs`
     ],
     [
         'test:coverage:node-turn-context',
-        "c8 --include='scripts/turn-context.mjs' --temp-directory=coverage/turn-context/tmp --reports-dir=coverage/turn-context --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/turn-context.test.mjs"
+        `c8 --include='scripts/turn-context.mjs' --temp-directory=${coverage('turn-context')}/tmp --reports-dir=${coverage('turn-context')} --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/turn-context.test.mjs`
     ],
     script('test:worker:bundled'),
     [
