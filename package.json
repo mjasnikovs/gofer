@@ -51,7 +51,7 @@
     },
     "dependencies": {
         "@astryxdesign/core": "0.4.7",
-        "@astryxdesign/theme-neutral": "0.4.7",
+        "@astryxdesign/theme-stone": "0.4.7",
         "@earendil-works/pi-agent-core": "0.84.2",
         "@earendil-works/pi-ai": "0.84.2",
         "@fontsource-variable/figtree": "^5.3.0",

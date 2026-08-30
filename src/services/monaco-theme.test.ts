@@ -7,8 +7,8 @@ describe('goferEditorTheme', () => {
     it('paints the editor on the theme’s dark page', () => {
         const theme = goferEditorTheme()
         expect(theme.base).toBe('vs-dark')
-        expect(theme.colors['editor.background']).toBe('#0a0a0a')
-        expect(theme.colors['editor.foreground']).toBe('#e5e5e5')
+        expect(theme.colors['editor.background']).toBe('#171719')
+        expect(theme.colors['editor.foreground']).toBe('#ababb0')
     })
 
     it('takes the dark half of every colour, in the form Monaco reads', () => {

@@ -106,5 +106,10 @@ export default tseslint.config(
     {
         files: ['vite.config.ts'],
         languageOptions: {globals: globals.node}
+    },
+    {
+        // `astryx theme build` emits these; the triple-slash reference is its own.
+        files: ['src/theme/gofer.d.ts', 'src/theme/gofer.variants.d.ts'],
+        rules: {'@typescript-eslint/triple-slash-reference': 'off'}
     }
 )

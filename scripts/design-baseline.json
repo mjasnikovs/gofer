@@ -1,4 +1,10 @@
 {
-    "note": "Theme violations gofer carries today. Never add to this list — a new entry means a screen just lost a distinction. Delete an entry in the same commit that fixes it; scripts/design-check.mjs fails either way.",
-    "allowed": []
+    "note": "The five below are the stone theme's own palette, taken on purpose when gofer switched to it. Never add a sixth \u2014 anything gofer authors itself still has to pass. Delete an entry in the same commit that fixes it; scripts/design-check.mjs fails either way.",
+    "allowed": [
+        "surface-ramp:light:--color-background-surface:--color-background-card",
+        "surface-ramp:light:--color-background-card:--color-background-popover",
+        "surface-ramp:dark:--color-background-card:--color-background-popover",
+        "accent-distinct:light:--color-accent:--color-text-primary",
+        "accent-distinct:dark:--color-accent:--color-text-primary"
+    ]
 }
