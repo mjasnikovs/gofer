@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Four tasks on surfaces the first three batches did not reach: a tilemap level, an autoload the
-# language server has to learn about, an iterative change to a game that already works, and audio.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/ox-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

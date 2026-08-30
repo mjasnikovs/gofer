@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# The three tasks that wrote an entry with no `op` that two operations fit, re-run against the
-# sentence `refuseUnnamedOperation` now answers with.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p logs/oxloop

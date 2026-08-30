@@ -10,14 +10,6 @@ import type {WorkspaceEntry} from '../../models/script'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
 import type {ChatReference} from '../../utils/chat-references'
 
-/**
- * The explorer, mounted as itself.
- *
- * Every one of these used to need the whole frame around it, because the panel took the editor
- * session apart into four props only a frame could supply consistently. It reads the session at a
- * seam now, so a test supplies one.
- */
-
 afterEach(cleanup)
 
 const TREE = {
@@ -42,7 +34,6 @@ function explorer(
         tab?: 'scene' | 'runtime' | 'files'
         state?: GodotSessionState
         answer?: () => Promise<unknown>
-        /** Mounted without a sink unless one is asked for, as a panel with no conversation is. */
         add?: (reference: ChatReference) => void
     }> = {}
 ) {
@@ -82,8 +73,6 @@ describe('the explorer column', () => {
         await waitFor(() => {
             expect(screen.getByText('Player')).toBeInTheDocument()
         })
-        // The panel names its own bound rather than taking the agent's default of 150 nodes,
-        // which is sized for a tool result rather than for someone looking at a tree.
         expect(call).toHaveBeenCalledWith('scene.get_tree', {limit: 4096})
     })
 
@@ -95,10 +84,6 @@ describe('the explorer column', () => {
         expect(onStartSession).toHaveBeenCalled()
     })
 
-    /**
-     * A session that is still coming up answers with nothing, and nothing would refetch it. The
-     * panel waits rather than printing "No scene is open" over a project that has one.
-     */
     it('waits for an editor that is still importing', () => {
         const {call} = explorer({state: 'importing'})
         expect(call).not.toHaveBeenCalled()
@@ -133,11 +118,6 @@ describe('the explorer column', () => {
         expect(screen.queryByRole('button', {name: /^Mention /})).not.toBeInTheDocument()
     })
 
-    /**
-     * A picture is the file most worth naming in a message and the one Gofer will never open, so
-     * the two have to be independent. They were not: a row Astryx marks disabled takes no pointer
-     * events at all, which would have taken this button with it.
-     */
     it('mentions a file, a folder, and a picture it cannot open', async () => {
         const user = userEvent.setup()
         const add = vi.fn()

@@ -64,7 +64,6 @@ impl TaskDropped for ApprovalError {
 
 impl TaskDropped for crate::ask::QuestionError {
     fn task_dropped(command: &'static str, cause: String) -> Self {
-        // Retryable: the question is still waiting, so the same answer sent again reaches it.
         Self {
             code: "task_dropped",
             message: dropped_message(command, cause),
@@ -107,8 +106,6 @@ where
     Work: FnOnce() -> Result<Answer, String> + Send + 'static,
     Answer: Send + 'static,
 {
-    // Named rather than inferred: `CommandError` can be built from a `String` as well as from a
-    // dropped task, so nothing here says which of the two the `?` is lifting unless it is written.
     let answered = off_thread::<_, CommandError, _>(command, work).await?;
     answered.map_err(CommandError::coded(code))
 }

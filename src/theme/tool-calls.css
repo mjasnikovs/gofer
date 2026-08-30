@@ -1,23 +1,3 @@
-/*
- * A tool call's name never loses characters; its target does.
- *
- * `ChatToolCalls` gives the name `flex-shrink: 1` and the target `flex-shrink: 10`, so the target
- * gives ground ten times faster — but "faster" is not "first". Flexbox splits a deficit across
- * every shrinkable item at once, so a row too wide to fit takes a few pixels off the name as well,
- * and a name is eight or twelve characters where a target is eighty: the same few pixels are
- * invisible on one and a lost word on the other. The committed baseline shows it —
- * `streaming-tool-activity-dark-linux.png` reads `godot_scri…` beside a full-width target — and the
- * reported case was `subage…`, which is not a tool anyone can look up.
- *
- * The name is the second element of the row, after the status icon and before the optional node
- * badge; that is the component's documented anatomy (`npm run astryx -- component ChatToolCalls`).
- * The row itself sits one level down when the call carries a result to expand and at the top level
- * when it does not, so the row is matched by descent rather than by depth. Nothing else in the
- * block is a second-born span under a div: the status icon's own two spans are children of a span.
- * `e2e/visual/application.visual.spec.ts` measures the name against its own content, so a row that
- * ever reorders fails there rather than quietly clipping again.
- */
-
 .astryx-chat-tool-calls div > span:nth-child(2) {
     flex-shrink: 0;
 }

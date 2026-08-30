@@ -130,10 +130,6 @@ fn engine_line() -> String {
 /// what they wrote, and the build owns which engine it is pinned to.
 fn refresh_engine_line(prompt: &str) -> String {
     let current = engine_line();
-    // Split on `\n` rather than `lines()`, and rejoin on `\n`, so a prompt written with CRLF keeps
-    // its `\r` — `lines()` strips it and the rejoin would silently rewrite the whole file's endings.
-    // The replacement keeps the matched line's own indentation for the same reason: what the user
-    // wrote around this line is theirs, and only the claim itself is the build's.
     prompt
         .split('\n')
         .map(|line| {
@@ -204,7 +200,6 @@ mod tests {
             !sent.contains("4.6.0"),
             "the frozen version is gone: {sent}"
         );
-        // Everything the user actually wrote is theirs, and is untouched.
         assert!(sent.contains("You are Gofer."));
         assert!(sent.contains("- My own rule, which is mine to keep"));
         assert!(sent.ends_with('\n'), "the text's own shape survives");
@@ -224,15 +219,9 @@ mod tests {
         assert!(shipped.contains("godot_session start"));
         assert!(shipped.contains("godot_docs_search"));
         assert_eq!(default_prompt(&[], true), BASE_PROMPT);
-        // The sub-agent is a Node tool, registered in `ai-provider.mjs` for every session and
-        // absent from the Rust catalog. So its instructions belong to the base half: gated on the
-        // Godot tools they would vanish from a build that has none, while the tool stayed.
         assert!(default_prompt(&[], true).contains("subagent"));
-        // The same holds for the two web tools, which are also Node-side and also always present.
         assert!(default_prompt(&[], true).contains("web_search"));
         assert!(default_prompt(&[], true).contains("web_fetch"));
-        // And the Godot half still sends engine questions to the local docs rather than the web:
-        // the shipped 4.7 documentation is on this machine and the web is a worse answer for it.
         assert!(shipped.contains("godot_docs_search"));
     }
 
@@ -251,7 +240,6 @@ mod tests {
         assert!(!shipped.contains("{version}"));
         assert!(!shipped.contains("{channel}"));
         assert!(!shipped.contains("{released}"));
-        // The date is only useful with the instruction it exists for.
         assert!(shipped.contains("newer than your training data"));
     }
 
@@ -273,9 +261,6 @@ mod tests {
                     .chars()
                     .take_while(|one| one.is_ascii_lowercase() || *one == '_')
                     .collect();
-                // Only a name that could not be an English word: two lowercase runs joined by an
-                // underscore. `create_shape` and `set_cells` are unmistakable; `godot_logs when`
-                // is prose and is not the business of this test.
                 if !word.contains('_') || word.starts_with('_') || word.ends_with('_') {
                     continue;
                 }
@@ -289,8 +274,6 @@ mod tests {
                 );
             }
         }
-        // Named rather than counted, so a prompt edit that quietly stops naming any operation
-        // fails here instead of leaving a test that asserts nothing.
         assert!(
             checked.len() >= 5,
             "this test only means something while the prompt names operations; it found {checked:?}"
@@ -312,14 +295,12 @@ mod tests {
         assert!(!enforced.contains("{typing}"));
         assert!(!relaxed.contains("{typing}"));
 
-        // One line, and nothing else moved: the rest of the prompt is the same text either way.
         let without: Vec<&str> = enforced
             .lines()
             .filter(|line| !line.contains("treats GDScript warnings as errors"))
             .collect();
         assert_eq!(without, relaxed.lines().collect::<Vec<&str>>());
 
-        // A build with no Godot tools ships neither the Godot block nor this line.
         assert!(!default_prompt(&[], true).contains("treats GDScript warnings as errors"));
     }
 

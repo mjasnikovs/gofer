@@ -1,12 +1,5 @@
 extends SceneTree
 
-# What the editor commands decide before they touch the editor.
-#
-# `params.gd` is the half of the addon that needs no editor, so it is loaded from source rather than
-# staged and every refusal it can make is checked in a second. Before it existed, all of this lived
-# inside `plugin.gd`, which extends EditorPlugin — so a `tile_size` of zero, an atlas coordinate off
-# the end of its grid, and an unknown key name each cost a real editor boot to reach, and the
-# 50-second acceptance suite was the only instrument that could reach one.
 
 ## Staged into the fixture project by `scripts/godot-test.mjs`, fresh from source for this run.
 ##
@@ -65,14 +58,12 @@ func _said(answer: Variant) -> String:
     return str((failure as Dictionary).get("message", ""))
 
 func _test_tile_size(params: GDScript, failures: Array[String]) -> void:
-    # One number, two numbers, and the default when a command names none.
     if params.call("tile_size", {})["value"] != Vector2i(16, 16):
         failures.append("A command naming no tileSize must take the 16x16 default")
     if params.call("tile_size", {"tileSize": 32})["value"] != Vector2i(32, 32):
         failures.append("One number is a square tile")
     if params.call("tile_size", {"tileSize": [24, 8]})["value"] != Vector2i(24, 8):
         failures.append("Two numbers are width and height")
-    # A tile with no area is not a tile, and neither is a sentence.
     if _refusal(params.call("tile_size", {"tileSize": 0})) != "invalid_params":
         failures.append("A tileSize of zero must be refused")
     if _refusal(params.call("tile_size", {"tileSize": [16, -1]})) != "invalid_params":
@@ -88,7 +79,6 @@ func _test_atlas_coords(params: GDScript, failures: Array[String]) -> void:
     var pair: Variant = params.call("atlas_coords", {"tiles": [[1, 2]]}, "tiles", grid)
     if (pair["value"] as Array)[0] != Vector2i(1, 2):
         failures.append("A [column, row] pair becomes one coordinate")
-    # Off the end of the atlas is its own code, because it is the one a caller can act on.
     if _refusal(params.call("atlas_coords", {"tiles": [[9, 0]]}, "tiles", grid)) \
             != "tile_out_of_atlas":
         failures.append("A tile outside the atlas must say so by name")
@@ -106,16 +96,10 @@ func _test_shapes(params: GDScript, failures: Array[String]) -> void:
     if not (circle["value"] is CircleShape2D) \
             or not is_equal_approx((circle["value"] as CircleShape2D).radius, 3.0):
         failures.append("A CircleShape2D takes its radius from the command")
-    # A shape with no dimensions is refused rather than built at some default the caller cannot see.
     if _refusal(params.call("build_shape", "CircleShape2D", {})) != "invalid_params":
         failures.append("A CircleShape2D with no radius must be refused")
     if _refusal(params.call("build_shape", "RectangleShape2D", {"size": [8]})) != "invalid_params":
         failures.append("A RectangleShape2D with one number must be refused")
-    # And the refusal carries the shape it wanted. `size` is optional in the parameter table because
-    # four of the five shapes do not take one, so the table cannot say a rectangle needs it and this
-    # sentence is the only place a caller hears it. Two live turns sent `create_shape` with a
-    # shapeType and no dimensions at all, twice each, and read "takes size as two numbers" without
-    # writing one.
     for missing in [
         ["RectangleShape2D", "\"size\": [32, 32]"],
         ["CircleShape2D", "\"radius\": 8"],
@@ -125,7 +109,6 @@ func _test_shapes(params: GDScript, failures: Array[String]) -> void:
         var said: String = params.call("build_shape", missing[0], {})["_gofer_error"]["message"]
         if not said.contains(missing[1]):
             failures.append("%s must be refused with an example: %s" % [missing[0], said])
-    # A world boundary is the infinite floor a level rests on, and takes nothing.
     if not (params.call("build_shape", "WorldBoundaryShape2D", {})["value"] \
             is WorldBoundaryShape2D):
         failures.append("A world boundary is built from no dimensions at all")
@@ -138,7 +121,6 @@ func _test_input_events(params: GDScript, failures: Array[String]) -> void:
         failures.append("Enter is Godot's own name for the key and must decode: %s" % str(decoded))
     elif (decoded["events"] as Array).size() != 1:
         failures.append("One event decodes to one event")
-    # The name a browser uses, which is the mistake the key vocabulary exists to prevent.
     var browser: Dictionary = params.call(
         "decode_input_events", [{"kind": "key", "key": "Return"}]
     )
@@ -149,7 +131,6 @@ func _test_input_events(params: GDScript, failures: Array[String]) -> void:
     if params.call("decode_input_events", "A")["ok"]:
         failures.append("Events that are not a list must be refused")
 
-    # The round trip: what the editor answers with is what a caller may send back.
     var event := InputEventKey.new()
     event.keycode = OS.find_keycode_from_string("Escape")
     var encoded: Variant = params.call("encode_input_events", [event])
@@ -189,14 +170,9 @@ func _test_check_declared(params: GDScript, failures: Array[String]) -> void:
         elif not str(error["message"]).contains("path"):
             failures.append("A refusal names the parameter: %s" % str(error))
 
-    # Absence is not emptiness: an undeclared command is unchecked, so adding one cannot silently
-    # start refusing its own parameters.
     if not params.call("check_declared", "scene.not_a_command", {"anything": 1}).is_empty():
         failures.append("A command the table does not carry is not checked")
 
-    # `expectedRevision` and `timeoutMs` ride the envelope, and the table leaves them out on
-    # purpose. A caller that sends one among the parameters instead has made the mistake this
-    # refuses — the field never reaches a handler from there, so accepting it would be silence.
     if params.call("check_declared", "scene.save", {"expectedRevision": 3}).is_empty():
         failures.append("An envelope field sent as a parameter must be refused")
 
@@ -233,7 +209,6 @@ func _test_climbing_paths(params: GDScript, failures: Array[String]) -> void:
         if params.call("climbs_out_of_the_project", case[0], case[1]):
             failures.append("%s under `%s` stays inside" % [case[1], case[0]])
 
-    # The walk finds the first climbing path anywhere in the parameters, however deeply it is held.
     var nested := {"files": [{"path": "res://ok.gd"}, {"path": "res://../out.gd"}]}
     if params.call("a_path_that_climbs_out", "", nested) != "res://../out.gd":
         failures.append("The walk names the climbing path it found: %s" % str(nested))
@@ -265,11 +240,9 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
         if params.call("same_value", case[0], case[1]):
             failures.append("%s does not read back as %s" % [str(case[0]), str(case[1])])
 
-    # A number is not a string that looks like one, and a null is not an empty string.
     if params.call("is_null_object", null) or params.call("is_null_object", 0):
         failures.append("Only an object variant pointing at nothing is a null object")
 
-    # Godot appends a number rather than refusing a name clash, and only an all-digit tail counts.
     if not str(params.call("made_unique", "UI", "UI2")).contains("already called UI"):
         failures.append("A name that came back with a number on it names the clash")
     if not str(params.call("made_unique", "Player", "PlayerShip")).is_empty():
@@ -277,20 +250,13 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
     if not str(params.call("made_unique", "UI", "UI")).is_empty():
         failures.append("A name that came back unchanged is not a clash")
 
-    # A property no scene holds is answered by name; a size is answered by its floor, and only when
-    # the value that came back is the larger one.
     if not str(params.call("instead_of", "anchors_preset", 3, 0)).contains("anchor_left"):
         failures.append("anchors_preset names the four properties to write instead")
     if not str(params.call("instead_of", "anchors_preset", 3, 0)).contains("layout_mode"):
         failures.append("anchors_preset names the mode that makes the same write take")
-    # And the case that mode cannot reach. Measured on a real editor: a Control inside a Container
-    # is held at layout_mode 2, a write of 1 reads back 2, and the preset reads back 0 whatever is
-    # tried — so a caller there needs the container's own sizing, not the mode.
     if not str(params.call("instead_of", "anchors_preset", 3, 0)).contains("size_flags_horizontal"):
         failures.append("anchors_preset names what to do inside a Container")
 
-    # A dialog with a launch queued behind it is not the same situation as one that stopped a call
-    # before it started anything, and the two used to share a sentence.
     var waiting := str(params.call("after_a_dialog", true))
     for named in ["waiting behind this dialog", "session.answer_dialog", "second one"]:
         if not waiting.contains(named):
@@ -303,40 +269,30 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
     if nothing.contains("waiting behind"):
         failures.append("a call that started nothing must not claim a launch is queued")
 
-    # The script has the method and the node does not, which the refusal used to state as two
-    # clauses that contradict each other.
     var stale := str(params.call("a_method_the_script_has_and_the_node_has_not", "_on_body_entered", ["_on_body_entered", "_ready"]))
     for named in ["_on_body_entered", "older instance", "scene.save", "scene.reload"]:
         if not stale.contains(named):
             failures.append("a stale script instance must name %s" % named)
-    # A method the script really does not declare is the ordinary case and gains nothing here.
     if not str(params.call("a_method_the_script_has_and_the_node_has_not", "_on_area_entered", ["_on_body_entered", "_ready"])).is_empty():
         failures.append("a method the script does not declare is not a stale instance")
     if not str(params.call("a_method_the_script_has_and_the_node_has_not", "", ["_ready"])).is_empty():
         failures.append("no method named is not a stale instance")
 
-    # The scene a caller is creating is the one the project starts with. Three of the four turns
-    # that met `already_exists` named exactly this path.
     var main_again := str(params.call("also_the_main_scene", "res://main.tscn", "res://main.tscn"))
     for named in ["main scene", "application/run/main_scene", "project.set_setting"]:
         if not main_again.contains(named):
             failures.append("replacing the main scene must name %s" % named)
-    # Any other path, and a project that names none, gain nothing.
     if not str(params.call("also_the_main_scene", "res://coin.tscn", "res://main.tscn")).is_empty():
         failures.append("a scene that is not the main scene gains no sentence")
     if not str(params.call("also_the_main_scene", "res://main.tscn", "")).is_empty():
         failures.append("a project with no main scene gains no sentence")
 
-    # A scene path written where a class name belongs. Every clause is what the turn that met this
-    # went looking for and did not find: what a type is here, where a scene goes instead, and that
-    # inheriting one scene from another is not something this tool does.
     var as_scene := str(params.call("a_type_that_is_a_scene", "res://pickup.tscn"))
     for named in ["res://pickup.tscn", "class name", "node.instantiate", "inherit"]:
         if not as_scene.contains(named):
             failures.append("a scene path written as a type must name %s" % named)
     if not str(params.call("a_type_that_is_a_scene", "scenes/coin.tscn")).contains("node.instantiate"):
         failures.append("a scene path without the scheme is still a scene path")
-    # And a real class name is left entirely alone, or every mistyped type gains a paragraph.
     for plain in ["Node2D", "Area2D", "CharacterBody2D", "Contrl"]:
         if not str(params.call("a_type_that_is_a_scene", plain)).is_empty():
             failures.append("%s is a class name and must gain no sentence" % plain)
@@ -350,21 +306,17 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
     if not str(params.call("grew_to_its_minimum", "position", Vector2(0, 0), Vector2(1, 1))).is_empty():
         failures.append("Only `size` has this floor")
 
-    # The hint strings are the ones a real 4.7.2 engine publishes for these properties.
     var out_of_range: String = params.call(
         "outside_the_values_it_takes", "grow_horizontal", "Left,Right,Both", 3
     )
     for named in ["3 is not one", "grow_horizontal", "0 Left", "1 Right", "2 Both"]:
         if not out_of_range.contains(named):
             failures.append("an out-of-range enum must name %s" % named)
-    # In range is not this refusal, whichever shape the hint string is written in.
     for held in [0, 1, 2]:
         if not str(
             params.call("outside_the_values_it_takes", "grow_horizontal", "Left,Right,Both", held)
         ).is_empty():
             failures.append("%d is one of grow_horizontal's values" % held)
-    # `anchors_preset` numbers its own names, and 15 is Full Rect — a value it has. Its refusal is
-    # about layout_mode, and a list of seventeen numbers would bury the sentence that says so.
     var presets := (
         "Custom:-1,Full Rect:15,Top Left:0,Top Right:1,Bottom Right:3,Bottom Left:2,Center Left:4"
     )
@@ -383,7 +335,6 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
         "2 Both"
     ):
         failures.append("instead_of reaches the enum sentence")
-    # A property with no enum hint, and a value that is not a number, are both left alone.
     if not str(params.call("outside_the_values_it_takes", "text", "", 3)).is_empty():
         failures.append("a property with no enum hint gains nothing")
     if not str(
@@ -404,7 +355,6 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
         params.call("as_far_as_the_path_goes", "/Main/Player", PackedStringArray(), "Sprite")
     ).contains("no children at all"):
         failures.append("a node with nothing under it says so rather than listing nothing")
-    # Long enough to be cut, and the count of what was cut is part of the sentence.
     var many := PackedStringArray()
     for index in range(20):
         many.append("Child%d" % index)
@@ -414,14 +364,11 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
             failures.append("a long list must name %s" % named)
     if trimmed.contains("Child12"):
         failures.append("and it must stop at twelve")
-    # Nothing to say is said as nothing, so the caller's sentence is unchanged.
     if not str(
         params.call("as_far_as_the_path_goes", "", PackedStringArray(["A"]), "B")
     ).is_empty():
         failures.append("a path that reached nowhere gains no clause")
 
-    # `layout_mode` is decided by the parent, so the sentence is about the three shapes rather than
-    # about the number written. It answers whatever value came in, in range or not.
     for asked in [1, 9]:
         var placed: String = params.call("instead_of", "layout_mode", asked, 3)
         for named in ["node.reparent", "Container", "size_flags_horizontal", "uncontrolled"]:
@@ -436,7 +383,6 @@ func _test_readback(params: GDScript, failures: Array[String]) -> void:
 ## `res://` prefix. Reaching one cost a staged addon and an xvfb boot. They cost a second here, and
 ## this is the test that says the move kept their answers.
 func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> void:
-    # A size is one number or two, and both are the same square.
     for asked: Variant in [8, [8, 8]]:
         var square: Dictionary = params.call("texture_size", asked)
         if square.get("value") != Vector2i(8, 8):
@@ -445,17 +391,13 @@ func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> v
         failures.append("a texture size that is neither a number nor a pair is refused")
     if _refusal(params.call("texture_size", 0)) != "invalid_params":
         failures.append("a texture with no pixels on a side is refused")
-    # The two limits are told apart by what the refusal says, not by the code: both are
-    # `invalid_params`, and a wide texture breaks the pixel budget as well as the edge one.
     var wide: Dictionary = params.call("texture_size", [8192, 1])
     if _refusal(wide) != "invalid_params" or not _said(wide).contains("on a side"):
         failures.append("a texture past the edge limit is refused for its edge, not %s" % wide)
-    # Inside both edges and still past the pixel budget: 4096 x 4096 is 16 times what it holds.
     var heavy: Dictionary = params.call("texture_size", [4096, 4096])
     if _refusal(heavy) != "invalid_params" or not _said(heavy).contains("at most"):
         failures.append("a texture inside both edges is refused for its pixels, not %s" % heavy)
 
-    # A path is left alone when it already names a resource, and prefixed when it does not.
     for asked: Variant in ["res://a.png", "a.png", "./a.png", "/a.png"]:
         var wanted: String = "res://a.png"
         if params.call("as_resource_path", asked) != wanted:
@@ -463,7 +405,6 @@ func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> v
     if params.call("as_resource_path", "  ") != "":
         failures.append("a path of nothing but spaces names nothing")
 
-    # A rescan takes one path or a list, drops the empties, and never repeats one.
     var listed: Dictionary = params.call("rescan_paths_param", {"path": ["a.png", "a.png", ""]})
     if listed.get("value") != ["res://a.png"]:
         failures.append("a rescan list is prefixed, deduplicated and emptied, not %s" % listed)
@@ -477,7 +418,6 @@ func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> v
     if _refusal(params.call("rescan_paths_param", {"path": too_many})) != "too_many_paths":
         failures.append("a rescan past the path limit is refused by its own code")
 
-    # A reserved setting names the command that owns it, and an ordinary one names none.
     for pair: Array in [
         ["autoload/Score", "project.set_autoload"],
         ["input/jump", "project.set_input_action"],
@@ -487,7 +427,6 @@ func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> v
         if params.call("reserved_setting_command", pair[0]) != pair[1]:
             failures.append("%s belongs to %s" % [pair[0], pair[1]])
 
-    # A search matches on every word, in any order, and no words matches everything.
     var words: PackedStringArray = params.call("words_of", "  Window   SIZE ")
     if Array(words) != ["window", "size"]:
         failures.append("a query is lowered, split and emptied, not %s" % words)
@@ -497,23 +436,18 @@ func _test_moved_from_the_editor(params: GDScript, failures: Array[String]) -> v
         failures.append("a name missing one of the words does not match")
     if not params.call("name_holds_every_word", "anything", params.call("words_of", "")):
         failures.append("no words matches everything")
-    # Punctuation is thrown away with the spaces. A query typed as a question used to ask for a
-    # word ending in `?`, and no setting name has one — a guaranteed miss on the natural phrasing.
     var asked: PackedStringArray = params.call("words_of", "show line numbers?")
     if Array(asked) != ["show", "line", "numbers"]:
         failures.append("a question mark is not part of the word before it, and %s says it is" % asked)
     if not params.call("name_holds_every_word", "text_editor/appearance/gutters/show_line_numbers", asked):
         failures.append("the setting the live turn could not find is found now")
-    # An underscore stays inside a word, because a settings name is written with them.
     if Array(params.call("words_of", "show_line_numbers")) != ["show_line_numbers"]:
         failures.append("an underscored name is one word, not three")
 
-    # A parent key is the path without the trailing slashes, and the root keeps its one.
     for pair: Array in [["/Main/", "/Main"], ["/Main///", "/Main"], ["/", "/"], [" /Main ", "/Main"]]:
         if params.call("batch_parent_key", pair[0]) != pair[1]:
             failures.append("batch_parent_key %s must be %s" % [pair[0], pair[1]])
 
-    # An unimplemented command is refused by name, and the refusal says it cannot be retried.
     var unknown: Dictionary = params.call("unknown_command_error", "scene.fly")
     var said: Dictionary = unknown.get("_gofer_error", {})
     if said.get("code") != "unknown_command" or not str(said.get("message")).contains("scene.fly"):
@@ -537,10 +471,8 @@ func _test_read_by_both_halves(params: GDScript, failures: Array[String]) -> voi
     if groups != ["pickups"]:
         failures.append("an engine group is not one the author wrote, and %s says it is" % [groups])
 
-    # No script, so the node is drawn as the engine class it is.
     if params.call("icon_class", node) != "Node2D":
         failures.append("a node with no script is drawn as its own class")
-    # A script with a `class_name` names the node instead; one without leaves the class alone.
     var named := GDScript.new()
     named.source_code = "class_name GoferProbeCoin\nextends Node2D\n"
     named.reload()
@@ -568,13 +500,8 @@ func _test_node_decisions(params: GDScript, failures: Array[String]) -> void:
     child.name = "Player"
     root.add_child(child)
 
-    # A near miss is answered with the name, and an exact spelling with nothing — there is nothing
-    # to correct about a name the caller already wrote. `runtime.gd` kept saying
-    # "Did you mean 'position'?" about `position` until both halves read this one function.
     if params.call("nearest_property", child, "Position") != "position":
         failures.append("a property misspelled by case is corrected to the real name")
-    # The matching is by prefix, either way round, not by edit distance: `positionValue` is a name
-    # with something stuck on it, and `Positon` is a typo inside it and is deliberately not guessed.
     if params.call("nearest_property", child, "positionValue") != "position":
         failures.append("a name with something stuck on the end is corrected to the name")
     if params.call("nearest_property", child, "Positon") != "":
@@ -583,14 +510,11 @@ func _test_node_decisions(params: GDScript, failures: Array[String]) -> void:
         failures.append("a property spelled exactly right has nothing to correct")
     if params.call("nearest_property", child, "flip_h") != "":
         failures.append("a property that is exactly right, underscores and all, is left alone")
-    # A category heading sits in the property list beside the property it heads, and is not one.
     if params.call("nearest_property", child, "Transform") == "Transform":
         failures.append("an inspector heading is never offered as a property")
-    # Under four characters there is nothing to be near, so a prefix match is not attempted.
     if params.call("nearest_property", child, "pos") != "":
         failures.append("a stub too short to be a near miss is not guessed at")
 
-    # The refusal names the property, carries its own code, and offers the near miss.
     var refused: Dictionary = params.call(
         "property_not_found_error", child, "/Main/Player", "positionValue"
     )
@@ -602,26 +526,19 @@ func _test_node_decisions(params: GDScript, failures: Array[String]) -> void:
     if not _said(nothing_near).contains("node.inspect"):
         failures.append("a property with nothing near it is answered with how to list them all")
 
-    # Every signal a node has, its class's and its ancestors' alike — a caller connecting to
-    # `ready` on a Sprite2D is doing something real, so the list is not narrowed.
     var signals: Array = params.call("node_signals", child)
     for named in ["frame_changed", "ready"]:
         if not signals.has(named):
             failures.append("a node's signals must include %s: %s" % [named, signals])
-    # And a signal a caller named that the node does not have is answered with the ones it does.
     var offered: String = params.call("the_signals_it_does_have", child, "pressed")
     if not offered.contains("frame_changed"):
         failures.append("a signal that is not there is answered with the ones that are")
 
-    # A swap gives back what it displaced: who owned which child, and the owners restored.
     var owned: Dictionary = {}
     params.call("who_owned_what", root, owned)
     if not owned.has("/Player"):
         failures.append("a swap records the owner of every child by path, not %s" % [owned])
 
-    # An instance that would contain the open scene is refused before any dependency is followed,
-    # and with nothing open there is no cycle to make. The walk itself needs real files on disk, so
-    # the fixture's one scene is what the "allowed" case is asked about.
     if params.call("instance_cycle", "res://main.tscn", "res://main.tscn").is_empty():
         failures.append("a scene instantiated inside itself is refused")
     if not str(params.call("instance_cycle", "res://main.tscn", "")).is_empty():
@@ -629,7 +546,6 @@ func _test_node_decisions(params: GDScript, failures: Array[String]) -> void:
     if not str(params.call("instance_cycle", "res://main.tscn", "res://other.tscn")).is_empty():
         failures.append("a scene that does not reach the open one is allowed")
 
-    # The autoload clause is added only when this session registered one.
     var quiet: String = params.call("why_the_editor_cannot_see_it", child, [] as Array[String])
     if quiet.contains("autoload"):
         failures.append("a session that registered no autoload does not mention them")

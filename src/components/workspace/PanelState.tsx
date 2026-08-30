@@ -8,24 +8,16 @@ import type {GodotError} from '../../models/godot'
 import {SESSION_OTHER_TASK, SessionTaskBanner} from './SessionTaskBanner'
 
 type PanelStateProps = Readonly<{
-    /** What the panel is reading, named for the status message: “Loading the scene tree…”. */
     label: string
     isLoading: boolean
     error?: GodotError | undefined
     isEmpty: boolean
     emptyTitle: string
     emptyDescription?: string | undefined
-    /** What the user can do about the emptiness, when it is something they can act on. */
     emptyAction?: ReactNode
     children: ReactNode
 }>
 
-/**
- * The four states every panel in this workspace has: loading, failed, empty, and answered.
- *
- * A failure keeps its structured code — `session_not_active` and `runtime_not_running` are ordinary
- * states of a workspace whose editor is not running, so they read as facts rather than as faults.
- */
 export function PanelState({
     label,
     isLoading,
@@ -36,8 +28,6 @@ export function PanelState({
     emptyAction,
     children
 }: PanelStateProps) {
-    // One failure is not a failed read but a workspace pointed at the wrong editor, and it has its
-    // own way out. Everything else is reported as what it is.
     if (error?.code === SESSION_OTHER_TASK) return <SessionTaskBanner error={error} />
     if (error)
         return (

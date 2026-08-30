@@ -156,15 +156,11 @@ impl FileError {
     /// can actually make.
     fn conflict(path: &str, expected: Option<&str>, actual: Option<&str>) -> Self {
         let message = match (expected, actual) {
-            // Nothing was passed for a file that is already there: the ledger holds no record, so
-            // this caller has never been told what the file contains.
             (None, Some(_)) => format!(
                 "{path} exists and this agent has not been shown what it holds. Nothing was \
                  written. Open it with `godot_script open` — a plain `read` does not record what \
                  it showed you — then save."
             ),
-            // A hash for a file that is not there: the record outlived the file. The router drops
-            // the record on this refusal, so saying "save it again" is true rather than a loop.
             (Some(_), None) => format!(
                 "{path} no longer exists on disk. Nothing was written. Save it again to create the \
                  file."
@@ -305,7 +301,6 @@ impl Workspace {
         &self.root
     }
 
-    // coverage-critical-start: path
     /// Maps a workspace-relative path onto disk, refusing traversal, absolute paths, and every
     /// symlink whose real location leaves the worktree.
     pub fn resolve(&self, relative: &str) -> Result<PathBuf, FileError> {
@@ -315,8 +310,6 @@ impl Workspace {
         loop {
             match paths::canonical(existing) {
                 Ok(real) => {
-                    // A short root can stay plain while a long path under it needs the verbatim
-                    // prefix, so the two spellings are levelled before they are compared.
                     if !paths::simplified(&real).starts_with(paths::simplified(&self.root)) {
                         return Err(FileError::outside(relative));
                     }
@@ -333,12 +326,9 @@ impl Workspace {
             }
         }
     }
-    // coverage-critical-end: path
 
     pub fn read(&self, relative: &str) -> Result<FileContents, FileError> {
         let path = self.resolve(relative)?;
-        // `resolve` already proved the real location is inside the worktree, so following a
-        // symlink here cannot leave it.
         let metadata = fs::metadata(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 FileError::not_found(relative)
@@ -426,8 +416,6 @@ impl Workspace {
         expected_hash: Option<&str>,
     ) -> Result<FileStamp, FileError> {
         let path = self.resolve(relative)?;
-        // Before the hash check, because a file too large to write is refused on its size whatever
-        // the caller believed was there.
         refuse_if_too_large(relative, text)?;
         let current = self.current_hash(relative, &path)?;
         match (expected_hash, current.as_deref()) {
@@ -508,8 +496,6 @@ impl Workspace {
     /// file back, so either both ends moved or neither did.
     pub fn move_path(&self, from: &str, to: &str) -> Result<(), FileError> {
         self.reject_live_sidecar(from)?;
-        // And the destination, for the same reason from the other side: landing on
-        // `player.gd.uid` plants a file Godot reads as `player.gd`'s identity.
         self.reject_live_sidecar(to)?;
         let source = self.resolve(from)?;
         let destination = self.resolve(to)?;
@@ -536,16 +522,7 @@ impl Workspace {
         fs::rename(&source, &destination).map_err(|error| FileError::io(to, &error))?;
         let mut moved = Vec::new();
         for (carried, landing) in carrying {
-            // Renamed over whatever is there. A sidecar at the destination with no file of its
-            // own is metadata for something that does not exist, and leaving it would give the
-            // moved file that dead file's uid.
             if let Err(error) = fs::rename(&carried, &landing) {
-                // Every rename this loop already made, not just the main file. There is more than
-                // one sidecar, so a `.uid` that moved and an `.import` that then failed used to
-                // put the file back at its old path and leave its uid stranded at the new one —
-                // which is the breakage `SIDECARS` exists to prevent, reported as a failure. The
-                // doc above promises both ends moved or neither did; only undoing all of them
-                // keeps that promise.
                 for (carried, landing) in moved {
                     let _ = fs::rename(&landing, &carried);
                 }
@@ -582,12 +559,6 @@ impl Workspace {
             }
         }
         fs::remove_file(&path).map_err(|error| FileError::io(relative, &error))?;
-        // Best effort, and after the file itself, in that order for one reason each. After,
-        // because a sidecar removed while its file is still there is the breakage this exists to
-        // prevent. Best effort, because the file the caller named is gone either way, and an
-        // orphaned `.uid` harms nothing — Godot ignores it and [`Self::reject_live_sidecar`] lets
-        // anyone take it away later. Reporting `Err` here told the caller the delete had failed
-        // about a file that was no longer there.
         for suffix in SIDECARS {
             if let Ok(carried) = self.resolve(&format!("{relative}.{suffix}")) {
                 let _ = fs::remove_file(&carried);
@@ -606,10 +577,6 @@ impl Workspace {
         let Some((owner, suffix)) = relative.rsplit_once('.') else {
             return Ok(());
         };
-        // The dot has to end a filename, not begin one. `.uid` splits to an empty owner, and
-        // `assets/.import` to `assets/` — a real directory, which made a dotfile look like the
-        // sidecar of the folder it sits in and refused a move nobody should have been stopped from
-        // making.
         if owner.is_empty() || owner.ends_with('/') {
             return Ok(());
         }
@@ -643,7 +610,6 @@ impl Workspace {
     }
 }
 
-// coverage-critical-start: path
 /// Cleans one worktree-relative path, and refuses one that is not.
 ///
 /// It takes `res://` off as well, and that is the confinement backstop rather than the place the
@@ -679,7 +645,6 @@ fn validate_relative(relative: &str) -> Result<PathBuf, FileError> {
     }
     Ok(cleaned)
 }
-// coverage-critical-end: path
 
 pub fn hash_text(text: &str) -> String {
     hash_bytes(text.as_bytes())
@@ -765,7 +730,6 @@ fn collect(root: &Path, directory: &Path, depth: usize, snapshot: &mut Snapshot)
             }
             continue;
         }
-        // Symlinks are skipped rather than followed: their target may sit outside the worktree.
         if !metadata.is_file() {
             continue;
         }
@@ -965,8 +929,6 @@ where
 {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
-    // The baseline is taken before the caller regains control, so a change made right after this
-    // call is still reported.
     let mut previous = scan(workspace.root());
     let worker = std::thread::spawn(move || {
         let mut buffer = ChangeBuffer::default();
@@ -1176,9 +1138,6 @@ mod tests {
             "an unread file must not be reported as an outside change: {}",
             omitted.message
         );
-        // And it names the call that satisfies it. "Read the file first" was the sentence, the
-        // `read` tool is what a model reached for, and that read never reaches this ledger —
-        // three of four live runs on the same script, one wasted round trip each.
         assert!(
             omitted.message.contains("godot_script open"),
             "the way out has to be in the sentence: {}",
@@ -1206,8 +1165,6 @@ mod tests {
             stale.message
         );
 
-        // The prose is read by a model that cannot see `expectedHash` at all, so naming it — or
-        // naming what the caller "passed" — is the failure this test exists to keep out.
         for refusal in [&omitted, &missing, &stale] {
             assert!(
                 !refusal.message.contains("expectedHash")
@@ -1488,7 +1445,6 @@ mod tests {
             "not_found"
         );
 
-        // A file with no sidecar is the ordinary case and must not become an error.
         workspace.write("notes.md", "text", None).expect("plain");
         workspace
             .move_path("notes.md", "docs/notes.md")
@@ -1497,8 +1453,6 @@ mod tests {
             .delete("docs/notes.md", None)
             .expect("delete a bare file");
 
-        // And a sidecar is not a file a caller may name. Moving one on its own would leave the
-        // script it describes without a uid, which is the bug this test is about, backwards.
         workspace
             .write("scripts/main.gd", "two", None)
             .expect("script");
@@ -1519,8 +1473,6 @@ mod tests {
                 .code,
             "sidecar_path"
         );
-        // And from the destination side. Landing on `main.gd.uid` plants a file Godot reads as
-        // `main.gd`'s identity, which is the same corruption written rather than taken away.
         workspace.write("stray.txt", "three", None).expect("plain");
         assert_eq!(
             workspace
@@ -1530,9 +1482,6 @@ mod tests {
             "sidecar_path"
         );
 
-        // A dot that begins a filename is not a suffix on one. `.uid` has no owner, and
-        // `assets/.import` is a dotfile in a directory rather than that directory's sidecar —
-        // splitting on the last dot alone made both look like live sidecars.
         workspace
             .write(".uid", "not a sidecar", None)
             .expect("dotfile");
@@ -1544,7 +1493,6 @@ mod tests {
             .move_path("assets/.import", "assets/moved.txt")
             .expect("a dotfile in a directory is a file");
 
-        // An orphan is metadata for something that is gone, and taking one away is a tidy-up.
         workspace
             .write("gone.gd.uid", "uid://y", None)
             .expect("orphan");
@@ -1584,12 +1532,9 @@ mod tests {
                 .text,
             "uid://kept"
         );
-        // And a hand-edited file is replaced rather than reported as a conflict, which is the whole
-        // reason the delete was there.
         workspace
             .replace("addons/gofer/plugin.gd", "newer")
             .expect("replace again");
-        // A path this workspace refuses is still refused, and a file too large still is.
         assert_eq!(
             workspace
                 .replace("../escape.gd", "x")
@@ -1608,8 +1553,6 @@ mod tests {
     #[test]
     fn a_move_that_cannot_carry_the_sidecar_leaves_the_file_where_it_was() {
         let (_directory, workspace) = workspace();
-        // Deep rather than long: every component stays under the filesystem's own 255-byte limit,
-        // so the only thing that refuses this path is Gofer's.
         let directories = vec!["d".repeat(200); 5].join("/");
         let long = format!("{directories}/{}.gd", "a".repeat(15));
         assert!(
@@ -1656,15 +1599,12 @@ mod tests {
         for relative in ["a.gd", "a.gd.uid", "a.gd.import"] {
             workspace.write(relative, "one", None).expect("write");
         }
-        // A non-empty directory where the second sidecar must land: renaming a file onto one is
-        // what the filesystem refuses, which is the failure this needs and cannot fake.
         let blocked = workspace.resolve("b.gd.import").expect("resolve");
         fs::create_dir_all(blocked.join("inside")).expect("a directory in the way");
 
         let failure = workspace.move_path("a.gd", "b.gd").expect_err("refused");
         assert_eq!(failure.code, "io_failed", "{failure:?}");
 
-        // Everything back where it started, sidecars included.
         for relative in ["a.gd", "a.gd.uid", "a.gd.import"] {
             assert_eq!(
                 workspace.read(relative).expect("still where it was").text,
@@ -1715,7 +1655,6 @@ mod tests {
                 .decode(square.trim_start_matches("data:image/png;base64,"))
                 .expect("base64");
             let small = image::load_from_memory(&decoded).expect("decode square");
-            // 64x48 shrunk to fit a 32px box, aspect ratio kept.
             assert_eq!((small.width(), small.height()), (32, 24), "{relative}");
         }
     }
@@ -1756,10 +1695,10 @@ mod tests {
         fs::create_dir_all(workspace.root().join("sprites")).expect("create directory");
         fs::write(workspace.root().join("sprites/broken.png"), b"not a png").expect("write");
         for relative in [
-            "scripts/player.gd",  // not a picture
-            "sprites/broken.png", // named like one, will not decode
-            "sprites/gone.png",   // never existed
-            "sprites",            // a directory
+            "scripts/player.gd",
+            "sprites/broken.png",
+            "sprites/gone.png",
+            "sprites",
         ] {
             assert_eq!(
                 workspace.thumbnail(relative).expect("thumbnail"),
@@ -1792,8 +1731,6 @@ mod tests {
         workspace
             .write("node_modules/pkg/index.js", "ignored", None)
             .expect("create");
-        // Gofer's own directory, which the agent's `godot_resource list` reads out of this walk. A
-        // live project answered that call with two hundred lines of its own session logs.
         workspace
             .write(".gofer/logs/session/turn.jsonl.zst", "ignored", None)
             .expect("create");
@@ -1945,7 +1882,6 @@ mod tests {
             "a tree past the walk limit is truncated, not followed"
         );
 
-        // A path that is not a directory at all is the same non-event: the scan answers empty.
         assert!(scan(&directory.path().join("shallow.gd")).is_empty());
         assert!(scan(&directory.path().join("absent")).is_empty());
     }

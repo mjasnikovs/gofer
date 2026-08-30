@@ -417,10 +417,6 @@ fn start_with(
         let mut active = ACTIVE_SESSION
             .lock()
             .map_err(|_| SessionError::new("lock_poisoned", "The session lock is poisoned"))?;
-        // A session whose editor has already exited is not one to refuse a new start over: the
-        // window it belonged to is gone, and starting another is exactly what the user does next.
-        // It stays in the slot until then so the state they read says the editor failed rather
-        // than that there was never a session at all.
         if active
             .as_mut()
             .is_some_and(|session| session.child.lock().is_ok_and(has_exited))
@@ -437,10 +433,6 @@ fn start_with(
     }
 
     let worktree = canonical_worktree(&request.worktree)?;
-    // Godot opens any directory as a project, inventing an empty one where there is none, so a
-    // workspace that is not a Godot project fails later as a scene that will not load rather than
-    // here as the plain fact it is. Naming the directory is the whole point: Gofer takes its
-    // workspace from the directory it was started in, which is not always the one the user meant.
     if !worktree.join(crate::addon::PROJECT_FILE).is_file() {
         return Err(SessionError::new(
             "not_a_godot_project",
@@ -500,17 +492,10 @@ fn start_with(
     if cfg!(target_os = "macos") {
         arguments.insert(0, OsString::from("--single-window"));
     }
-    // The packaged journey and the final acceptance journey both drive a real editor on machines
-    // that have no display. The flag exists only in the WebDriver build and under the acceptance
-    // gate, so a shipped Gofer can never start an editor the user cannot see, and neither journey
-    // needs a second, differently-launched code path.
     #[cfg(any(feature = "webdriver", all(test, feature = "godot-acceptance")))]
     if std::env::var_os("GOFER_GODOT_HEADLESS").is_some() {
         arguments.insert(0, OsString::from("--headless"));
     }
-    // Asked for after the headless flag rather than before it, because `--headless` *is* a display
-    // driver — the two arguments contradict each other, and a journey that has no display wants the
-    // one it asked for.
     if !arguments.iter().any(|argument| argument == "--headless")
         && wants_wayland_driver(
             request.embed_game_window,
@@ -535,13 +520,6 @@ fn start_with(
                     OsString::from("GOFER_RPC_TOKEN"),
                     OsString::from(token.clone()),
                 ),
-                // Cleared rather than left alone. A child inherits this process's environment, and
-                // the addon reads this variable to write `network/debug/remote_port` into the
-                // machine-wide EditorSettings — permanently, because stopping quits the editor
-                // from the inside. A developer whose shell exports it while running the acceptance
-                // suite would otherwise have their own remote debugging rewritten by a Gofer they
-                // started from that shell. Only the acceptance harness may set it, and it launches
-                // its editors itself.
                 (OsString::from("GOFER_DEBUG_PORT"), OsString::new()),
             ],
         )
@@ -553,10 +531,6 @@ fn start_with(
             .retryable()
         })?;
 
-    // Both streams are pipes: an unread pipe fills and stalls the editor, so each one is drained
-    // by a reader thread into the session log buffer. That buffer is the only place editor,
-    // importer, plugin, and game output exists — the game the editor launches inherits these very
-    // pipes — so the logs domain reads it instead of re-deriving output from somewhere else.
     let stdout = child
         .take_stdout()
         .ok_or_else(|| SessionError::new("godot_stdout_missing", "Could not read Godot output"))?;
@@ -614,8 +588,6 @@ fn derive_state(session: &GodotSession) -> SessionState {
         Readiness::Ready => SessionState::Ready,
         Readiness::Importing => SessionState::Importing,
         Readiness::Starting => SessionState::Starting,
-        // The editor is alive and the addon is not answering. Nothing can be asked of the session,
-        // which is what `Error` means to every panel that reads it.
         Readiness::Unavailable => SessionState::Error,
     }
 }
@@ -849,9 +821,6 @@ fn spawn_log_reader(stream: crate::process::ProcessReader, source: LogSource) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        // A non-UTF-8 byte in engine output must not stop the drain: the pipe would fill and stall
-        // the editor. `read_line` fails the whole read, so the buffer is cleared and reading
-        // continues with the next line.
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -946,8 +915,6 @@ const QUIT_REQUEST_TIMEOUT_MS: u64 = 2_000;
 /// question. The waiting is announced in the session log because it is the one part of stopping
 /// that a person can notice.
 fn quit_gracefully(session: &GodotSession, child: &mut Box<dyn ChildProcess>) {
-    // An editor whose addon never connected has nothing to ask. Without this the question is put
-    // to a socket nobody is holding and every stop waits out the request timeout first.
     if matches!(child.try_wait(), Ok(Some(_))) || session.rpc.readiness() == Readiness::Unavailable
     {
         return;
@@ -995,15 +962,9 @@ pub fn stop() -> Result<(), SessionError> {
         .lock()
         .map_err(|_| SessionError::new("lock_poisoned", "The child process lock is poisoned"))?;
     quit_gracefully(&active, &mut child);
-    // Stopped after the quit, not before it: asking the editor to close itself is an RPC call, and
-    // a stopped session refuses those.
     active.rpc.stop();
     match child.kill() {
         Ok(()) => Ok(()),
-        // An editor that already exited cannot be killed, and on Linux saying so is an error: once
-        // `poll_editor_exit` has reaped a crashed or closed editor, `kill` answers "can't kill an
-        // exited process". Stopping a session whose editor is already gone is exactly what a user
-        // does next, and it has to clean up rather than refuse.
         Err(error) => match child.try_wait() {
             Ok(Some(_)) => Ok(()),
             _ => Err(SessionError::new(
@@ -1014,7 +975,6 @@ pub fn stop() -> Result<(), SessionError> {
     }
 }
 
-// coverage-critical-start: version
 fn verify_version(spawner: &impl ProcessSpawner, binary: &str) -> Result<String, SessionError> {
     let output = command_text(spawner, binary, &["--version"]).map_err(|error| {
         SessionError::new(
@@ -1045,7 +1005,6 @@ fn is_supported_version(version: &str) -> bool {
     let required = format!("{REQUIRED_ENGINE_VERSION}.{REQUIRED_CHANNEL}");
     version == required || version.starts_with(&format!("{required}."))
 }
-// coverage-critical-end: version
 
 fn discover_binary(
     spawner: &impl ProcessSpawner,
@@ -1184,7 +1143,6 @@ fn canonical_worktree(worktree: &Path) -> Result<PathBuf, SessionError> {
         })
 }
 
-// coverage-critical-start: network
 fn bind_loopback_listener() -> std::io::Result<TcpListener> {
     TcpListener::bind("127.0.0.1:0")
 }
@@ -1223,7 +1181,6 @@ fn allocate_loopback_port(purpose: &str) -> Result<u16, SessionError> {
 fn is_loopback_host(host: &str) -> bool {
     host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
-// coverage-critical-end: network
 
 fn generate_token() -> String {
     use std::hash::{Hash, Hasher};
@@ -1262,8 +1219,6 @@ fn editor_settings_path() -> Result<Option<PathBuf>, SessionError> {
         if path.is_file() {
             return Ok(Some(path));
         }
-        // An explicit override that names nothing is a mistake worth reporting, unlike a machine
-        // that simply has no settings file yet.
         return Err(SessionError::new(
             "editor_settings_missing",
             format!(
@@ -1321,9 +1276,6 @@ fn parse_lsp_remote_host(text: &str) -> Option<String> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        // A real settings file writes the fully qualified `network/language_server/remote_host`
-        // with spaces around the separator; the suffix match accepts both that and the bare key,
-        // and `network/debug/remote_host` cannot collide with it.
         if !key.trim().ends_with(LSP_REMOTE_HOST_KEY) {
             continue;
         }
@@ -1351,9 +1303,6 @@ const GAME_IS_NOT_ANSWERING: [&str; 5] = [
     "runtime_not_running",
     "runtime_slow_start",
     "runtime_timeout",
-    // The editor, not the game. `session_closed` is what every call answers once the RPC socket
-    // has gone, and on its own it says only that — see `editor_crashed` for what it is usually
-    // hiding.
     "session_closed",
 ];
 
@@ -1395,10 +1344,6 @@ fn editor_crashed() -> Option<String> {
         1,
     )
     .pop()?;
-    // The second half of "whose death is this". The buffer is cleared once, when an editor starts,
-    // so a game that segfaulted an hour ago leaves its marker there for the rest of the session —
-    // and once the editor is stopped the guard above no longer rules it out. A crash that ended the
-    // call the model is reading about happened moments ago; an older line belongs to something else.
     if now_millis().saturating_sub(entry.timestamp) > CRASH_IS_THIS_CALLS_MS {
         return None;
     }
@@ -1502,9 +1447,6 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
     if !GAME_IS_NOT_ANSWERING.contains(&failure.code.as_str()) {
         return failure;
     }
-    // Appended rather than returned. The crash says the engine broke; the lines below say what it
-    // broke on, and a model handed the first without the second is told to go and look for the
-    // parse error this function exists to carry.
     if let Some(crash) = editor_crashed() {
         failure.message = format!(
             "{}\n\nThe Godot editor itself died: {crash}. That is the engine crashing, not this \
@@ -1512,17 +1454,7 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
             failure.message.trim_end()
         );
     }
-    // Not for `session_closed`. That one is about the editor, and an editor that has gone takes the
-    // staged autoload with it — so the check below would be right about the file and wrong about
-    // what happened.
-    // One of the two, because they describe the same call from opposite ends and both cannot be
-    // true. Neither returns: what the session printed is the other half of the answer, and a branch
-    // that leaves without it is the defect the crash branch above was just fixed for — a model told
-    // the autoload is missing, and not told the parse error sitting under it.
     if failure.code.starts_with("runtime_") {
-        // The crash first. A game that died of a signal took its helper with it, so the two
-        // checks under this one would both be true and both be the wrong half of the answer:
-        // "the helper is not installed" about a helper that was installed and is now dead.
         if let Some(crash) = the_game_crashed() {
             failure.message = format!("{}\n\n{crash}", failure.message.trim_end());
         } else if let Some(missing) = the_helper_is_not_installed() {
@@ -1749,9 +1681,6 @@ fn last_session_errors(wanted: usize) -> Vec<String> {
     newest_logs(
         &LogQuery {
             min_severity: Some(LogSeverity::Error),
-            // Asked for more than are wanted, because the epilogue below is dropped afterwards and
-            // a game that exited cleanly prints nothing else. Six of the wanted six were epilogue
-            // in both recorded occurrences.
             ..LogQuery::default()
         },
         wanted * 4,
@@ -2050,7 +1979,6 @@ mod tests {
     fn settings_file_with(host: &str) -> (TempDir, PathBuf) {
         let directory = TempDir::new().expect("temporary settings dir");
         let path = directory.path().join(EDITOR_SETTINGS_FILE_NAMES[0]);
-        // Written the way a real editor writes it: fully qualified key, spaces around the equals.
         fs::write(
             &path,
             format!("[network]\n\nnetwork/{LSP_REMOTE_HOST_KEY} = \"{host}\"\n"),
@@ -2062,7 +1990,6 @@ mod tests {
     #[test]
     fn supported_version_matches_exact_release() {
         assert!(is_supported_version("4.7.2.stable"));
-        // What a published release actually reports; rejecting it would reject every real editor.
         assert!(is_supported_version("4.7.2.stable.official"));
         assert!(is_supported_version("4.7.2.stable.official.ed1daf0bf"));
         assert!(!is_supported_version("4.7.2.dev"));
@@ -2102,7 +2029,6 @@ mod tests {
             "an editor bound without a transport has none to hand out"
         );
 
-        // Unbinding goes back to the supervisor, which has started nothing in this test.
         bind(None);
         assert!(current_info().is_none());
         assert_eq!(current_state(), SessionState::Offline);
@@ -2144,8 +2070,6 @@ mod tests {
             parse_lsp_remote_host("language_server/remote_host=\"::1\""),
             Some("::1".to_owned())
         );
-        // What Godot 4.7 actually writes: fully qualified, spaced, and next to a sibling key that
-        // must not be mistaken for it.
         assert_eq!(
             parse_lsp_remote_host(
                 "[network]\n\nnetwork/debug/remote_host = \"10.0.0.5\"\nnetwork/language_server/remote_host = \"127.0.0.1\"\n"
@@ -2181,8 +2105,6 @@ mod tests {
 
         // SAFETY: restore the process environment while still holding the test lock.
         unsafe { std::env::remove_var("GOFER_GODOT_EDITOR_SETTINGS") };
-        // Whatever this machine has — a real settings file or none at all — the answer is a host,
-        // never a failure.
         assert!(!read_lsp_remote_host().expect("discovered host").is_empty());
     }
 
@@ -2204,7 +2126,6 @@ mod tests {
         .expect_err("a directory that is not a Godot project cannot host a session");
 
         assert_eq!(error.code, "not_a_godot_project");
-        // The directory is what the user has to change, so the message has to name it.
         assert!(error.message.contains(&worktree.display().to_string()));
         assert!(
             spawner.arguments.lock().expect("arguments").is_empty(),
@@ -2226,11 +2147,7 @@ mod tests {
             wants_wayland_driver(true, wayland),
             cfg!(target_os = "linux")
         );
-        // Not asked for when the rule is off: the driver is chosen for embedding and for nothing
-        // else, so an unticked box leaves the user's own display server alone.
         assert!(!wants_wayland_driver(false, wayland));
-        // No compositor to ask for. Godot does not fall back from a driver it was told to use, so
-        // this would trade a game window in the wrong place for no editor at all.
         assert!(!wants_wayland_driver(true, None));
         assert!(!wants_wayland_driver(true, Some(OsStr::new(""))));
     }
@@ -2339,24 +2256,15 @@ mod tests {
             &spawner,
         )
         .expect("start session");
-        // A session whose editor is up says nothing, however often it is asked.
         assert!(!poll_editor_exit());
         assert_eq!(current_state(), SessionState::Starting);
 
         spawner.exited.store(true, Ordering::Release);
-        // Read before anything is told: the state is worked out from the child on the spot, so an
-        // editor that exited is failed from that moment whether or not a poll ever happens. It used
-        // to be a remembered field that only `poll_editor_exit` moved, and nothing called that
-        // unless a subscriber was draining events — which is how a dead editor kept a ready badge.
         assert_eq!(current_state(), SessionState::Error);
         assert!(poll_editor_exit(), "the exit must be noticed");
-        // Once only: the caller polling this closes a run row on the transition, and closing it
-        // again on every later poll would rewrite history that has already been written.
         assert!(!poll_editor_exit());
         assert_eq!(current_state(), SessionState::Error);
 
-        // Stopping a session whose editor already exited is what a user does next, and killing a
-        // process that has ended is an error on Linux — so the stop has to see that for what it is.
         stop().expect("stopping a dead session must clean up rather than refuse");
     }
 
@@ -2380,7 +2288,6 @@ mod tests {
         )
         .expect("start the first session");
 
-        // A live session is still refused, which is the guard this must not remove.
         let second = FakeSpawner::new("4.7.2.stable");
         let refused = start_with(
             LaunchRequest {
@@ -2399,8 +2306,6 @@ mod tests {
         );
 
         first.exited.store(true, Ordering::Release);
-        // The desktop layer asks this before it refuses a start over the session already in the
-        // slot, and it has to keep answering the same way however often it is asked.
         assert!(
             editor_has_exited(),
             "a dead editor must be reported as gone"
@@ -2544,7 +2449,6 @@ mod tests {
         let all = read_logs(&LogQuery::default()).expect("read logs");
         assert_eq!(all.entries.len(), 5);
         assert_eq!(all.dropped, 0);
-        // The newline is not part of the message, and the engine's own markers set the severity.
         assert_eq!(all.entries[0].message, "Godot Engine v4.7.2.stable");
         assert_eq!(all.entries[0].severity, LogSeverity::Info);
         assert_eq!(all.entries[2].severity, LogSeverity::Error);
@@ -2568,7 +2472,6 @@ mod tests {
         assert_eq!(game.entries.len(), 1);
         assert_eq!(game.entries[0].message, "presses: 1 (key)");
 
-        // A cursor resumes exactly after the line it names, and an empty page keeps it put.
         let page = read_logs(&LogQuery {
             after: Some(2),
             limit: Some(1),
@@ -2604,7 +2507,6 @@ mod tests {
         assert_eq!(page.dropped, 10);
         assert_eq!(page.entries[0].message, "line 10");
 
-        // One oversized line cannot blow the page budget on its own.
         append_log(LogSource::Editor, &"x".repeat(MAX_LOG_LINE_CHARS * 2));
         let last = read_logs(&LogQuery {
             after: Some(u64::try_from(MAX_LOG_ENTRIES).expect("buffer size fits") + 10),
@@ -2654,19 +2556,6 @@ mod tests {
         }
     }
 
-    /*
-     * A game whose helper is not in the project is told so, rather than told to wait.
-     *
-     * `runtime_slow_start` was written for a helper that is late, and it says the right thing to a
-     * caller whose game is still starting: read `get_state`, do not stop it. A helper that is not
-     * installed reads the same and never resolves — `get_state` answers
-     * `running: true, runtimeReady: false` for ever, `wait` answers `runtime_not_running` about a
-     * game that is plainly running, and the advice is to keep asking. A live turn spent seventeen
-     * calls in that loop and produced nothing.
-     *
-     * The session output cannot explain it, because there is no error: the game boots and runs
-     * perfectly, with nothing inside it that can answer.
-     */
     #[test]
     fn a_game_with_no_runtime_helper_is_told_that_and_not_to_wait() {
         let _test = session_test_lock();
@@ -2747,12 +2636,6 @@ mod tests {
         );
     }
 
-    /*
-     * And a staged project keeps the failure it already had.
-     *
-     * The sentence above is a diagnosis, so it must not be attached to a game whose helper is
-     * simply late — which is every ordinary `runtime_slow_start` and the reason that code exists.
-     */
     #[test]
     fn a_staged_project_is_not_accused_of_losing_its_helper() {
         let _test = session_test_lock();
@@ -2815,7 +2698,6 @@ mod tests {
             "The game stopped before it could answer",
         ));
 
-        // The code is the addon's and stays the addon's; only what the model can act on is added.
         assert_eq!(carried.code, "runtime_not_running");
         assert!(
             carried
@@ -3094,15 +2976,6 @@ mod tests {
         );
     }
 
-    /*
-     * The other half of "whose death is this", for the case the live-editor guard cannot answer.
-     *
-     * A game that segfaulted leaves its marker in the editor's own buffer, which is cleared only
-     * when an editor starts. While the editor is up, the guard says the line is not its. Once the
-     * editor is stopped the guard goes quiet, and every later failure was answered "the Godot
-     * editor itself died — retrying will not help" on the strength of an hour-old line about a
-     * different process. Age is what tells them apart: the crash that ended this call just happened.
-     */
     #[test]
     fn a_crash_from_earlier_in_the_session_is_not_this_calls_crash() {
         let _test = session_test_lock();
@@ -3259,7 +3132,6 @@ mod tests {
             carried.message
         );
 
-        // And a game the debugger never started gains nothing from the sentence.
         let alone = carrying_the_error_that_ended_the_game(addon_failure(
             "runtime_timeout",
             "The game did not answer in time",
@@ -3301,23 +3173,18 @@ mod tests {
             "{}",
             refused.message
         );
-        // And the two that answer while it is halted are named, because trying one is how a caller
-        // tells a halted game from a wedged one.
         assert!(
             refused.message.contains("inspect_node") && refused.message.contains("get_tree"),
             "{}",
             refused.message
         );
 
-        // The calls that need no frame are not refused at all.
         assert!(a_game_the_debugger_has_halted("inspect_node").is_ok());
         assert!(a_game_the_debugger_has_halted("get_tree").is_ok());
 
-        // A game the debugger launched and let run.
         crate::godot_dap::pretend_the_debuggee_is_stopped(false);
         assert!(a_game_the_debugger_has_halted("input").is_ok());
 
-        // And a game the debugger never started, whatever the adapter last said about one.
         crate::godot_dap::pretend_the_debuggee_is_stopped(true);
         crate::debug::pretend_it_holds_a_game(false);
         assert!(a_game_the_debugger_has_halted("input").is_ok());
@@ -3352,8 +3219,6 @@ mod tests {
             carried.message
         );
 
-        // A game the debugger is holding gets the sentence about *that*, which says more, and never
-        // both — they describe the same call from opposite ends.
         crate::debug::pretend_it_holds_a_game(true);
         let held = carrying_the_error_that_ended_the_game(addon_failure(
             "runtime_timeout",
@@ -3371,7 +3236,6 @@ mod tests {
             held.message
         );
 
-        // And with nothing armed there is nothing to say.
         crate::debug::pretend_a_breakpoint_is_armed(None);
         let alone = carrying_the_error_that_ended_the_game(addon_failure(
             "runtime_timeout",
@@ -3403,25 +3267,17 @@ mod tests {
             "{}",
             carried.message
         );
-        // And it has to contradict the advice above it, or the caller has two sentences and
-        // follows the first.
         assert!(
             carried.message.contains("will not change that"),
             "{}",
             carried.message
         );
-        // And it claims no mechanism. Two drafts did and both were wrong — see
-        // `the_games_own_scripts_did_not_compile`. What is pinned is that it stays out of the
-        // business of saying *why* the helper is missing, which nobody has measured.
         assert!(
             !carried.message.contains("autoload"),
             "the sentence must not explain a mechanism nobody has measured: {}",
             carried.message
         );
 
-        // A session that printed no script failure keeps the sentence it had. The engine's own
-        // chatter is already dropped before this reads it, so a run with nothing wrong says
-        // nothing new.
         given_the_session_printed(&[(LogSource::Editor, "Godot Engine v4.7.2.stable")]);
         let quiet = carrying_the_error_that_ended_the_game(addon_failure(
             "runtime_slow_start",
@@ -3518,9 +3374,6 @@ mod tests {
             "the editor's own chatter was carried as the cause"
         );
 
-        // And `ERR_FAIL_NULL`'s generic wording is *not* filtered, however often a headless scene
-        // save prints it: a game that hands RenderingServer a null texture says the same words, and
-        // that game's only diagnostic line has to reach the model.
         given_the_session_printed(&[(LogSource::EditorError, "ERROR: Parameter \"t\" is null.")]);
         assert!(
             carrying_the_error_that_ended_the_game(addon_failure(

@@ -7,14 +7,6 @@ import {fakeSession, refusal} from '../test/fake-session'
 import type {GodotSessionState} from '../models/godot'
 import type {GodotCall} from '../models/workspace'
 
-/**
- * The rule this module exists to hold: when a panel's reading is sent, and when it is not.
- *
- * Every one of these used to be reachable only by mounting the whole frame, because the condition
- * lived in the panels rather than behind the interface they read through.
- */
-
-/** A panel's surroundings: one session, and the wrapper that puts a reading inside it. */
 function reader(
     state: GodotSessionState,
     answer: () => Promise<unknown> = () => Promise.resolve({root: null})
@@ -50,7 +42,6 @@ describe('useGodotReading', () => {
             const {wrapper, call} = reader(state)
             const {result} = renderHook(() => useGodotReading('scene.get_tree'), {wrapper})
             expect(call).not.toHaveBeenCalled()
-            // The panel is waiting for the editor, which is not the same as having nothing to show.
             expect(result.current.isLoading).toBe(true)
         }
     )
@@ -102,7 +93,6 @@ describe('useGodotReading', () => {
     it('does not re-read for params that only look new', async () => {
         const {wrapper, call} = reader('ready')
         const {result, rerender} = renderHook(
-            // A fresh object literal every render, which is how a panel writes it.
             () => useGodotReading('project.search_settings', {query: 'physics'}),
             {wrapper}
         )

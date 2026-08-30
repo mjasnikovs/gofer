@@ -29,8 +29,6 @@ describe('formatGodotValue', () => {
         expect(formatGodotValue({type: 'string', value: 'res://main.tscn'})).toBe('res://main.tscn')
     })
 
-    // A value the addon sent in a shape this version does not know must not reach the screen as
-    // `[object Object]`, so anything that is not a primitive prints as nothing at all.
     it('prints a non-primitive payload as nothing', () => {
         expect(formatGodotValue({type: 'string', value: {unexpected: true}})).toBe('')
         expect(formatGodotValue({type: 'int', value: undefined})).toBe('')
@@ -83,8 +81,6 @@ describe('formatGodotValue', () => {
         expect(formatGodotValue({type: 'opaque', value: {}})).toBe('')
     })
 
-    // Vectors, colors, transforms, and quaternions all arrive as flat number arrays, so one
-    // fallback prints every one of them by the type tag the addon gave it.
     it('prints an unknown type with numbers as a constructor call', () => {
         expect(formatGodotValue({type: 'vector2', value: [1, 2]})).toBe('vector2(1, 2)')
         expect(formatGodotValue({type: 'color', value: [1, 0, 0, 1]})).toBe('color(1, 0, 0, 1)')

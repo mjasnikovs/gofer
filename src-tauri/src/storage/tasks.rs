@@ -40,8 +40,6 @@ impl Tasks<'_> {
         let _checkout = self.storage.claim_checkout()?;
         let task_id = Uuid::now_v7().to_string();
         let branch_name = task_branch_name(&task_id);
-        // The base is read only once there is a repository to read it from: a project that has no
-        // Git yet has no base branch either, and asking for one is an error rather than an absence.
         let base = if git::is_repository(&self.storage.workspace_path) {
             self.storage.base_branch()?
         } else {
@@ -53,8 +51,6 @@ impl Tasks<'_> {
             git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base);
         }
         result?;
-        // A new task the checkout never moved to is a task whose files are the previous task's. The
-        // switch is what makes it real, and a failure to switch takes the row with it.
         if created.is_some() {
             let moved = if carry_changes {
                 switch.carrying(&branch_name)
@@ -93,10 +89,6 @@ impl Tasks<'_> {
             let connection = self.storage.connection()?;
             require_task(&connection, task_id)?;
         }
-        // The branch first, then the working tree, then the pointer. Nothing records the new task
-        // until its files are the ones on disk, so a refused checkout leaves the user on the task
-        // they can still see. A project that is not a repository yet has no working tree to move
-        // and no branch to move it to; opening another task there is still just a pointer.
         if git::is_repository(&self.storage.workspace_path) {
             self.storage.task_workspace(task_id)?;
             let branch_name = self.branch_of(task_id)?;
@@ -187,15 +179,12 @@ impl Tasks<'_> {
             transaction
                 .execute("DELETE FROM tasks WHERE id = ?1", [task_id])
                 .map_err(database_error)?;
-            // The unsent message belonged to this conversation, so it goes with it.
             transaction
                 .execute(
                     "DELETE FROM project_state WHERE key = ?1",
                     [draft_ui_key(task_id)],
                 )
                 .map_err(database_error)?;
-            // The deleted task cannot stay the active one. The most recently worked-on task left
-            // takes over, so the user lands on work they recognize rather than an empty new task.
             if active_task_id(&transaction)?.as_deref() == Some(task_id) {
                 match next_task_id(&transaction)? {
                     Some(next) => set_active_task(&transaction, &next)?,
@@ -212,13 +201,6 @@ impl Tasks<'_> {
             let base = self.storage.base_branch()?;
             git::discard_task_branch(&self.storage.workspace_path, &branch_name, &base);
         }
-        // The task that took over is only the active one on paper until the checkout is on its
-        // branch. Deleting the task in front of the user otherwise leaves them looking at a
-        // conversation whose files are the deleted task's.
-        //
-        // Answered rather than dropped. This used to be `let _ = checkout_branch(..)`, so a checkout
-        // that would not move produced exactly that — one task's chat over another task's files,
-        // with nothing anywhere saying so. The message says the deletion itself did happen.
         if let Some(next) = active_task_id(&self.storage.connection()?)? {
             self.storage.task_workspace(&next)?;
             let branch_name = self.branch_of(&next)?;
@@ -289,16 +271,11 @@ impl Tasks<'_> {
         switch: &Switch<'_>,
     ) -> Result<MergeTaskResult, CommandError> {
         self.merge_record(task_id, switch).map_err(|failure| {
-            // A conflict gets its own code and carries the paths, because it is the one failure the
-            // window can offer a way out of: the agent can be asked to reconcile those files. Every
-            // other failure is a sentence and nothing to do about it.
             let conflicts = failure.conflicts();
             if !conflicts.is_empty() {
                 return CommandError::new("task_merge_conflicted", failure.message().to_owned())
                     .with_details(json!({"conflicts": conflicts}));
             }
-            // And a resolution that stopped half-way is the other one: the way out of it is
-            // discarding the merge, which nothing offers unless this failure says so by name.
             let unfinished = failure.unfinished();
             if !unfinished.is_empty() {
                 return CommandError::new("task_merge_unfinished", failure.message().to_owned())
@@ -350,11 +327,6 @@ impl Tasks<'_> {
         Ok(git::abandon_task_conflicts(&self.storage.workspace_path)?)
     }
 
-    // ─── the brief ───────────────────────────────────────────────────────────
-    //
-    // A task's plan, kept with the task rather than with the project's backups and its remembered
-    // window layout. A brief belongs to exactly one task, is created with it, and is deleted by the
-    // same cascade — which is a description of a task's own row, not of the project's.
     /// reaches them anyway.
     pub fn start_brief(&self, task_id: &str, prompt: &str) -> Result<(), CommandError> {
         let now = now_millis().map_err(CommandError::or_coded("brief_unwritable"))?;
@@ -373,13 +345,6 @@ impl Tasks<'_> {
                 CommandError::new("brief_unwritable", database_error(error).message)
             })?;
 
-        // Named from the ask, here, before any phase runs.
-        //
-        // A task is otherwise named after its first message, and a planned task's first message is
-        // the specification — so every one of them appeared in the sidebar as "GOAL During active
-        // combat, ui_cancel opens PauseMenu above the H…", which names the output rather than the
-        // job and is indistinguishable from the next planned task's. The same `'New task'` guard the
-        // first-message path uses keeps this from overwriting a name that is already better.
         let title: String = prompt.trim().chars().take(80).collect();
         if !title.is_empty() {
             let _ = connection.execute(
@@ -501,8 +466,6 @@ impl Tasks<'_> {
         let _checkout = self.storage.claim_checkout()?;
         let branch_name = self.branch_of_the_open_task(task_id)?;
         let base = self.storage.base_branch()?;
-        // A task is merged from its own branch. Merging one the user is not on would move the
-        // checkout under them and leave them reading another task's files afterwards.
         switch.onto(&branch_name)?;
         let merged = git::merge_task_branch(&self.storage.workspace_path, &branch_name, &base)?;
         let now = now_millis()?;
@@ -690,9 +653,6 @@ pub(crate) fn require_task(connection: &Connection, task_id: &str) -> Result<(),
         .map_err(database_error)?
         .is_some();
     if !exists {
-        // Named where it is known. A task that is gone is a task the window should route away
-        // from; every method that used to flatten this into its own one code left the renderer
-        // unable to tell it from a database it should simply try again.
         return Err(CommandError::new(
             "task_not_found",
             "The task was not found",
@@ -726,7 +686,6 @@ mod tests {
         let storage =
             ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
 
-        // No task could be created, so nothing claims a worktree the repository cannot supply.
         assert_eq!(storage.tasks().list().expect("tasks").len(), 0);
     }
 
@@ -764,7 +723,6 @@ mod tests {
             &task_branch_name(&task_id)
         ));
 
-        // Recorded, so the next call answers from the table rather than rebuilding.
         let summary = storage
             .tasks()
             .list()
@@ -847,8 +805,6 @@ mod tests {
         let directory = TempDir::new().expect("temporary directory");
         let storage = storage(&directory);
 
-        // `ProjectStorage::open` ensures an active task exists, but the plain test workspace is
-        // not a Git repository, so there is no worktree to give the task and none to adopt.
         assert!(
             storage
                 .tasks()
@@ -859,7 +815,6 @@ mod tests {
             "active_task_workspace must fail rather than fall back"
         );
 
-        // `agent_workspace` still falls back to the root workspace for existing UI paths.
         assert!(storage.tasks().agent_workspace().is_ok());
     }
 
@@ -881,10 +836,8 @@ mod tests {
             .into_iter()
             .map(|task| task.id)
             .collect();
-        // Three made here, plus the one a new project opens with.
         assert_eq!(before.len(), 4);
 
-        // The oldest one, which is the row furthest from where the reorder would put it.
         let opened = before.last().expect("an oldest task").clone();
         storage
             .tasks()
@@ -999,15 +952,11 @@ mod tests {
             .delete(&doomed, &storage.switch_with_no_turn_to_refuse(&recording))
             .expect("delete task");
 
-        // The session is stopped before the checkout moves off the branch being deleted, and again
-        // before it moves onto the task that took over. Deleting a task is two Switches, not one.
         assert_eq!(released.paths(), vec![workspace.clone(), workspace.clone()]);
         assert!(
             git_text(&workspace, &["branch", "--list", &worktree.branch_name]).is_empty(),
             "the task branch must be gone from the repository"
         );
-        // The task the user worked on before takes over, with its chat intact, and the checkout is
-        // moved onto its branch rather than left on the deleted task's.
         let tasks = storage.tasks().list().expect("remaining tasks");
         assert_eq!(tasks.len(), 1);
         assert_eq!(replacement.task_id, first.task_id);
@@ -1027,13 +976,6 @@ mod tests {
         );
     }
 
-    /*
-     * A checkout that would not move is answered, not dropped.
-     *
-     * The move onto the task that takes over used to be `let _ = checkout_branch(..)`, so an editor
-     * that would not stop produced exactly the state the whole Switch exists to prevent — one task's
-     * chat over another task's files — with nothing anywhere saying so.
-     */
     #[test]
     fn a_delete_that_cannot_land_on_the_next_task_says_so() {
         let directory = TempDir::new().expect("temporary directory");
@@ -1048,8 +990,6 @@ mod tests {
             .task_id
             .expect("task ID");
 
-        // The stop the delete itself needs is allowed; the one the move onto the next task needs is
-        // refused, which is the second Switch a delete performs.
         let stops = Mutex::new(0);
         let refuses_the_second = |_: &Path| {
             let mut count = stops.lock().expect("the counter");
@@ -1073,8 +1013,6 @@ mod tests {
             refusal.message
         );
 
-        // The task is gone and the pointer moved; only the files are still the deleted task's, and
-        // that is exactly what the user has now been told.
         let tasks = storage.tasks().list().expect("remaining tasks");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, first);
@@ -1140,8 +1078,6 @@ mod tests {
         tasks.record_brief_phase(&task_id, "refine", "refined", "GOAL\nA pause menu.");
         tasks.record_brief_phase(&task_id, "research", "research", "FILES\n  a.gd");
 
-        // Stopped during grill: the two phases that finished are still here, and the row says where
-        // it stopped rather than only that it did.
         tasks.finish_brief(&task_id, "stopped", Some("the user stopped it"));
 
         let brief = tasks.read_brief(&task_id).expect("the brief");
@@ -1257,7 +1193,6 @@ mod tests {
         let worktree = storage.tasks().active_workspace().expect("worktree");
         assert!(worktree.join("project.godot").is_file());
 
-        // Started over: the worktree directory survives, the repository behind it does not.
         fs::remove_dir_all(workspace.join(".git")).expect("remove the repository");
         let rebuilt = committed_repository_in_place(&workspace);
         assert!(worktree.is_dir(), "the abandoned directory is still there");
@@ -1366,7 +1301,6 @@ mod tests {
             .expect("open the first task");
         assert_eq!(released.paths(), vec![workspace.clone()]);
 
-        // Opening the task that is already open moves nothing, so nothing is stopped.
         released.0.lock().expect("the recorder").clear();
         storage
             .tasks()
@@ -1396,7 +1330,6 @@ mod tests {
             .expect("create the second task")
             .task_id
             .expect("task ID");
-        // Both branches touch the same tracked file, which is the shape Git refuses a checkout over.
         fs::write(
             workspace.join("project.godot"),
             "[application]\nname=\"second\"\n",
@@ -1440,13 +1373,6 @@ mod tests {
         );
     }
 
-    /*
-     * Every task operation that moves the checkout stops what is holding it first.
-     *
-     * The rule CONTEXT.md states about a Switch, asserted once for all five rather than once per
-     * operation. Each used to spell the order out for itself, and every spelling was a place for it
-     * to go missing — which is exactly what happened to delete's second move.
-     */
     #[test]
     fn every_task_operation_that_moves_the_checkout_stops_the_editor_first() {
         for operation in ["create", "activate", "delete", "merge", "resolve"] {
@@ -1462,8 +1388,6 @@ mod tests {
                 .task_id
                 .expect("task ID");
 
-            // Refused, so the operation cannot get past the stop. What is asserted is that it asked
-            // at all, and that nothing moved when the answer was no.
             let branch_before = git::current_branch(&workspace).expect("a branch");
             let asked = Mutex::new(0);
             let refuses = |_: &Path| {
@@ -1534,8 +1458,6 @@ mod tests {
             )
             .expect_err("an unknown task is refused");
 
-        // The situation, not the method it happened in: `task_not_activated` is what this used
-        // to say for a stale id, a locked database and a broken branch alike.
         assert_eq!(refused.code, "task_not_found");
         assert!(
             released.paths().is_empty(),
@@ -1642,7 +1564,6 @@ mod tests {
             )
             .expect("merge the refactor");
 
-        // The user goes back to an older task to look at it, and only then starts the next one.
         storage
             .tasks()
             .activate(
@@ -1704,8 +1625,6 @@ mod tests {
             .expect("create the second task")
             .task_id
             .expect("task ID");
-        // A third task, so the checkout sits on neither of the two being switched between. A switch
-        // to the branch already checked out returns without touching Git, and would race nothing.
         let third = storage
             .tasks()
             .create(&storage.switch_with_no_turn_to_refuse(&NOTHING_TO_STOP))
@@ -1714,11 +1633,7 @@ mod tests {
             .expect("task ID");
         assert_ne!(third, second);
 
-        // A race is not proved or disproved by one attempt. The second switch is started a little
-        // later each round, which walks it across the first one's whole run.
         for round in 0..60u64 {
-            // Enough loose work that staging it takes long enough for the other switch to arrive.
-            // Written fresh each round, because the round before it banked what was there.
             for index in 0..300 {
                 fs::write(workspace.join(format!("loose{index}.gd")), "extends Node\n")
                     .expect("loose work");
@@ -1798,7 +1713,6 @@ mod tests {
             )
             .expect("merge the task");
 
-        // The user carries on in the same task, the way the window still lets them.
         fs::write(workspace.join("enemy.gd"), "extends Node\n").expect("more work");
         git_text(&workspace, &["add", "--all"]);
         git_text(&workspace, &["commit", "-m", "Work done after the merge"]);
@@ -1840,7 +1754,6 @@ mod tests {
             .expect("task ID");
         assert_ne!(first, second);
 
-        // The window is on the second task. Something asks to merge the first.
         let _ = storage.tasks().merge(
             &first,
             &storage.switch_with_no_turn_to_refuse(&NOTHING_TO_STOP),

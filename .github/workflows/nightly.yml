@@ -10,9 +10,6 @@ concurrency:
     cancel-in-progress: false
 
 jobs:
-    # Every platform runs the journey the push gate runs on Linux, plus the real-editor Godot
-    # acceptance suites, against its own pinned Godot artifact. `fail-fast: false` because the
-    # point of the matrix is which platforms fail, not that one did.
     desktop:
         strategy:
             fail-fast: false

@@ -47,31 +47,14 @@ import {WorkspaceHeader} from './WorkspaceHeader'
 
 type WorkspaceProps = Readonly<{
     activeTask?: TaskSummary
-    /**
-     * The task this workspace is drawing, as the route names it.
-     *
-     * Passed rather than taken from `activeTask`, which is looked up in a list that lags a switch by
-     * one refresh. The chat is read by this name, so what is on screen is the conversation of the
-     * task the window says it is showing and never the one the backend happens to have active.
-     */
     taskId?: string
-    /** Whether a task operation is running, which is when Merge must not be offered. */
     isTaskBusy?: boolean
     onTasksChanged?: () => void
-    /**
-     * Merges the displayed task.
-     *
-     * The argument is the answer to the question the merge asks about unsaved Godot work. Left out,
-     * a merge that would lose it is refused and names the scenes instead.
-     */
     onMergeTask?: (unsavedWork?: UnsavedWork) => Promise<void>
-    /** Brings the project's branch into the task and answers what clashed. */
     onResolveMerge?: () => Promise<readonly string[]>
-    /** Throws away an unfinished resolution merge and leaves the task as it was. */
     onAbandonMerge?: () => Promise<void>
 }>
 
-/** What the window is offering about a merge, and the files it is offering it about. */
 type MergeOffer = Readonly<{
     mode: MergeConflictMode
     paths: readonly string[]
@@ -79,14 +62,6 @@ type MergeOffer = Readonly<{
 
 const NOTHING_TO_OFFER: MergeOffer = {mode: 'clashed', paths: []}
 
-/**
- * What a coded merge failure leaves to offer, or nothing.
- *
- * Two of the failures carry files and the rest carry a sentence. `task_merge_conflicted` is a merge
- * that never started, and the offer is to hand it to the agent. `task_merge_unfinished` is one that
- * started and stopped, and the offer is to throw it away — the state this feature is the only thing
- * that can create, so it is the one thing that has to answer for it.
- */
 function mergeOffer(failure: CommandError): MergeOffer {
     const mode = MERGE_FAILURE_MODES[failure.code]
     if (!mode) return NOTHING_TO_OFFER
@@ -100,15 +75,6 @@ const MERGE_FAILURE_MODES: Readonly<Record<string, MergeConflictMode | undefined
     task_merge_unfinished: 'unfinished'
 }
 
-/**
- * What the agent is told about the merge it has been handed.
- *
- * It names the files and what state they are in, because the agent has no way to find that out —
- * nothing in the conversation says a merge is open. `git` through the shell would answer, but a
- * scene cannot be named in a shell command here, and the conflicts in the reported case were a
- * `.tscn` and five other files. So the prompt carries the list, and the rule that decides when the
- * job is done.
- */
 function conflictPrompt(conflicts: readonly string[]): string {
     return [
         "I have brought the project's branch into this task and Git could not merge these files.",
@@ -125,21 +91,8 @@ const CHAT_ATTACHMENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 
 const MAX_CHAT_ATTACHMENTS = 5
 const MAX_CHAT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const DEFAULT_CONTEXT_WINDOW = 120_064
-/**
- * The chat column, built once at module scope.
- *
- * This is what makes the frame's memo hold: the element the frame is handed has to keep its
- * identity through a streamed reply, and an element built during render never can. The column reads
- * the conversation from `ChatColumnContext` instead.
- */
 const CHAT_COLUMN = <ChatColumn />
 
-/**
- * The chat column and the frame around it.
- *
- * What a turn is belongs to `services/turn.ts`; what is left here is the composer around it — the
- * unsent message, the images waiting to go with it, and where a failure is shown.
- */
 export function Workspace({
     activeTask,
     taskId: openTaskId,
@@ -152,13 +105,10 @@ export function Workspace({
     const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
     const [isSavingAttachments, setIsSavingAttachments] = useState(false)
     const [workspaceError, setWorkspaceError] = useState<string>()
-    // The files a merge failure named, which is what the offer about them is drawn from.
     const [mergeOffered, setMergeOffered] = useState<MergeOffer>(NOTHING_TO_OFFER)
-    // The scenes the editor was holding when a merge was refused for them.
     const [unsaved, setUnsaved] = useState<readonly string[]>([])
     const messageScrollRef = useRef<HTMLElement>(null)
 
-    /** Everything that fails outside a turn reports here: the panels, the connection, the images. */
     const report = useCallback((message: string) => {
         setWorkspaceError(message)
     }, [])
@@ -171,87 +121,42 @@ export function Workspace({
         onError: report,
         onTasksChanged
     })
-    // The composer shows one line. A turn's own failure is the runner's to clear, so it is read
-    // rather than copied — copying it was what left a stale error under the next turn.
     const streamError = workspaceError ?? turnError
     const {attachmentPreviews, addPreviews} = useAttachmentPreviews({messages, isChatLoaded})
     const {settings, models, connectionState, connect, applyModel, applyThinkingLevel} =
         useAiConnection({onError: report, onConnected: clearError})
     const {approvals, respond: respondToApproval} = useToolApprovals({onError: report})
-    // Mounted beside the approvals dialog and knowing nothing about briefs: `ask_user` is an
-    // ordinary tool, so an ordinary chat turn can ask the user something too.
     const {questions, answer: answerQuestion} = useUserQuestions({onError: report})
     const isBusy = useSyncExternalStore(watchTurn, isTurnRunning, isTurnRunning)
 
     const hasConversation = messages.length > 0
-    /*
-     * The follow is a spring, and a spring that trails a growing column settles at a fixed distance
-     * behind it: `growth × (mass − damping) / stiffness` per frame. At the library's default
-     * stiffness that measured 57px of the last row hidden under the viewport's edge for as long as
-     * the reply streamed. Twelve times stiffer holds the same stream at the bottom and still eases:
-     * only a row that arrives in one piece, rather than a token at a time, is briefly behind.
-     */
     const chatScroll = useChatStreamScroll({
         scrollRef: messageScrollRef,
         enabled: hasConversation,
         stiffness: 0.6
     })
 
-    /*
-     * The unsent message is kept with the task it was being written for.
-     *
-     * The pair is safe because the module makes it so: the read is asynchronous, and the empty
-     * composer that exists while it is in flight would otherwise be written back over the draft it
-     * is waiting for, and switching tasks would save one task's half-written message onto another.
-     * A task that has not loaded yet has no key, so the composer still works and remembers nothing.
-     */
     const {value: storedDraft, change: setDraft} = useRememberedValue({
         key: taskId === undefined ? undefined : draftKey(taskId),
         restore: stored => (typeof stored === 'string' ? stored : ''),
         isEmpty: value => value === ''
     })
     const draft = storedDraft ?? ''
-    // Planning is the composer's other way to send a first message: the four phases run against
-    // what was typed, and their specification is the turn.
     const {briefState, isPlanStarted, startPlan, stopBrief, startWithoutPlan} = useTaskBrief({
         taskId: openTaskId,
         onStartTurn: start,
         onError: report
     })
-    /*
-     * Whether the agent is occupied, whichever thing is occupying it.
-     *
-     * Read from the service rather than ORed here, because the sidebar needs the same answer and is
-     * mounted beside this rather than inside it. See `turn-activity`: a brief is an AI turn — that
-     * is what makes it stoppable, and what stops the checkout being switched under it — but it is
-     * not the CHAT turn, so `isStreaming` stays false for the whole of it.
-     */
     const isBriefRunning = briefState.isRunning
 
     useEffect(() => {
         chatScroll.scrollIfLocked()
     }, [messages, chatScroll.scrollIfLocked])
 
-    /*
-     * The jump button's handler takes no argument: `scrollToBottom` reads an options object, and a
-     * click handler passed straight through would hand it the mouse event as those options.
-     */
     const jumpToNewest = useCallback(() => {
         chatScroll.scrollToBottom()
     }, [chatScroll.scrollToBottom])
 
-    /*
-     * The column also follows growth that arrives without a new message.
-     *
-     * The effect above fires on `messages`, which is every streamed token but not every change in
-     * height: the running indicator appearing under the last paragraph, a lazily loaded block of
-     * tool output, an image finishing its decode. Each of those grew the column after the last
-     * token, so the bottom row sat half under the composer until the next token pushed it — and
-     * the indicator, which is the last row by definition, sat there the whole time it ran.
-     *
-     * The observer watches the list rather than the viewport: the viewport's own size is fixed by
-     * the frame, so it never reports the growth that matters.
-     */
     useEffect(() => {
         const content = messageScrollRef.current?.firstElementChild
         if (!content) return undefined
@@ -264,15 +169,6 @@ export function Workspace({
         }
     }, [chatScroll.scrollIfLocked, hasConversation])
 
-    /**
-     * Puts the drawer's images on disk and answers with what names them from here on.
-     *
-     * Both of the composer's sends go through this, because both take the images with them: the
-     * bytes cross to the backend once and everything after it — the brief, the turn, the stored
-     * row — carries the metadata alone. The drawer is emptied here for the same reason the draft
-     * is emptied beside it: the images have been taken, and a copy left behind is a second send
-     * waiting to happen.
-     */
     const takeAttachments = async (): Promise<readonly ChatAttachment[]> => {
         const taken = draftAttachments
         if (taken.length === 0) return []
@@ -358,14 +254,6 @@ export function Workspace({
         }
     }
 
-    /**
-     * Retry is handed to every message in the conversation, so it has to keep its identity between
-     * renders or `ConversationMessage`'s memo never holds: a callback redefined per token
-     * re-renders the whole conversation per token.
-     *
-     * The draft is deliberately left alone — a retry is not a message the user just sent, and
-     * clearing the composer threw away whatever they had started typing while the turn failed.
-     */
     const retryTurn = useCallback(
         (assistantId: number) => {
             setWorkspaceError(undefined)
@@ -374,14 +262,6 @@ export function Workspace({
         [retry]
     )
 
-    /**
-     * Merges, and asks about anything the Godot editor is still holding.
-     *
-     * The first press answers nothing, so a merge that would throw unsaved scenes away comes back
-     * refused and naming them; the dialog then presses this again with what the user chose. Nothing
-     * has moved when that refusal arrives — the editor is still open with the work in it — so the
-     * error line is left alone and the dialog carries the message instead.
-     */
     const mergeTask = async (unsavedWork?: UnsavedWork) => {
         if (!onMergeTask) return
         setWorkspaceError(undefined)
@@ -397,21 +277,10 @@ export function Workspace({
                 return
             }
             setWorkspaceError(`The task could not be merged: ${failure.message}`)
-            // Two merge failures have something left to try, and the backend says which files.
-            // Everything else is a sentence and nothing to offer.
             setMergeOffered(mergeOffer(failure))
         }
     }
 
-    /**
-     * Hands the conflict to the agent.
-     *
-     * The backend brings the project's branch into this task, so the clashing files are sitting in
-     * the worktree holding both versions — which is a file to edit, the thing the agent is for,
-     * rather than a merge somebody has to drive. The turn that follows names them and says what
-     * done looks like. Nothing can be committed until every one of them is resolved, so a turn that
-     * gives up leaves the task no worse than the aborted merge did.
-     */
     const resolveMerge = async () => {
         if (!onResolveMerge) return
         setMergeOffered(NOTHING_TO_OFFER)
@@ -432,14 +301,6 @@ export function Workspace({
         await submitMessage(conflictPrompt(conflicts))
     }
 
-    /**
-     * Throws the unfinished merge away.
-     *
-     * The only state this feature can leave behind that the user cannot get out of: a resolution
-     * the agent stopped part-way refuses every merge after it, and the file it gave up on is not
-     * something anyone fixes by pressing Merge again. Discarding puts the task back where the failed
-     * merge had already left it, which is the same place "Leave it to me" would have.
-     */
     const abandonMerge = async () => {
         if (!onAbandonMerge) return
         setMergeOffered(NOTHING_TO_OFFER)
@@ -451,20 +312,10 @@ export function Workspace({
         }
     }
 
-    // Memoised because `composerValue` depends on it: the counts are a fresh object per call, so
-    // computing them during render made that memo miss on every render and hold nothing.
     const usage = useMemo(() => messageUsage(messages), [messages])
-    /** The model the composer is about to send to, which is the live connection's. */
     const model = activeModel(settings)
     const supportsImages = Boolean(model?.input.includes('image'))
 
-    /**
-     * Swaps in the drawn-on picture, keeping the original and the strokes beside it.
-     *
-     * The id does not change, so the thumbnail stays where it was rather than jumping to the end of
-     * the drawer. `annotation.src` is only taken from the current preview the first time: after that
-     * the preview is a flattened picture, and drawing on a drawing would bake the strokes in.
-     */
     const editAttachment = async (
         attachmentId: string,
         file: File,
@@ -499,15 +350,6 @@ export function Workspace({
         }
     }
 
-    /**
-     * Hands the typed ask to the brief instead of to a turn.
-     *
-     * The composer is emptied, because the ask has been taken: the plan holds it from here, and a
-     * plan that fails offers it back rather than leaving a copy behind to be sent twice. The
-     * pictures go with it. A user who pastes a screenshot and presses this has said "plan THIS",
-     * and left in the drawer the picture reached neither the plan nor the turn the specification
-     * starts — the whole run was written about a sentence describing a screen nobody looked at.
-     */
     const planMessage = async (value: string) => {
         const prompt = value.trim()
         if (!prompt || isBusy || !isTauri()) return
@@ -528,13 +370,6 @@ export function Workspace({
         setDraftAttachments(previous => previous.filter(item => item.id !== attachmentId))
     }, [])
 
-    /*
-     * The image on the system clipboard, asked for because the paste event did not carry it.
-     *
-     * WebKitGTK gives a paste event an empty `clipboardData` when the clipboard holds an image, so
-     * the composer has nothing to read and has to ask the backend instead. A clipboard holding
-     * anything else answers with nothing, which is why a paste of plain text is not an error here.
-     */
     const attachClipboardImage = async () => {
         if (!isTauri()) return
         try {
@@ -546,21 +381,6 @@ export function Workspace({
         }
     }
 
-    /*
-     * The actions keep their identity for the life of the workspace; only what they close over is
-     * replaced. Several of them read the draft and the attachment list, so a plain `useCallback`
-     * would still be rebuilt on every keystroke — and this value is published to every control in
-     * the composer, which is replaced once per streamed token besides.
-     *
-     * The refresh is a layout effect with no dependency list, which is the only kind of effect
-     * that cannot lose the race. React flushes passive effects synchronously at the end of a
-     * commit only when the update arrived at sync priority — `commitRoot` in react-dom 19.2 does
-     * it under `0 !== (pendingEffectsLanes & 3)`. A commit at default priority, which is every
-     * `setState` after an `await` and so every attached image, instead posts the flush as a
-     * scheduler task; a browser that runs input ahead of a MessageChannel task can dispatch a
-     * click before it. A layout effect runs inside the commit, so the ref is rewritten before
-     * anything at all can be dispatched against that commit.
-     */
     const liveActions: ComposerActions = {
         applyModel,
         applyThinkingLevel,
@@ -618,17 +438,10 @@ export function Workspace({
                 canAttachImages: supportsImages && !isBusy && !isSavingAttachments && isTauri(),
                 contextWindow: model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
                 isSavingAttachments,
-                // The chat has to have been read before this can mean anything: an unread task
-                // reports no messages, which is the same shape as a task that genuinely has none.
                 isPlanOffered: isChatLoaded && !hasConversation && !isPlanStarted,
                 isStreaming: isBusy,
                 models,
                 supportsImages,
-                // Asked, not re-derived. The composer's copy of this rule read `reasoning` alone, so
-                // a chat template that thinks and names no efforts — llama.cpp reports exactly that
-                // pair for a Qwen build — was offered `minimal` through `max` here and `off`/`on` in
-                // settings. The template raises on an effort it does not know, and llama.cpp turns
-                // that into an HTTP 500 on every request of the turn.
                 thinkingLevels: model ? thinkingLevelsFor(model) : NO_THINKING_LEVELS,
                 ...(settings && {settings})
             }
@@ -651,17 +464,11 @@ export function Workspace({
         ]
     )
 
-    // Every panel below the header can name what it shows in the message being written.
     const references = useMemo(
         () => ({
             add: (reference: ChatReference) => {
                 setDraft(previous => appendReference(previous, reference))
             },
-            // A paragraph of its own, and once. A pasted block is a document, not a phrase: joined
-            // onto the sentence somebody is mid-way through it would be neither readable nor
-            // separable again. The whole block is what a repeat is recognised by: its first line
-            // carries only the label the model chose, so two questions it named "Centered overlay"
-            // pasted one layout and dropped the other with nothing said.
             paste: (text: string) => {
                 setDraft(previous => {
                     if (previous.includes(text)) return previous
@@ -672,8 +479,6 @@ export function Workspace({
         [setDraft]
     )
 
-    // Memoised for the same reason `asked` and `references` below are: a render where none of these
-    // moved — a keystroke, an unsaved-work flag — used to re-render the whole conversation anyway.
     const chatColumn = useMemo<ChatColumnValue>(
         () => ({
             attachmentPreviews,
@@ -700,9 +505,6 @@ export function Workspace({
         ]
     )
 
-    // Published rather than passed, for the reason `ChatColumnContext` is: the block that draws a
-    // question is inside a message, inside the list, inside the frame — and the conversation around
-    // it is replaced once per streamed token.
     const asked = useMemo(() => ({questions, answer: answerQuestion}), [questions, answerQuestion])
 
     return (

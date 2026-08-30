@@ -1,26 +1,6 @@
-/*
- * A placeholder is the weakest text on the screen, not the second weakest.
- *
- * Astryx draws every input's placeholder with `--color-text-secondary`, the same value it gives a
- * field's own label, a caption and an inactive tab. On a dark panel that made "Ask anything" read
- * as a sentence somebody had already typed, and it left the composer looking occupied when it was
- * empty. The disabled colour is the role the hint actually plays: still legible at 4.7:1 on the
- * panel surface, but plainly below the label above it and far below a value.
- *
- * The rule is deliberately unlayered. Astryx ships its component styles inside `@layer astryx-base`
- * and pads their selectors with `:not(#\#)` so specificity alone cannot reach them; an unlayered
- * rule wins over any layered one regardless of how it is written, which is the documented seam for
- * external CSS rather than a specificity fight.
- */
-
 ::placeholder {
     color: var(--color-text-disabled);
 }
-
-/*
- * The chat composer is a contenteditable, so its hint is not a `::placeholder` at all: it is an
- * aria-hidden sibling drawn behind the caret. Same role, same colour, different selector.
- */
 
 .astryx-chat-composer-input > [aria-hidden='true'] {
     color: var(--color-text-disabled);

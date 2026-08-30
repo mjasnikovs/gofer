@@ -44,11 +44,6 @@ pub(super) fn entry_in_a_store(username: &str) -> Result<Option<Entry>, String> 
         .map_err(|_| "The credential-store initialization lock is poisoned".to_owned())?;
     match Entry::new(API_KEY_SERVICE, username) {
         Ok(entry) => Ok(Some(entry)),
-        // The keyring crate builds the platform store on the first `Entry::new` of the process and
-        // never tries again, so the first failure carries the platform's own words and the second
-        // call says what was left behind: `NoDefaultStore` means nothing was, and there is nowhere
-        // on this machine to keep a credential. A store that did register and refused this entry —
-        // locked, prompted, denied — fails the same way twice and stays an error.
         Err(first) => match Entry::new(API_KEY_SERVICE, username) {
             Ok(entry) => Ok(Some(entry)),
             Err(KeyringError::NoDefaultStore) => Ok(None),
@@ -103,9 +98,6 @@ impl Secret {
     pub(super) const fn username(self) -> &'static str {
         match self {
             Self::AiDefault => "ai-default",
-            // Its own slot, not `ai-default`. Two key-based drivers sharing one entry means
-            // configuring the second wipes the first, and — worse — a key meant for openrouter.ai
-            // being sent as bearer to whatever `http://127.0.0.1:8080` happens to be.
             Self::OpenRouter => "ai-openrouter",
             Self::Cerebras => "ai-cerebras",
             Self::ChatGpt => "ai-openai-codex",
@@ -178,9 +170,6 @@ impl Secrets for SystemSecrets {
             return Ok(None);
         };
         match entry.get_password() {
-            // What a blank *slot* means, which is the same question [`Blank`] answers for a blank
-            // box. Nothing here writes one, so this is about a slot an older build left behind: a
-            // key it reads back as configured is one every request is then rejected for.
             Ok(value) if matches!(secret.blank(), Blank::Clears) && value.trim().is_empty() => {
                 Ok(None)
             }
@@ -332,21 +321,12 @@ pub(super) fn apply_saved_secrets_with(
 ) -> Result<Vec<WrittenSecret>, String> {
     let mut written = Vec::new();
     for (secret, update) in saved_secrets(request) {
-        // A slot nobody asked about is never read, so a save that touches no key costs no keyring
-        // lookup and has nothing to put back.
         if matches!(update, ApiKeyUpdate::Keep) {
             continue;
         }
         match write_one_secret(secret, update, secrets) {
             Ok(slot) => written.push(slot),
             Err(failure) => {
-                // Put back here, because the window goes back with the answer and an `Err` carries
-                // no window. `lib.rs` propagates this with `?` and the settings file is then never
-                // written — so a keyring failure on the second of three slots used to leave the
-                // first one changed, the file unchanged, and nothing anywhere able to undo it.
-                //
-                // A restore that fails too is not reported over the failure that caused it: the
-                // first one is what the user did and what they can act on.
                 let _ = restore_saved_secrets_with(secrets, &written);
                 return Err(failure);
             }
@@ -381,7 +361,6 @@ pub(super) fn restore_saved_secrets_with(
     Ok(())
 }
 
-// coverage-critical-start: credential
 /// The three-way rule a settings page's key box is saved by, for any of the four secrets.
 ///
 /// `Keep` is what an untouched box means, because the page never reads a stored secret back and so
@@ -451,4 +430,3 @@ pub(super) fn resolve(
         ApiKeyUpdate::Clear => Ok(None),
     }
 }
-// coverage-critical-end: credential

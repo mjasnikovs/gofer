@@ -15,15 +15,11 @@ mod tasks;
 
 pub use chats::*;
 pub use memories::*;
-pub use project::*;
-// The recursive copy the legacy migration below uses, which is the backup's own.
 pub(crate) use project::copy_directory;
+pub use project::*;
 pub use runs::*;
 pub use sketches::*;
 pub use tasks::*;
-// The task helpers every other view reaches for: whether a task exists, which one is active, and
-// how the pointer moves. They live with `Tasks` and are named here so a sibling's `use super::*`
-// finds them.
 pub(crate) use tasks::{active_task_id, require_task, set_active_task, task_branch_name};
 
 use crate::command_error::CommandError;
@@ -228,8 +224,6 @@ PRAGMA user_version = 2;
 COMMIT;
 "#;
 
-// `memory_vectors` is a vec0 virtual table, so the `memory_embeddings` foreign key cascade does
-// not reach it. Without this trigger a deleted memory would leave its vector searchable forever.
 const PROJECT_SCHEMA_V3: &str = r#"
 BEGIN;
 CREATE TRIGGER memory_items_ad_vectors AFTER DELETE ON memory_items BEGIN
@@ -239,10 +233,6 @@ PRAGMA user_version = 3;
 COMMIT;
 "#;
 
-// Run logging moved from the retired standalone Godot process to the managed editor session, so a
-// stored run now names the session that produced it as well as itself. The column is added rather
-// than the table rebuilt: runs recorded before the migration keep their segments and their FTS
-// rows, and a NULL `session_id` is exactly what "recorded before Gofer managed sessions" means.
 const PROJECT_SCHEMA_V4: &str = r#"
 BEGIN;
 ALTER TABLE godot_runs ADD COLUMN session_id TEXT;
@@ -251,16 +241,6 @@ PRAGMA user_version = 4;
 COMMIT;
 "#;
 
-// Documentation answers, kept per project because the project is what owns them: they are deleted
-// with it, they are backed up with it, and nothing has to manage a store that outlives every
-// project on the machine. The manual itself is the same everywhere, so this does pay for the same
-// answer once per project — a deliberate trade of some repeated work for keeping a project's
-// traces inside the project.
-//
-// `corpus_version` is the gofer-rag package version, which is the version of the manual: the
-// LanceDB table ships inside the package, so nothing else can change what a question retrieves.
-// It is part of the key rather than a column to check, so an upgrade cannot serve one answer out
-// of the old manual before anything notices.
 const PROJECT_SCHEMA_V5: &str = r#"
 BEGIN;
 CREATE TABLE docs_answers (
@@ -815,9 +795,6 @@ impl ProjectStorage {
     /// blobs, and worktrees sit beside its files, so copying or renaming the folder carries them
     /// along and deleting the folder deletes them.
     pub fn open(data_root: &Path, workspace_path: &Path) -> Result<Self, CommandError> {
-        // Neither sentence names a path: the data root is Gofer's own directory inside the project
-        // and the workspace is the one the user already has open, so a host path in the message is
-        // detail the user cannot act on and the renderer has no reason to print.
         fs::create_dir_all(data_root).map_err(|error| {
             CommandError::from(format!(
                 "Could not create the Gofer data directory: {error}"
@@ -840,16 +817,7 @@ impl ProjectStorage {
         migrate_project(&project)?;
         close_abandoned_runs(&project)?;
         storage.project_id = ensure_project_id(&project)?;
-        // Before the first task, because creating one checks out a task branch and the branch tasks
-        // merge into can only be read while it is still the branch on disk. Guessing it afterwards
-        // is how a deleted task's branch stayed in the repository: the checkout could not be moved
-        // off a branch whose base was a name that does not exist, so Git refused to delete it.
         let _ = storage.base_branch();
-        // A workspace whose Git repository cannot yet supply a branch — one with no commits, most
-        // often — must not stop the database from opening. Failing here failed Tauri's `setup`,
-        // which panics: the user got no window at all, in a repository they could have fixed with
-        // one commit. The health check reports it instead, and the task is created the moment it is
-        // asked for.
         let _ = storage.ensure_active_task(&project);
         Ok(storage)
     }
@@ -924,8 +892,6 @@ impl ProjectStorage {
         let base = self.base_branch()?;
         let created = git::create_task_branch(&self.workspace_path, &branch_name, &base)?
             .ok_or_else(|| CommandError::from("The project is not a Git repository".to_owned()))?;
-        // Written as an insert-or-update because this is the one place both cases arrive: a task
-        // whose row went stale, and a task that never had a row to update.
         let (_write_guard, connection) = self.write_connection()?;
         connection
             .execute(
@@ -1047,9 +1013,6 @@ impl ProjectStorage {
         if let Some(task_id) = active_task_id(connection)? {
             return Ok(task_id);
         }
-        // Opening a project runs before any editor session exists, so there is nothing to stop —
-        // and no turn to refuse either. Taking the provider operation here would refuse the
-        // project itself: a tool handler inside a live turn reopens this same storage.
         let nothing_to_stop = |_: &Path| Ok(());
         self.tasks()
             .create_record(&self.switch_with_no_turn_to_refuse(&nothing_to_stop), false)?
@@ -1317,10 +1280,6 @@ pub fn migrate_legacy_data(
             CommandError::from(format!("Could not create {}: {error}", parent.display()))
         })?;
     }
-    // A rename keeps the move atomic and cheap when both sides share a filesystem, which is the
-    // common case. When they do not, a copy is the only way across, and the original is left where
-    // it was rather than deleted: the copy is the one Gofer will use from now on, and a stale
-    // duplicate is a far smaller problem than a half-moved history.
     if fs::rename(&source, data_root).is_err() {
         copy_directory(&source, data_root)?;
     }
@@ -1643,8 +1602,6 @@ mod tests {
             .expect("schema version");
         assert_eq!(title, "Existing task");
         assert_eq!(version, 7);
-        // The newest table has to exist on a migrated database, not only on one created today: a
-        // project opened since before this feature is the only kind that has sketches to lose.
         connection
             .execute_batch(
                 "INSERT INTO sketches (id, task_id, question_id, question, label, is_approved, saved_at)
@@ -1715,7 +1672,6 @@ mod tests {
             ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
         assert_eq!(storage.base_branch().expect("a base"), "master");
 
-        // The user renames their default branch, which is a thing Git lets them do at any time.
         git_text(&workspace, &["branch", "-m", "master", "main"]);
         assert!(!git::branch_exists(&workspace, "master"));
 
@@ -1729,7 +1685,6 @@ mod tests {
             "and never a task branch, whatever happens to be checked out"
         );
 
-        // And the new answer is what the next read gets, without re-deriving every time.
         git_text(&workspace, &["branch", "stray"]);
         assert_eq!(storage.base_branch().expect("a base"), "main");
     }

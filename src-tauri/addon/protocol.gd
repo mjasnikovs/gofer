@@ -71,8 +71,6 @@ static func compose_frame(base: Image, overlays: Array) -> Image:
         var visible := Rect2i(offset, image.get_size()).intersection(bounds)
         if visible.size.x <= 0 or visible.size.y <= 0:
             continue
-        # `blit_rect` takes the source rectangle in the *source* image, so the part of the window
-        # that is off the screen is subtracted from where the copy starts, not from where it lands.
         if image.get_format() != base.get_format():
             image.convert(base.get_format())
         base.blit_rect(image, Rect2i(visible.position - offset, visible.size), visible.position)
@@ -157,11 +155,6 @@ static func encode(value: Variant) -> Dictionary:
                 entries.append({"key": encode(key), "value": encode(value[key])})
             return {"type": "dictionary", "value": entries}
         TYPE_OBJECT:
-            # An object property that holds nothing is not `TYPE_NIL`: `Sprite2D.texture` on a fresh
-            # node is a Variant of type Object carrying a null pointer, and it lands here rather
-            # than in the branch above. Without this guard `get_class` was called on nothing, which
-            # is 341 properties across 120 of the 131 node types — every unset `material`,
-            # `shape`, `icon`, and `theme`.
             if not is_instance_valid(value):
                 return {"type": "null", "value": null}
             if value is Resource and not (value as Resource).resource_path.is_empty():
@@ -266,11 +259,6 @@ static func decode(value: Variant) -> Dictionary:
             var quaternion := numbers(payload, 4)
             return decode_failed("A quaternion value requires four numbers") if quaternion.is_empty() else decoded(Quaternion(quaternion[0], quaternion[1], quaternion[2], quaternion[3]))
         "color":
-            # A name or a hex string as well as four numbers. Godot reads both — `Color.from_string`
-            # takes "skyblue" and "#8b5a2b" alike — and `resource.create_texture` takes them, so a
-            # `color` value that refused them was the one place in the tool where a colour had to be
-            # spelled another way. One live turn wrote "red" here and was told a colour is four
-            # numbers.
             if typeof(payload) == TYPE_STRING or typeof(payload) == TYPE_STRING_NAME:
                 var unreadable := Color(-1.0, -2.0, -3.0, -4.0)
                 var named := Color.from_string(str(payload).strip_edges(), unreadable)
@@ -317,8 +305,6 @@ static func decode(value: Variant) -> Dictionary:
                 return decode_failed("A resource value requires a non-empty path")
             var resource := load(path)
             if resource == null:
-                # A file written into the worktree from outside the editor is the usual reason,
-                # and naming the way out of it is what stops a caller asking again and again.
                 return decode_failed(
                     (
                         "Resource %s could not be loaded. A file written into the worktree from "
@@ -390,24 +376,8 @@ static func under_the_tag_it_takes(declared: int, value: Variant) -> String:
 static func fit_to_declared_type(value: Variant, declared: int) -> Dictionary:
     if declared == TYPE_NIL or typeof(value) == declared:
         return decoded(value)
-    # A whole number is the natural way to write a float setting, and a string is the only way the
-    # protocol carries a StringName or a NodePath.
     if declared == TYPE_FLOAT and typeof(value) == TYPE_INT:
         return decoded(float(value))
-    # And the mirror, which was missing. JSON has one number type, so a caller writing 1 for an
-    # `int` property reaches here as 1.0 whenever its serialiser renders whole numbers with a point
-    # — and Godot's own `Object.set` takes that perfectly well. Watched live: a menu turn wrote
-    # `alignment: 1.0` on a VBoxContainer and was answered `expected int, received float` about a
-    # number that is an integer.
-    #
-    # Only a whole one. A fraction dropped on the way into an `int` is a silent loss, and a caller
-    # that meant 1.5 is better told than quietly given 1.
-    #
-    # Measured against the nearest whole number rather than the floor, and rounded rather than cut.
-    # `int()` cuts toward zero, so -2.9999999999999996 — which is how a serialiser writes -3 —
-    # passed the floor check and was written as -2: the silent loss this check exists to stop, on
-    # the number it was meant to let through. And -3.0000000000000004 floors to -4, which is
-    # nothing like it, so a whole number was refused for not being one.
     if declared == TYPE_INT and typeof(value) == TYPE_FLOAT:
         var number: float = value
         if is_finite(number) and is_equal_approx(number, round(number)):
@@ -421,7 +391,6 @@ static func fit_to_declared_type(value: Variant, declared: int) -> Dictionary:
         var element: int = PACKED_ARRAY_ELEMENTS[declared]
         for index in (value as Array).size():
             var actual := typeof(value[index])
-            # A whole number is a valid way to write one element of a float array.
             if actual == element or (element == TYPE_FLOAT and actual == TYPE_INT):
                 continue
             return decode_failed(

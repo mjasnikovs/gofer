@@ -21,38 +21,12 @@ type SettingsPageProps = Readonly<{
     onCacheDeleted: () => void
 }>
 
-/**
- * The settings dialog: the draft every tab edits, the tab strip, and the body and footer of
- * whichever tab is showing.
- *
- * The five tabs were five `const`s inside this function, which was 1,458 lines long and the only
- * way to reach any of them. Each is a module now, and what it is given is `SettingsView` — the
- * draft, the dispatch, and the task runner. Everything else a tab needs it derives for itself.
- *
- * All five are called on every render rather than only the one on screen, which is what the five
- * `const`s did too: the model lists and the sign-in state belong to a tab that is still there when
- * the user clicks away from it and back.
- */
 export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPageProps) {
     const hasLoaded = useRef(false)
     const [state, dispatchAny] = useReducer(reduce, INITIAL_SETTINGS_DRAFT)
-    /*
-     * Narrowed on purpose. `began`, `ended` and `failed` are one protocol in a fixed order, and
-     * this page used to narrate it eight times; typing the page's dispatch to the other union is
-     * what makes writing a ninth copy a compile error rather than a habit.
-     */
     const dispatch: (action: SettingsAction) => void = dispatchAny
-    /** Runs one task, and owns its began / failed / ended. See `runSettingsTask`. */
     const run = (task: SettingsTask, title: string, work: () => Promise<void>) =>
         runSettingsTask(dispatchAny, task, title, work)
-    /*
-     * A fresh object every render, on purpose.
-     *
-     * It was briefly memoised "so a tab can honestly depend on it"; no tab did, and the memo listed
-     * `state`, so it changed on every keystroke regardless. An effect that must read the whole draft
-     * but may only re-run when the driver changes wants `useEffectEvent`, not a stable object — see
-     * the AI tab.
-     */
     const view: SettingsView = {state, dispatch, run}
     const {tab} = state
 
@@ -94,8 +68,6 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         }
 
         void load()
-        // `dispatch` is `useReducer`'s, so this list is stable and the ref above is what keeps the
-        // load to one. Listed rather than elided because the alias hides that from the linter.
     }, [dispatch])
 
     const ai = useAiTab(view)
@@ -173,14 +145,6 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                             </VStack>
                         </VStack>
                     }
-                    /*
-                     * A floor under the body, because the tabs are wildly different heights: the
-                     * connection form overflows a 1280x800 window while project storage is two
-                     * lines. Without it the dialog collapsed from 780px to 280px on a tab click,
-                     * and the footer buttons jumped most of the way up the screen. 520 is what
-                     * fills the shortest window this dialog is designed for once its header and
-                     * footer are taken out, so the taller tabs still scroll rather than stretch.
-                     */
                     content={
                         <LayoutContent padding={6}>
                             <VStack

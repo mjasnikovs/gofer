@@ -1,10 +1,3 @@
-/**
- * The tool host: one stream of answers, correlated back to the calls that are waiting for them.
- *
- * Nothing here spawns anything or asks a model. The host is a correlation table with a cancel line
- * running past it, and this is the whole of its interface.
- */
-
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {CANCEL_TYPE, createCancellation, createToolHost} from './ai-host.mjs'
@@ -28,8 +21,6 @@ test('the tool host correlates results, failures, cancellation, and closure', as
     })
     await assert.rejects(refused, /revision_conflict: The scene moved on/u)
 
-    // A late duplicate result must not settle anything a second time, and an unknown id is
-    // ignored rather than thrown: the channel outlives individual calls.
     host.deliver({type: 'tool-result', id: sent[1].id, ok: true, result: {}})
     host.deliver({type: 'tool-result', id: 'call-unknown', ok: true, result: {}})
     host.deliver({type: 'ignored'})
@@ -60,8 +51,6 @@ test('the cancel line is the only line that is not an answer', () => {
     const cancellation = createCancellation()
     assert.equal(cancellation.signal.aborted, false)
 
-    // A tool result is not a stop, and a stop is not a tool result: answering `false` is what puts
-    // a line in front of the hosts, and answering `true` is what keeps it away from them.
     assert.equal(cancellation.deliver({type: 'tool-result', id: 'call-1', ok: true}), false)
     assert.equal(cancellation.deliver(undefined), false)
     assert.equal(cancellation.signal.aborted, false)
@@ -80,7 +69,6 @@ test('two hosts reading one stream never answer each other', async () => {
     const stored = credentials.call('store', {credential: {type: 'oauth'}})
     assert.notEqual(toolCalls[0].id, credentialCalls[0].id)
 
-    // Every line reaches every host, so only the id keeps the two apart.
     for (const answer of [
         {type: 'tool-result', id: credentialCalls[0].id, ok: true},
         {type: 'tool-result', id: toolCalls[0].id, ok: true, result: {revision: 7}}

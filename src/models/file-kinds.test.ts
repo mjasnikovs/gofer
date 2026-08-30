@@ -22,7 +22,6 @@ describe('what a worktree file is', () => {
         expect(fileKind('LICENSE', false)).toBe('file')
     })
 
-    /* A dotfile is named by its dot, not extended by it. */
     it('reads no extension out of a leading dot', () => {
         expect(fileExtension('.gitignore')).toBe('')
         expect(fileExtension('src/.env')).toBe('')
@@ -48,10 +47,6 @@ describe('what Godot wrote for itself', () => {
 })
 
 describe('which files are worth asking the backend about', () => {
-    /*
-     * The list holds formats no browser can open. They reach the webview because Rust decodes and
-     * re-encodes them as PNG, which is the whole reason a `.tga` can have a preview at all.
-     */
     it('includes the textures a browser cannot open on its own', () => {
         for (const path of ['a.tga', 'a.exr', 'a.hdr', 'a.dds']) {
             expect(hasThumbnail(path, false)).toBe(true)

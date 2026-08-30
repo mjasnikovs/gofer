@@ -157,9 +157,6 @@ fn ask<R: Runtime>(
     prompt: ApprovalPrompt,
     timeout: Duration,
 ) -> Result<(), ApprovalError> {
-    // Without a window there is nobody to ask, and an unattended headless backend must not decide
-    // on the user's behalf. The call is refused, and refused as retryable: the same request works
-    // once the window is back.
     if !app.webview_windows().contains_key(MAIN_WINDOW) {
         return Err(ApprovalError::new(
             "approval_unavailable",
@@ -176,8 +173,6 @@ fn ask<R: Runtime>(
         ApprovalError::new("lock_poisoned", "The tool approval lock is poisoned").retry_later()
     })?;
 
-    // Registered into a turn that has already ended: there is nobody to answer, so the prompt is
-    // never shown and the wait is skipped entirely.
     let abandoned = !APPROVALS.is_open();
     if !abandoned && let Err(error) = app.emit_to(MAIN_WINDOW, REQUEST_EVENT, &prompt) {
         take_pending(&approval_id);
@@ -193,8 +188,6 @@ fn ask<R: Runtime>(
     } else {
         receiver.recv_timeout(timeout)
     };
-    // The responder removes the entry before it answers; a timeout or a disconnect leaves it, so
-    // both paths take it back out rather than leaking a prompt id nobody will ever answer.
     take_pending(&approval_id);
     let details = json!({
         "approvalId": approval_id,
@@ -385,8 +378,6 @@ mod tests {
 
     #[test]
     fn the_safety_model_auto_allows_recoverable_work() {
-        // Reads, editor and debugger control, runtime actions, saves, undoable scene changes, and
-        // worktree project settings all run without asking.
         for (tool, op) in [
             ("godot_scene", "get_tree"),
             ("godot_scene", "save"),
@@ -400,7 +391,6 @@ mod tests {
         ] {
             assert_eq!(gate(tool, op), None, "{tool}.{op} must be allowed");
         }
-        // A node delete is undoable in the editor; a file delete is not.
         assert!(gate("godot_resource", "delete").is_some());
         assert!(gate("godot_resource", "move").is_some());
         assert!(gate("godot_project", "set_editor_setting").is_some());
@@ -447,7 +437,6 @@ mod tests {
         .expect_err("an unanswered prompt fails");
         assert_eq!(failure.code, "approval_timeout");
         assert!(failure.retryable);
-        // The timed-out prompt is gone, so a late answer cannot approve a call nobody is running.
         assert_eq!(
             respond("approval-timeout", true)
                 .expect_err("late answer")
@@ -485,9 +474,6 @@ mod tests {
     fn a_prompt_raised_after_the_turn_ended_is_refused_at_once() {
         let _test = serialize_gate_tests();
         let app = mock_app(true);
-        // The turn ends while a tool worker is still on its way in: dropping the senders cannot
-        // reach a prompt that is not registered yet, so the closed gate has to refuse it instead of
-        // letting it wait out the full approval timeout.
         cancel_all();
         let started = std::time::Instant::now();
         let failure = ask(app.handle(), prompt("approval-late"), APPROVAL_TIMEOUT)
@@ -518,7 +504,6 @@ mod tests {
     fn an_auto_allowed_operation_never_reaches_the_prompt() {
         let _test = serialize_gate_tests();
         let app = mock_app(false);
-        // No window, so anything that asked would fail: reaching `Ok` proves nothing was asked.
         require(app.handle(), "godot_scene", &[])
             .expect("a call with nothing gated in it is auto-allowed");
     }

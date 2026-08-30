@@ -107,8 +107,6 @@ pub(crate) fn policy_calls(settings: &GodotSettings) -> Vec<PolicyCall> {
                 }),
             }
         } else {
-            // Reset rather than a write of 0: it is what puts the key back to the engine's own
-            // default, which is what `project.godot` then stops mentioning at all.
             PolicyCall {
                 command: "project.reset_setting",
                 params: json!({ "name": warning }),
@@ -176,10 +174,6 @@ pub(crate) fn enforcement_refusal(
             ))
         }
         Writes::ScriptText if settings.strict_typing => {
-            // A save carries the whole file, so the whole file is what it proposes. An edit carries
-            // only the text it introduces, and only that text is its to answer for: refusing an
-            // edit for an annotation already in the file would refuse every edit of that file
-            // forever, over a line this call did not write.
             let proposed = params
                 .get("text")
                 .and_then(Value::as_str)
@@ -313,7 +307,6 @@ mod tests {
             .find(|call| call.params["name"] == GAME_EMBED_MODE)
             .expect("the embed mode is written");
         assert_eq!(embed.command, "editor.set_setting");
-        // 2 also embeds, and then floats the workspace out of the editor. Only 1 keeps it inside.
         assert_eq!(embed.params["value"]["value"], json!(1));
     }
 
@@ -427,7 +420,6 @@ mod tests {
         );
         assert!(refusal(&enforcing(), &call).is_some());
         assert_eq!(refusal(&relaxed(), &call), None);
-        // The rules are independent: strict typing on does not lock an unrelated editor setting.
         let unrelated = (
             "godot_project",
             "set_editor_setting".to_owned(),
@@ -488,7 +480,6 @@ mod tests {
             introduced.contains("godot_docs_search"),
             "the fix names the docs to verify against"
         );
-        // The same annotation, already in the file and merely quoted back as the anchor.
         assert_eq!(
             refusal_for(json!([
                 {"oldText": "@warning_ignore(\"untyped_declaration\")\nvar x = 1", "newText": "var x: int = 1"},

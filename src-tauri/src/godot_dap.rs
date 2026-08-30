@@ -402,8 +402,6 @@ impl DapClient {
         project: &Path,
         play_args: &[String],
     ) -> Result<PendingLaunch, DapError> {
-        // A new game, so whatever the last one left in the event queues is no longer an answer
-        // about this one.
         self.begin_run();
         let arguments = json!({
             "project": project.to_string_lossy(),
@@ -628,9 +626,6 @@ impl DapClient {
         let initial_depth = self.stack_depth(thread_id)?;
         if initial_depth <= 1 {
             self.continue_execution(thread_id)?;
-            // A game with a breakpoint left in it stops again almost at once and the step-out ends
-            // where a person would expect; one with nothing left to stop it simply runs, and that
-            // is the honest answer rather than a failure.
             return match self.await_stop(events, thread_id, STEP_OUT_RESUME_TIMEOUT) {
                 Ok(Some(stop)) => Ok(StepOutcome::SteppedOut { stop }),
                 Ok(None) => Ok(StepOutcome::Terminated),
@@ -720,8 +715,6 @@ impl DapClient {
                 )
                 .retryable(),
             })?;
-            // The debuggee that produced this one is gone, and so is anything it has to say about
-            // whether it stopped.
             if event.run < run {
                 continue;
             }
@@ -859,7 +852,6 @@ impl DapClient {
 
 impl Drop for DapClient {
     fn drop(&mut self) {
-        // Best effort only: the editor may already be dead, so no disconnect handshake here.
         self.close(DapError::closed());
     }
 }
@@ -1006,7 +998,6 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, 
                 return;
             };
             let Some(pending) = shared.pending.remove(&seq) else {
-                // A response to a timed-out request: expected, not an error.
                 return;
             };
             let _ = pending.send(Ok(message));
@@ -1015,8 +1006,6 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, 
             let Some(name) = message.get("event").and_then(Value::as_str) else {
                 return;
             };
-            // Before the fan-out, so the flag is true by the time anything woken by this event
-            // can read it.
             match name {
                 "stopped" => DEBUGGEE_IS_STOPPED.store(true, Ordering::Relaxed),
                 "continued" | "terminated" | "exited" => note_the_debuggee_is_running(),
@@ -1034,9 +1023,6 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, 
                     .retain(|sender| sender.send(event.clone()).is_ok());
             }
         }
-        // A reverse request (runInTerminal, startDebugging) gets a failure reply rather than
-        // silence: some adapters wait on the reply before answering anything else. Godot 4.7
-        // never sends one, but a conforming adapter may.
         Some("request") => {
             if let Ok(mut shared) = shared.lock() {
                 let reply = json!({
@@ -1173,8 +1159,6 @@ mod tests {
                 if message.get("type").and_then(Value::as_str) != Some("request") {
                     continue;
                 }
-                // Teardown is answered for every handler: a silent `disconnect` would make each
-                // test pay the full shutdown timeout for nothing.
                 let action = if message["command"] == "disconnect" {
                     FakeAction::Result(json!({}))
                 } else {
@@ -1313,17 +1297,12 @@ mod tests {
         let server = start_fake_server(move |message, writer| {
             match message["command"].as_str().unwrap_or_default() {
                 "initialize" => handshake_handler(message, writer),
-                // Godot answers launch only once configurationDone spawns the game, and the
-                // response keeps the launch request_seq.
                 "launch" => {
                     *server_launch_seq.lock().expect("launch seq") =
                         Some(message["seq"].as_u64().expect("seq"));
                     FakeAction::Ignore
                 }
                 "configurationDone" => {
-                    // Godot spawns nothing for a configurationDone that precedes its launch, and
-                    // answers the launch never. The client owes this server that order, so the
-                    // fake refuses to invent a launch that had not arrived.
                     let seq = server_launch_seq
                         .lock()
                         .expect("launch seq")
@@ -1345,8 +1324,6 @@ mod tests {
         client.initialize().expect("initialize");
         let script = PathBuf::from("/project/scripts/main.gd");
 
-        // One thread, in the order Godot requires: the launch is written, then everything that
-        // rides behind it, and only then is its deferred answer collected.
         let launching = client
             .start_launch(Path::new("/project"), &["--headless".to_owned()])
             .expect("start launch");
@@ -1383,16 +1360,6 @@ mod tests {
 
     #[test]
     fn correlates_out_of_order_responses() {
-        /*
-         * The stack trace request, held until the one that overtakes it has been sent.
-         *
-         * A response cannot arrive out of order until the request it overtakes exists. This used to
-         * answer `threads` the moment `stackTrace` arrived, guessing the sequence number the client
-         * was about to use — so on a loaded machine the reply reached the reader before
-         * `start_request` had registered anything under it, the reader dropped it as a response to
-         * a timed-out request, which is exactly what it looks like, and the test spent its two
-         * seconds waiting for a reply that had already been thrown away.
-         */
         let mut stashed_trace: Option<u64> = None;
         let server = start_fake_server(move |message, writer| {
             match message["command"].as_str().unwrap_or_default() {
@@ -1401,9 +1368,6 @@ mod tests {
                     stashed_trace = message["seq"].as_u64();
                     FakeAction::Ignore
                 }
-                // Both replies once both requests are in, newest first: the older stackTrace is
-                // answered last and has to be correlated by its sequence number rather than by
-                // arrival.
                 "threads" => {
                     let threads = json!({
                         "seq": 901,
@@ -1487,8 +1451,6 @@ mod tests {
             match message["command"].as_str().unwrap_or_default() {
                 "initialize" => handshake_handler(message, writer),
                 "threads" => FakeAction::Result(json!({"threads": [{"id": 1, "name": "Main"}]})),
-                // stackTrace never gets an answer; a later request still does, proving one silent
-                // request does not wedge the session.
                 _ => FakeAction::Ignore,
             }
         });
@@ -1519,8 +1481,6 @@ mod tests {
                      "source": {"path": "/project/scripts/main.gd"}},
                     {"id": 2, "verified": false, "line": 12, "message": "not a statement"}
                 ]})),
-                // Godot answers with a `breakpoints` key where the specification says
-                // `breakpointLocations`; the client accepts both.
                 "breakpointLocations" => FakeAction::Result(json!({"breakpoints": [
                     {"line": 9, "endLine": 11}
                 ]})),
@@ -1583,8 +1543,6 @@ mod tests {
 
     #[test]
     fn variables_retries_until_the_debuggee_dump_lands() {
-        // Godot hands out scope references from the stack dump but rejects them until the
-        // debuggee has answered the remote scope fetch that `scopes` only started.
         let attempts = Arc::new(Mutex::new(0u32));
         let server_attempts = Arc::clone(&attempts);
         let server = start_fake_server(move |message, writer| {
@@ -1638,8 +1596,6 @@ mod tests {
 
     #[test]
     fn writes_each_message_as_one_frame() {
-        // Header and body in separate writes make Nagle hold the body until the peer's delayed
-        // ACK, which costs tens of milliseconds on every single request.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("address");
         let receiver = thread::spawn(move || {
@@ -1713,7 +1669,6 @@ mod tests {
                            "body": {"category": "stdout", "output": "tick\r\n"}}),
                         json!({"seq": 902, "type": "event", "event": "continued",
                            "body": {"threadId": 1}}),
-                        // A stop on another thread must not satisfy a waiter on thread 1.
                         json!({"seq": 903, "type": "event", "event": "stopped",
                            "body": {"reason": "step", "threadId": 2}}),
                         json!({"seq": 904, "type": "event", "event": "stopped",
@@ -1801,8 +1756,6 @@ mod tests {
         let events = client.subscribe_events();
 
         client.terminate().expect("terminate");
-        // Nothing reads those two events: the panel that asked for the terminate is not waiting
-        // for a stop, which is exactly how they come to be sitting there.
         client.begin_run();
         client.continue_execution(MAIN_THREAD_ID).expect("continue");
         let stop = client
@@ -1851,7 +1804,6 @@ mod tests {
 
     #[test]
     fn step_out_stops_once_the_stack_shrinks() {
-        // Start at depth 2; the first two steps stay inside the frame, the third escapes.
         let server = stepping_server(2, |steps, _depth| if steps >= 3 { 1 } else { 2 });
         let client = connected_client(&server);
 
@@ -1861,9 +1813,6 @@ mod tests {
             panic!("expected a clean escape, got {outcome:?}");
         };
         assert_eq!(stop.reason, "step");
-        // The step-out steps through the caller's own stream, so it leaves nothing behind: a stop
-        // still queued here would be handed to the next wait as if the game had just stopped
-        // again, and the panel would report a running game as stopped.
         assert!(
             events.try_recv().is_err(),
             "the step-out left its own stops in the stream it stepped through"
@@ -1930,7 +1879,6 @@ mod tests {
 
     #[test]
     fn step_out_enforces_the_safety_limit() {
-        // The depth never shrinks: a function stuck in a loop must not spin the client forever.
         let server = stepping_server(2, |_steps, _depth| 2);
         let client = connected_client(&server);
 
@@ -1979,7 +1927,6 @@ mod tests {
         let server = start_fake_server(|message, writer| {
             match message["command"].as_str().unwrap_or_default() {
                 "initialize" => {
-                    // Push a reverse request before answering initialize.
                     let reverse = json!({"seq": 950, "type": "request", "command": "runInTerminal",
                         "arguments": {"kind": "integrated", "title": "game", "cwd": "/project",
                                       "args": []}});
@@ -2011,7 +1958,6 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            // Read the initialize request, then hang up without answering.
             let mut reader = BufReader::new(stream);
             let _ = read_message(&mut reader);
         });
@@ -2019,9 +1965,6 @@ mod tests {
         let error = client.initialize().expect_err("server hung up");
         assert_eq!(error.code, "transport_closed");
         assert!(error.retryable);
-        // And the client says so afterwards, which is what the cached connection is asked before
-        // it is handed out again. Without it a hung-up adapter is kept and every later request is
-        // answered `session_closed` until the whole editor session is restarted.
         assert!(
             client.is_closed(),
             "a hung-up transport must read as closed"
@@ -2037,7 +1980,6 @@ mod tests {
             let (mut stream, _) = listener.accept().expect("accept");
             let header = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE_BYTES + 1);
             stream.write_all(header.as_bytes()).expect("write header");
-            // Keep the socket open until the reader has rejected the frame.
             stream
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .expect("read timeout");
@@ -2091,7 +2033,6 @@ mod tests {
         assert!(StoppedDetails::from_event_body(&Value::Null).is_none());
         assert!(StoppedDetails::from_event_body(&json!([])).is_none());
 
-        // The tagged outcome crosses to the renderer as a discriminated union.
         let serialized = serde_json::to_value(StepOutcome::SteppedOut { stop: stop.clone() })
             .expect("serialize outcome");
         assert_eq!(serialized["kind"], "steppedOut");

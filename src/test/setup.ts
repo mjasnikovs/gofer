@@ -1,17 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import {noInterval, setIntervalScheduler} from '../services/clock'
 
-/*
- * No poll comes round on its own, in any test, unless that test asks for one.
- *
- * A repeating timer is not a delay a test can wait out — it fires again, and what it does the
- * second time depends on how long everything else took. The session reconcile is the one that bit:
- * it runs every second, and on a machine busy enough for a test to spend a second between rendering
- * a panel and clicking it, the poll had already turned the panel offline and disabled the control
- * the click was aimed at. Nothing in the test said so, and it passed alone every time.
- *
- * A test that wants the second tick says so with `setIntervalScheduler`.
- */
 setIntervalScheduler(noInterval)
 
 class ResizeObserverStub implements ResizeObserver {
@@ -93,8 +82,6 @@ Object.defineProperty(window, 'scrollTo', {
     value: () => undefined
 })
 
-// `Channel` registers its receiver through Tauri's IPC internals, which only exist inside the
-// desktop shell. The stub keeps channel-carrying commands constructible under jsdom.
 let nextCallbackId = 1
 const callbacks = new Map<number, (payload: unknown) => void>()
 Object.defineProperty(window, '__TAURI_INTERNALS__', {
@@ -109,13 +96,6 @@ Object.defineProperty(window, '__TAURI_INTERNALS__', {
     }
 })
 
-/*
- * jsdom lays nothing out, so it implements no scrolling at all.
- *
- * A block with a question waiting scrolls itself into view — the feed's follow settles before the
- * sketches have measured their own height, and a question drawn below the fold is a question
- * nothing on screen says is waiting. Here it is a no-op: there is no viewport to be outside of.
- */
 Object.defineProperty(Element.prototype, 'scrollIntoView', {
     configurable: true,
     value: () => undefined

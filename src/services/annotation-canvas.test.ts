@@ -13,12 +13,6 @@ type Call = readonly [string, ...unknown[]]
 
 type Recorder = Readonly<{ctx: CanvasRenderingContext2D; calls: readonly Call[]}>
 
-/**
- * A stand-in for the 2D context, because jsdom has none.
- *
- * Every call is recorded with the stroke settings in force at the time, which is the only way to
- * see that the dark pass really went down before the coloured one.
- */
 function recorder(): Recorder {
     const calls: Call[] = []
     const state = {strokeStyle: '', fillStyle: '', lineWidth: 0, font: '', composite: ''}
@@ -125,10 +119,6 @@ const LABEL: TextShape = {
 }
 
 describe('painting a shape so it survives the art under it', () => {
-    /*
-     * A red stroke on a red sprite is invisible, and the game decides the colour, not Gofer. So
-     * every stroke is laid down dark and wide first, and the colour rides on top of it.
-     */
     it('strokes a dark wider pass before the coloured one', () => {
         const passes = named(paint([PEN]), 'stroke').map(styleOf)
         expect(passes).toHaveLength(2)
@@ -141,18 +131,15 @@ describe('painting a shape so it survives the art under it', () => {
     it('walks a pen from its first point through every later one', () => {
         const calls = paint([PEN])
         expect(named(calls, 'moveTo')[0]?.slice(0, 3)).toEqual(['moveTo', 0, 0])
-        // Two passes over a three-point stroke: two segments drawn twice.
         expect(named(calls, 'lineTo')).toHaveLength(4)
     })
 
-    /* The corner dragged to is not always the bottom right, so a box is drawn from its bounds. */
     it('draws a box from its bounds however it was dragged', () => {
         expect(named(paint([BOX]), 'rect')[0]?.slice(0, 5)).toEqual(['rect', 10, 10, 30, 30])
     })
 
     it('draws an arrow head as two barbs meeting at the point', () => {
         const lines = named(paint([ARROW]), 'lineTo').map(call => call.slice(0, 3))
-        // Shaft, tip, barb per pass, twice over.
         expect(lines).toHaveLength(6)
         expect(lines[0]).toEqual(['lineTo', ARROW.to.x, ARROW.to.y])
     })
@@ -180,10 +167,6 @@ describe('the ring around the picked shape', () => {
         expect(named(paint([PEN, BOX], 'pen'), 'strokeRect')).toHaveLength(1)
     })
 
-    /*
-     * `flattenAnnotations` paints with no selection, so this is what keeps the ring out of the PNG
-     * the model is sent.
-     */
     it('draws nothing when no shape is picked, or when the pick is gone', () => {
         expect(named(paint([PEN]), 'strokeRect')).toHaveLength(0)
         expect(named(paint([PEN], 'deleted'), 'strokeRect')).toHaveLength(0)
@@ -197,7 +180,6 @@ describe('the ring around the picked shape', () => {
 })
 
 describe('naming the edited image', () => {
-    /* Always a PNG: re-encoding a JPEG on every save would soften the picture a little each time. */
     it('puts a png extension on whatever came in', () => {
         expect(annotatedName('game-screenshot.png')).toBe('game-screenshot.png')
         expect(annotatedName('shot.jpeg')).toBe('shot.png')
@@ -206,10 +188,6 @@ describe('naming the edited image', () => {
     })
 })
 
-/*
- * The picture is what the user attached, and it is not the annotator's to damage. `destination-out`
- * cuts whatever context it is drawn on, so the eraser only ever meets a layer of strokes.
- */
 describe('rubbing out', () => {
     afterEach(() => {
         vi.restoreAllMocks()
@@ -222,12 +200,10 @@ describe('rubbing out', () => {
 
         paintAnnotations(ctx, [PEN, ERASE])
 
-        // Nothing was drawn on the picture but the finished layer.
         expect(named(calls, 'stroke')).toHaveLength(0)
         expect(named(calls, 'drawImage')).toHaveLength(1)
         const cut = named(layer.calls, 'stroke').map(styleOf).at(-1)
         expect(cut?.composite).toBe('destination-out')
-        // Wider than the stroke it rubs out, so no dark halo is left standing.
         expect(cut?.lineWidth).toBeGreaterThan(ERASE.width)
     })
 

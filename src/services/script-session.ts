@@ -10,11 +10,6 @@ import type {
     ScriptStamp
 } from '../models/script'
 
-/**
- * The renderer's half of the script commands. Every language request travels to Godot's language
- * server through Rust, which owns the document versions, so the editor never invents one.
- */
-
 export function openScriptDocument(path: string): Promise<ScriptDocument> {
     return invoke('open_script_document', {request: {path}})
 }
@@ -39,7 +34,6 @@ export function callScriptLanguage(request: ScriptRequest): Promise<ScriptRespon
     return invoke('call_script_language', {request})
 }
 
-/** Formats through the pinned sidecar. Writing the answer back is the caller's separate decision. */
 export function formatGdscript(source: string) {
     return invoke('format_gdscript', {request: {source}})
 }
@@ -62,11 +56,6 @@ export function unsubscribeScriptDiagnostics(): Promise<void> {
     return invoke('unsubscribe_script_diagnostics')
 }
 
-/**
- * Restores the structured failure Rust rejected with. Tauri hands the serialized struct straight
- * to the promise rejection, so an object carrying a string `code` is the backend's own error and
- * anything else is a transport or renderer fault.
- */
 export function toScriptError(error: unknown): ScriptError {
     if (typeof error === 'object' && error !== null && 'code' in error && 'message' in error) {
         const candidate = error as Partial<ScriptError>

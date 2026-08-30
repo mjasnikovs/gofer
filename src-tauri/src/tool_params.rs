@@ -1991,24 +1991,13 @@ pub fn signature(params: &[Param]) -> String {
         .filter(|param| !param.hidden)
         .map(|param| {
             let mark = if param.required { "" } else { "?" };
-            // Every parameter carries its kind, and this is not decoration. A local Qwen3.6-27B was
-            // asked 24 times to attach a script with `{node, property, value, expectedRevision}` in
-            // front of the sentence and got the tagged value wrong 24 times, flattening it to
-            // `{"type": "resource", "path": …}`; with `value: tagged` written out it was right 24
-            // times out of 24. Annotating only the parameters that look tricky was worse than both
-            // — 10 of 24 — so the annotation is uniform on purpose.
             match param.kind {
                 Kind::Choice(allowed) => {
                     let quoted: Vec<String> =
                         allowed.iter().map(|word| format!("\"{word}\"")).collect();
                     format!("{}{mark}: {}", param.name, quoted.join("|"))
                 }
-                // The entry shape is printed for the same reason the kind is: it is the part a
-                // model gets wrong, and it belongs where the kind is rather than in a sentence
-                // beside it. `files: list of {path: text, edits: list of {oldText: text,
-                // newText: text}}` is the whole contract, nested as deeply as it really is.
                 _ if !param.entry.is_empty() => match param.kind {
-                    // An object is its shape, so naming the kind as well would say it twice.
                     Kind::Object => format!("{}{mark}: {}", param.name, signature(param.entry)),
                     _ => format!(
                         "{}{mark}: {} of {}",
@@ -2017,12 +2006,6 @@ pub fn signature(params: &[Param]) -> String {
                         signature(param.entry)
                     ),
                 },
-                // A vocabulary is printed wherever it applies, and the note on `Kind` above is the
-                // measurement that says a signature carries this better than a sentence beside it.
-                //
-                // `like` rather than the `|` list a `Choice` gets, because a vocabulary is a sample
-                // and a choice is the whole set: every key name Godot knows would be a signature
-                // nobody could read, and `F7` is as valid as the twenty-five spelled here.
                 _ if !param.vocabulary.is_empty() => {
                     let quoted: Vec<String> = param
                         .vocabulary

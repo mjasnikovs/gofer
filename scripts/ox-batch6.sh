@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Two verifications of iterations 19 and 21, and two tasks on surfaces still untested.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/ox-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

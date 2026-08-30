@@ -170,18 +170,6 @@ fn declared_entry_shapes(params: &[crate::tool_params::Param]) -> Vec<BTreeSet<S
     shapes
 }
 
-/*
- * A summary says when and why. The signature says what.
- *
- * Prose and the generated signature each used to carry something the other did not, so the model
- * read two contracts per operation and only one of them refuses a call. `breakpoints` was the worst
- * of it: `list` in the contract, `[{path, lines}]` in the sentence — and `Param::entry`, written
- * after a live turn nested five files inside each other's `edits`, was sitting unused.
- *
- * What is checked is duplication, not braces: a quoted JSON example is a call the model could make,
- * and those stay. What may not stay is a shape the signature already carries, spelled a second time
- * in a place nothing enforces.
- */
 #[test]
 fn no_summary_restates_a_shape_the_signature_already_carries() {
     let mut restated = Vec::new();
@@ -259,7 +247,6 @@ fn gd_functions(source: &str) -> HashMap<&str, String> {
     let mut current: Option<&str> = None;
     let mut body = String::new();
     for line in source.lines() {
-        // `static func` in the protocol, plain `func` in the plugin and the game helper.
         if let Some(rest) = line
             .strip_prefix("func ")
             .or_else(|| line.strip_prefix("static func "))
@@ -309,10 +296,6 @@ fn calls_taking_params(body: &str) -> Vec<(&str, &str)> {
             continue;
         };
         let arguments = &body[at + 1..at + length];
-        // A helper of the editor half, wherever it lives. `plugin.gd`'s own are `_named`;
-        // `params.gd`'s are reached as `Params.named`, because they are static functions of a
-        // module that can be loaded without an editor. Both are followed, because to the
-        // command that calls them they are the same step.
         let is_helper = name.starts_with('_') || before[..start].ends_with("Params.");
         if is_helper && hands_on_the_parameters(arguments) {
             found.push((name, arguments));
@@ -348,8 +331,6 @@ fn params_a_handler_reads(
         keys.extend(quoted_after(body, needle).into_iter().map(str::to_owned));
     }
     for (callee, arguments) in calls_taking_params(body) {
-        // A helper may be told which key to read, as `_atlas_coords_param(params, "tiles", …)`,
-        // and then the key is in the call rather than in the helper.
         keys.extend(
             quoted_after(arguments, "\"")
                 .into_iter()
@@ -396,7 +377,6 @@ fn match_arms(body: &str, prefix: &str) -> Vec<(String, String)> {
     let mut arms: Vec<(String, String)> = Vec::new();
     for line in body.lines() {
         let trimmed = line.trim();
-        // Any label ends the arm before it, whether or not it is one being collected.
         if let Some(label) = trimmed
             .strip_prefix('"')
             .and_then(|rest| rest.strip_suffix("\":"))
@@ -422,8 +402,6 @@ fn params_every_addon_command_reads() -> BTreeMap<String, BTreeSet<String>> {
             params_a_handler_reads(&handler, &editor, &mut BTreeSet::new()),
         );
     }
-    // The game half is reached in two hops: the editor parks the request and forwards it under
-    // its own short name, and only the helper inside the game reads the parameters.
     let forwarding = editor
         .get("_handle_runtime_request")
         .cloned()
@@ -458,8 +436,6 @@ fn documented_parameters(summary: &str) -> Vec<String> {
     let Some(open) = summary.find('{') else {
         return Vec::new();
     };
-    // Depth-aware, because a parameter may carry a shape of its own — `breakpoints?: [{path,
-    // lines}]` names one parameter, not three.
     let mut depth = 0usize;
     let mut items: Vec<String> = Vec::new();
     let mut item = String::new();
@@ -532,10 +508,6 @@ fn the_one_path_that_names_a_node_says_so() {
                     continue;
                 }
                 let where_ = format!("{}.{}", domain.name, operation.op);
-                // Backticked, because `tool_repair`'s synonym rename reads the note for exactly
-                // this — `` `node` `` in a required parameter's note is what moves a key called
-                // `node` onto it. A note rewritten to say "node" in prose would leave that rename
-                // silently dead, and this test green.
                 if param.note.contains("`node`") {
                     noted.push(where_);
                 } else {
@@ -583,14 +555,9 @@ fn every_parameter_the_addon_reads_is_the_one_the_catalog_documents() {
                 continue;
             };
             checked += 1;
-            // Never a skip: a command the parser did not find is a check that quietly stopped
-            // reading, which is the one failure a source-reading test cannot afford.
             let read = reads.get(&command).unwrap_or_else(|| {
                 panic!("{command} is routed to the addon but nothing here parsed its handler")
             });
-            // The declared table where there is one, the prose where there is not. An operation
-            // that declares its parameters is held to the table the router enforces, which is
-            // strictly stronger: a sentence can be right and still not be what refuses a call.
             let documented = match crate::tool_params::params_of(domain.name, operation.op) {
                 Some(params) => params
                     .iter()
@@ -624,8 +591,6 @@ fn every_parameter_the_addon_reads_is_the_one_the_catalog_documents() {
         undocumented.join("\n"),
         unread.join("\n")
     );
-    // The floor. A parser that stopped recognising the dispatch table would compare nothing to
-    // nothing and pass, which is the one way this test could be worse than not having it.
     assert!(
         checked > 50,
         "only {checked} addon operations were read, so this test proves little"
@@ -690,13 +655,10 @@ fn both_operations_that_take_a_key_speak_the_same_vocabulary() {
 /// this is a lookup into a table rather than a parse of a file.
 fn rust_request_behind(domain: &str, op: &str) -> Option<&'static [(&'static str, bool)]> {
     match (domain, op) {
-        // The three the desktop answers out of the supervisor rather than out of a request: they
-        // take nothing, so the empty table is the whole of what they take.
         ("godot_session", "status" | "start" | "stop") => Some(&[]),
         ("godot_resource", "list") => Some(crate::files::LIST_PATHS_FIELDS),
         ("godot_resource", "move") => Some(crate::files::MOVE_PATH_FIELDS),
         ("godot_resource", "delete") => Some(crate::files::DELETE_PATH_FIELDS),
-        // The operations the script domain answers itself, before the language server.
         ("godot_script", "list") => Some(crate::script::LIST_SCRIPTS_FIELDS),
         ("godot_script", "open" | "close") => Some(crate::script::OPEN_SCRIPT_FIELDS),
         ("godot_script", "update") => Some(crate::script::UPDATE_SCRIPT_FIELDS),
@@ -733,17 +695,12 @@ fn every_field_the_rust_handlers_deserialize_is_the_one_the_catalog_documents() 
             if operation.route() != crate::tool_params::Answers::Rust {
                 continue;
             }
-            // Never a skip: an operation answered in Rust that nothing here describes is the one
-            // failure a table comparison could otherwise make in silence.
             let fields = rust_request_behind(domain.name, operation.op).unwrap_or_else(|| {
                 panic!(
                     "{} {} is answered in Rust and nothing declares what it deserializes",
                     domain.name, operation.op
                 )
             });
-            // The declared table, which is what the router enforces. It replaced the prose the
-            // first version of this test read: a sentence can be right about a field and still
-            // not be the thing that refuses a call carrying the wrong one.
             let params =
                 crate::tool_params::params_of(domain.name, operation.op).unwrap_or_else(|| {
                     panic!("{} {} declares its parameters", domain.name, operation.op)
@@ -756,9 +713,6 @@ fn every_field_the_rust_handlers_deserialize_is_the_one_the_catalog_documents() 
                         domain.name, operation.op
                     ));
                 }
-                // Names alone let a hole through: `resource.rescan` was declared as requiring the
-                // path it treats as optional, and the whole-project walk stopped working. Serde
-                // knows which of its fields may be left out, so the table is held to that too.
                 let Some(declared) = params.iter().find(|param| param.name == *field) else {
                     continue;
                 };
@@ -904,9 +858,6 @@ fn every_name_a_vocabulary_holds_is_offered_by_the_summary_that_advertises_it() 
             names.len() > 1,
             "{what} came out empty, so this proves nothing"
         );
-        // The summary and the generated signature together are what the model reads, so a
-        // name may be offered by either. A `choice` parameter puts its words in the
-        // signature, which is why they no longer need repeating in the sentence.
         let summary = summary_of(tool, op);
         let signature = crate::tool_params::params_of(tool, op)
             .map(crate::tool_params::signature)
@@ -986,8 +937,6 @@ fn decodes_a_value(
 /// the sentence and the decoder together, because the sentence is prose.
 #[test]
 fn the_input_event_shape_the_catalog_documents_is_the_one_the_addon_reads() {
-    // The decoder that reads these fields lives in `params.gd` now, which is the editor half's
-    // other file: it needs no editor, so it can be loaded and tested without one.
     const ADDON: &str = PARAMS_ADDON;
     let summary = CATALOG
         .iter()
@@ -1015,10 +964,6 @@ fn the_input_event_shape_the_catalog_documents_is_the_one_the_addon_reads() {
         "the addon has no `keycode` field on an input event: {summary}"
     );
 
-    // And the other direction, which the two named fields above cannot cover: a field the catalog
-    // declares and the addon never reads is a promise nothing keeps. `pressed` was one — a model
-    // told it could bind a release event silently got a pressed one, because `decode_input_events`
-    // reads `kind`, `key` and `button` and builds the event from those alone.
     let events = crate::tool_params::params_of("godot_project", "set_input_action")
         .expect("set_input_action declares its parameters")
         .iter()
@@ -1058,14 +1003,8 @@ fn mutating_operations_document_the_revision_they_require() {
             domain.operations.iter().any(|operation| operation.op == op),
             "{tool} {op} is in the catalog"
         );
-        // The revision used to be documented in prose and is now a declared parameter, so this
-        // reads the table the router enforces rather than a sentence nothing enforces.
         let params = crate::tool_params::params_of(tool, op)
             .unwrap_or_else(|| panic!("{tool} {op} declares its parameters"));
-        // Declared, and hidden. The router fills it in from the last answer that reported one,
-        // so a signature that names it is inviting the model to copy a number it should never
-        // have been handed — the same mistake `expectedHash` made, and one a measured turn paid
-        // 28,067 tokens for: a refusal, then a whole second `scene.get_tree` to read it back.
         let revision = params
             .iter()
             .find(|param| param.name == "expectedRevision")
@@ -1102,7 +1041,6 @@ fn the_line_the_editor_talks_to_itself_with_is_the_one_the_summary_names() {
             "the summary must name {named}: {summary}"
         );
     }
-    // And the filter really drops the line the summary describes.
     assert!(
         crate::godot_session::is_the_editor_talking_to_itself(
             "ERROR: Couldn't find the given section \"res://scripts/player.gd\" and key \"state\", \

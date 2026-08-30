@@ -25,13 +25,6 @@ function answered(id: number, totalTokens: number): Message {
 }
 
 describe('context usage', () => {
-    /**
-     * Gofer does not compact: every turn resends the whole conversation, so what the last turn
-     * cost is what the next one starts from. A conversation that outgrows the window dies there —
-     * the model answers a token or two with `finish_reason: length` — and the readout is the only
-     * warning the user gets before that happens, so it has to be the number that hits the wall
-     * rather than a running total of everything spent.
-     */
     it('reads the last turn rather than the sum of the session', () => {
         const messages = [answered(1, 4_000), answered(2, 9_000), answered(3, 21_000)]
         expect(messageUsage(messages)).toEqual({total: 34_000, context: 21_000})
@@ -43,10 +36,6 @@ describe('context usage', () => {
         expect(messageUsage([]).context).toBe(0)
     })
 
-    /**
-     * The live sweep that found this had the model answering "I" and "Let" nine times in a row at
-     * 116,449 tokens of a 120,064-token window. The bar has to have left green well before that.
-     */
     it('warns before the wall and not on it', () => {
         expect(contextProgressVariant(21_000, WINDOW)).toBe('success')
         expect(contextProgressVariant(96_051, WINDOW)).toBe('success')
@@ -55,7 +44,6 @@ describe('context usage', () => {
         expect(contextProgressVariant(116_449, WINDOW)).toBe('error')
     })
 
-    /** A window nothing reported is not a full one. */
     it('does not read an unknown window as spent', () => {
         expect(contextProgressVariant(0, 0)).toBe('success')
     })
@@ -68,10 +56,6 @@ describe('context usage', () => {
 })
 
 describe('compaction activity', () => {
-    /**
-     * The label carries the two numbers because they are what tells the user the wait is bounded.
-     * Without them it is a spinner with a sentence on it, which is what it already was.
-     */
     it('names the wait and how much conversation it is working through', () => {
         expect(compactionActivity(105_000, 120_064)).toBe(
             'Summarising the conversation to make room (105K / 120K)'

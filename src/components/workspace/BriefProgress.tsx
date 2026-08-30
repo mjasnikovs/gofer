@@ -13,7 +13,6 @@ import {
 } from '../../models/brief'
 import type {BriefState} from '../../models/brief'
 
-/** What each research worker is for, in the terms of what it is reading rather than its name. */
 const WORKER_LABELS: Readonly<Record<string, string>> = {
     FILES: 'Which files this touches',
     APIS: 'Signatures and node types',
@@ -21,38 +20,11 @@ const WORKER_LABELS: Readonly<Record<string, string>> = {
     TOOLING: 'How to check the work'
 }
 
-/**
- * What a brief is doing, while it does it.
- *
- * It exists because of how long this takes. Four phases and seven bounded delegations against a
- * reasoning model is minutes before the chat has anything in it, and for all of that time a healthy
- * run and a hung one look exactly the same from outside. So the panel's job is not decoration — it
- * is the only thing separating "working" from "stuck".
- *
- * The research workers are named rather than counted, and each says how it ended. "Four of four"
- * reports that a phase finished; it does not report that the APIS worker found nothing, or that one
- * was cut short and its section is partial — and those are the two things that explain a thin
- * specification afterwards, at the point where the user can still do something about it.
- *
- * They are listed in the order they run, which is one at a time. Nothing here is concurrent: the
- * workers share one model connection and the list says so by only ever having one spinner in it.
- */
-/** Tokens, as a number a person reads rather than one they count digits in. */
 function thousands(tokens: number): string {
     return tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1)}K`
 }
 
-/**
- * What the worker in flight is doing at this moment.
- *
- * The only thing on this panel that moves between one worker starting and the same worker finishing,
- * which can be minutes. Everything above it says which of seven bounded delegations is running; this
- * says the run is alive.
- */
 function StepLine({step}: Readonly<{step: string}>) {
-    // One line, clamped rather than wrapped. A shell command is arbitrarily long and this sits in a
-    // narrow column: left to wrap, one `rg` invocation is four lines and the phase list below it
-    // moves every few seconds. `maxLines` also gives the full text back on hover.
     return (
         <Text
             type='supporting'
@@ -85,9 +57,6 @@ export function BriefProgress({
                 </VStack>
                 <VStack gap={2}>
                     {BRIEF_PHASES.map((phase, index) => {
-                        // Behind the phase the run is on, which is the only thing that makes a
-                        // phase done. There is no "everything is done because nothing has started"
-                        // case: before the first phase every row is still ahead of the run.
                         const isDone = index < reached
                         const isRunning = phase === current && state.isRunning
                         return (
@@ -118,11 +87,6 @@ export function BriefProgress({
                                         </Text>
                                     )}
                                 </HStack>
-                                {/*
-                                 * The other three phases are one row each with one delegation behind
-                                 * them, so their live line goes here. Research has four rows of its
-                                 * own below and puts the line under whichever is running.
-                                 */}
                                 {isRunning && phase !== 'research' && state.step && (
                                     <VStack paddingInline={5}>
                                         <StepLine step={state.step} />
@@ -191,18 +155,6 @@ export function BriefProgress({
                         {`Planning cost ${thousands(state.cost.input + state.cost.output)} tokens`}
                     </Text>
                 )}
-                {/*
-                 * "Cancel", not "Stop", because nothing survives it. A brief cannot be resumed:
-                 * a second run rewrites the stored row from its first phase and is handed only the
-                 * raw ask, and no control on screen starts one anyway. "Stop" would promise a
-                 * pause over minutes of work that is actually thrown away.
-                 *
-                 * It lives here because the composer is gone. Stopping a brief was the composer's
-                 * Stop button, and this panel now stands where the composer stood.
-                 *
-                 * `secondary`: the screen's job is to be waited on, and leaving is not the press it
-                 * should invite.
-                 */}
                 {state.isRunning && onCancel && (
                     <HStack justify='end'>
                         <Button
@@ -222,12 +174,6 @@ export function BriefProgress({
                             :   `It could not finish: ${state.ended.reason ?? 'no reason was reported'}`
                             }
                         </Text>
-                        {/*
-                         * The way out. A plan that ended without a specification leaves a task that
-                         * exists, is named, and has an empty chat — and the dialog that took the ask
-                         * is long gone, so the only other thing to do with it is delete it and type
-                         * the same sentence again.
-                         */}
                         {onStartWithoutPlan && (
                             <HStack justify='end'>
                                 <Button

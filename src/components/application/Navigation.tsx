@@ -27,47 +27,24 @@ type NavigationProps = Readonly<{
     page: Page
     selectedTaskId?: string
     tasks: readonly TaskSummary[]
-    /**
-     * Whether a task operation is running. Opening, creating, deleting and merging a task each move
-     * the project's one checkout and stop the Godot editor first, which takes seconds. Nothing that
-     * would start a second one is offered while one is running.
-     */
     isBusy: boolean
-    /**
-     * Whether the agent is answering. The same controls are withheld, for the same reason one step
-     * earlier: the checkout they move is the one the running turn is reading.
-     */
     isTurnRunning: boolean
-    /** How the sidebar was left last time: what it opens as, and what changes are reported against. */
     sideNav: SideNavLayout
     onNavigate: (page: Page) => void
     onNewTask: () => void
     onOpenTask: (taskId: string) => void
     onDeleteTask: (taskId: string) => void
-    /*
-     * An updater, not a value. `SideNav` answers one expand with two callbacks in the same tick —
-     * the collapse first, then the resize — and both used to spread the same captured prop, so the
-     * width write put the stale `isCollapsed` straight back and opening the sidebar was never kept.
-     */
     onSideNavChange: (change: (current: SideNavLayout) => SideNavLayout) => void
 }>
 
 type TaskRowProps = Readonly<{
     task: TaskSummary
     isSelected: boolean
-    /** Why this row is not offered, or absent when it is. See [`Locked`]. */
     lockedReason?: string
     onOpenTask: (taskId: string) => void
     onDeleteTask: (task: TaskSummary) => void
 }>
 
-/**
- * Says why a control is not offered, on hover and on focus.
- *
- * A disabled control has no voice of its own: it stops answering and explains nothing, which reads
- * as the window having broken rather than as the window being busy. The reason is on the wrapper
- * rather than the control because a disabled button emits no pointer events for a tooltip to hear.
- */
 function Locked({reason, children}: {reason: string | undefined; children: ReactNode}) {
     if (reason === undefined) return children
     return (
@@ -77,13 +54,6 @@ function Locked({reason, children}: {reason: string | undefined; children: React
     )
 }
 
-/**
- * One task in the sidebar: the link that opens it, and the button that deletes it.
- *
- * The delete button is a sibling of the navigation item rather than its `endContent`, because that
- * slot renders inside the item's own link — a button nested in an anchor, which navigates as well as
- * deletes. The collapsed rail has no room for it and shows the link alone.
- */
 function TaskRow({task, isSelected, lockedReason, onOpenTask, onDeleteTask}: TaskRowProps) {
     const {isCollapsed} = useSideNavCollapse()
 
@@ -99,8 +69,6 @@ function TaskRow({task, isSelected, lockedReason, onOpenTask, onDeleteTask}: Tas
                         href={`#/tasks/${encodeURIComponent(task.id)}`}
                         isSelected={isSelected}
                         isDisabled={lockedReason !== undefined}
-                        // The workspace chunk starts downloading while the pointer is still on its way
-                        // to the click, rather than after it.
                         onMouseEnter={() => {
                             void preloadWorkspace()
                         }}
@@ -150,13 +118,6 @@ export function Navigation({
     onSideNavChange
 }: NavigationProps) {
     const [taskToDelete, setTaskToDelete] = useState<TaskSummary | undefined>(undefined)
-    /*
-     * The two reasons a task control is withheld, in the order the user meets them.
-     *
-     * Both are the same fact from the backend's side — the project's one checkout is spoken for —
-     * and both are temporary. Neither is worth an error the user has to dismiss: the control simply
-     * is not offered, and hovering it says why and what ends the wait.
-     */
     const lockedReason =
         isBusy ? 'Another task operation is still finishing. This will come back when it does.'
         : isTurnRunning ?
@@ -166,18 +127,7 @@ export function Navigation({
     return (
         <>
             <SideNav
-                // Announced as well as disabled: a sidebar that has gone quiet for the seconds it
-                // takes to stop an editor has to say it is working, not look broken.
                 aria-busy={isBusy}
-                /*
-                 * Opened as the project was left, and every change reported back so it stays that
-                 * way. Before this the sidebar was told nothing: it opened at 280px on every
-                 * launch, and closing it or dragging it narrower was a choice the next launch lost.
-                 *
-                 * Started rather than controlled. `SideNav` gives its resize hook the same collapse
-                 * setter, so the hook answers a collapse by reporting a state of its own — and a
-                 * controlled flag was set back to open by that report before the click had landed.
-                 */
                 collapsible={{
                     defaultIsCollapsed: sideNav.isCollapsed,
                     onCollapsedChange: isCollapsed => {
@@ -196,10 +146,6 @@ export function Navigation({
                     <SideNavHeading
                         heading='Gofer'
                         icon={
-                            // The mascot carries its own disc: the artwork's own blue is baked into
-                            // the image, and Avatar's content box clips it to a circle. NavIcon's
-                            // accent fill is covered rather than overridden, because this repo
-                            // forbids `xstyle`.
                             <NavIcon
                                 icon={
                                     <Avatar

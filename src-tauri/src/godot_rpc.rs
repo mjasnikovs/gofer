@@ -307,12 +307,6 @@ impl RpcSession {
         self.request_tx
             .send(request)
             .map_err(|_| RpcError::new("session_closed", "The RPC session has stopped"))?;
-        // A request may name a timeout of minutes, and an agent turn the user stopped must not be
-        // held open for one, so the wait polls rather than blocks. Giving up leaves the pending
-        // entry behind on purpose: the reader treats a response it cannot match as a stale reply
-        // and fails the connection over it, so the entry has to outlive the waiter and absorb the
-        // answer — into a receiver nobody is holding — rather than the editor losing its session
-        // because a request was abandoned.
         match crate::cancel::recv_until(&rx, Instant::now() + timeout) {
             Ok(response) => response,
             Err(crate::cancel::WaitEnd::Cancelled) => {
@@ -335,8 +329,6 @@ impl RpcSession {
     /// pending entry, and the reader knows the answer to it is nobody's.
     fn tell_the_addon_to_give_up(&self, request_id: &str) {
         let _ = self.request_tx.send(CallRequest {
-            // The one id not minted: the reader recognizes a cancellation's own answer as nobody's
-            // by this prefix, which is exactly why no caller may spell one.
             id: format!("{CANCEL_ID_PREFIX}{request_id}"),
             command: "session.cancel".to_owned(),
             params: json!({"requestId": request_id}),
@@ -408,10 +400,6 @@ fn run_session(
     let mut reconnects = 0;
     let deadline = Instant::now() + Duration::from_millis(CONNECT_TIMEOUT_MS);
 
-    // The wait for the addon polls rather than blocks. A blocking `accept` observes neither the
-    // deadline nor the stop signal, so an editor that never connects — one that failed to start,
-    // or one whose plugin never loaded — left this thread parked on the socket for the life of the
-    // process, keeping the port bound and the process alive long after anything wanted it.
     listener
         .set_nonblocking(true)
         .expect("listener non-blocking mode");
@@ -422,7 +410,6 @@ fn run_session(
         }
         match listener.accept().map(|(stream, _)| stream) {
             Ok(stream) => {
-                // The connection itself is read and written blocking, with its own timeouts.
                 stream
                     .set_nonblocking(false)
                     .expect("connection blocking mode");
@@ -573,9 +560,6 @@ fn handle_connection(
         state.connection = ConnectionState::Connected {
             writer: writer.try_clone().expect("clone writer"),
         };
-        // A connected socket is not a ready editor. The addon announces its own readiness on the
-        // first frame after the handshake — importing, then ready — and calling it ready here meant
-        // the badge said so over an editor still importing a project's worth of assets.
         state.readiness = Readiness::Starting;
         state.is_playing = false;
     }
@@ -607,9 +591,6 @@ fn handle_connection(
             if write_envelope(&mut writer, &heartbeat_request()).is_err() {
                 break;
             }
-            // Restart the interval on the write, not on the reply, so one silent addon costs one
-            // heartbeat per interval instead of one per poll. A dead connection is caught by the
-            // read timeout, which is three intervals wide.
             *last_heartbeat.lock().expect("heartbeat lock") = Instant::now();
         }
 
@@ -676,12 +657,6 @@ fn read_envelopes(
                 break;
             }
         };
-        // How large a line may be is a property of the line, so it is asked of everything that
-        // arrives. `read_line` above can only cap at the largest limit any envelope may use,
-        // because which limit applies is decided by what the payload turned out to be — only an
-        // image frame may exceed the 1 MB the handshake publishes as the contract. Before this,
-        // the 16 MB cap was the only one anything post-handshake was ever held to, and the two
-        // functions that know the real rule were called by nothing but their own test.
         if let Err(error) = enforce_envelope_size(line.len(), &envelope) {
             let id = envelope
                 .get("id")
@@ -691,17 +666,10 @@ fn read_envelopes(
             close_with_error(&state, protocol_error_to_rpc(error));
             break;
         }
-        // Uncorrelated traffic is dropped rather than dispatched, and counts as liveness on the way
-        // past: an answer from the addon proves it is alive whichever request it belongs to.
         if is_uncorrelated(&envelope) {
             *last_heartbeat.lock().expect("heartbeat lock") = Instant::now();
             continue;
         }
-        // What shape a line must have is a property of what is about to be done with it, so it is
-        // asked of everything that gets dispatched. `dispatch_envelope` reads `kind`, `id`,
-        // `result`, `revision`, `sequence`, `event` and `data` out of the value by hand and takes
-        // whatever it finds; the frozen contract those fields belong to was enforced on the
-        // handshake and nowhere else.
         if let Err(error) = validate_envelope(&envelope) {
             let id = envelope
                 .get("id")
@@ -910,18 +878,10 @@ fn write_request(writer: &mut TcpStream, request: &CallRequest) -> Result<(), Rp
 fn note_lifecycle(state: &mut SharedState, event: &str) {
     match event {
         "session.playing" => state.is_playing = true,
-        // A game that ended is reported as the editor being ready again.
         "session.ready" => {
             state.readiness = Readiness::Ready;
             state.is_playing = false;
         }
-        // The runtime helper going away is not the editor stopping. A restart tears the helper
-        // down and starts the next game within the same frame, so the addon's own play-state poll
-        // never sees a gap and never announces the new game — and this event, taken as a stop,
-        // left Gofer certain nothing was playing over a game that ran for minutes. Which game the
-        // helper belongs to is the debugger's business; whether the editor is playing is the
-        // editor's, and it is polled every frame, so a game that really died is reported as
-        // `session.ready` a frame later.
         "runtime.stopped" => {}
         "session.starting" => state.readiness = Readiness::Starting,
         "session.importing" => state.readiness = Readiness::Importing,
@@ -1078,8 +1038,6 @@ mod tests {
 
         session.stop();
 
-        // The accept loop owns the listener, so the port returns only once that loop has left it.
-        // Before the loop polled, a blocking accept held it until the process died.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
             if TcpListener::bind(address).is_ok() {
@@ -1143,8 +1101,6 @@ mod tests {
             reader.read_line(&mut line).unwrap();
             let request: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(request["command"], "scene.list");
-            // Answered under the id the session minted. The addon has never chosen one; a test
-            // that spells its own is testing an arrangement production does not have.
             writeln!(
                 addon,
                 "{}",
@@ -1190,11 +1146,8 @@ mod tests {
         let mut response = String::new();
         reader.read_line(&mut response).unwrap();
 
-        // A connected socket is not a ready editor: the addon has said nothing about itself yet.
         assert_eq!(settled(&session, Readiness::Starting), Readiness::Starting);
 
-        // Sequenced, because the addon sequences every event and the reader now holds what arrives
-        // to the frozen contract rather than reading the fields it happens to want out of it.
         let mut sequence = 0_u64;
         let mut announce = |addon: &mut TcpStream, event: &str| {
             writeln!(
@@ -1231,17 +1184,12 @@ mod tests {
             "the game the editor started is running"
         );
 
-        // A restart takes the runtime helper down and brings the next game up inside one frame,
-        // so the addon's play-state poll never sees a gap to announce. Taking the helper's
-        // teardown for a stop left Gofer certain nothing was playing over a game that was.
         announce(&mut addon, "runtime.stopped");
         assert!(
             played(&session, true),
             "the helper going away is not the editor stopping"
         );
 
-        // The addon polls the editor every frame and says so when the game is gone, however it
-        // went — stopped from the toolbar, ended on its own, or killed.
         announce(&mut addon, "session.ready");
         assert!(
             !played(&session, false),
@@ -1249,8 +1197,6 @@ mod tests {
         );
         assert_eq!(session.readiness(), Readiness::Ready);
 
-        // Nothing the addon said survives the addon. Anything else would be a play state read off
-        // an editor that is no longer there.
         announce(&mut addon, "session.playing");
         assert!(played(&session, true));
         session.stop();
@@ -1371,7 +1317,6 @@ mod tests {
             refused
         };
 
-        // A plain reply of the same size is over its own limit, and the addon is told which.
         let rejection = refused(json!({"text": oversized}), Value::Null)
             .expect("an oversized plain reply is answered rather than accepted");
         assert_eq!(rejection["kind"], "error", "{rejection}");
@@ -1381,9 +1326,6 @@ mod tests {
             json!(MAX_ENVELOPE_BYTES)
         );
 
-        // The same bytes carried as a screenshot are inside the image limit, so nothing is refused
-        // and the connection stays up. A stale reply is the answer to an id nobody is waiting for,
-        // which is this envelope reaching dispatch rather than being turned away before it.
         let accepted = refused(
             json!({}),
             json!({"encoding": IMAGE_ENCODING, "data": oversized}),
@@ -1401,7 +1343,6 @@ mod tests {
         let token = "a1".repeat(32);
         let session = RpcSession::start(listener, token.clone(), worktree.display().to_string());
 
-        // `ProjectSettings.globalize_path("res://")` always ends in a separator.
         let mut addon = addon_client(address);
         writeln!(
             addon,
@@ -1467,9 +1408,6 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).expect("the handshake answer");
 
-        // The turn is stopped before the call is made, so the wait gives up on its first look.
-        // The cancelled turn is one process-wide value, so this holds the lock that keeps it from
-        // being replaced by another test's cancellation while this one is watching for its own.
         let _serialized = crate::cancel::CANCEL_TEST_LOCK
             .lock()
             .unwrap_or_else(|held| held.into_inner());
@@ -1485,8 +1423,6 @@ mod tests {
             .expect_err("a stopped turn must not wait out its timeout");
         assert_eq!(failure.code, "cancelled");
 
-        // The addon sees the request, then the retraction naming it — by the id the session
-        // minted, which is the only place that spelling exists.
         let mut sent = String::new();
         reader.read_line(&mut sent).expect("the parked request");
         let parked: Value = serde_json::from_str(&sent).expect("valid JSON");
@@ -1501,7 +1437,6 @@ mod tests {
         assert_eq!(cancellation["command"], "session.cancel");
         assert_eq!(cancellation["params"]["requestId"], parked_id);
 
-        // Answering it must not cost the session, because nobody is holding that id.
         writeln!(
             addon,
             "{}",
@@ -1514,7 +1449,6 @@ mod tests {
         )
         .unwrap();
 
-        // Leaving the tool call is what frees this thread, rather than clearing the shared id.
         drop(scope);
         let alive =
             session.call(CallRequest::new("scene.list".to_owned(), json!({})).within(Some(2_000)));
@@ -1618,8 +1552,6 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
 
-        // The addon answers the heartbeat like any other request. It has no pending entry, so a
-        // correlation-only reader would treat the reply as a stale reply and close the session.
         writeln!(
             addon,
             "{}",
@@ -1750,8 +1682,6 @@ mod tests {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
 
-        // Two calls that both give up. Neither answer arrives, so both pending entries stay — which
-        // is exactly the case a repeated spelling would corrupt.
         let sender = session.clone();
         let asking = thread::spawn(move || {
             let _ = sender.call(CallRequest::new("scene.list", json!({})).within(Some(50)));
@@ -1806,9 +1736,6 @@ mod tests {
         let accepted: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(accepted["kind"], "response");
 
-        // Only the session loop tolerates a bare newline. The handshake reader does not: the
-        // handshake must be the connection's first line, and a blank one there is a protocol
-        // error rather than keepalive.
         writeln!(addon).unwrap();
 
         writeln!(
@@ -1828,11 +1755,6 @@ mod tests {
         let stale: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(stale["error"]["code"], "stale_reply");
 
-        // A reply nobody is waiting for is not a stray message to drop: the addon and the session
-        // disagree about what is outstanding, and the only safe answer is to stop. The connection
-        // is closed behind that error.
-        // The session is done with this addon: the disagreement is recorded as the connection's
-        // error, so the next caller is told what happened instead of waiting out a timeout.
         let refused = session
             .call(CallRequest::new("scene.list".to_owned(), json!({})).within(Some(100)))
             .expect_err("a session that lost track of its requests cannot carry another");

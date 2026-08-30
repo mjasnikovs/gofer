@@ -113,12 +113,6 @@ impl Chats<'_> {
             }
             None => self.storage.ensure_active_task(&transaction)?,
         };
-        // A chat is stored by replacing every row the task owns, so a caller holding fewer messages
-        // than are on disk deletes the difference. That is never what a save means: the renderer
-        // sends the whole conversation, and a short one is a renderer that lost its state — a chat
-        // that failed to load, a turn rewritten by hand, a remount that arrived before its read.
-        // Losing the user's conversation to any of those is worse than refusing the write, so the
-        // write is refused and the message says what it was about to cost.
         let stored_messages: i64 = transaction
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE task_id = ?1",
@@ -661,7 +655,6 @@ mod tests {
             })
             .expect("save the first conversation");
 
-        // A second task, which creating makes the active one.
         let second = storage
             .tasks()
             .create(&storage.switch_with_no_turn_to_refuse(&NOTHING_TO_STOP))
@@ -676,19 +669,11 @@ mod tests {
         assert_eq!(named.task_id.as_deref(), Some(first_task_id.as_str()));
         assert_eq!(named.messages.len(), 1);
         assert_eq!(named.messages[0].text, "The first conversation");
-        // And the active one is still answered when nothing is named.
         let active = storage.chats().load(None).expect("the active chat");
         assert_eq!(active.task_id.as_deref(), Some(second_task_id.as_str()));
         assert!(active.messages.is_empty());
     }
 
-    /*
-     * A chat asked for by a name nothing holds is refused rather than answered with another one.
-     *
-     * And it is refused by the name of what actually went wrong. A missing task, a database another
-     * process is holding and a row that will not parse all used to arrive as `chat_unavailable`, so
-     * the renderer could not tell one it should route away from from one worth trying again.
-     */
     #[test]
     fn a_chat_named_for_a_task_that_is_gone_is_refused() {
         let directory = TempDir::new().expect("temporary storage");
@@ -891,7 +876,6 @@ mod tests {
         let task = storage.tasks().list().expect("tasks").remove(0);
 
         assert_eq!(task.title, "Build the player controller");
-        // A non-repository workspace records no worktree; git.rs covers the repository path.
         assert!(task.worktree.is_none());
     }
 

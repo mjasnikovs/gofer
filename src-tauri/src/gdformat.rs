@@ -242,9 +242,6 @@ pub fn format_source(
         })));
     }
     if output.stdout.is_empty() && !source.is_empty() {
-        // gdformat always echoes the whole buffer on success. Empty stdout means the output was
-        // lost, not that the script formats to nothing — returning it would offer the caller a
-        // diff that wipes the file.
         return Err(GdformatError::new(
             "invalid_output",
             "gdformat exited successfully without output; the buffer was left unchanged",
@@ -257,10 +254,6 @@ pub fn format_source(
             "gdformat produced output that is not valid UTF-8; the buffer was left unchanged",
         )
     })?;
-    // The frozen sidecar writes its stdout through Python's text mode, which on Windows translates
-    // every newline it emits to CRLF. Gofer's buffers, hashes, and editor are LF throughout, so an
-    // unnormalized answer would report an already-formatted script as changed and rewrite every
-    // line ending in the file the first time anyone formatted it.
     let formatted = formatted.replace("\r\n", "\n");
     Ok(FormatResponse {
         changed: formatted != source,
@@ -313,8 +306,6 @@ fn run(
             }
         };
         thread::spawn(move || {
-            // A broken pipe just means the formatter rejected the input and exited early; the
-            // exit status below carries the real verdict.
             let _ = stdin.write_all(&bytes);
         });
     }
@@ -405,10 +396,6 @@ fn collect(
 ) -> Result<RunOutput, GdformatError> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    // The child has exited, so each piped stream's reader thread delivers exactly one event. If
-    // one never arrives the pipe is still held open — by an inherited descriptor, say — and the
-    // read is truncated. Defaulting to empty here would hand the caller a blank "formatted"
-    // buffer that looks like a legitimate result, so a missing event is an error instead.
     for _ in 0..expected {
         match receiver.recv_timeout(drain) {
             Ok(StreamEvent::Stdout(Ok(bytes))) => stdout = bytes,
@@ -592,8 +579,6 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_the_bundled_resource() {
         let directory = tempfile::TempDir::new().expect("temp directory");
-        // The layout is the contract with `tauri.conf.json`, which bundles `src-tauri/sidecar`:
-        // a binary loose in the resource root is not the one Gofer ships.
         let sidecar = directory.path().join(SIDECAR_DIRECTORY);
         std::fs::create_dir(&sidecar).expect("create sidecar directory");
         std::fs::write(sidecar.join(binary_name()), b"binary").expect("write fake binary");
@@ -677,9 +662,6 @@ mod tests {
         let response = format_source(&spawner, &binary(), source).expect("format");
         assert!(response.changed);
         assert_eq!(response.formatted, formatted);
-        // The formatter saw exactly the buffer through stdin and nothing else. The write rides its
-        // own thread — a formatter that exits early must not block the caller — so the assertion
-        // waits for it rather than racing a scheduler under load.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline
             && written.lock().expect("written lock").len() < source.len()
@@ -809,7 +791,6 @@ mod tests {
             .expect_err("empty output must never become a buffer-wiping diff");
         assert_eq!(error.code, "invalid_output");
         assert!(error.retryable);
-        // An empty buffer legitimately formats to nothing.
         let (fake, _) = child(b"", b"", success());
         let spawner = FakeSpawner {
             child: Mutex::new(Some(fake)),
@@ -824,7 +805,6 @@ mod tests {
     fn format_rejects_a_stream_that_never_closes() {
         let fake = FakeChild {
             stdin: Some(Box::new(RecordingWriter(Arc::new(Mutex::new(Vec::new()))))),
-            // A descriptor held open past the child's exit: the reader never reaches EOF.
             stdout: Some(Box::new(BlockingReader)),
             stderr: Some(Box::new(Cursor::new(Vec::new()))),
             status: success(),

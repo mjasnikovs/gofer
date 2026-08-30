@@ -594,8 +594,6 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::StepOut { thread_id } => {
-            // The one stream, held for the whole emulated step-out: the stops it consumes are the
-            // stops a later `AwaitStop` must no longer see.
             let events = events.lock().map_err(|_| poisoned())?;
             Ok(DebugResponse::Stepped {
                 outcome: client.step_out(&events, thread_id.unwrap_or(MAIN_THREAD_ID))?,
@@ -624,16 +622,11 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
         }
         DebugRequest::Restart => {
             client.restart()?;
-            // A restart is a launch by another name: it leaves a game running, and the refusal the
-            // flag drives is the one that names restart as the way to replace one.
             DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
             crate::godot_dap::note_the_debuggee_is_running();
             Ok(DebugResponse::Acknowledged)
         }
         DebugRequest::Terminate => {
-            // The flag goes down whatever the adapter answers. Terminate is the way out the
-            // refusal names, and a terminate that errored is not a reason to go on refusing every
-            // launch for the rest of the session.
             let terminated = client.terminate();
             DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
             crate::godot_dap::note_the_debuggee_is_running();
@@ -654,8 +647,6 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
 /// the next debug request reconnects rather than talking to a dead editor.
 pub fn disconnect() {
     DEBUGGER_HOLDS_A_GAME.store(false, Ordering::Relaxed);
-    // The editor is what holds a breakpoint, so this is one of only two things that takes one
-    // away: the editor going, and a `set_breakpoints` asking for none in that file.
     if let Ok(mut armed) = ARMED_BREAKPOINTS.lock() {
         armed.clear();
     }
@@ -717,8 +708,6 @@ fn launch(
         }
     }
 
-    // configurationDone goes out even when a breakpoint failed: without it the launch request is
-    // never answered and the wait below would run to its own timeout.
     let configured = client.configuration_done();
     let launched = client.await_launch(launching);
     launched?;
@@ -727,7 +716,6 @@ fn launch(
         return Err(error);
     }
     DEBUGGER_HOLDS_A_GAME.store(true, Ordering::Relaxed);
-    // A game that has just been launched is running, whatever the last one was doing when it went.
     crate::godot_dap::note_the_debuggee_is_running();
     Ok(DebugResponse::Launched {
         breakpoints: verified,
@@ -769,9 +757,6 @@ fn set_breakpoints(
     let text = std::fs::read_to_string(&absolute).unwrap_or_default();
     let moved: Vec<Moved> = lines.iter().map(|line| Moved::of(&text, *line)).collect();
     let asked: Vec<i64> = moved.iter().map(|one| one.line).collect();
-    // Noted after the adapter has taken them, not before. A `set_breakpoints` the adapter refuses
-    // used to leave lines recorded that were never set, and every later runtime failure then
-    // carried "a breakpoint is still set in <file>" about one that does not exist.
     let taken = client.set_breakpoints(&absolute, &asked)?;
     note_the_armed_breakpoints(&relative, &asked);
     Ok(taken
@@ -840,9 +825,6 @@ fn first_statement_of_function(text: &str, line: i64) -> Option<i64> {
     if !declares(lines.get(index)?) {
         return None;
     }
-    // The signature can span lines. It ends on the one closing with `:`, and the search stops at
-    // the next declaration so a one-line `func f(): return 1` — which is a statement and stays put
-    // — cannot borrow the body of the function after it.
     let mut header = index;
     while !lines[header].trim_end().ends_with(':') {
         header += 1;
@@ -863,8 +845,6 @@ fn first_statement_of_function(text: &str, line: i64) -> Option<i64> {
 
 /// Returns the adapter for the active session, connecting on first use.
 fn connection() -> Result<BoundAdapter, DapError> {
-    // The same guard the editor's other two doors take. A debugger attached through a checkout the
-    // window has moved away from is stepping through another task's code.
     crate::godot_session_api::require_session_task_here().map_err(|refusal| {
         DapError::new("session_other_task", refusal.message).with_details(refusal.details)
     })?;
@@ -877,8 +857,6 @@ fn connection() -> Result<BoundAdapter, DapError> {
     })?;
     let key = format!("{dap_port}|{worktree}");
     let mut slot = CONNECTION.lock().map_err(|_| poisoned())?;
-    // The same three conditions the language server's cache takes, closed included: an adapter
-    // that hung up — every `disconnect` ends with one — is not a connection to hand out again.
     if let Some(existing) = slot.as_ref()
         && existing.key == key
         && !existing.client.is_closed()
@@ -895,8 +873,6 @@ fn connection() -> Result<BoundAdapter, DapError> {
     let workspace = Workspace::open(&PathBuf::from(&worktree)).map_err(file_error)?;
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), dap_port);
     let mut client = DapClient::connect(address)?;
-    // Subscribing before initialize would still be too late for `initialized`, which rides out
-    // with the initialize response; the events that matter here are the stops that follow.
     client.initialize()?;
     let events = Arc::new(Mutex::new(client.subscribe_events()));
     let client = Arc::new(client);
@@ -1002,9 +978,6 @@ mod tests {
             timed_out.message
         );
 
-        // A call is the other cause, and it is the one that costs a turn: a live run was stopped
-        // at a breakpoint, read a one-frame stack in the same call, and was told the game must be
-        // paused. See the measurements on the function.
         let called = what_a_timed_out_evaluate_usually_means(
             "_tick(1)",
             DapError::new(
@@ -1023,7 +996,6 @@ mod tests {
             called.message
         );
 
-        // Anything else the adapter says is left exactly as it said it.
         let other = what_a_timed_out_evaluate_usually_means(
             "counter",
             DapError::new("dap_server_error", "Parse error in expression"),
@@ -1083,7 +1055,6 @@ mod tests {
             );
         }
 
-        // And a game that is merely stopped, stepped, or launched is still a game.
         for alive in [
             super::DebugResponse::Stopped {
                 stopped: Some(stop.clone()),
@@ -1119,27 +1090,14 @@ mod tests {
         (directory, workspace)
     }
 
-    /*
-     * A breakpoint on a `func` line is moved onto the body, because Godot will not stop on one.
-     *
-     * Measured against a real 4.7.2 editor on one script: line 8 is `func _process(...)`, line 9 is
-     * its only statement. `breakpointLocations` offers line 8, `setBreakpoints` answers
-     * `verified: true` for it, and twenty seconds pass with the game running and no stop. On line 9
-     * the stop arrives at once.
-     *
-     * A live debugging turn set line 8 four times — it is the line a model names, having read the
-     * script and picked the function — spent six calls on `stop_timeout`, and finished nothing.
-     */
     #[test]
     fn a_breakpoint_on_a_function_header_moves_onto_its_first_statement() {
         let script = "extends Node2D\n\n@export var speed: float = 24.0\n\nvar travelled := 0.0\n\n\nfunc _process(delta: float) -> void:\n\ttravelled += speed * delta\n";
 
         assert_eq!(first_statement_of_function(script, 8), Some(9));
-        // A line already holding a statement stays exactly where it was asked for.
         assert_eq!(first_statement_of_function(script, 9), None);
         assert_eq!(first_statement_of_function(script, 3), None);
         assert_eq!(first_statement_of_function(script, 1), None);
-        // And a line the file does not have is not a breakpoint this can improve.
         assert_eq!(first_statement_of_function(script, 99), None);
         assert_eq!(first_statement_of_function(script, 0), None);
 
@@ -1149,26 +1107,20 @@ mod tests {
         assert!(note.contains("line 9"), "{note}");
         assert!(Moved::of(script, 9).note().is_none());
 
-        // Comments and blank lines under the header are not statements either.
         let commented = "extends Node\n\nfunc go() -> void:\n\t# what this does\n\n\tprint(1)\n";
         assert_eq!(first_statement_of_function(commented, 3), Some(6));
 
-        // A signature written over several lines ends on the one closing with `:`.
         let wrapped = "extends Node\n\nfunc go(\n\tfirst: int,\n\tsecond: int\n) -> void:\n\tprint(first + second)\n";
         assert_eq!(first_statement_of_function(wrapped, 3), Some(7));
 
-        // A one-line function is a statement of its own and must not borrow the body of the next
-        // one. Nothing between it and the following declaration closes a signature, so it stays.
         let inline = "extends Node\n\nfunc one(): return 1\n\nfunc two() -> void:\n\tprint(2)\n";
         assert_eq!(first_statement_of_function(inline, 3), None);
 
-        // A declaration with nothing under it has no body to move to.
         assert_eq!(
             first_statement_of_function("func trailing() -> void:\n", 1),
             None
         );
 
-        // `static func` declares one too.
         let statics = "extends Node\n\nstatic func make() -> int:\n\treturn 3\n";
         assert_eq!(first_statement_of_function(statics, 3), Some(4));
     }
@@ -1185,8 +1137,6 @@ mod tests {
             Some("scripts/probe.gd")
         );
 
-        // Escapes are the workspace's refusal, kept whole rather than flattened into a generic
-        // adapter failure.
         let escaped = resolve(&workspace, "../outside.gd").expect_err("escape is refused");
         assert!(!escaped.message.is_empty());
         assert_ne!(escaped.code, "");
@@ -1258,14 +1208,11 @@ mod tests {
                 .contains(&format!("default is {DEFAULT_STOP_TIMEOUT_MS}ms")),
             "{shortened:?}"
         );
-        // And what to do about it, which is the half a bare timeout never had.
         assert!(
             shortened.message.contains("without timeoutMs"),
             "{shortened:?}"
         );
 
-        // A caller that named nothing waited the default, and a caller that named more than the
-        // default waited longer than that: neither is this situation, and neither is told it is.
         assert_eq!(
             saying_the_wait_was_the_callers_own(timed_out.clone(), None).message,
             timed_out.message
@@ -1280,7 +1227,6 @@ mod tests {
             timed_out.message
         );
 
-        // Only a timeout. A cancelled wait is a different situation and the deadline is not why.
         let cancelled = DapError::new("cancelled", "The wait was stopped with its agent turn");
         assert_eq!(
             saying_the_wait_was_the_callers_own(cancelled.clone(), Some(5_000)).message,
@@ -1309,7 +1255,6 @@ mod tests {
             "and what reaches a line the game does not run by itself: {named:?}"
         );
 
-        // Nothing set at all is a wait that could never have returned, and says so instead.
         pretend_a_breakpoint_is_armed(None);
         let nothing = saying_what_has_not_been_reached(timed_out.clone(), None);
         assert!(
@@ -1318,14 +1263,11 @@ mod tests {
             "{nothing:?}"
         );
 
-        // A caller that named a short wait is answered by the other sentence, not this one: its
-        // wait did not run out, it was cut short, and the two must not both fire.
         assert_eq!(
             saying_what_has_not_been_reached(timed_out.clone(), Some(5_000)).message,
             timed_out.message
         );
 
-        // Only a timeout.
         let cancelled = DapError::new("cancelled", "The wait was stopped with its agent turn");
         assert_eq!(
             saying_what_has_not_been_reached(cancelled.clone(), None).message,

@@ -137,8 +137,6 @@ fn ask(request: &serde_json::Value) -> Result<WorkerAnswer, CommandError> {
     })?;
     let text = String::from_utf8_lossy(&output.stdout);
     let Some(line) = text.lines().last().filter(|line| !line.trim().is_empty()) else {
-        // The worker's own stderr, because a bundle that failed to load says so there and nowhere
-        // else — and "the skills worker said nothing" is not a sentence anyone can act on.
         let reason = String::from_utf8_lossy(&output.stderr);
         let detail = reason.trim();
         return Err(CommandError::new(
@@ -184,9 +182,6 @@ fn list_with(workspace_path: &Path, disabled: &[String]) -> Result<SkillsRespons
         skills: skills
             .into_iter()
             .map(|skill| Skill {
-                // A skill hidden by its own frontmatter is off whatever the project says, because
-                // the block the model is sent leaves it out either way. Saying otherwise in the
-                // tab would be the interface lying about what the agent can see.
                 enabled: !skill.hidden && !disabled.contains(&skill.name),
                 ..skill
             })
@@ -376,8 +371,6 @@ pub fn delete_skill(app: AppHandle, name: String) -> Result<SkillsResponse, Comm
             )
         })?;
     }
-    // The flag goes with the file. A name left in the disabled list would silently turn off a
-    // future skill that happened to be called the same thing.
     let project = storage.project();
     let mut disabled = project.read_disabled_skills()?;
     disabled.retain(|one| one != &name);
@@ -392,9 +385,6 @@ pub fn set_skill_enabled(
     enabled: bool,
 ) -> Result<SkillsResponse, CommandError> {
     let (workspace_path, storage) = workspace(&app)?;
-    // Checked by asking the loader rather than by pattern: the name a skill is listed under is the
-    // one its frontmatter chose, and pi accepts names this module's own rule would refuse. A row
-    // the user can see and cannot switch off is worse than a permissive key in a list of names.
     locate(&workspace_path, &name)?;
     let project = storage.project();
     let mut disabled = project.read_disabled_skills()?;
@@ -456,12 +446,10 @@ mod tests {
         let listed = list_with(workspace, &[]).expect("the loader answers");
         assert_eq!(listed.skills[0].name, "another-name");
 
-        // The name it is listed under finds the file it is listed from.
         assert_eq!(
             locate(workspace, "another-name").expect("a path"),
             workspace.join(".gofer/skills/one-name/SKILL.md")
         );
-        // And the directory it does not sit in is not somewhere a delete could reach.
         assert!(locate(workspace, "one-name").is_err());
     }
 
@@ -476,7 +464,6 @@ mod tests {
         let workspace = directory.path();
         let skills = workspace.join(".gofer").join("skills");
 
-        // A skill, a file that is not one, and a file whose name disagrees with its directory.
         for (name, body) in [
             (
                 "tile-levels",
@@ -503,8 +490,6 @@ mod tests {
                 .iter()
                 .any(|one| one.name == "tile-levels" && one.enabled)
         );
-        // The project turned this one off, and the name it is off under is the one the loader
-        // gave it — not the directory it happens to sit in.
         assert!(
             answer
                 .skills
@@ -512,7 +497,6 @@ mod tests {
                 .any(|one| one.name == "another-name" && !one.enabled)
         );
 
-        // A file that is not a skill is not silently missing: it is a warning the tab can show.
         assert!(
             answer
                 .warnings
@@ -576,16 +560,12 @@ mod tests {
         )
         .expect("shadowing file");
 
-        // pi names it after the directory it was handed, which is the store.
         let listed = list_with(workspace, &[]).expect("the loader answers");
         assert_eq!(listed.skills[0].name, "skills");
 
-        // Its directory is the store, so nothing may be removed for it.
         let refused = deletable_directory(workspace, "skills").expect_err("refused");
         assert_eq!(refused.code, "skill_not_found");
 
-        // The store is still there, and once the file hiding it is gone the real skill is a row
-        // again — in a directory of its own, which is one the delete may point at.
         std::fs::remove_file(skills.join("SKILL.md")).expect("the shadowing file");
         assert_eq!(
             deletable_directory(workspace, "tile-levels").expect("a directory"),
@@ -609,7 +589,6 @@ mod tests {
 
         assert_eq!(name, "tile-levels");
         assert!(locate(workspace, &name).expect("a path").is_file());
-        // And the second time is refused rather than overwriting what is there.
         let failure = import_into(workspace, &source.display().to_string()).expect_err("refused");
         assert_eq!(failure.code, "skill_refused");
         assert!(

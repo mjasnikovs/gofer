@@ -1,55 +1,14 @@
-/**
- * What each phase asks its worker for.
- *
- * Written fresh for Gofer rather than lifted: pi-task's prompts are AGPL, they name pi's tools, and
- * they describe a repository Gofer's workers never see. What is borrowed is the shape, and the shape
- * is the part that was earned — one job per worker, an output contract stated as a format rather than
- * as a request, and a standing rule that the worker gathers INPUTS and never writes the deliverable.
- *
- * Two rules run through all of them and both come from watching local models fail:
- *
- *   Say the format, not the wish. "List the files" gets prose about files. A worked example of one
- *   line gets lines.
- *   Optional regions are absent, not empty. Every builder below returns a prompt byte-identical to
- *   the bare one when its optional block is missing, so a task with no plan context is not quietly
- *   asked a slightly different question from the one that was measured.
- *
- * An instruction here is never the whole of a rule. Where behaviour has to hold, the deterministic
- * check that enforces it lives beside the phase — a prompt line is where a rule is explained, not
- * where it is kept.
- */
-
-/**
- * Appended to every worker prompt.
- *
- * These are agentic exploration loops, and on a reasoning model the child would otherwise narrate a
- * full thinking trace at every tool step — the single largest decode cost in the pipeline, spent on
- * text nobody reads. The worker still calls as many tools as it wants; it just stops talking between
- * them.
- */
 export const NO_THINK = '\n\n/no_think'
 
 export function appendNoThink(prompt) {
     return `${prompt}${NO_THINK}`
 }
 
-/** A block that is absent rather than empty when it has nothing to say. */
 function block(heading, body) {
     const text = (body ?? '').trim()
     return text.length === 0 ? '' : `${heading}\n${text}\n\n`
 }
 
-// ─── refine ──────────────────────────────────────────────────────────────────
-
-/**
- * The standing correction that travels with the existing-files block.
- *
- * Refine runs before research, so on a task worded "set up the player scene" it has no signal that
- * the scene already exists, and it writes greenfield constraints — "exactly three nodes", "the only
- * script" — that compose then obeys over anything research later found. The implementer executes a
- * rewrite and the existing work is gone. Handing refine the files up front, with this reframe, fixes
- * it at the origin rather than arguing with it three phases downstream.
- */
 const PRESERVE_EXISTING =
     'EXISTING FILES — AUTHORITATIVE. The files shown below already exist. They override any '
     + '"create", "set up", "scaffold", "initialise", "only" or "exactly" wording in the task. Where '
@@ -58,13 +17,6 @@ const PRESERVE_EXISTING =
     + 'Never write a constraint that empties, replaces wholesale, or reduces an existing file to a '
     + 'fixed minimal set. Something already in the project is never scope creep.'
 
-/**
- * Said when the ask comes with pictures, because this is the last step that can see them.
- *
- * Every phase after refine reads refine's text and nothing else. A screenshot that is not written
- * down here is gone — and the model, asked for a self-contained statement, will otherwise write one
- * that quietly assumes the reader is looking at the same screen it is.
- */
 function picturesNote(count) {
     if (!count) return ''
     return (
@@ -99,9 +51,6 @@ export function refinePrompt(raw, {existingFiles, planContext, pictures = 0} = {
     )
 }
 
-// ─── research ────────────────────────────────────────────────────────────────
-
-/** The rules every research worker answers under. One job, inputs only, no deliverable. */
 const WORKER_RULES =
     'You are gathering INPUTS for somebody else to work from. Do not solve the task, do not write '
     + 'code, and do not propose a design. Emit only the section below — no preamble, no closing '
@@ -186,14 +135,6 @@ export function toolingPrompt(goal) {
     )
 }
 
-/**
- * The GOAL prose alone, cut at the first bullet.
- *
- * The tooling worker only needs to know what the task is trying to achieve. A large refined prompt
- * carries a per-file checklist inside its GOAL, and handing that to a small model drags it into
- * reading source it has no use for until it runs out of steps. Falls back to the whole text when
- * there is no GOAL heading, and to the whole GOAL when it has no bullets.
- */
 export function scopedGoal(refined) {
     const match = /^GOAL[ \t]*\n([\s\S]*?)(?=\n[A-Z][A-Z][A-Z -]*[ \t]*\n|$(?![\s\S]))/mu.exec(
         refined
@@ -204,9 +145,6 @@ export function scopedGoal(refined) {
     return bullet === -1 ? goal : goal.slice(0, bullet).trim()
 }
 
-// ─── grill ───────────────────────────────────────────────────────────────────
-
-/** How many questions one brief may ask before it stops asking. */
 export const MAX_QUESTIONS = 6
 
 export function grillPrompt(refined, research, {asked} = {}) {
@@ -241,17 +179,6 @@ export function autoAnswerPrompt(question, refined, research) {
     )
 }
 
-// ─── compose ─────────────────────────────────────────────────────────────────
-
-/**
- * What a VERIFY block holds when the project defines no command to run.
- *
- * A Godot project is not a Node one: `project.godot` is not a manifest and most of them define no
- * command at all. The gate used to demand a runnable line regardless, so on a project with none the
- * model reached for the nearest command-shaped text it had seen — the example in this file — and
- * wrote `npm run test:godot` into a workspace with no package.json. An honest empty answer has to be
- * expressible, or the contract is asking to be lied to.
- */
 export const NO_COMMANDS = '(none)'
 
 export function composePrompt(refined, research, answers) {

@@ -86,7 +86,6 @@ fn await_breakpoint(client: &DapClient, events: &Receiver<DapEvent>, editor: &Ed
             });
         match stop {
             Some(stop) if stop.reason == "breakpoint" => return,
-            // The previous instance terminated around a restart; the new one is still coming.
             None => continue,
             Some(stop) => panic!(
                 "expected a breakpoint stop, got {stop:?}\n--- editor output ---\n{}",
@@ -126,7 +125,6 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     let events = client.subscribe_events();
     let script = worktree.join("scripts").join("debugger_probe.gd");
 
-    // Candidate validation comes first: the adapter must accept the probe line before the run.
     let locations = client
         .breakpoint_locations(&script, BREAK_LINE)
         .expect("breakpoint locations");
@@ -135,10 +133,6 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         "line {BREAK_LINE} must be a breakpoint candidate, got {locations:?}"
     );
 
-    // The exact Godot 4.7 sequence: launch first (its response is deferred until
-    // configurationDone spawns the game, so it is written now and collected below), then
-    // breakpoints, then configurationDone. Godot does not forward --headless to the game it
-    // spawns, so the play argument does.
     let launching = client
         .start_launch(&worktree, &["--headless".to_owned()])
         .expect("start launch");
@@ -156,15 +150,11 @@ fn the_editor_runs_breaks_steps_and_terminates() {
     client.await_launch(launching).expect("launch response");
     await_breakpoint(&client, &events, &editor);
 
-    // A real adapter's own `stopped` event is the only thing that sets this, and it is what stands
-    // between a caller and twenty seconds of waiting for a frame a halted game will never draw.
-    // See `godot_session::a_game_the_debugger_has_halted`.
     assert!(
         crate::godot_dap::debuggee_is_stopped(),
         "a real breakpoint stop must be visible to the runtime router"
     );
 
-    // One thread, two frames: _tick called from _process, stopped on the probe line.
     let threads = client.threads().expect("threads");
     assert_eq!(threads.len(), 1, "Godot debugs exactly one thread");
     let frames = client.stack_trace(MAIN_THREAD_ID).expect("stack trace");
@@ -182,7 +172,6 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         "the top frame must name the probe script, got {frames:?}"
     );
 
-    // Locals, Members, and Globals are always reported, in that order.
     let scopes = client.scopes(frames[0].id).expect("scopes");
     let names: Vec<&str> = scopes.iter().map(|scope| scope.name.as_str()).collect();
     assert_eq!(names, ["Locals", "Members", "Globals"]);
@@ -202,19 +191,15 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         members.iter().any(|variable| variable.name == "counter"),
         "the probe's counter must be a member, got {members:?}"
     );
-    // The probe touches no autoloads or global classes, so Globals may legitimately be empty;
-    // what matters is that the scope answers.
     client
         .variables(scopes[2].variables_reference)
         .expect("globals");
 
-    // Evaluation runs in the stopped frame and comes back as the debuggee rendered it.
     let evaluation = client
         .evaluate("1 + 2", Some(frames[0].id))
         .expect("evaluate");
     assert_eq!(evaluation.result, "3");
 
-    // Step-out is emulated: bounded step-overs until the stack shrinks back into _process.
     let outcome = client.step_out(&events, MAIN_THREAD_ID).expect("step out");
     let StepOutcome::SteppedOut { .. } = outcome else {
         panic!("the probe must step out into _process, got {outcome:?}")
@@ -224,11 +209,6 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         .expect("stack after step out");
     assert_eq!(frames[0].name, "_process");
 
-    // With the breakpoint cleared, the game runs free until it is paused. Mid-session
-    // breakpoint changes do take effect on the debuggee even though Godot does not broadcast
-    // `breakpoint` events for them. The stream is drained before the pause anyway: the step-out
-    // above consumed its own stops from it, and with no breakpoints left no new one can arrive
-    // between the drain and the pause.
     let cleared = client
         .set_breakpoints(&script, &[])
         .expect("clear breakpoints");
@@ -257,11 +237,6 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         });
     assert_eq!(paused.reason, "paused");
 
-    // A pause is not a break, and this is what that costs. Both are the engine's own behaviour on
-    // the pinned 4.7.2, and both are why `why_there_are_no_frames` and
-    // `what_a_timed_out_evaluate_usually_means` exist: a live turn paused to look at a collision it
-    // could not see, read an empty stack twice, waited out the evaluate, and abandoned the
-    // debugger.
     assert!(
         client
             .stack_trace(MAIN_THREAD_ID)
@@ -279,15 +254,10 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         refused.message
     );
 
-    // Terminate stops the game and ends the debug session but keeps the adapter. Stopping a
-    // game mid-break can report one last stray stop before the termination events, so the wait
-    // loops until the terminated/exited events actually arrive.
     assert!(client.continue_execution(MAIN_THREAD_ID).expect("continue"));
     client.terminate().expect("terminate");
     await_termination(&client, &events);
 
-    // Restart with no session active: the relaunched instance takes the default debugger again,
-    // receives the restored breakpoint during session sync, and hits it on its next frame.
     client
         .set_breakpoints(&script, &[BREAK_LINE])
         .expect("restore breakpoint");

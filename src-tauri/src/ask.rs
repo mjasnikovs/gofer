@@ -399,8 +399,6 @@ pub fn ask_question<R: Runtime>(
     owner_call_id: Option<String>,
     is_delegated: bool,
 ) -> Answer {
-    // Nobody to ask. An unattended backend must not answer on the user's behalf, and a caller that
-    // gets this back can record the question as open rather than inventing a decision.
     if !app.webview_windows().contains_key(MAIN_WINDOW) {
         return Answer::Unavailable;
     }
@@ -419,8 +417,6 @@ pub fn ask_question<R: Runtime>(
         return Answer::Unavailable;
     };
 
-    // Asked after the run already ended: there is nobody waiting on the answer, so the question is
-    // never shown and the wait is skipped rather than running out its half hour.
     let abandoned = !QUESTIONS.is_open();
     if !abandoned
         && app
@@ -436,8 +432,6 @@ pub fn ask_question<R: Runtime>(
     } else {
         receiver.recv_timeout(QUESTION_TIMEOUT)
     };
-    // The responder removes the entry before it answers; a timeout or a disconnect leaves it, so
-    // both paths take it back out rather than leaking an identifier nobody will ever answer.
     QUESTIONS.take(&prompt.question_id);
 
     let answered = outcome.as_ref().is_ok_and(|reply| !reply.skipped);
@@ -496,11 +490,6 @@ pub fn respond_question(response: QuestionResponse) -> Result<(), QuestionError>
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_default();
-    // An approval is never empty, whatever else it carries. It is the user saying the design is
-    // done, which is the most definite answer this card can produce — and reading it as "they
-    // pressed a button without saying anything" would turn the end of a design into a skip.
-    // Asking for another round is never empty either: it is the user saying the decision is not
-    // finished, which is a thing they did rather than a box they left alone.
     let empty =
         text.is_empty() && response.picked.is_none() && !response.approved && !response.again;
     let reply = if response.skipped || empty {
@@ -608,37 +597,23 @@ pub(crate) fn ask_user<R: Runtime>(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let sketches = requested_sketches(params)?;
-    // Echoed back rather than chosen: a caller revising something it has already asked about sends
-    // the identifier it was given, and anything else starts a new question under a fresh one.
     let question_id = params
         .get("questionId")
         .and_then(Value::as_str)
         .map(unquoted)
         .filter(|text| !text.is_empty())
         .unwrap_or_else(new_question_id);
-    // Put there by the tool, never by the model. It names the call in the feed these questions belong
-    // to, which is the difference between a card that stays put across a revision and a pile of
-    // unrelated questions.
     let owner_call_id = params
         .get("ownerCallId")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(str::to_owned);
-    // Set only by the copy of the tool a delegated child holds. It draws the button that ends the
-    // delegation, and nothing else has a delegation to end.
     let is_delegated = params
         .get("isDelegated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    // Resolved before anything is shown, so the user judges a layout with the game's own artwork in
-    // it rather than with the window's default typeface.
-    //
-    // The model's own markup is kept beside the resolved copy, because the two are read by different
-    // readers. The window is shown the resolved one, so a sprite is a sprite. The agent that asked
-    // for the design is handed the original: inlining turns a 2KB layout into 80KB of base64 that
-    // says nothing a builder can act on, and `res://` is the path it has to build against anyway.
     let (shown, unresolved) = resolve_sketch_assets(app, sketches.clone());
 
     match ask_question(
@@ -707,16 +682,6 @@ fn reply_answer(
         .picked
         .filter(|index| *index < sketches.len())
         .map(|index| json!({"index": index, "label": sketches[index].label}));
-    // The layout the user reacted to, as the model wrote it.
-    //
-    // Not part of the prose, and the design tool is the only thing that reads it: a child asking a
-    // question does not need its own markup handed back, and putting it in the answer text would
-    // charge the child for the drawing on every round. It rides here so the *parent* can be shown
-    // what was agreed.
-    //
-    // Which one that is comes from `chosen_sketch`, the same function that decides what is kept.
-    // Two rules would mean the panel showing a layout the asker was never told about, and each
-    // half would look right on its own.
     let chosen = chosen_sketch(sketches, sketches, reply)
         .map(|(sketch, _)| json!({"label": sketch.label, "html": sketch.html}));
     json!({
@@ -810,10 +775,6 @@ fn chosen_sketch<'a>(
     if reply.skipped {
         return None;
     }
-    // No pick at all is not the same as a pick that arrived wrong, and only the second is ours to
-    // absorb. Words against three variants name none of them, so nothing is kept: guessing the
-    // first is a one-in-three guess, and what is kept becomes what somebody builds. One sketch is
-    // the exception, because there is nothing else the words could have been about.
     let index = match reply.picked {
         Some(picked) if picked < sketches.len() => picked,
         Some(_) => 0,
@@ -821,8 +782,6 @@ fn chosen_sketch<'a>(
         None => return None,
     };
     let source = sketches.get(index)?;
-    // `resolve_sketch_assets` maps one to one, so this is the same sketch. Read rather than indexed
-    // anyway: a panic here would cost the user the answer they have just given.
     let shown_html = shown
         .get(index)
         .map_or(source.html.as_str(), |sketch| sketch.html.as_str());
@@ -966,8 +925,6 @@ fn inline_project_assets(workspace: &crate::files::Workspace, html: &str) -> (St
         match asset_data_uri(workspace, relative) {
             Ok(uri) => out.push_str(&uri),
             Err(reason) => {
-                // The reference is left as it was written. Removed, the markup would silently lose
-                // an attribute; left alone, the model can see in its own sketch what did not resolve.
                 out.push_str(PREFIX);
                 out.push_str(relative);
                 refused.push(format!("res://{relative} ({reason})"));
@@ -1005,8 +962,6 @@ fn asset_data_uri(workspace: &crate::files::Workspace, relative: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Only the design-loop test needs it, so it is imported here rather than beside `Mutex`: a
-    // lib build without the tests would carry an import nothing uses.
 
     #[test]
     fn an_identifier_is_never_handed_out_twice() {
@@ -1023,8 +978,6 @@ mod tests {
         let receiver = registry.register("q-1").expect("registered");
         assert_eq!(registry.waiting(), vec!["q-1".to_owned()]);
 
-        // Whoever removes the entry owns the outcome. The second attempt finds nothing, which is how
-        // a timeout that fired first stops a late answer from also settling the same prompt.
         registry.respond("q-1", true).expect("answered");
         assert_eq!(registry.respond("q-1", true), Err(AskError::Unknown));
         assert_eq!(receiver.recv_timeout(Duration::from_secs(1)), Ok(true));
@@ -1487,8 +1440,6 @@ mod tests {
             })
         );
 
-        // The second asking is the same question, so nothing is registered twice and the number the
-        // card carries goes up rather than starting over.
         let second = reply();
         ask_question(
             app.handle(),
@@ -1557,8 +1508,6 @@ mod tests {
                 .any(|domain| domain.name == ASK_USER_TOOL),
             "ask_user must not be a catalog domain"
         );
-        // Reachable by construction: it is compiled in, and whether a window is open is a thing
-        // that changes during a turn rather than something a pre-turn probe can settle.
         let answer = crate::ai_tools::probe(ASK_USER_TOOL).expect("ask_user answers its own probe");
         assert_eq!(answer["reachable"], serde_json::json!(true));
     }
@@ -1597,8 +1546,6 @@ mod tests {
     #[test]
     fn probing_the_question_tool_asks_nobody() {
         let app = unattended_app();
-        // Without the probe branch this would be refused for having no question in it; answering
-        // proves the probe was taken before the parameters were read.
         let answer = ask_user(app.handle(), &json!({"probe": true})).expect("a probe is answered");
         assert_eq!(answer["tool"], serde_json::json!(ASK_USER_TOOL));
     }
@@ -1736,8 +1683,6 @@ mod tests {
             json!({"question": "Where does the menu live?", "sketches": []}),
             json!({"question": "Where does the menu live?", "sketches": null}),
         ] {
-            // No window, so it gets that far and no further — which is proof it was not refused for
-            // its parameters on the way.
             let failure = ask_user(app.handle(), &params).expect_err("no window to ask in");
             assert_eq!(failure.code, "question_unavailable", "for {params}");
         }
@@ -1773,8 +1718,6 @@ mod tests {
         assert_eq!(answer["picked"]["index"], json!(1));
         assert_eq!(answer["answer"], json!("tighter"));
 
-        // A pick pointing past the end of the list is dropped rather than panicking or naming the
-        // wrong sketch: the reaction crosses a process boundary and nothing on the way is typed.
         let stray = reply_answer(
             "question-1",
             &sketches,
@@ -1820,7 +1763,6 @@ mod tests {
         assert_eq!(picked["sketch"]["html"], json!("<p>b</p>"));
         assert_eq!(picked["sketch"]["label"], json!("Side rail"));
 
-        // Words against one layout are a reaction to that layout, because there is no other.
         let said = reply_answer(
             "question-1",
             &sketches[..1],
@@ -1832,8 +1774,6 @@ mod tests {
         );
         assert_eq!(said["sketch"]["html"], json!("<p>a</p>"));
 
-        // Words against three, with no pick, name none of them. Answering with the first is a guess
-        // reported as a fact, and it is the fact somebody builds.
         let unpicked = reply_answer(
             "question-1",
             &sketches,
@@ -1845,7 +1785,6 @@ mod tests {
         );
         assert_eq!(unpicked["sketch"], Value::Null);
 
-        // A skip reacted to nothing, and a question in words has nothing to react to.
         let skipped = reply_answer(
             "question-1",
             &sketches,
@@ -1881,11 +1820,8 @@ mod tests {
         let note = skipped["note"].as_str().expect("a skip says what it is");
         assert!(note.contains("left the decision to you"), "{note}");
         assert!(note.contains("Nothing was refused"), "{note}");
-        // And it does not claim to have unlocked anything: what a caller may do is the approval
-        // gate's to answer, and that is a different registry.
         assert!(note.contains("permission asks for it separately"), "{note}");
 
-        // An answer the user actually wrote carries no note at all — the words are the answer.
         let said = reply_answer(
             "question-1",
             &[],
@@ -1982,7 +1918,6 @@ mod tests {
         assert_eq!(unquoted("'question-1'"), "question-1");
         assert_eq!(unquoted("  question-1  "), "question-1");
         assert_eq!(unquoted("question-1"), "question-1");
-        // Nothing but quotes is nothing, and the caller reads that as "no identifier given".
         assert_eq!(unquoted("\"\""), "");
     }
 }

@@ -44,43 +44,25 @@ import {ScriptWorkspace} from './ScriptWorkspace'
 import type {ScriptReveal} from './ScriptWorkspace'
 
 type InspectorWorkspaceProps = Readonly<{
-    /** The chat column, owned by `Workspace` because the conversation outlives this frame. */
     chat: ReactNode
     onError: (message: string) => void
 }>
 
 type InspectorFrameProps = InspectorWorkspaceProps
     & Readonly<{
-        /** How this project was left, already checked against what this version understands. */
         layout: WorkspaceLayout
-        /** Monaco's cursor and scroll for each script that was open. */
         views: ScriptViews
-        /** Changes the layout, and records the change. */
         dispatch: (action: LayoutAction) => void
-        /** Records where the cursor was left in one script. */
         recordView: (path: string, view: unknown) => void
     }>
 
 type FrameRegionsProps = Omit<InspectorFrameProps, 'onError'>
     & Readonly<{
-        /**
-         * Shows a failure in the frame's own banner, and passes it on to the conversation.
-         *
-         * The regions never see the frame's `onError`. There is one sink below this point, and
-         * `WorkspaceFailureContext` is how everything that is not a region reaches it.
-         */
         report: (message: string) => void
         clearFailure: () => void
         failure?: string | undefined
     }>
 
-/*
- * Responsive contract:
- *   > 1024px   explorer 260 (resizable) | center | inspector 380 (resizable)
- *   <= 1024px  the inspector overlays the center column, opened from the toolbar and dismissed
- *              with Escape; focus returns to the button that opened it
- *   the bottom panel is 240px and collapses to its own tab strip at every width
- */
 const NARROW_QUERY = '(max-width: 1024px)'
 const BOTTOM_HEIGHT = 240
 
@@ -98,20 +80,6 @@ const STATE_VARIANT: Readonly<
     error: 'error'
 }
 
-/**
- * Brings the tab holding a waiting question forward, once per question.
- *
- * A question is drawn in the chat column and nowhere else — inside the tool call that asked it, or
- * beside the composer for a plan's own questions — and the chat column is mounted only while the
- * Chat tab is showing. So an agent that asked something while the user was watching the game put
- * nothing on screen anywhere: no card, no badge, nothing to answer, and the tool blocked for its
- * full thirty minutes and failed `question_timeout`. Approvals never had this: their dialog is
- * mounted beside the frame rather than inside it.
- *
- * Once per question and not while one is waiting, which is the difference between showing the user
- * where the question is and holding them on a tab they are trying to leave. Answering it is the
- * only thing that clears it, and they may well want to read the script it is about first.
- */
 function useTabWithTheQuestionOnIt(openCenterTab: (tab: CenterTab) => void) {
     const waiting = useWaitingQuestions()
     const shown = useRef(new Set<string>())
@@ -123,14 +91,7 @@ function useTabWithTheQuestionOnIt(openCenterTab: (tab: CenterTab) => void) {
     }, [openCenterTab, waiting])
 }
 
-/** Tracks the one breakpoint the responsive contract names. */
 function useNarrowViewport() {
-    /*
-     * Subscribed rather than seeded and then listened to. A `useState` initialiser reads the match
-     * during render and the listener only starts after commit, so a viewport that crossed the
-     * breakpoint in between fired nothing and the frame drew the wrong regions until the next
-     * resize. `useSyncExternalStore` re-reads on subscribe, which closes that window.
-     */
     return useSyncExternalStore(subscribeToWidth, isNarrowNow)
 }
 
@@ -146,26 +107,9 @@ function isNarrowNow() {
     return window.matchMedia(NARROW_QUERY).matches
 }
 
-/**
- * The IDE frame: explorer, center, inspector, and bottom panel around one Godot editor session.
- *
- * The frame owns the state its regions share — the open script buffers, the selected node, the
- * session — so that the Problems list, the debugger, and the editor tabs are three views of one
- * thing rather than three copies of it. Every panel calls the same Rust handlers the AI tool router
- * calls, which is what keeps a click and an agent turn from disagreeing.
- *
- * Memoized, and the memo is load-bearing rather than an optimisation. The frame's parent owns the
- * conversation, so it re-renders once per streamed token; without this boundary every one of those
- * tokens rebuilt the scene tree — one `TreeListItemData` per node, each carrying a `Tooltip` and an
- * `IconButton` — along with the runtime tree, the file listing and the bottom panel. Both props are
- * built to hold it: `chat` is a module constant and `onError` is the parent's stable callback.
- */
 export const InspectorWorkspace = memo(function Frame({chat, onError}: InspectorWorkspaceProps) {
     const {state, dispatch, recordView} = useRememberedLayout()
 
-    // The frame mounts once, with the layout already in hand. Mounting on the defaults and moving
-    // afterwards would open the wrong tab, refetch through the wrong panel, and write the defaults
-    // back over the project's own layout before the read that would have prevented it returned.
     if (!state.isOpen) {
         return (
             <HStack
@@ -196,25 +140,9 @@ export const InspectorWorkspace = memo(function Frame({chat, onError}: Inspector
     )
 })
 
-/**
- * The editor session the frame is built around, and the failures the frame reports about it.
- *
- * This is the whole of what the frame owns that its regions merely read, which is why it is a
- * component of its own: the session is provided here, so everything below reads it the same way —
- * a panel and the frame's own regions ask the same seam, and neither is handed pieces of it.
- */
 function InspectorFrame({chat, layout, views, dispatch, recordView, onError}: InspectorFrameProps) {
     const [failure, setFailure] = useState<string>()
 
-    /**
-     * Reports a failure where the person who caused it is looking.
-     *
-     * The chat composer is where the workspace's errors are shown, and it is on screen only while
-     * the chat is. A scene that will not open, a session that will not start, and a debugger that
-     * will not launch are all things a user provokes from the frame — from a tab that is not the
-     * chat — so the frame keeps its own banner rather than reporting into a column nobody is
-     * looking at. The message still reaches the conversation, which is where it belongs afterwards.
-     */
     const report = useCallback(
         (message: string) => {
             setFailure(message)
@@ -256,9 +184,6 @@ function FrameRegions({
     clearFailure,
     failure
 }: FrameRegionsProps) {
-    // How the project was opened, as opposed to how it stands. The widths and the script buffers
-    // are owned by hooks that only take a starting value, and a starting value that moved is a
-    // hook restarted mid-drag.
     const [opened] = useState(layout)
     const openCenterTab = useCallback(
         (tab: CenterTab) => {
@@ -285,11 +210,6 @@ function FrameRegions({
     const {call, ensureReady, isBusy, runtimeEpoch, scene, scenePath, session, start, state, stop} =
         useEditorSession()
 
-    /*
-     * No `autoSaveId`: the hook's own persistence is one width in `localStorage` for the whole
-     * machine, so every project shared it. The width is stored with the project instead, which is
-     * what makes it a property of the work rather than of the window it was last dragged in.
-     */
     const explorer = useResizable({
         defaultSize: opened.explorerWidth,
         minSizePx: EXPLORER_MIN,
@@ -302,14 +222,6 @@ function FrameRegions({
     })
 
     const isOffline = isSessionOffline(state)
-    /*
-     * Whether there is a game to stop, taken from the editor rather than from what Gofer launched.
-     *
-     * Godot polls its own play state every frame and the addon reports the transition, so a game
-     * that crashed, that ended on its own, or that was closed from its own window stops counting as
-     * running here without anything being told. It is also what makes the Game tab's own Run — the
-     * editor's play button, not the debugger's launch — show up in the toolbar as a game running.
-     */
     const isPlaying = isSessionPlaying(state)
 
     const breakpoints = useMemo<readonly DebugSourceBreakpoints[]>(
@@ -324,8 +236,6 @@ function FrameRegions({
 
     const openScripts = useMemo(() => scripts.buffers.map(buffer => buffer.path), [scripts.buffers])
 
-    // The widths and the open scripts belong to hooks that own their own state, so the layout
-    // catches up with them rather than reading them at write time.
     useEffect(() => {
         dispatch({
             type: 'resized',
@@ -343,18 +253,11 @@ function FrameRegions({
         })
     }, [breakpoints, dispatch, openScripts, scripts.activePath])
 
-    /** What the frame does to the project, as opposed to what it draws. */
     const project = useMemo(
         () => createProjectActions({call, ensureReady, debug, dispatch, report}),
         [call, debug, dispatch, ensureReady, report]
     )
 
-    /*
-     * Depending on the member, not the container. `useScriptBuffers` memoises what it returns, but
-     * that memo lists `buffers` — which typing replaces — so `scripts` still moves on every
-     * keystroke. `openBuffer` does not, so these hold. The breakpoint and open-script effects below
-     * already follow the same rule.
-     */
     const openBuffer = scripts.openBuffer
 
     const openFile = useCallback(
@@ -374,8 +277,6 @@ function FrameRegions({
         [dispatch, openBuffer]
     )
 
-    // Wrapped like its neighbours: the explorer's file-tree memo lists this handler, so a fresh
-    // arrow here rebuilt every row of the tree — up to the listing cap — on every frame render.
     const openScene = useCallback(
         (path: string) => {
             void project.openScene(path)
@@ -495,13 +396,6 @@ function FrameRegions({
                                             }}
                                         />
                                     :   null}
-                                    {/*
-                                     * Emphasis follows whatever the screen is for. With no editor
-                                     * there is only one thing to do, and starting it is already the
-                                     * primary; once the editor is live the project controls are, and
-                                     * they were both rendering grey-on-grey, so a running workspace
-                                     * had no primary action at all.
-                                     */}
                                     <Button
                                         label={isPlaying ? 'Stop Game' : 'Run Game'}
                                         size='sm'
@@ -534,32 +428,11 @@ function FrameRegions({
                                 onDismiss={clearFailure}
                             />
                         )}
-                        {/*
-                         * Scrollable, because seven labels need 404 pixels and a 1280-wide window
-                         * gives this panel 358 at the default split. 1600 gives it 678 and 2560
-                         * gives it 1638, so on every wider screen this does nothing at all — but
-                         * 1280 is the width `tauri.conf.json` opens at, and without this the
-                         * seventh tab is drawn where nobody can reach it.
-                         *
-                         * Wrapped so it cannot shrink. `overflow: auto` costs a flex child its
-                         * automatic minimum size, which made this the only sibling in the column
-                         * that could give way. A long conversation sizes the fill item below, and
-                         * the strip was squeezed to two pixels while the agent answered.
-                         */}
                         <StackItem size='static'>
                             <HStack
                                 gap={0}
                                 isScrollable
                             >
-                                {/*
-                                 * Grown, because `hasDivider` draws the rail on the nav and the
-                                 * nav hugs its tabs — so the underline stopped after "Skills" and
-                                 * the rest of the panel had no rail at all. `layout='fill'` would
-                                 * span it too, but it spreads seven tabs across 1638 pixels on a
-                                 * wide screen. Growing the nav keeps the labels together on the
-                                 * left and still caps at the visible width, so the scroll above
-                                 * behaves as it did.
-                                 */}
                                 <TabList
                                     size='sm'
                                     hasDivider
@@ -590,18 +463,6 @@ function FrameRegions({
                                         value='memory'
                                         label='Memory'
                                     />
-                                    {/*
-                                     * "Design" rather than "Sketches": at the narrowest panel width this
-                                     * strip is drawn at, "Sketches" needs 373 pixels and there are 358.
-                                     *
-                                     * Seven labels need 404, and that is not the reason to hide any of
-                                     * them. 358 is what a 1280-wide window gives this panel at the default
-                                     * split, and the panel is resizable: 1600 gives it 678 and 2560 gives
-                                     * it 1638, so on every real screen the strip has room to spare. An
-                                     * overflow `TabMenu` was tried here and was worse in both directions —
-                                     * it is wider than the label it replaces, so it clipped the strip at
-                                     * 1280 anyway, and it put two views behind a click for everybody else.
-                                     */}
                                     <Tab
                                         value='sketches'
                                         label='Design'
@@ -619,12 +480,6 @@ function FrameRegions({
                                     gap={0}
                                     height='100%'
                                 >
-                                    {/*
-                                     * Published here rather than lifted, because this is where the
-                                     * tab dispatch lives and the conversation is drawn inside it.
-                                     * One reader: an answered design block, pointing at the tab
-                                     * holding the layout it agreed.
-                                     */}
                                     <OpenCenterTabContext value={openCenterTab}>
                                         {chat}
                                     </OpenCenterTabContext>
@@ -675,12 +530,6 @@ function FrameRegions({
                             />
                         </VStack>
                     </VStack>
-                    {/*
-                     * Only built at the width that can open it. A dialog that is merely closed
-                     * still renders its children, so at every other width the inspector was mounted
-                     * twice — two panels reading the selected node from the editor, drawing every
-                     * property twice, one of them behind a dialog nothing can open.
-                     */}
                     {isNarrow ?
                         <Dialog
                             isOpen={isInspectorOpen}

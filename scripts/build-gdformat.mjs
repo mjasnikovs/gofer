@@ -1,22 +1,3 @@
-/**
- * Builds the pinned gdformat sidecar as a frozen, single-file executable.
- *
- * Upstream gdtoolkit publishes only wheels and sdists, so "standalone sidecar" means freezing one
- * per platform rather than shipping a wheel and hoping the user has a Python. This script is that
- * build: it resolves the pins in `protocol/gdformat-sidecar.json`, installs them into a throwaway
- * virtual environment, freezes the `gdformat` console entry point with PyInstaller, and drops the
- * result into `src-tauri/sidecar/`, which `tauri.conf.json` bundles as an application resource.
- *
- * The build is also the proof. `fixtures/gdformat/README.md` specifies what the pin has to satisfy
- * — the version answers exactly, the Godot 4.7 fixtures parse, the formatter's own output is a
- * fixed point, and invalid syntax writes nothing — and every one of those is asserted here against
- * the frozen executable rather than against the virtual environment that produced it. A frozen
- * binary that lost a package data file (lark's grammars are the obvious candidate) fails at import
- * time, not at pack time, so a build that never runs its artifact proves nothing.
- *
- * Run it with `npm run build:gdformat`. CI runs it per platform before packaging the application;
- * a developer runs it once, or points `GOFER_GDFORMAT` at a local gdformat 4.5.0 instead.
- */
 import {createHash} from 'node:crypto'
 import {spawnSync} from 'node:child_process'
 import {
@@ -57,7 +38,6 @@ function must(label, command, arguments_, options = {}) {
     throw new Error(`${label} failed (exit ${String(result.status)}):\n${output}`)
 }
 
-/** The interpreter the virtual environment is built from; the venv's own is used after that. */
 function hostPython() {
     const candidates = process.env.GOFER_PYTHON ? [process.env.GOFER_PYTHON] : ['python3', 'python']
     for (const candidate of candidates) {
@@ -80,8 +60,6 @@ const python = hostPython()
 process.stdout.write(`Freezing gdformat ${manifest.version} with ${python}\n`)
 must('Creating the build virtual environment', python, ['-m', 'venv', venv])
 must('Upgrading pip', venvPython, ['-m', 'pip', 'install', '--quiet', '--upgrade', 'pip'])
-// The formatter's own closure and the freezer's are installed together: PyInstaller analyses the
-// environment it runs in, so it has to see gdtoolkit rather than merely be told about it.
 must('Installing the pinned requirements', venvPython, [
     '-m',
     'pip',
@@ -92,9 +70,6 @@ must('Installing the pinned requirements', venvPython, [
 ])
 
 const [module, attribute] = manifest.entryPoint.split(':')
-// gdtoolkit's console script strips a trailing `.exe` from argv[0] before handing it to docopt,
-// which parses the usage text against the program name. A frozen executable is argv[0] too, so the
-// generated entry point reproduces the console script exactly rather than approximating it.
 const entry = join(buildDirectory, 'gdformat_entry.py')
 await writeFile(
     entry,
@@ -120,8 +95,6 @@ must('Freezing gdformat', venvPython, [
     join(buildDirectory, 'work'),
     '--specpath',
     join(buildDirectory, 'spec'),
-    // lark reads its grammars from package data and gdtoolkit reads its own; neither is an import
-    // PyInstaller's analysis can see, so both are collected wholesale.
     ...manifest.collect.flatMap(name => ['--collect-all', name]),
     entry
 ])
@@ -129,19 +102,10 @@ must('Freezing gdformat', venvPython, [
 const frozen = join(distribution, binaryName)
 if (!existsSync(frozen)) throw new Error(`PyInstaller produced no executable at ${frozen}`)
 
-/** PyPI's own name comparison, so `docopt-ng` finds the `docopt_ng-0.9.0.dist-info`. */
 function normalize(name) {
     return name.toLowerCase().replaceAll(/[-_.]+/g, '-')
 }
 
-/**
- * Collects the licence of everything that ended up inside the frozen executable.
- *
- * Only the pinned requirements are collected, never the builder: PyInstaller, pip, and setuptools
- * produce the executable and are not inside it, and pip in particular files two dozen vendored
- * licences that a user of Gofer never receives. The interpreter is named rather than quoted,
- * because CPython's licence lives with the interpreter build rather than in a wheel.
- */
 async function collectLicences() {
     const shipped = new Set(manifest.requirements.map(pin => normalize(pin.split('==')[0])))
     const libraries = JSON.parse(
@@ -160,8 +124,6 @@ async function collectLicences() {
             const distribution_ = normalize(name.replace(/-[^-]+$/, ''))
             if (!shipped.has(distribution_)) continue
             const directory = join(library, entry_)
-            // Newer wheels file their licences under `.dist-info/licenses/`, older ones leave
-            // them loose in the `.dist-info` itself, so the whole metadata tree is walked.
             const files = await readdir(directory, {recursive: true, withFileTypes: true})
             const licences = files
                 .filter(file => file.isFile() && /^(licen[cs]e|copying)/i.test(file.name))
@@ -196,19 +158,12 @@ async function collectLicences() {
 
 const licences = await collectLicences()
 
-// The proof from `fixtures/gdformat/README.md`, run against the artifact rather than the virtual
-// environment that produced it, and run before it is installed: a sidecar that fails here must not
-// be left where the application would find it. Each failure is a reason not to ship — a version
-// that is not the pin risks grammar drift, a fixture that stopped parsing means gdtoolkit cannot
-// read Godot 4.7 syntax, a non-idempotent format means the diff never settles, and output on
-// invalid syntax means a broken buffer could reach a file.
 const version = must('Running the frozen gdformat', frozen, ['--version']).stdout.trim()
 if (version !== `gdformat ${manifest.version}`) {
     throw new Error(`The frozen sidecar reports ${version}, not gdformat ${manifest.version}`)
 }
 
 for (const fixture of manifest.proof) {
-    // 0 means already canonical and 1 means it would be reformatted; both mean it parsed.
     const parsed = run(frozen, ['--check', join(root, fixture)])
     if (parsed.status !== 0 && parsed.status !== 1) {
         throw new Error(`The frozen sidecar could not parse ${fixture}:\n${parsed.stderr}`)

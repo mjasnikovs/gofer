@@ -11,7 +11,6 @@ import {flush} from '../test/flush'
 
 const SQUARE = 'data:image/png;base64,AAAA'
 
-/** Waits until every queued request has settled and the listeners have been told. */
 async function settle() {
     for (let turn = 0; turn < 10; turn += 1) await flush()
 }
@@ -32,7 +31,6 @@ describe('the squares the @ menu draws', () => {
         expect(request).toHaveBeenCalledTimes(1)
     })
 
-    /* Twenty rows redraw on every keystroke, so the same path is asked for over and over. */
     it('asks once for a burst of requests on the same path', async () => {
         const request = vi.fn().mockResolvedValue(SQUARE)
         setThumbnailRequest(request)
@@ -41,10 +39,6 @@ describe('the squares the @ menu draws', () => {
         expect(request).toHaveBeenCalledTimes(1)
     })
 
-    /*
-     * The reason the queue exists. A 4K texture is tens of megabytes once unpacked, and twenty
-     * decoding at once is a gigabyte of spike for twenty 16px squares.
-     */
     it('keeps at most three decodes running at a time', async () => {
         let running = 0
         let peak = 0
@@ -69,7 +63,6 @@ describe('the squares the @ menu draws', () => {
         expect(thumbnailFor('sprites/frame11.png')).toBe(SQUARE)
     })
 
-    /* A picture the agent is half-way through writing. The row falls back to its kind icon. */
     it('remembers a failure as "no preview" rather than retrying it', async () => {
         const request = vi.fn().mockRejectedValue(new Error('half written'))
         setThumbnailRequest(request)
@@ -95,10 +88,6 @@ describe('the squares the @ menu draws', () => {
         expect(told).not.toHaveBeenCalled()
     })
 
-    /*
-     * A task switch moves the one checkout onto another branch. The paths stay the same and the
-     * files behind them do not, so a square held over is a picture of something else.
-     */
     it('forgets everything when the checkout moves', async () => {
         const request = vi.fn().mockResolvedValue(SQUARE)
         setThumbnailRequest(request)
@@ -112,11 +101,6 @@ describe('the squares the @ menu draws', () => {
         expect(request).toHaveBeenCalledTimes(2)
     })
 
-    /**
-     * The clear cannot cancel a request already in flight, so the answer has to notice it is stale.
-     * Without that check, a square fetched from the old branch landed in the cache *after* the
-     * clear, under a path whose file had changed — the exact thing the clear exists to prevent.
-     */
     it('drops an answer that was already in flight when the checkout moved', async () => {
         let answer: ((url: string) => void) | undefined
         setThumbnailRequest(

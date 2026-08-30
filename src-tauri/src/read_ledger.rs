@@ -288,28 +288,17 @@ mod tests {
         assert_eq!(held.scene, "res://a.tscn");
         assert_eq!(held.revision, 0);
 
-        // A mutation reports its revision on the envelope and names no scene. That is not the same
-        // as there being no scene, so the one already recorded is kept.
         remember_revision(&tree, None, 1);
         let after = recall_revision(&tree).expect("a recorded revision");
         assert_eq!(after.scene, "res://a.tscn");
         assert_eq!(after.revision, 1);
 
-        // And a read of a different scene moves both halves together.
         remember_revision(&tree, Some("res://b.tscn"), 0);
         let switched = recall_revision(&tree).expect("a recorded revision");
         assert_eq!(switched.scene, "res://b.tscn");
         assert_eq!(switched.revision, 0);
     }
 
-    /*
-     * The whole of "the ledger is up to date and the model never sees a hash", in one step.
-     *
-     * It used to be five steps re-enacted per router arm, and `apply_rename` enacted none of them:
-     * a rename left records for text it had just rewritten, and the next save over one was refused
-     * `file_conflict` with no call the model could make to escape — `expectedHash` is hidden from
-     * the signature, so it cannot clear a record it is never shown.
-     */
     #[test]
     fn reconciling_records_every_stamp_and_hands_back_none_of_them() {
         let tree = root("reconcile");
@@ -325,15 +314,6 @@ mod tests {
         assert!(answer.get("version").is_none(), "{answer}");
     }
 
-    /*
-     * A `diagnostics` answer carries no hash and is reconciled anyway, and its `version` goes.
-     *
-     * Written down because it changed and nothing said so: the read ledger now takes every answer
-     * from an operation that names a path, and `godot_script diagnostics` is one that never passed
-     * through here before. The rule it meets is the one above — `version` is the language server's
-     * document counter, no operation accepts it as a parameter, and a field the model cannot spend
-     * anywhere is context it pays for. This is that rule holding for an answer with no stamp in it.
-     */
     #[test]
     fn a_verdict_that_carries_no_hash_still_loses_its_document_counter() {
         let tree = root("reconcile-diagnostics");
@@ -407,9 +387,7 @@ mod tests {
             ]}),
         );
 
-        // The file that came with its text is recorded, as always.
         assert_eq!(recall(&tree, "kept.gd").as_deref(), Some("shown"));
-        // The withheld one is not — not recorded now, and not refreshed from what it used to be.
         assert_eq!(recall(&tree, "withheld.gd"), None);
         assert_eq!(answer["files"][1]["omitted"], "no room left");
     }

@@ -87,9 +87,6 @@ test('a transcript compaction left with no prompt is given one, in a fixed place
         {role: 'compactionSummary', content: 'earlier'}
     ])
 
-    // And it stays in that place while the turn goes on, which is the whole point of the position:
-    // nothing can anchor a message that is made fresh every request, so it has to be somewhere the
-    // growing tail cannot push it.
     const anchor = {}
     const head = {role: 'compactionSummary', content: 'earlier'}
     deepEqual(withTurnContext([head], 'CONTEXT', anchor).slice(0, 2), [
@@ -127,7 +124,6 @@ test('a second question mid-turn does not move the block off the first', () => {
         {role: 'user', content: 'Build the level\n\nCONTEXT'}
     ])
 
-    // What a red verify report does: a second prompt, in the same turn, behind the work.
     const later = [
         asked,
         {role: 'toolResult', content: 'a result'},
@@ -143,7 +139,6 @@ test('a second question mid-turn does not move the block off the first', () => {
 test('a compaction that replaced the messages anchors afresh', () => {
     const anchor = {}
     withTurnContext([{role: 'user', content: 'Build the level'}], 'CONTEXT', anchor)
-    // Compaction hands back new objects, so the message the turn anchored to is no longer there.
     deepEqual(
         withTurnContext(
             [

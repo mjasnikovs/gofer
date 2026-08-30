@@ -20,8 +20,6 @@ const settingsResponse: SettingsResponse = {
             ...SETTINGS.settings.ai,
             connections: {
                 ...SETTINGS.settings.ai.connections,
-                // Sent with every settings response, because what a ChatGPT connection is belongs
-                // to the backend. Without it this page has no second driver to offer.
                 'openai-codex': {
                     name: 'ChatGPT subscription',
                     baseUrl: 'https://chatgpt.com/backend-api',
@@ -50,7 +48,6 @@ const shippedPrompt = 'You are Gofer, a capable local coding agent.'
 const installedCache = {path: '/tmp/gofer-rag', sizeBytes: 1024 ** 3, state: 'installed'} as const
 const missingCache = {path: '/tmp/gofer-rag', sizeBytes: 0, state: 'not-installed'} as const
 
-/** The models a server answers `/models` with, as the page offers them for selection. */
 const serverModels = [
     {
         id: 'qwen3-coder',
@@ -65,14 +62,6 @@ const serverModels = [
     }
 ]
 
-/**
- * The shared backend, holding this page's settings, with per-command answers on top.
- *
- * Most overrides are values, because that is all a page test usually needs: what one command
- * answers, or the failure it raises. `handlers` is for the two that need the command held open
- * while the window is read. Keying either by `DesktopCommand` is what makes a renamed command fail
- * typecheck here rather than quietly stop being overridden.
- */
 let server: Backend
 function answer(
     overrides: Partial<Record<DesktopCommand, unknown>> = {},
@@ -96,17 +85,11 @@ function answer(
     return server
 }
 
-/**
- * Brings one tab's controls on screen. Only that tab's fields, buttons and banner are rendered, so
- * every assertion below that is not about the connection has to say which tab it is about first.
- */
 async function openTab(label: string) {
-    // A button, not a `tab`: Astryx's TabList is a `<nav>` of buttons rather than an ARIA tablist.
     await userEvent.click(screen.getByRole('button', {name: label}))
     await flush()
 }
 
-/** Mounts the page with the settings loaded, which is where every interaction below starts. */
 async function open() {
     render(
         <SettingsPage
@@ -188,8 +171,6 @@ describe('the AI connection form', () => {
         await user.click(screen.getByRole('button', {name: 'Save AI settings'}))
         await flush()
 
-        // Read back out of the backend rather than out of the call that went to it: what a save
-        // means is that the next read answers with what was sent.
         expect(server.state.settings.settings.ai).toMatchObject({
             connections: {
                 'openai-compatible': {
@@ -203,15 +184,6 @@ describe('the AI connection form', () => {
         })
     })
 
-    /*
-     * The catalogue is keyed on the driver and on nothing else. The request that carries it is built
-     * from the whole draft, so the tab is one careless dependency away from sending one per
-     * character typed into the address beside it.
-     *
-     * Two things stop that — the effect's list, and the ref that remembers which driver was asked —
-     * and this fails only when both are gone, which is the honest shape: it asserts the property,
-     * not either mechanism.
-     */
     it('asks a driver for its catalogue once, however much is typed afterwards', async () => {
         answer({list_ai_models: serverModels})
         const user = userEvent.setup()
@@ -228,8 +200,6 @@ describe('the AI connection form', () => {
 
         expect(listings()).toHaveLength(1)
 
-        // Changing driver is the one edit that does ask again, because the answer would be a
-        // different server's.
         await user.click(screen.getByRole('combobox', {name: 'AI driver'}))
         await user.click(screen.getByRole('option', {name: 'ChatGPT subscription'}))
         await flush()
@@ -248,10 +218,6 @@ describe('the AI connection form', () => {
         expect(screen.getByText(/credential store is locked/)).toBeInTheDocument()
     })
 
-    /*
-     * The models list is what a server actually offers, so it arrives from the connection test
-     * rather than from a field the user types. Choosing one fills in the numbers that come with it.
-     */
     it('offers the server models a successful test found, and adopts the one chosen', async () => {
         answer({
             test_ai_connection: {status: 'connected', message: 'Connected.'},
@@ -287,9 +253,6 @@ describe('the AI connection form', () => {
         await user.click(screen.getByRole('option', {name: /Qwen3 Coder/}))
         await flush()
 
-        // A field now, not a menu: the level has its own label and shows its value in the control.
-        // The starting value is asserted first, or this passes on a picker that already read `high`
-        // and never moved.
         expect(screen.getByRole('combobox', {name: 'Reasoning'})).toHaveTextContent('off')
         await user.click(screen.getByRole('combobox', {name: 'Reasoning'}))
         await user.click(screen.getByRole('option', {name: 'high'}))
@@ -303,7 +266,6 @@ describe('the AI connection form', () => {
         const user = userEvent.setup()
         await open()
 
-        // Nothing to choose until the child is told which connection answers it.
         expect(
             screen.queryByRole('combobox', {name: 'Model the sub-agent answers with'})
         ).not.toBeInTheDocument()
@@ -323,7 +285,6 @@ describe('the AI connection form', () => {
             connectionType: 'openai-compatible',
             model: {id: 'qwen3-coder', contextWindow: 262_144}
         })
-        // The main agent is where it was. That separation is the whole feature.
         expect(savedRequest()?.settings.ai.connections['openai-compatible']?.model.id).toBe(
             'local-model'
         )
@@ -384,10 +345,6 @@ describe('the agent prompt', () => {
         expect(screen.getByRole('button', {name: 'Restore default'})).toBeDisabled()
     })
 
-    /*
-     * Its own tab, its own Save, and its own store. Saving the connection must not reach the
-     * prompt at all now, whether the prompt was touched or not.
-     */
     it('is untouched by a save on the connection tab', async () => {
         const user = userEvent.setup()
         await open()
@@ -433,8 +390,6 @@ describe('the Godot rules', () => {
                 .at(-1)?.[1] as {godot: Record<string, boolean>} | undefined
         )?.godot
 
-    // The stored settings this suite loads say nothing about Godot, which is what a file written
-    // before the tab existed looks like. Both boxes must still come up ticked.
     it('enforces both rules by default', async () => {
         await open()
         await openTab('Godot rules')
@@ -456,10 +411,6 @@ describe('the Godot rules', () => {
         expect(screen.getByLabelText(/Enforce game window inline/)).toBeChecked()
     })
 
-    /*
-     * The tab has no Save of its own, so a rule ticked here must not carry another tab's draft with
-     * it. This is the whole reason the command takes the rules rather than the page's settings.
-     */
     it('never sends a connection edit left open on another tab', async () => {
         const user = userEvent.setup()
         await open()
@@ -497,12 +448,9 @@ describe('the documentation model cache', () => {
 
         expect(screen.getByText('/tmp/gofer-rag')).toBeInTheDocument()
         expect(screen.getByText('1.00 GiB')).toBeInTheDocument()
-        // Nothing to download when the cache is already installed.
         expect(screen.queryByRole('button', {name: 'Download models'})).not.toBeInTheDocument()
     })
 
-    // The download subscribes before it starts and unsubscribes whatever happens, because the
-    // progress events are the only sign of life during a 1.68 GiB fetch.
     it('subscribes to the download progress, installs the models, and unsubscribes', async () => {
         const unlisten = vi.fn()
         let report: ((payload: unknown) => void) | undefined
@@ -518,8 +466,6 @@ describe('the documentation model cache', () => {
             {get_rag_cache_status: missingCache},
             {
                 initialize_rag: () => {
-                    // As the backend does it: the progress arrives while the command is still
-                    // running.
                     report?.({model: 'bge-m3', status: 'progress', loaded: 1024, total: 2048})
                     return undefined
                 }
@@ -536,11 +482,6 @@ describe('the documentation model cache', () => {
         expect(unlisten).toHaveBeenCalledOnce()
     })
 
-    /*
-     * A 1.68 GiB download shows what it is doing while it does it. `Button` runs `clickAction`
-     * inside a transition, and React holds the old screen until a transition settles — so a
-     * download this page awaited from the button painted nothing at all until it had finished.
-     */
     it('shows the progress while the download is still running', async () => {
         answer({get_rag_cache_status: missingCache})
         let report: ((payload: unknown) => void) | undefined
@@ -573,7 +514,6 @@ describe('the documentation model cache', () => {
             report?.({model: 'bge-m3', status: 'progress', loaded: 1024, total: 2048})
         })
 
-        // The cache is in flux until the backend says otherwise, and the bar names the file.
         expect(screen.getByText('Busy')).toBeInTheDocument()
         expect(screen.getAllByText('bge-m3: 1 KiB of 2 KiB').length).toBeGreaterThan(0)
 
@@ -613,8 +553,6 @@ describe('the documentation model cache', () => {
 
         await userEvent.click(screen.getByRole('button', {name: 'Delete model cache'}))
         await flush()
-        // The warning takes over from the settings dialog rather than stacking on it: the form
-        // behind it is hidden, and the only reachable buttons are the two the warning offers.
         expect(screen.getByRole('button', {name: 'Cancel'})).toBeInTheDocument()
         expect(screen.queryByRole('button', {name: 'AI connection'})).not.toBeInTheDocument()
 
@@ -716,8 +654,6 @@ describe('when the settings cannot be read at all', () => {
         )
         await flush()
 
-        // The failure lands on the tab the dialog opens on. The other two say their own line in
-        // place rather than leaving an empty tab behind.
         expect(screen.getByText('Settings could not be loaded')).toBeInTheDocument()
         expect(screen.getByText('Settings are unavailable.')).toBeInTheDocument()
 

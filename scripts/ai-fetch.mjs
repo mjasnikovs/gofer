@@ -1,29 +1,3 @@
-/**
- * Reading one web page, in a child, so the page never enters this conversation.
- *
- * The main agent holds a live shell, a live editor and a real worktree. Any text that lands in its
- * context sits next to a shell that runs without asking, and a web page is text somebody else wrote.
- * So the page is handed to a child that has no tools at all, asked one question about it, and only
- * the child's answer comes back. The page is thrown away with the child.
- *
- * No tools is the contract, not a default. The child is given everything it may use inside its
- * prompt, so a tool could only reach for something the page never said — and a page that can ask for
- * a shell command is the whole injection problem restated. `createChildTools` is told `[]`, and
- * `assertChildTools` refuses anything else.
- *
- * The rest of this file is the three things that decide whether the answer is worth anything:
- *
- *   which bytes are read   a GitHub blob URL serves a viewer, not the file, so it is rewritten; a
- *                          `#fragment` names the section the caller actually meant, so it is sliced
- *                          out rather than lost past the head of a long page.
- *   what the child is told the extraction rules, and the two sentinels it answers with when it
- *                          cannot answer — one for "this page is about something else", one for
- *                          "the page says it ambiguously". They are different moves for the caller.
- *   whether it made it up  the child must quote the page verbatim, and the quote is checked against
- *                          the page. A quote that is not there is the one visible sign of an answer
- *                          that came out of the model's memory instead of the page.
- */
-
 import {createAssistantMessageEventStream} from '@earendil-works/pi-ai'
 import {
     abstentionSentence,
@@ -39,25 +13,14 @@ import {runSubagent, toolProgress} from './ai-subagent.mjs'
 
 export const WEB_FETCH_TOOL_NAME = 'web_fetch'
 
-/** How much page reaches the child, and how a longer one is cut. */
 const CONTENT_BUDGET = 30_000
 const HEAD_CHARS = 25_000
 const TAIL_CHARS = 5_000
 const TRUNCATION_MARKER = '\n\n[...page continues, truncated...]\n\n'
 
-/**
- * The two non-answers this page reader can give, taken from the shared table in `ai-extract.mjs`
- * rather than written here.
- *
- * They used to be two literals beside two regexes in this file, which is exactly the arrangement
- * that drifts — and a third corpus was about to be written the same way. The prompt below now
- * interpolates the same sentence the matcher looks for.
- */
 export const NOT_COVERED_ANSWER = notCoveredSentence('page')
 export const UNCLEAR_ANSWER = abstentionSentence('page')
 
-// Re-exported rather than re-implemented: the protocol moved to `ai-extract.mjs` so a second
-// corpus could share it, and this module is still where a page reader's callers look for it.
 export {
     isAbstention,
     isExcerptInContent,
@@ -66,14 +29,6 @@ export {
     verifyExcerpt
 } from './ai-extract.mjs'
 
-/**
- * `github.com/{owner}/{repo}/blob/{ref}/{path}` renders the file through a viewer written in
- * JavaScript, so the HTML carries GitHub's chrome and none of the file. `raw.githubusercontent.com`
- * serves the same bytes as text.
- *
- * Only the URL handed to the fetcher is rewritten. The caller's URL still supplies the `#fragment`,
- * and still reports as what was asked for.
- */
 const GH_BLOB_RE =
     /^https?:\/\/(?:www\.)?github\.com\/([^/?#]+)\/([^/?#]+)\/blob\/([^?#]+?)\/*(?:[?#].*)?$/iu
 
@@ -81,7 +36,6 @@ export function normaliseSourceUrl(url) {
     const match = GH_BLOB_RE.exec(url.trim())
     if (!match) return url
     const [, owner, repo, refAndPath] = match
-    // `/blob/{ref}/{path}`. A bare `/blob/{ref}` names no file, so there is nothing to rewrite to.
     if (!refAndPath.includes('/')) return url
     return `https://raw.githubusercontent.com/${owner}/${repo}/${refAndPath}`
 }
@@ -90,19 +44,11 @@ function escapeRegExp(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-/** The `#fragment` of a URL, or an empty string. */
 function fragmentOf(url) {
     const at = url.indexOf('#')
     return at === -1 ? '' : url.slice(at + 1).trim()
 }
 
-/**
- * The section a heading anchor names: from that heading to the next one of the same or higher level.
- *
- * Anchors are matched on the heading line in both the shapes real documentation emits — Docusaurus
- * writes `### Title[](#slug "…")`, GitHub writes `## [Title](#slug)`. `#foo` must not match
- * `#foobar`, or a link to a short section silently delivers a longer one.
- */
 function sliceSection(markdown, fragment) {
     const lines = markdown.split('\n')
     const anchor = new RegExp(`#${escapeRegExp(fragment)}(?![a-z0-9-])`, 'iu')
@@ -138,14 +84,6 @@ function truncate(markdown) {
     )
 }
 
-/**
- * Which part of the page the child is shown.
- *
- * A deep link is the caller saying which section they meant, and on a long page that section usually
- * sits past the head window — so head-truncating a fragment URL throws away the exact thing that was
- * asked for. When the fragment names no heading in this content, the page has changed since the link
- * was written, and falling back to truncation reads more of it than honouring a stale anchor would.
- */
 export function selectContent(markdown, requestedUrl) {
     const fragment = fragmentOf(requestedUrl)
     if (fragment) {
@@ -155,19 +93,6 @@ export function selectContent(markdown, requestedUrl) {
     return {content: truncate(markdown)}
 }
 
-/**
- * What the child is told.
- *
- * In the message rather than the system prompt, deliberately: the rules and the page are one thing
- * to compare when a prompt change is measured, and a rule that migrates between the two slots would
- * otherwise pass every assertion about either.
- *
- * Rule 5 is the one that was tuned rather than invented. Sending the child to `unclear` on any
- * ambiguity threw away answers that were on the page. It now answers partially and says what is
- * missing; rule 6 reports a page about something else as its own outcome; rule 7 keeps `unclear` for
- * content that genuinely contradicts itself. Rules 1 and 2 — the verbatim quote — were not relaxed,
- * because that pair is the whole fabrication guard.
- */
 export function buildFetchPrompt({query, url, title, content, section}) {
     const sectionNote =
         section ?
@@ -213,13 +138,6 @@ export function buildFetchPrompt({query, url, title, content, section}) {
     )
 }
 
-/**
- * The page reader's own wording for a quote that is not on the page.
- *
- * The check itself, the parsing and the formatting are shared — see `ai-extract.mjs`. Only this
- * sentence is the page's, because a page and a manual are wrong in different ways: a page can be
- * the wrong page, where a documentation search that returned nothing has already said so.
- */
 const UNVERIFIED_WARNING =
     'WARNING: the quote below is not on the page, so this answer may have been remembered rather '
     + 'than read. Treat it as unsourced.'
@@ -228,16 +146,6 @@ export function formatResultText(parsed, verified) {
     return sharedFormatResultText(parsed, verified, {unverifiedWarning: UNVERIFIED_WARNING})
 }
 
-/**
- * What to do instead, said only when the page was about something else.
- *
- * It carries the two things the bare sentinel does not: which URL was actually read — after a blob
- * rewrite that is not the one asked for, and a caller who cannot see that would "retry" the raw URL
- * it already got — and that asking this page again differently returns this same answer.
- *
- * Deliberately no suggestion of which other URL. Nothing here knows one, and naming a guess turns
- * one dead end into two.
- */
 export function coverageMissNextStep(requestedUrl, fetchedUrl) {
     const rewritten =
         fetchedUrl === requestedUrl ? '' : (
@@ -252,14 +160,6 @@ export function coverageMissNextStep(requestedUrl, fetchedUrl) {
     )
 }
 
-/**
- * Fetch one page and ask a no-tools child one question about it.
- *
- * The excerpt is verified against the WHOLE cleaned page even when only a `#fragment` section was
- * shown to the child. The section is a substring of the page, so a genuine quote still verifies and
- * a remembered one still fails — anchoring cannot weaken the detector. Verifying against anything
- * narrower would manufacture fabrication verdicts for quotes that are really there.
- */
 export async function fetchFocused({
     url,
     query,
@@ -277,8 +177,6 @@ export async function fetchFocused({
     const fetchedUrl = normaliseSourceUrl(url)
     const page = await fetchAndClean(fetchedUrl, {signal})
 
-    // Anchored from the URL as asked for, not from the post-redirect one: a `#fragment` never
-    // reaches a server, so the final URL has already dropped it.
     const selected = selectContent(page.markdown, url)
     const prompt = buildFetchPrompt({
         query,
@@ -348,15 +246,6 @@ const WEB_FETCH_DESCRIPTION =
 const PROBE_URL = 'https://gofer.invalid/probe'
 export const WEB_FETCH_PROBE_ANSWER = 'web-fetch-reachable'
 
-/**
- * A page and a reader that answer at once, without a request leaving the machine.
- *
- * The probe has to prove the tool constructs, that a no-tools child can be built for it, and that an
- * answer comes back out through the same parsing and formatting the real path uses. What it cannot
- * prove is that the network is up — and it must not try, because a real request here would leak one
- * request per turn and spend a search quota on a tool the user may never call. A network that is
- * down is reported by the call that needs it, retried first.
- */
 function cannedPage() {
     return () =>
         Promise.resolve({
@@ -460,15 +349,10 @@ export function createWebFetchTool({
                     settings,
                     signal,
                     timers,
-                    // The reader holds no tools, so its only steps are thinking and writing — which
-                    // is exactly the silence this fills. A page of forty thousand characters read by
-                    // a local model is a minute of a spinner that says nothing.
                     progress: toolProgress(onUpdate),
                     fetchAndClean: probing ? cannedPage() : fetchAndClean
                 })
             } catch (error) {
-                // A page that could not be fetched is the site's problem and is reported as itself.
-                // Anything else is the reader's, and `runSubagent` has already worded it.
                 if (error instanceof FetchAndCleanError) throw new Error(error.message)
                 throw error
             }
@@ -477,8 +361,6 @@ export function createWebFetchTool({
                 {answer: result.answer, excerpt: result.excerpt},
                 result.excerptVerified
             )
-            // The coverage miss carries an instruction, so it goes in the text. `details` reaches
-            // the window, not the model, and the model is what has to act on it.
             const text = result.nextStep ? `${body}\n\n${result.nextStep}` : body
             return {
                 content: [{type: 'text', text: text || '(the page produced no answer)'}],
@@ -494,13 +376,6 @@ export function createWebFetchTool({
     }
 }
 
-/**
- * The one shape a fetch failure reaches the calling agent in.
- *
- * A sibling of `subagentFailure` rather than a call to it, because the remedy differs and the remedy
- * is the part that matters. A sub-agent that fails can be replaced by reading the files yourself.
- * There is no local fallback for a page: the caller either asks for less of it, or picks another URL.
- */
 export function webFetchFailure(reason) {
     return (
         `The page was not read: ${reason}. Nothing from it reached this conversation, so treat the `

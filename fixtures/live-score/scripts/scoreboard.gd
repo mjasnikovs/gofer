@@ -1,6 +1,5 @@
 extends Node2D
 
-# The variable the task is about is `score`. Everything else on this page only looks like it.
 
 const SCOREBOARD_PATH := "user://scoreboard.cfg"
 

@@ -68,14 +68,11 @@ fn a_tree_past_the_answers_budget_is_bounded_and_says_so() {
         "scene.create",
         json!({"path": "res://wide.tscn", "rootType": "Node2D", "rootName": "Level"}),
     );
-    // Past the default, so the walk has to stop inside the scene rather than at its end. Two
-    // hundred is what one create command carries.
     let wide: Vec<Value> = (0..200)
         .map(|index| json!({"parent": "/Level", "name": format!("Marker{index}"), "type": "Marker2D"}))
         .collect();
     session.mutate("node.create_nodes", json!({"nodes": wide}));
 
-    // A call naming nothing is bounded, and says it stopped.
     let bounded = session.call("scene.get_tree", json!({}));
     assert_eq!(
         bounded["truncated"], true,
@@ -94,17 +91,14 @@ fn a_tree_past_the_answers_budget_is_bounded_and_says_so() {
         "the default answer is {measured} characters, past the worker's {WORKER_CAP}"
     );
 
-    // `limit` is the caller's own bound, and a whole subtree fits under one.
     let ten = session.call("scene.get_tree", json!({"limit": 10}));
     assert!(paths(&ten).len() <= 10, "limit is the caller's own bound");
     assert_eq!(ten["truncated"], true);
 
-    // `depth` reads the shape of a wide tree without its contents.
     let shallow = session.call("scene.get_tree", json!({"depth": 0}));
     assert_eq!(paths(&shallow), vec!["/Level".to_owned()]);
     assert_eq!(shallow["truncated"], true, "the children were left out");
 
-    // `root` is how the rest is read: a leaf answers as itself, whole and untruncated.
     let leaf = session.call("scene.get_tree", json!({"root": "/Level/Marker199"}));
     assert_eq!(leaf["root"]["name"], "Marker199");
     assert_eq!(
@@ -112,7 +106,6 @@ fn a_tree_past_the_answers_budget_is_bounded_and_says_so() {
         "a leaf is the whole of its subtree"
     );
 
-    // A root the scene does not hold is named, not answered with an empty tree.
     let missing = session
         .try_call("scene.get_tree", json!({"root": "/Level/Nowhere"}), None)
         .expect_err("a root that is not in the scene is refused");
@@ -152,7 +145,6 @@ fn saving_a_scene_nobody_changed_leaves_the_file_alone() {
 
     let saved = session.mutate("scene.save", json!({}));
     assert_eq!(saved["dirty"], false);
-    // And it says so, rather than letting `dirty: false` be read as "written and clean".
     assert_eq!(saved["wrote"], false);
     let after = std::fs::read_to_string(&scene).expect("the scene is still on disk");
     assert_eq!(
@@ -160,7 +152,6 @@ fn saving_a_scene_nobody_changed_leaves_the_file_alone() {
         "a save of a scene nobody changed rewrote the file:\n--- before\n{before}\n--- after\n{after}"
     );
 
-    // And the skip is a skip, not a refusal: the very next real change still saves.
     session.mutate(
         "node.create",
         json!({"parent": "/ProtocolFixture", "name": "Marker", "type": "Marker2D"}),
@@ -185,7 +176,6 @@ fn saving_a_scene_nobody_changed_leaves_the_file_alone() {
 fn every_scene_command_answers_from_the_file_it_wrote() {
     let mut session = Session::start();
 
-    // create: the file has to exist and hold the root that was asked for, under the name asked for.
     let created = session.mutate(
         "scene.create",
         json!({"path": "res://readback.tscn", "rootType": "Node2D", "rootName": "Level"}),
@@ -203,7 +193,6 @@ fn every_scene_command_answers_from_the_file_it_wrote() {
         "the editor must be editing the scene that was created"
     );
 
-    // save: the node made since the create has to be in the file afterwards.
     session.mutate(
         "node.create",
         json!({"parent": "/Level", "name": "Marker", "type": "Marker2D"}),
@@ -217,7 +206,6 @@ fn every_scene_command_answers_from_the_file_it_wrote() {
         "scene.save answered clean about a file without the node:\n{on_disk}"
     );
 
-    // save_as: the new file holds the tree, and the editor now says it is editing that file.
     let elsewhere = session.mutate("scene.save_as", json!({"path": "res://elsewhere.tscn"}));
     assert_eq!(
         elsewhere["scene"], "res://elsewhere.tscn",
@@ -231,7 +219,6 @@ fn every_scene_command_answers_from_the_file_it_wrote() {
         .expect("scene.save_as must leave the file on disk");
     assert!(moved.contains("name=\"Marker\""), "{moved}");
 
-    // reload: a node that was never saved is gone, because the tree came off the disk again.
     session.mutate(
         "node.create",
         json!({"parent": "/Level", "name": "Unsaved", "type": "Marker2D"}),
@@ -266,7 +253,6 @@ fn every_node_command_answers_from_the_edited_tree() {
     let ledger = directory.path().join("ledger.json");
     let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
 
-    // A saved scene to place instances of.
     session.mutate(
         "scene.create",
         json!({"path": "res://coin.tscn", "rootType": "Area2D", "rootName": "Coin"}),
@@ -276,7 +262,6 @@ fn every_node_command_answers_from_the_edited_tree() {
         json!({"path": "res://tree.tscn", "rootType": "Node2D", "rootName": "Stage"}),
     );
 
-    // create
     let made = session.mutate(
         "node.create",
         json!({"parent": "/Stage", "name": "Pickup", "type": "Area2D"}),
@@ -287,7 +272,6 @@ fn every_node_command_answers_from_the_edited_tree() {
         "a created node the tree does not hold was never created"
     );
 
-    // instantiate
     let placed = session.mutate(
         "node.instantiate",
         json!({"parent": "/Stage", "path": "res://coin.tscn", "name": "Placed"}),
@@ -299,7 +283,6 @@ fn every_node_command_answers_from_the_edited_tree() {
         "Area2D"
     );
 
-    // duplicate
     let copied = session.mutate(
         "node.duplicate",
         json!({"node": "/Stage/Pickup", "name": "Second"}),
@@ -307,7 +290,6 @@ fn every_node_command_answers_from_the_edited_tree() {
     assert_eq!(copied["node"], "/Stage/Second");
     session.call("node.inspect", json!({"node": "/Stage/Second"}));
 
-    // rename
     let renamed = session.mutate(
         "node.rename",
         json!({"node": "/Stage/Second", "name": "Silver"}),
@@ -318,7 +300,6 @@ fn every_node_command_answers_from_the_edited_tree() {
         "Silver"
     );
 
-    // reparent
     session.mutate(
         "node.create",
         json!({"parent": "/Stage", "name": "Holder", "type": "Node2D"}),
@@ -333,7 +314,6 @@ fn every_node_command_answers_from_the_edited_tree() {
             .contains(&"/Stage/Holder/Silver".to_owned())
     );
 
-    // set_property: the reply carries the value the node holds, which is not always the one sent.
     let written = session.mutate(
         "node.set_property",
         json!({
@@ -359,7 +339,6 @@ fn every_node_command_answers_from_the_edited_tree() {
         "the write and the read have to agree: {inspected}"
     );
 
-    // groups
     let grouped = session.mutate(
         "node.add_to_group",
         json!({"node": "/Stage/Pickup", "group": "coins"}),
@@ -379,7 +358,6 @@ fn every_node_command_answers_from_the_edited_tree() {
         json!([])
     );
 
-    // signals: the connection has to be one the tree really carries, with the flags it recorded.
     session.mutate(
         "node.set_property",
         json!({
@@ -419,7 +397,6 @@ fn every_node_command_answers_from_the_edited_tree() {
             .is_empty()
     );
 
-    // delete
     let deleted = session.mutate("node.delete", json!({"node": "/Stage/Placed"}));
     assert_eq!(deleted["deleted"], true);
     assert!(
@@ -429,9 +406,6 @@ fn every_node_command_answers_from_the_edited_tree() {
         "a node reported deleted must be gone from the tree"
     );
 
-    // The root has no parent to be detached from, so this used to run, change nothing, and come
-    // back as a read-back mismatch comparing a path to a name — which a live turn was sent and
-    // could not act on. It is refused by name now, and the scene still has its root.
     let at = session.revision();
     let refused = session.error("node.delete", json!({"node": "/Stage"}), Some(at));
     assert!(refused.starts_with("cannot_delete_root"), "{refused}");
@@ -457,7 +431,6 @@ fn cells_and_resources_answer_from_what_they_wrote() {
     let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
     session.call("resource.rescan", json!({}));
 
-    // create_tileset: what the reply says has to be what the saved file holds.
     let built = session.call(
         "resource.create_tileset",
         json!({
@@ -485,7 +458,6 @@ fn cells_and_resources_answer_from_what_they_wrote() {
         "the collision the reply claimed has to be in the file: {described}"
     );
 
-    // create_shape: the reply names the class the file loads as, which is what fills a property.
     let shape = session.call(
         "resource.create_shape",
         json!({"path": "res://hitbox.tres", "shapeType": "RectangleShape2D", "size": [32, 48]}),
@@ -509,7 +481,6 @@ fn cells_and_resources_answer_from_what_they_wrote() {
         }),
     );
 
-    // set_cells: the tally the paint reports has to be the tally the layer answers.
     let painted = session.mutate(
         "node.set_cells",
         json!({
@@ -555,7 +526,6 @@ fn a_scene_is_created_in_a_directory_the_project_does_not_have_yet() {
         "{made}"
     );
 
-    // And `save_as` into another folder that does not exist either.
     let elsewhere = session.mutate(
         "scene.save_as",
         json!({"path": "res://levels/one/copy.tscn"}),
@@ -588,7 +558,6 @@ fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
-    // Two 16x16 tiles side by side, in a directory the editor has never walked.
     let drawn = session.call(
         "resource.create_texture",
         json!({
@@ -606,8 +575,6 @@ fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
     assert_eq!(drawn["replaced"], false, "{drawn}");
     assert!(worktree.join("art/atlas.png").exists(), "{drawn}");
 
-    // No rescan here on purpose: the draw waits for its own import, and a caller that had to
-    // remember a second call would forget it.
     let built = session.call(
         "resource.create_tileset",
         json!({
@@ -619,14 +586,12 @@ fn a_texture_this_tool_draws_is_one_create_tileset_can_cut() {
     );
     assert_eq!(built["grid"], json!([2, 1]), "{built}");
 
-    // Drawing over it again is a replacement, and says so.
     let again = session.call(
         "resource.create_texture",
         json!({"path": "res://art/atlas.png", "size": [32, 16], "background": "black"}),
     );
     assert_eq!(again["replaced"], true, "{again}");
 
-    // A colour nobody can write is refused rather than quietly drawn as black.
     let refused = session
         .try_call(
             "resource.create_texture",
@@ -667,7 +632,6 @@ fn a_floor_wider_than_the_window_is_drawn_and_a_runaway_is_still_refused() {
     assert_eq!(drawn["height"], 64, "{drawn}");
     assert!(worktree.join("art/floor.png").exists(), "{drawn}");
 
-    // Past the area, and the refusal says what it counted rather than what one side measured.
     let refused = session
         .try_call(
             "resource.create_texture",
@@ -678,7 +642,6 @@ fn a_floor_wider_than_the_window_is_drawn_and_a_runaway_is_still_refused() {
     assert!(refused.contains("holds at most"), "{refused}");
     assert!(!worktree.join("art/huge.png").exists(), "{refused}");
 
-    // And a side past the edge is still refused by the edge, whatever its area comes to.
     let refused = session
         .try_call(
             "resource.create_texture",
@@ -742,15 +705,12 @@ fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
         "nothing may be written above the project"
     );
 
-    // The gate reads paths, not values: a string that merely holds two dots is untouched.
     let drawn = session.call(
         "resource.create_texture",
         json!({"path": "res://art/dots..png.png", "size": 4, "background": "red"}),
     );
     assert_eq!(drawn["width"], 4, "{drawn}");
 
-    // And a node's own text may say anything, `../docs/readme` included. A game that puts a
-    // relative path on screen is not a game reaching out of its worktree.
     let mut session = session;
     let root = session.call("scene.get_tree", json!({}))["root"]["path"]
         .as_str()
@@ -768,9 +728,6 @@ fn a_path_that_climbs_out_of_the_project_is_refused_by_the_addon() {
             "value": {"type": "string", "value": "see ../docs/readme"}
         }),
     );
-    // `mutate` panics on a refusal, so arriving here is the assertion; and the addon ends every
-    // mutation by reading back what it wrote, so a write it did not make could not have got here
-    // either.
 }
 
 /// An asset written into a directory the editor has never seen is importable after `rescan` names
@@ -797,7 +754,6 @@ fn a_rescan_imports_an_asset_in_a_directory_made_after_the_editor_started() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
-    // The editor is already up, and neither the directory nor the file was there when it scanned.
     std::fs::create_dir_all(worktree.join("assets")).expect("make the assets directory");
     std::fs::write(worktree.join("assets/late.png"), ATLAS).expect("write the atlas");
 
@@ -808,8 +764,6 @@ fn a_rescan_imports_an_asset_in_a_directory_made_after_the_editor_started() {
         "a rescan that answers `scanned: true` has to have run the importer: no .import was written"
     );
 
-    // The proof that the import is real rather than a file on disk: the texture loads, and the one
-    // command that cannot be worked around by hand cuts tiles out of it.
     let built = session.call(
         "resource.create_tileset",
         json!({
@@ -841,8 +795,6 @@ fn a_rescan_imports_an_asset_again_after_its_first_import_failed() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
-    // A PNG header over bytes that decode to nothing — the shape a hand-written encoder produces,
-    // and the shape Godot's importer takes far enough to write a sidecar and then fails on.
     std::fs::create_dir_all(worktree.join("assets")).expect("make the assets directory");
     let mut broken = b"\x89PNG\r\n\x1a\n".to_vec();
     broken.extend_from_slice(&[0u8; 64]);
@@ -858,12 +810,10 @@ fn a_rescan_imports_an_asset_again_after_its_first_import_failed() {
         "an image that cannot be imported must not answer scanned: {refused:?}"
     );
 
-    // The same path, now a real atlas. Nothing else about the project changed.
     std::fs::write(worktree.join("assets/fixed.png"), ATLAS).expect("write the real atlas");
     let scanned = session.call("resource.rescan", json!({"path": "res://assets/fixed.png"}));
     assert_eq!(scanned["scanned"], true, "{scanned}");
 
-    // The proof that the import is real: the one command that cannot be faked cuts tiles out of it.
     let built = session.call(
         "resource.create_tileset",
         json!({
@@ -953,7 +903,6 @@ fn history_commands_answer_from_the_editors_own_history() {
         "a redo that reports a step must have taken one"
     );
 
-    // Nothing left to walk is a refusal, not a step reported against an empty history.
     assert!(
         session
             .try_mutate("session.redo", json!({}))
@@ -977,7 +926,6 @@ fn every_configuration_command_answers_from_godot() {
     let project =
         || std::fs::read_to_string(worktree.join("project.godot")).expect("project.godot");
 
-    // set_setting
     let set = session.call(
         "project.set_setting",
         json!({"name": "readback/knob", "value": {"type": "int", "value": 7}}),
@@ -990,14 +938,6 @@ fn every_configuration_command_answers_from_godot() {
     );
     assert!(project().contains("knob=7"), "{}", project());
 
-    // reset_setting
-    //
-    // The answer has to say what it did. It used to answer `{name, exists}`, and `exists` is
-    // `has_setting`, which is true of every setting that ships a default — so for anything but an
-    // invented name it read `true` before the call and `true` after it, and told the caller only
-    // that they had spelled a real name. A live turn reset `rendering/renderer/rendering_method`,
-    // was answered `exists: true`, and had no way to tell that from a reset that had not happened;
-    // the two calls beside it in the same batch answered `removed: true`.
     let reset = session.call("project.reset_setting", json!({"name": "readback/knob"}));
     assert_eq!(reset["changed"], true, "{reset}");
     assert_eq!(
@@ -1016,8 +956,6 @@ fn every_configuration_command_answers_from_godot() {
         "a setting reported reset must be gone"
     );
 
-    // And a setting that ships a default goes back to it rather than out of the file, which is the
-    // shape the live turn actually met: still there afterwards, with a different value.
     session.call(
         "project.set_setting",
         json!({"name": "physics/2d/default_gravity", "value": {"type": "float", "value": 1400.0}}),
@@ -1037,15 +975,12 @@ fn every_configuration_command_answers_from_godot() {
         "a reverted setting must answer with the value it now reads as: {reverted}"
     );
 
-    // Resetting what is already at its default changes nothing, and says so rather than claiming
-    // a write. This is the one case the old `exists` field could not express at all.
     let again = session.call(
         "project.reset_setting",
         json!({"name": "physics/2d/default_gravity"}),
     );
     assert_eq!(again["changed"], false, "{again}");
 
-    // set_autoload
     let autoload = session.call(
         "project.set_autoload",
         json!({"name": "ReadbackHelper", "path": "res://tests/protocol_test.gd"}),
@@ -1061,7 +996,6 @@ fn every_configuration_command_answers_from_godot() {
         "res://tests/protocol_test.gd"
     );
 
-    // remove_autoload
     session.call("project.remove_autoload", json!({"name": "ReadbackHelper"}));
     assert!(
         named(
@@ -1073,7 +1007,6 @@ fn every_configuration_command_answers_from_godot() {
         "an autoload reported removed must be gone from project.godot"
     );
 
-    // set_input_action: the reply's events are the ones the file now holds.
     let action = session.call(
         "project.set_input_action",
         json!({"name": "readback_jump", "events": [{"kind": "key", "key": "Space"}]}),
@@ -1089,7 +1022,6 @@ fn every_configuration_command_answers_from_godot() {
         action["events"]
     );
 
-    // remove_input_action
     session.call(
         "project.remove_input_action",
         json!({"name": "readback_jump"}),
@@ -1100,7 +1032,6 @@ fn every_configuration_command_answers_from_godot() {
         project()
     );
 
-    // reset_input_action: the override leaves project.godot, and the engine's binding takes over.
     session.call(
         "project.set_input_action",
         json!({"name": "ui_accept", "events": [{"kind": "key", "key": "F9"}]}),
@@ -1116,7 +1047,6 @@ fn every_configuration_command_answers_from_godot() {
         project()
     );
 
-    // set_plugin_enabled: what the editor says about the plugin, not what it was asked to do.
     let toggled = session.call(
         "project.set_plugin_enabled",
         json!({"plugin": "gofer", "enabled": true}),
@@ -1127,8 +1057,6 @@ fn every_configuration_command_answers_from_godot() {
         "a plugin already enabled was not changed"
     );
 
-    // editor.set_setting: machine-wide, so it is written back to itself — and the reply carries the
-    // value the editor holds rather than the one it was handed.
     let candidate =
         session.call("editor.search_settings", json!({"query": "font_size"}))["settings"]
             .as_array()
@@ -1217,8 +1145,6 @@ fn a_resource_this_tool_wrote_carries_a_uid_the_project_can_resolve() {
 
     registered(&worktree, "res://shapes/coin.tres", &stamped);
 
-    // A tileset is the other `.tres` this tool writes, and a scene is the third file that carries a
-    // stamped UID. Both are referenced by UID from somewhere else the moment they exist.
     session.call(
         "resource.create_texture",
         json!({"path": "res://art/atlas.png", "size": [16, 16], "background": "#3b2a1a"}),
@@ -1232,10 +1158,6 @@ fn a_resource_this_tool_wrote_carries_a_uid_the_project_can_resolve() {
         }),
     );
     registered(&worktree, "res://art/world.tres", "the tileset");
-
-    // Not a scene: `scene.create` is answered from a later frame by the scene-switch machinery,
-    // which has nowhere to park a walk, and starting one beside the switch makes the two contend —
-    // measured, once, at the switch's own 90s timeout. A scene's UID is still unregistered.
 }
 
 /// The project's own UID table, as the running game reads it.
@@ -1291,11 +1213,9 @@ fn creating_a_scene_over_one_that_exists_is_refused_rather_than_done() {
     assert!(refused.contains("scene.open"), "{refused}");
     assert!(refused.contains("scene.save_as"), "{refused}");
 
-    // And the file is exactly as it was.
     let after = std::fs::read_to_string(worktree.join("level.tscn")).expect("the scene");
     assert_eq!(before, after, "nothing may be written by a refused create");
 
-    // A path nothing holds is still created.
     session.mutate(
         "scene.create",
         json!({"path": "res://levels/two.tscn", "rootType": "Node2D", "rootName": "Two"}),

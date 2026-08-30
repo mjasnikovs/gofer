@@ -1,15 +1,5 @@
 extends SceneTree
 
-# The addon's value codec, exercised without an editor.
-#
-# `protocol.gd` is the half of the addon that needs no editor — it is loaded from source rather
-# than staged, so the round trip every scene write depends on is checked in a second instead of
-# costing a booted editor. That is what this file is for, and all it is for.
-#
-# It used to carry a third hand-written implementation of the version 2 envelope contract, walking
-# the same golden fixtures as the JSON Schemas and as Rust. Two of those three read the same JSON
-# the same way and proved nothing about any running code; the schemas are the spec and
-# `protocol_v2.rs` is what the wire is actually held to.
 
 const PROTOCOL_SOURCE := "res://../../src-tauri/addon/protocol.gd"
 
@@ -81,8 +71,6 @@ func _test_codec(failures: Array[String]) -> void:
         if round_trip["value"] != sample:
             failures.append("A %s decoded as %s" % [sample, round_trip["value"]])
 
-    # A malformed payload is refused rather than coerced. Each of these once had to be found by a
-    # wrong value sitting in a saved scene.
     var refusals := {
         "a value that is not tagged at all": 7,
         "a bool with a numeric payload": {"type": "bool", "value": 1},
@@ -92,8 +80,6 @@ func _test_codec(failures: Array[String]) -> void:
         "an array that is not an array": {"type": "array", "value": 1},
         "a dictionary entry with no key": {"type": "dictionary", "value": [{"value": 1}]},
         "a tag nothing writes": {"type": "sprite", "value": null},
-        # Encode describes a live object rather than encoding it, so decode must refuse the tag
-        # instead of building a placeholder that would be saved into the scene.
         "a node reference": {"type": "node", "value": {"path": "/root", "nodeType": "Node"}},
         "an opaque value": {"type": "opaque", "value": {"typeName": "Callable", "text": ""}}
     }
@@ -104,10 +90,6 @@ func _test_codec(failures: Array[String]) -> void:
         elif str(refused["message"]).is_empty():
             failures.append("The codec refused %s without saying why" % what)
 
-    # A colour may be named or written as hex, because Godot reads both and
-    # `resource.create_texture` takes both. A `color` value that refused them made the same tool
-    # spell a colour two ways, and one live turn wrote "red" here and was told a colour is four
-    # numbers.
     for spelling in ["red", "skyblue", "#8b5a2b", "8b5a2b"]:
         var named: Dictionary = protocol.call("decode", {"type": "color", "value": spelling})
         if not named["ok"] or typeof(named["value"]) != TYPE_COLOR:
@@ -138,29 +120,18 @@ func _test_declared_types(protocol: GDScript, failures: Array[String]) -> void:
     var mismatched: Dictionary = protocol.call("fit_to_declared_type", "12", TYPE_INT)
     if mismatched["ok"]:
         failures.append("A string must not fit an int")
-    # The mirror of the widening above. JSON has one number type, so a caller writing 1 for an
-    # `int` property reaches here as 1.0 whenever its serialiser renders whole numbers with a
-    # point. Watched live: `alignment: 1.0` on a VBoxContainer, answered `expected int, received
-    # float` about a number that is an integer.
     var narrowed: Dictionary = protocol.call("fit_to_declared_type", 1.0, TYPE_INT)
     if not narrowed["ok"] or typeof(narrowed["value"]) != TYPE_INT or narrowed["value"] != 1:
         failures.append("A whole float must fit an int")
     var negative: Dictionary = protocol.call("fit_to_declared_type", -3.0, TYPE_INT)
     if not negative["ok"] or negative["value"] != -3:
         failures.append("A negative whole float must fit an int")
-    # And one that is a hair off it. `int()` cuts toward zero rather than to the nearest, so
-    # -2.9999999999999996 — which is how a serialiser writes -3 — passed the whole-number check and
-    # was written as -2: the silent loss the check is here to stop, on the number it was meant to
-    # let through. The mirror is refused rather than lost: floor(-3.0000000000000004) is -4, which
-    # is nothing like it, so the whole-number check said no to a whole number.
     var under: Dictionary = protocol.call("fit_to_declared_type", -2.9999999999999996, TYPE_INT)
     if not under["ok"] or under["value"] != -3:
         failures.append("A float a hair under a negative whole number must fit that number")
     var over: Dictionary = protocol.call("fit_to_declared_type", -3.0000000000000004, TYPE_INT)
     if not over["ok"] or over["value"] != -3:
         failures.append("A float a hair past a negative whole number must fit that number")
-    # And a fraction must not: dropping it is a silent loss, and a caller that meant 1.5 is better
-    # told than quietly given 1.
     var fractional: Dictionary = protocol.call("fit_to_declared_type", 1.5, TYPE_INT)
     if fractional["ok"]:
         failures.append("A fractional float must not fit an int")
@@ -199,8 +170,6 @@ func _test_frame_composite(failures: Array[String]) -> void:
     if composed.get_pixel(2, 2) != red or composed.get_pixel(5, 5) != red:
         failures.append("A window must not be drawn past its own edges")
 
-    # A window half off the screen is ordinary — a dialog dragged to the edge, or one wider than
-    # the editor behind it. The part that overlaps is drawn and the rest is dropped.
     var clipped: Image = protocol.call("compose_frame", _filled(8, 8, red), [
         {"image": _filled(4, 4, blue), "offset": Vector2i(6, 6)}
     ])
@@ -219,8 +188,6 @@ func _test_frame_composite(failures: Array[String]) -> void:
     if outside.get_pixel(7, 7) != red:
         failures.append("A window entirely off the screen must leave the screen alone")
 
-    # Two windows, and the later one wins where they overlap, which is the order they are stacked
-    # in. Nothing else can be said about a screenshot of overlapping windows.
     var stacked: Image = protocol.call("compose_frame", _filled(8, 8, red), [
         {"image": _filled(4, 4, blue), "offset": Vector2i(0, 0)},
         {"image": _filled(2, 2, Color(0, 1, 0)), "offset": Vector2i(0, 0)}
@@ -228,13 +195,10 @@ func _test_frame_composite(failures: Array[String]) -> void:
     if stacked.get_pixel(0, 0) != Color(0, 1, 0) or stacked.get_pixel(3, 3) != blue:
         failures.append("Windows must be composited in the order they are given")
 
-    # Nothing open is the common case, and it must cost the caller nothing.
     var alone: Image = protocol.call("compose_frame", _filled(8, 8, red), [])
     if alone.get_pixel(4, 4) != red:
         failures.append("A capture with no windows over it must be the window itself")
 
-    # A value under the wrong tag is told which tag the property takes, and every tag named here is
-    # one `decode` really reads — checked against `decode` rather than against a list.
     var tags: Dictionary = protocol.get("TAG_FOR_TYPE")
     for declared in tags:
         var tag: String = tags[declared]
@@ -249,11 +213,9 @@ func _test_frame_composite(failures: Array[String]) -> void:
     for named in ["expected Color", '"type": "color"', "#5c8a3c", "hex string"]:
         if not str(wrong.get("message", "")).contains(named):
             failures.append("a colour under the wrong tag must name %s" % named)
-    # Every other type names its tag rather than the value, because the value is not the answer.
     var number: Dictionary = protocol.call("fit_to_declared_type", "3", TYPE_INT)
     if not str(number.get("message", "")).contains('"type": "int"'):
         failures.append("an int under the wrong tag names the int tag")
-    # A type with no tag gains no sentence rather than an invented one.
     if not str(protocol.call("under_the_tag_it_takes", TYPE_CALLABLE, "x")).is_empty():
         failures.append("a type with no tag must gain nothing")
 

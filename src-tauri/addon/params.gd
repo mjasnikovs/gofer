@@ -211,7 +211,6 @@ static func build_shape(shape_type: String, params: Dictionary) -> Dictionary:
             segment.a = Vector2(points[0], points[1])
             segment.b = Vector2(points[2], points[3])
             return {"value": segment}
-    # A world boundary is the infinite floor a 2D level rests on and takes no dimensions.
     return {"value": WorldBoundaryShape2D.new()}
 
 
@@ -422,11 +421,6 @@ const NO_SCENE_HOLDS := {
         + " the preset — 0 and 1 are the edges, so 0, 0, 1, 1 is the whole parent — with"
         + " offset_right and offset_bottom at 0 to sit flush."
     ),
-    # The property the sentence above tells a caller to set, which most nodes will not take either.
-    # Measured on 4.7.2, every shape, every value: a Control with no Control parent holds 3 whatever
-    # is written; a Control inside a Container holds 2 whatever is written; a Control under a plain
-    # Control takes 0 and 1, and 2 and 3 there fall back to 0. So the parent decides it and the
-    # write only reports whether the caller agreed.
     "layout_mode":
     (
         " `layout_mode` says where a Control already sits, and its parent decides it — a write"
@@ -944,7 +938,6 @@ static func instance_cycle(path: String, open_scene: String) -> String:
             continue
         seen[next] = true
         for dependency in ResourceLoader.get_dependencies(next):
-            # A dependency may be written as "type::uid::path"; the path is the last field.
             var parts := String(dependency).split("::")
             var resolved: String = parts[parts.size() - 1]
             if resolved == open_scene:
@@ -1106,20 +1099,10 @@ static func node_properties(node: Node, wanted: Array[String] = []) -> Array:
         var property_name := str(info.get("name", ""))
         if property_name.is_empty():
             continue
-        # A name the caller asked for is answered, whatever the inspector would do with it. The
-        # filters below shape a list nobody chose; a caller who named `global_position` has chosen,
-        # and every one of those filters would answer them "this node has no such property" about a
-        # property `set_property` writes perfectly well — with the only pointer being `node.inspect`
-        # itself, which is the call that just refused it. `script` is the same case: left out of the
-        # whole list because it is the node's own script rather than a property of it, and answered
-        # the moment anybody names it.
         if not wanted.is_empty():
             if not wanted.has(property_name):
                 continue
         else:
-            # Both halves of the inspector, and nothing that carries neither flag: `global_position`
-            # and friends are `PROPERTY_USAGE_NONE` and would otherwise be listed twice over, once
-            # as themselves and once as the `position` they are computed from.
             if not (usage & (PROPERTY_USAGE_STORAGE | PROPERTY_USAGE_EDITOR)):
                 continue
             if property_name == "script":
@@ -1147,18 +1130,11 @@ static func nearest_property(node: Node, property: String) -> String:
         var name := str(entry.get("name", ""))
         if name.is_empty() or name.contains("/"):
             continue
-        # The list carries the inspector's own headings — a Sprite2D's `Transform` sits in it beside
-        # its `transform` — and answering `Did you mean Transform?` sends a caller to a name that is
-        # not a property at all.
         var usage := int(entry.get("usage", 0))
         if usage & (PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP):
             continue
         var plain := name.to_lower().replace("_", "")
         if plain == wanted:
-            # Spelled the same way, so there is nothing to correct and `Did you mean script?` about
-            # `script` is what a caller was told. A near miss of case or underscores is still worth
-            # answering — `Position` for `position` is a real correction — so only an exact match
-            # is dropped.
             return "" if name == property else name
         if mini(plain.length(), wanted.length()) < 4:
             continue
@@ -1238,10 +1214,6 @@ static func where_a_method_would_be(target: Node, method: String = "") -> String
             + "lives elsewhere."
         )
     var named: Array[String] = []
-    # `get_script_method_list` belongs to Script, not to Object: `node.get_script_method_list()`
-    # is a runtime error, and a runtime error inside a message builder is a message that never
-    # arrives. Measured against the pinned editor — `Node2D.has_method("get_script_method_list")`
-    # is false, and the same call on the script it carries answers the methods.
     for entry in (script as Script).get_script_method_list():
         var name := str(entry.get("name", ""))
         if not name.is_empty() and not name.begins_with("@"):
@@ -1252,8 +1224,6 @@ static func where_a_method_would_be(target: Node, method: String = "") -> String
             + "defaults to the scene root, so name it if the method lives elsewhere."
         )
     named.sort()
-    # The script has it and the node does not, which is one situation rather than two facts that
-    # contradict each other. See `a_method_the_script_has_and_the_node_has_not`.
     var stale := a_method_the_script_has_and_the_node_has_not(method, named)
     if not stale.is_empty():
         return stale
@@ -1277,19 +1247,15 @@ static func fit_to_property(node: Node, property: String, value: Variant) -> Dic
         if str(info.get("name", "")) == property:
             declared = info
             break
-    # A property reachable through `in` but absent from the list is the script's own business.
     if declared.is_empty():
         return Protocol.decoded(value)
     var wanted := int(declared.get("type", TYPE_NIL))
-    # Clearing a resource or a node reference is what null is for, and every object takes it.
     if value == null and wanted == TYPE_OBJECT:
         return Protocol.decoded(null)
     var fitted := Protocol.fit_to_declared_type(value, wanted)
     if not fitted["ok"]:
         return fitted
     var wanted_class := str(declared.get("class_name", ""))
-    # Only an engine class is checked: a property typed with a script's `class_name` reports that
-    # name here, and the resource carrying that script is an ordinary Resource to `is_class`.
     if wanted != TYPE_OBJECT or wanted_class.is_empty() or not ClassDB.class_exists(wanted_class):
         return fitted
     var object: Object = fitted["value"]

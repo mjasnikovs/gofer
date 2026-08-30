@@ -207,9 +207,6 @@ fn committed_workspace(root: &Path) -> PathBuf {
     git(&workspace, &["init", "--quiet", "--initial-branch", "main"]);
     git(&workspace, &["config", "user.email", "journey@gofer.test"]);
     git(&workspace, &["config", "user.name", "Gofer journey"]);
-    // Git for Windows installs `core.autocrlf=true`, which would check every task worktree out
-    // with CRLF and leave this journey asserting Git's line-ending policy instead of Gofer's own
-    // round trip. The fixture repository hands back the bytes it was given, on every platform.
     git(&workspace, &["config", "core.autocrlf", "false"]);
     git(&workspace, &["config", "core.eol", "lf"]);
     git(&workspace, &["add", "--all"]);
@@ -236,10 +233,6 @@ struct Journey {
 
 impl Drop for Journey {
     fn drop(&mut self) {
-        // Ahead of stopping the session, for the reason `run_ai_worker_with` closes it ahead of
-        // joining its tool threads: a gated call still waiting on a user it will never get holds
-        // the thread that is about to be asked to shut the editor down. `_run`'s own `Drop` closes
-        // it again once this body has finished — this is the one place the order matters.
         crate::ask::cancel_user_prompts();
         let _ = ai_tools::dispatch(
             self.app.handle(),
@@ -253,9 +246,6 @@ impl Drop for Journey {
 
 impl Journey {
     fn start() -> Self {
-        // Every other acceptance module binds an editor it launched itself. This one drives the
-        // supervised session, so any binding still standing — including one a module that panicked
-        // never took down — is dropped before anything runs.
         godot_session::bind(None);
 
         let directory = TempDir::new().expect("temporary directory");
@@ -263,19 +253,9 @@ impl Journey {
         let workspace = committed_workspace(&root);
 
         let environment = vec![
-            // The supervisor launches the editor the user would see. A gate has no display, and
-            // the journey's whole point is that it is the supervisor's own launch.
             EnvGuard::set("GOFER_GODOT_HEADLESS", "1"),
-            // The cleanup ledger lives in application data. Redirected, so a journey can never
-            // stage into — or unstage out of — the developer's own Gofer installation.
             EnvGuard::set("XDG_DATA_HOME", root.join("app-data")),
             EnvGuard::set("APPDATA", root.join("app-data")),
-            // The editor the supervisor launches inherits this process's environment, and going
-            // ready now applies the Godot rules — one of which, `game_embed_mode`, is a
-            // machine-wide EditorSetting. Without this, a journey would quietly rewrite the
-            // editor configuration the developer running the suite uses for their own work. The
-            // other acceptance modules get this from the harness, which launches the editor
-            // itself; this one drives the real supervisor, so it sets them here.
             EnvGuard::set("XDG_CONFIG_HOME", root.join("editor-config")),
             EnvGuard::set("XDG_CACHE_HOME", root.join("editor-cache")),
         ];
@@ -284,19 +264,10 @@ impl Journey {
         let app = tauri::test::mock_builder()
             .build(crate::app_context())
             .expect("build mock Tauri app");
-        // Approvals are shown in the main window, and a backend without one refuses rather than
-        // deciding for the user.
         tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
             .expect("build mock webview");
         app.manage(crate::storage::StorageSlot::new(Ok(storage.clone())));
-        // A turn is running: gated tool calls only ever wait for a user inside one. The real
-        // guard, rather than the approval half of it copied out by hand — which left every
-        // `ask_user` a journey made refused by a gate nothing here had opened.
-        //
-        // Nothing reads the stream. A journey drives `ai_tools::dispatch` directly rather than
-        // spawning a worker, so there are no agent events to carry; the turn is what owns the
-        // channel, so one has to exist.
         let turn = crate::ai_turn::AiTurn::begin(1, tauri::ipc::Channel::new(|_| Ok(())))
             .expect("no other AI turn is running");
         let run = crate::ai_turn::WorkerRun::enter(&turn);
@@ -329,8 +300,6 @@ impl Journey {
             .tasks()
             .active_workspace()
             .expect("the new task must have a branch");
-        // The session spells its directory the way `paths::canonical` does, which on Windows is
-        // the plain path and not the verbatim one `fs::canonicalize` returns.
         crate::paths::canonical(&workspace).expect("canonical workspace")
     }
 
@@ -484,11 +453,6 @@ fn approve_when_asked() -> thread::JoinHandle<usize> {
 fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     let journey = Journey::start();
 
-    // 1. Connect to a task worktree.
-    //
-    // The session is bound to the task's own checkout, never to the user's. That is the whole
-    // reason the supervisor refuses `agent_workspace`'s fallback: staging writes files and edits
-    // project.godot, and doing that in the main checkout is not something an undo can take back.
     let worktree = journey.new_task();
     let session = journey.start_session();
     assert_eq!(
@@ -512,19 +476,12 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "the session runs on the task's own branch in the project's one checkout"
     );
     assert!(read(&worktree, "project.godot").contains("GoferRuntime"));
-    // The editor's own output is captured by the supervisor and archived against this session, so
-    // the engine banner is both proof that a real editor started and the first line of the run.
     assert!(
         session_output().contains("Godot Engine v4.7.2"),
         "the session must capture the editor's own output:\n{}",
         session_output()
     );
 
-    // The sentence the model is handed about this session, against the session it describes. It
-    // names the engine and the readiness and not the worktree's own path — that path is one every
-    // path-taking tool refuses, and naming it here is the only way a model can learn it. Measured:
-    // with it, twenty of twenty turns asked to use the shell wrote a command the confinement rule
-    // refused; without it, none did. See `ai_turn::describe_session`.
     let described = crate::ai_turn::describe_session(journey.app.handle());
     assert!(
         described.starts_with("Editor session: ready. Godot 4.7.2"),
@@ -539,7 +496,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "the session sentence must say how a path is spelled instead: {described}"
     );
 
-    // 2. Inspect and mutate a scene, undo it, redo it, and explicitly save.
     let opened = journey.call("godot_scene", "open", json!({"path": SCENE_PATH}));
     assert_eq!(opened["scene"], SCENE_PATH);
     let mut revision = opened["revision"]
@@ -567,8 +523,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
             .contains(&MARKER_NAME.into())
     );
 
-    // A stale revision is refused rather than applied to a scene that moved on: the marker is
-    // already there, so this write is exactly what a second author would send.
     let stale = journey.error(
         "godot_node",
         "rename",
@@ -603,13 +557,11 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
             .contains(&MARKER_NAME.into())
     );
 
-    // Nothing reached disk until the save, which is the point of keeping it a separate operation.
     assert!(!read(&worktree, SCENE_FILE).contains(MARKER_NAME));
     let saved = journey.call("godot_scene", "save", json!({"expectedRevision": revision}));
     assert_eq!(saved["dirty"], false);
     assert!(read(&worktree, SCENE_FILE).contains(MARKER_NAME));
 
-    // 3. Create/edit a script, fix diagnostics, format it, rename a symbol, navigate references.
     let broken = journey.open_script(BROKEN_PATH);
     assert_eq!(broken["text"], BROKEN_SCRIPT);
     let reported = journey.call(
@@ -625,8 +577,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "the parse error must be reported: {reported}"
     );
 
-    // No `expectedHash`. The open above put the file's hash in the router's ledger, and the save
-    // is held to it from there — a caller never carries one, and no answer hands one out.
     assert!(
         broken["hash"].is_null(),
         "an open must not put a hash in front of its caller: {broken}"
@@ -649,11 +599,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     );
     assert_eq!(read(&worktree, BROKEN_PATH), FIXED_SCRIPT);
 
-    // Formatting is allowed to ship disabled, so the journey accepts either the pin doing its work
-    // or the documented unavailable state, and nothing in between. Which one is legitimate is not
-    // left open: a machine that has the sidecar — CI builds it with `npm run build:gdformat` and
-    // exports this variable — must take the branch where formatting ran, because a `match` that
-    // accepts both is a green run that proves nothing about the formatter.
     let sidecar_available = std::env::var_os(crate::gdformat::ENV_OVERRIDE).is_some();
     match journey
         .try_call(
@@ -669,10 +614,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
                 "format",
                 json!({"source": formatted["formatted"]}),
             );
-            // Both strings, escaped, because the bare assertion said only `true != false`. The pin
-            // is idempotent for this input as a file, through stdin, and frozen — measured on this
-            // machine and on a clean ubuntu-24.04 — so a run that fails here is holding two
-            // versions of the same script that differ somewhere invisible.
             assert_eq!(
                 again["changed"], false,
                 "formatting must be idempotent\n  once:  {:?}\n  twice: {:?}",
@@ -744,10 +685,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         );
     }
 
-    // 4. Set a breakpoint, run, inspect stack/variables, evaluate, step, and continue.
-    //
-    // The breakpoint rides out with the launch, because Godot answers the launch only once
-    // `configurationDone` spawns the game — the order is the adapter's, not the caller's.
     let launched = journey.call(
         "godot_debug",
         "launch",
@@ -795,8 +732,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     );
     assert_eq!(evaluated["result"], "2", "{evaluated}");
 
-    // Step-out is Gofer's own emulation: Godot 4.7 has no `stepOut` handler, so bounded step-overs
-    // run until the stack depth drops back into the caller.
     let stepped = journey.call("godot_debug", "step_out", json!({}));
     assert_eq!(stepped["outcome"]["kind"], "steppedOut", "{stepped}");
     assert_eq!(
@@ -804,8 +739,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "_process"
     );
 
-    // With the breakpoint cleared the game runs free again, and terminating it leaves the adapter
-    // in place for the runtime loop that follows.
     journey.call(
         "godot_debug",
         "set_breakpoints",
@@ -817,7 +750,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     );
     journey.call("godot_debug", "terminate", json!({}));
 
-    // 5. Inspect the runtime tree, inject input, and capture the changed game screen.
     let run = journey.call(
         "godot_runtime",
         "run",
@@ -838,8 +770,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
             && running.contains(&"JourneyProbe".to_owned()),
         "the runtime helper and the main scene must both be live: {running:?}"
     );
-    // The edited scene and the running scene stay separate concepts: the marker was saved into the
-    // file, and the game running from it is a different tree with a different question to ask.
     assert!(
         !running.contains(&MARKER_NAME.to_owned()),
         "the running tree is the game's, not the edited scene's: {running:?}"
@@ -885,7 +815,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     );
     journey.call("godot_runtime", "stop", json!({}));
 
-    // 6. Edit project settings and approve one machine-wide editor setting.
     let written = journey.call(
         "godot_project",
         "set_setting",
@@ -901,9 +830,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         json!({"type": "bool", "value": true})
     );
 
-    // A machine-wide editor setting is the one write the task cannot roll back, so it stops and
-    // waits for the user. It is written back to itself: the developer's own settings file must not
-    // change under a test, and what is being proven is the gate, not the value.
     let found = journey.call(
         "godot_project",
         "search_editor_settings",
@@ -929,11 +855,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "the machine-wide write must have waited for exactly one answer"
     );
 
-    // 7. Retrieve relevant Godot documentation.
-    //
-    // The embedding index is the one thing that cannot be a fixture, so the retrieve sidecar's
-    // model call is scripted the way the acceptance model is. Everything downstream of it is real:
-    // the Node worker, its response framing, the vector stripping, and the router.
     let _cache = EnvGuard::set("GOFER_RAG_CACHE_DIR", journey.directory.path().join("rag"));
     let _worker = EnvGuard::set(
         "GOFER_RAG_RETRIEVE_WORKER",
@@ -946,8 +867,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
     let docs = journey.call(
         "godot_docs_search",
         "search",
-        // No `maxPassages`: how many passages clear the relevance gate is the search's decision,
-        // not the model's, so the model is no longer offered a number it cannot reason about.
         json!({"question": "How do I connect a signal?", "maxTextChars": 40}),
     );
     let passages = docs["passages"]
@@ -970,7 +889,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "a raw embedding must never reach the model or the renderer: {docs}"
     );
 
-    // 8. Switch tasks and verify complete cleanup and rebinding.
     let exclude = journey.workspace.join(".git").join("info").join("exclude");
     assert!(
         std::fs::read_to_string(&exclude)
@@ -994,8 +912,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "the project setting the task made must survive the session that made it:\n{project}"
     );
 
-    // The scene as the first task's branch records it, read before the switch. Nothing the second
-    // task does may write over it, and nothing the first task's editor still held may either.
     let first_branch = journey.current_branch();
     let scene_on_first_branch = read(&worktree, SCENE_FILE);
     assert!(scene_on_first_branch.contains(MARKER_NAME));
@@ -1010,16 +926,10 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         second_branch, first_branch,
         "a second task gets its own branch, and opening it moves the checkout"
     );
-    // The measured failure this whole design exists to prevent. Godot holds every open scene in
-    // memory and never rereads one a checkout changed underneath it: an editor left running through
-    // a switch writes the outgoing task's copy over the incoming task's file on the next save, with
-    // no error anywhere. Creating the task stopped the session, so there was no editor to do it.
     assert!(
         godot_session::current_info().is_none(),
         "opening another task must stop the editor before the checkout moves"
     );
-    // The second branch came off the commit, not off the first task, so none of the first task's
-    // work is visible in it.
     assert!(!read(&second, SCENE_FILE).contains(MARKER_NAME));
     assert!(!read(&second, "project.godot").contains("gofer_journey"));
 
@@ -1039,12 +949,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         "the rebound editor must show the second task's scene"
     );
 
-    // 9. Delete the task the editor is running in.
-    //
-    // Deleting is how the sidebar gets rid of a task, and an editor running in the project is
-    // exactly when that is inconvenient: the session has to stop first, the addon has to come out
-    // with it, the branch has to be gone afterwards, and the checkout has to end up somewhere the
-    // user can still work.
     let before = journey.storage.tasks().list().expect("list tasks");
     let doomed = before
         .iter()
@@ -1057,7 +961,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         .expect("the second task's branch")
         .branch_name
         .clone();
-    // The real Switch: the same `leave_task` a deletion runs in the app, not a re-spelling of it.
     let release = |worktree: &Path| crate::leave_task(journey.app.handle(), worktree);
     let replacement = journey
         .storage
@@ -1085,7 +988,6 @@ fn the_final_journey_takes_one_task_from_connect_to_a_second_task() {
         branch,
         "the checkout must be moved off the branch being deleted, not left on it"
     );
-    // Only the deleted task goes: the first task keeps its place in the list and its checkout.
     let remaining = journey.storage.tasks().list().expect("remaining tasks");
     assert_eq!(remaining.len(), before.len() - 1);
     assert!(!remaining.iter().any(|task| task.id == doomed.id));
@@ -1122,10 +1024,6 @@ fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
     journey.new_task();
     journey.start_session();
 
-    // The rules are applied off the watch's own thread, so the editor is asked until it agrees
-    // rather than once at whatever moment this line runs. Its own deadline, and a short one: the
-    // session is already ready by here, and a watch that is not running never agrees at all — so
-    // this is how long a failure takes, not how long a pass does.
     let settle = |tool: &str, name: &str, want: Value| -> Result<(), Value> {
         let deadline = Instant::now() + POLICY_TIMEOUT;
         loop {
@@ -1152,7 +1050,6 @@ fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
         );
     }
 
-    // All five, because four of them without the first still let an untyped `var` through.
     for warning in STRICT_TYPING_WARNINGS {
         assert_eq!(
             journey.call("godot_project", "get_setting", json!({"name": warning}))["value"],
@@ -1162,11 +1059,6 @@ fn a_session_nobody_subscribed_to_still_gets_the_rules_the_user_chose() {
         );
     }
 
-    // The other half of the same policy, and the half nothing used to read back here. It is an
-    // EditorSetting rather than a project one, so it is asked for through the editor's own store —
-    // and it is written last, so it is settled for separately rather than assumed from the
-    // warnings. 1 is Embed Game; 0 is the per-project default a session that never applied it
-    // leaves behind.
     if let Err(last) = settle(
         "get_editor_setting",
         GAME_EMBED_MODE,

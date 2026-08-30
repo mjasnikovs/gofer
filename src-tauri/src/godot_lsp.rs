@@ -403,8 +403,6 @@ impl LspClient {
                     return Err(LspError::closed());
                 }
             }
-            // Nothing published yet is a legitimate answer, so a stopped turn ends the wait the
-            // same way its deadline would rather than failing the call.
             if Instant::now() >= deadline || crate::cancel::is_cancelled() {
                 return Ok(None);
             }
@@ -695,7 +693,6 @@ impl LspClient {
 
 impl Drop for LspClient {
     fn drop(&mut self) {
-        // Best effort only: the editor may already be dead, so no shutdown handshake here.
         self.close(LspError::closed());
     }
 }
@@ -718,8 +715,6 @@ pub fn plan_workspace_edit(
     workspace: &Workspace,
     edit: &WorkspaceEdit,
 ) -> Result<Vec<PlannedFile>, LspError> {
-    // `documentChanges` wins outright when the server sends both: the protocol says so, and
-    // merging the two would plan the same file twice and fail its own concurrency check.
     let mut changes: Vec<(Url, Vec<TextEdit>)> = Vec::new();
     match &edit.document_changes {
         Some(DocumentChanges::Edits(edits)) => {
@@ -733,8 +728,6 @@ pub fn plan_workspace_edit(
                     DocumentChangeOperation::Edit(text) => {
                         changes.push((text.text_document.uri.clone(), text_edits(&text.edits)));
                     }
-                    // File creation, rename, and deletion have no typed counterpart in the
-                    // workspace transaction yet, so they are refused rather than half-applied.
                     DocumentChangeOperation::Op(_) => {
                         return Err(unsupported_resource_operations());
                     }
@@ -753,8 +746,6 @@ pub fn plan_workspace_edit(
     let mut planned: Vec<PlannedFile> = Vec::with_capacity(changes.len());
     for (uri, mut edits) in changes {
         let relative = relative_path(workspace, &uri)?;
-        // Two entries for one file would each claim the pre-edit hash, so the second write would
-        // lose to the first and roll the whole rename back. Refuse it while it is still explicable.
         if planned.iter().any(|file| file.path == relative) {
             return Err(
                 LspError::new("duplicate_edit_target", "The edit names one file twice")
@@ -762,7 +753,6 @@ pub fn plan_workspace_edit(
             );
         }
         let contents = workspace.read(&relative).map_err(file_error)?;
-        // Apply right-to-left so earlier offsets stay valid as later text shifts.
         edits.sort_by(|a, b| {
             (b.range.start.line, b.range.start.character)
                 .cmp(&(a.range.start.line, a.range.start.character))
@@ -1053,8 +1043,6 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, message: Value) {
                     .retain(|sender| sender.send(params.clone()).is_ok());
             }
         }
-        // A server-to-client request (e.g. workspace/configuration) gets an empty result rather
-        // than silence: some servers wait on the reply before answering anything else.
         (Some(_), Some(id)) => {
             if let Ok(mut shared) = shared.lock() {
                 let reply = json!({"jsonrpc": "2.0", "id": id, "result": Value::Null});
@@ -1070,7 +1058,6 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, message: Value) {
                 return;
             };
             let Some(pending) = shared.pending.remove(&id) else {
-                // A response to a timed-out or cancelled request: expected, not an error.
                 return;
             };
             if let Some(error) = message.get("error") {
@@ -1332,7 +1319,6 @@ mod tests {
         let server = start_fake_server(|message, writer| {
             match message.get("method").and_then(Value::as_str) {
                 Some("initialize") | Some("shutdown") => handshake_handler(message, writer),
-                // Answer the second request first, then the stashed first one.
                 Some("textDocument/documentSymbol") => {
                     let symbol = json!({"jsonrpc": "2.0", "id": message["id"], "result": null});
                     write_message(writer, &symbol).expect("write symbol reply");
@@ -1436,7 +1422,6 @@ mod tests {
         let changes = edit.changes.expect("changes");
         assert_eq!(changes[&uri][0].new_text, "score");
 
-        // initialize, initialized, and the five typed requests were all recorded.
         let mut methods = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline && methods.len() < 7 {
@@ -1496,8 +1481,6 @@ mod tests {
         let server = start_fake_server(|message, writer| {
             match message.get("method").and_then(Value::as_str) {
                 Some("initialize") | Some("shutdown") => handshake_handler(message, writer),
-                // Hover never gets an answer; a later definition still does, proving one silent
-                // request does not wedge the session.
                 Some("textDocument/definition") => FakeAction::Result(Value::Null),
                 _ => FakeAction::Ignore,
             }
@@ -1653,7 +1636,6 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("diagnostics");
         assert_eq!(params.uri.as_str(), "file:///C:/work/broken.gd");
-        // The pull reads the same cache the broadcast filled, and it is keyed by URI.
         let cached = client
             .diagnostics(&params.uri, Duration::from_secs(2))
             .expect("cached diagnostics")
@@ -1694,7 +1676,6 @@ mod tests {
         let waiter =
             thread::spawn(move || waiting.await_response(id, &receiver, Duration::from_secs(10)));
 
-        // Give the waiter a moment to block, then cancel.
         thread::sleep(Duration::from_millis(50));
         client.cancel(id).expect("cancel");
         let error = waiter.join().expect("waiter").expect_err("cancelled");
@@ -1765,13 +1746,11 @@ mod tests {
         assert_eq!(byte_offset(text, Position::new(1, 0)).expect("offset"), 3);
         assert_eq!(byte_offset(text, Position::new(1, 2)).expect("offset"), 5);
 
-        // An astral character occupies two UTF-16 code units but four bytes.
         let text = "a\u{1F600}b\n";
         assert_eq!(byte_offset(text, Position::new(0, 1)).expect("offset"), 1);
         assert_eq!(byte_offset(text, Position::new(0, 3)).expect("offset"), 5);
         assert_eq!(byte_offset(text, Position::new(0, 4)).expect("offset"), 6);
 
-        // The middle of the surrogate pair is not a valid position.
         let error = byte_offset(text, Position::new(0, 2)).expect_err("mid-surrogate");
         assert_eq!(error.code, "position_out_of_range");
         let error = byte_offset(text, Position::new(0, 5)).expect_err("past end");
@@ -1840,7 +1819,6 @@ mod tests {
         let planned = plan_workspace_edit(&workspace, &edit).expect("plan");
         assert_eq!(planned[0].updated_text, "var score := 0\n");
 
-        // An edit-only `documentChanges` array in the operations form is still just text edits.
         let edit: WorkspaceEdit = serde_json::from_value(json!({
             "documentChanges": [
                 {
@@ -1877,8 +1855,6 @@ mod tests {
             "newText": "score"
         }]);
 
-        // A server that sends both forms describes the same rename twice. Merging them would plan
-        // one.gd twice and lose the second write to the first, so documentChanges wins alone.
         let both: WorkspaceEdit = serde_json::from_value(json!({
             "changes": {uri.as_str(): rename},
             "documentChanges": [{
@@ -1967,7 +1943,6 @@ mod tests {
             PlannedFile {
                 path: "two.gd".to_owned(),
                 original_text: "two\n".to_owned(),
-                // The hash no longer matches the file: somebody edited it after the plan.
                 original_hash: "stale".to_owned(),
                 updated_text: "TWO\n".to_owned(),
             },
@@ -2098,7 +2073,6 @@ mod tests {
             .expect("no match");
         assert!(none.is_empty());
 
-        // The client opened both documents itself, so it must have closed them again.
         let mut closes = 0;
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline && closes < 2 {
@@ -2142,7 +2116,6 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            // Read the initialize request, then hang up without answering.
             let mut reader = BufReader::new(stream);
             let _ = read_message(&mut reader);
         });
@@ -2370,14 +2343,12 @@ mod tests {
         let server = start_fake_server(|message, writer| {
             if message.get("method").and_then(Value::as_str) == Some("initialized") {
                 for junk in [
-                    // A notification the client parses but cannot use.
                     json!({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics"}),
                     json!({
                         "jsonrpc": "2.0",
                         "method": "textDocument/publishDiagnostics",
                         "params": {"uri": 42}
                     }),
-                    // Answers to requests nobody is waiting for.
                     json!({"jsonrpc": "2.0", "id": "not-a-number", "result": null}),
                     json!({"jsonrpc": "2.0", "id": 4242, "result": {"ok": true}}),
                 ] {

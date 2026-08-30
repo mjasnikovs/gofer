@@ -1,6 +1,5 @@
 extends Node2D
 
-# The only script that reads the Input Map, and it reads two actions of the four declared.
 
 const SPEED := 120.0
 

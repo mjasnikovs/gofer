@@ -193,7 +193,6 @@ impl Sketches<'_> {
         let shown = fs::read_to_string(&shown_path).map_err(|error| {
             CommandError::from(format!("Could not read {}: {error}", shown_path.display()))
         })?;
-        // Absent is an age, not a fault: sketches kept before the second copy existed have one file.
         let source = fs::read_to_string(directory.join(format!("{sketch_id}.source.html"))).ok();
         Ok(SketchHtml { shown, source })
     }
@@ -244,13 +243,10 @@ impl Sketches<'_> {
             connection
                 .execute("DELETE FROM sketches WHERE id = ?1", [&id])
                 .map_err(database_error)?;
-            // The second copy can outlive the first, and a row that is going takes both with it.
             let _ = fs::remove_file(directory.join(format!("{id}.source.html")));
             removed += 1;
         }
         for path in sketch_files(&directory)? {
-            // A name this cannot read is not a sketch, and something that is not ours is not ours
-            // to delete.
             let Some(id) = sketch_id_of(&path) else {
                 continue;
             };
@@ -401,8 +397,6 @@ mod tests {
             .sketches()
             .keep(&kept("question-1-run", "Older", "<p>a</p>", "<p>a</p>"))
             .expect("keep the older sketch");
-        // The stamp is milliseconds, so two writes in the same millisecond would tie. The index
-        // breaks that tie on the identifier, which is what this asserts alongside the order.
         std::thread::sleep(std::time::Duration::from_millis(2));
         storage
             .sketches()

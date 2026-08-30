@@ -1,24 +1,3 @@
-/**
- * Two questions the schema alone cannot answer, measured against the local model.
- *
- * **A — does widening invite the mistake?** `unbox_the_one` repairs a single-value parameter handed
- * a list of one, and the generated schema refuses that shape before the router ever sees it, so the
- * repair is reachable only from the desktop client and the acceptance suites. Widening the property
- * makes it reachable — but a permissive schema may also *teach* the boxed shape. Arms: the shipped
- * property against one that accepts a list of one.
- *
- * **B — does our wording beat ajv's?** Seven of the eight nested entries in the catalogue are
- * enforced by ajv, whose refusal names neither the operation nor the position. `check_inside` was
- * written because `missing field oldText` left a model unable to tell which of five nested files
- * was wrong. Arms: pose the refusal both ways, three deep, and score the next call.
- *
- * Interleaved inside one process, alternating arms per seed, and only the SIGN of the gap is read —
- * the rule `bench-prompt-line.mjs` documents. A run collected across two sittings flipped sign
- * twice and is worth nothing.
- *
- *   GOFER_BENCH_CATALOG=/tmp/catalog.json GOFER_BENCH_PROMPT=/tmp/prompt.txt \
- *     node scripts/bench-boxed-and-wording.mjs 15
- */
 import {readFile} from 'node:fs/promises'
 import Ajv from 'ajv'
 import {createGodotTools} from './godot-tools.mjs'
@@ -38,7 +17,6 @@ const asSchema = tool => ({
     function: {name: tool.name, description: tool.description, parameters: tool.parameters}
 })
 
-/** The shipped tools, and the same with every single-value property also accepting a list of one. */
 function armedTools(widened) {
     const tools = createGodotTools(catalog, {call: async () => ({})})
     if (!widened) return {schemas: tools.map(asSchema), tools}
@@ -68,7 +46,6 @@ function armedTools(widened) {
 
 const SESSION = 'Editor session: ready. Godot 4.7.2, scene res://scenes/main.tscn open, revision 7.'
 
-// A: several nodes, one single-value parameter each. The shape of the turn the repair was measured in.
 const BOXED_ASK =
     'The scene holds /Main/Enemies/Slime, /Main/Enemies/Bat and /Main/Enemies/Ghost. Put all three'
     + ' into the "enemies" group so the spawner can find them.'
@@ -90,7 +67,6 @@ async function ask(schemas, messages, seed) {
     return (await response.json()).choices?.[0]?.message ?? {}
 }
 
-/** Every op entry the message wrote, whatever tool carried it. */
 function entriesOf(message, tools) {
     const out = []
     for (const call of message.tool_calls ?? []) {
@@ -102,9 +78,6 @@ function entriesOf(message, tools) {
         } catch {
             continue
         }
-        // A throw is a refusal. `prepareArguments` refuses an operation the tool does not have,
-        // and a wrong-tool `op` is exactly the mistake these recorded calls carry — so it is
-        // counted as refused rather than allowed to end the run.
         let prepared = args
         let threw = false
         try {
@@ -142,7 +115,6 @@ const scoreBoxed = written => {
     return {calls, boxed, accepted}
 }
 
-// B: the same refusal, worded two ways, posed three deep so it is a loop and not a first answer.
 const AJV_WORDING =
     "Invalid arguments: /ops/0/properties/0 must NOT have additional properties, /ops/0/properties/0 must have required property 'name'"
 const OURS_WORDING =
@@ -182,13 +154,6 @@ function wordingMessages(refusal) {
     return messages
 }
 
-/**
- * Did the retry produce something the app would take?
- *
- * Scored on the whole call, not on `set_properties`, because switching to `set_property` singular
- * is a real recovery: it drops the nested entry the refusal was about. Scoring only the plural
- * form reads that as a failure and reads a model that solved the problem as one that did not.
- */
 const scoreWording = written => {
     let recovered = 0
     let still = 0
@@ -234,8 +199,6 @@ for (let seed = 1; seed <= seeds; seed += 1) {
         const scored = scoreWording(
             entriesOf(await ask(shipped.schemas, wordingMessages(refusal), seed), shipped.tools)
         )
-        // Scored per TURN, not per entry: a model that batches two ops into one call has not
-        // recovered twice, and one that writes a single op has not recovered less.
         const won = scored.still === 0 && scored.recovered > 0
         B[arm].recovered += won ? 1 : 0
         B[arm].still += scored.still > 0 ? 1 : 0

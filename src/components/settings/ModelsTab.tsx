@@ -22,16 +22,8 @@ import {canDeleteCache} from '../../models/settings-draft'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {ReactNode} from 'react'
 import type {SettingsTabView, SettingsView} from './settings-view'
-/** The models tab, plus the confirmation the page draws outside the settings dialog. */
 type ModelsTabView = SettingsTabView & Readonly<{confirmation: ReactNode}>
 
-/**
- * The local documentation models: what is on disk, and the two buttons that change it.
- *
- * The confirmation is returned rather than rendered here. It stands in front of the settings dialog
- * — which closes while it is open — so a dialog drawn inside this tab's body would be a dialog
- * inside a body that is no longer on screen.
- */
 export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): ModelsTabView {
     const {state, dispatch, run} = view
     const {busy, cache, progress} = state
@@ -62,8 +54,6 @@ export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): Mo
                     }
                 })
             } catch (error) {
-                // Read back either way: a download that failed part-way still moved the cache, and
-                // the page must show what is on disk rather than what was hoped for.
                 await refreshCache()
                 throw error
             } finally {
@@ -112,11 +102,6 @@ export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): Mo
                                     gap={2}
                                     vAlign='center'
                                 >
-                                    {/*
-                                     * The dot's label is its accessible name, so the plain word
-                                     * beside it was announced twice. Qualified here and left plain
-                                     * on screen, which is what the frame's session dot does.
-                                     */}
                                     <StatusDot
                                         variant={cacheStateVariant(cache.state)}
                                         label={`Model cache: ${cacheStateLabel(cache.state)}`}
@@ -133,10 +118,6 @@ export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): Mo
                                 </VStack>
                             </VStack>
 
-                            {/*
-                             * One label, not two. `ProgressBar` draws its own above the bar unless
-                             * told to hide it, and the line underneath repeated it word for word.
-                             */}
                             {busy.downloading && (
                                 <ProgressBar
                                     label={progressLabel(progress)}
@@ -193,15 +174,6 @@ export function useModelsTab(view: SettingsView, onCacheDeleted: () => void): Mo
                                     />
                                 }
                                 isLoading={busy.downloading}
-                                /*
-                                 * Started rather than awaited. `Button` runs `clickAction` inside
-                                 * `startTransition`, and React holds the old screen for as long as
-                                 * a transition is pending — so awaiting a 1.68 GiB download here
-                                 * meant the progress bar and the Busy badge this sets did not
-                                 * appear until the download was already over. Returning at once
-                                 * ends the transition and lets the rest paint as it happens; the
-                                 * button still spins, on `busy.downloading` above.
-                                 */
                                 clickAction={() => {
                                     void downloadModels()
                                 }}

@@ -79,8 +79,6 @@ fn every_supported_node_is_created_and_survives_a_save() {
 
     let mut missing = Vec::new();
     for class in &classes {
-        // The type is what a `.tscn` records; a node that saved without one is a node the loader
-        // will drop the next time the scene is opened.
         if !saved.contains(&format!("type=\"{class}\"")) {
             missing.push(class.clone());
         }
@@ -107,7 +105,6 @@ fn a_swept_scene_reopens_with_every_node_intact() {
     }
     session.mutate("scene.save", json!({}));
 
-    // Away and back, so the tree comes from the file rather than from what the editor still holds.
     session.mutate(
         "scene.create",
         json!({"path": "res://elsewhere.tscn", "rootType": "Node2D"}),
@@ -161,8 +158,6 @@ fn a_rename_onto_a_siblings_name_says_that_is_what_happened() {
         "the refusal has to say why the name changed: {clashed}"
     );
 
-    // And the refusal is true about the scene. Godot renames anyway — it does not refuse a clash —
-    // so before this the node kept a name nobody asked for, and the revision never moved to say so.
     let after: Vec<String> = session.call("scene.get_tree", json!({}))["root"]["children"]
         .as_array()
         .expect("children")
@@ -175,7 +170,6 @@ fn a_rename_onto_a_siblings_name_says_that_is_what_happened() {
         "{after:?}"
     );
 
-    // A rename to a name nobody has is not this, and goes through.
     let renamed = session.mutate(
         "node.rename",
         json!({"node": "/clash/Other", "name": "Third"}),
@@ -217,15 +211,11 @@ fn a_node_reports_its_property_values() {
         .filter_map(Value::as_str)
         .collect();
 
-    // A property the class has no default for is answered with its value, whether or not it holds
-    // one: `ClassDB` knows nothing about a texture that was never assigned.
     assert!(
         named.contains(&"texture"),
         "node.inspect must report texture, answered {named:?}"
     );
 
-    // A fresh sprite sits at the origin and is unmodulated, so both of those are the class's own
-    // answer restated. They are named rather than valued.
     for shipped in ["position", "modulate"] {
         assert!(
             defaulted.contains(&shipped) && !named.contains(&shipped),
@@ -233,7 +223,6 @@ fn a_node_reports_its_property_values() {
         );
     }
 
-    // And naming one answers it in full. This is the whole of what makes the narrowing safe.
     let asked = session.call(
         "node.inspect",
         json!({"node": "/read/Sprite", "properties": ["position", "modulate"]}),
@@ -285,9 +274,6 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         .as_array()
         .unwrap_or_else(|| panic!("node.inspect answered without atClassDefault: {whole}"))
         .len();
-    // A Label declares 119 of them here. What comes back with a value is what a caller could not
-    // have known; the rest are named. Both halves are asserted, because the answer is only cheap
-    // if the names are still there to ask for.
     assert!(
         all > 8 && all < 40,
         "answered {all} valued properties: {whole}"
@@ -311,8 +297,6 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         vec!["position", "size", "text"],
         "a narrowed inspect must answer with exactly the names it was given"
     );
-    // Everything a caller reads a node for besides its properties is still there, so narrowing is
-    // not a second, poorer operation the caller has to choose between.
     assert_eq!(narrowed["type"], "Label", "{narrowed}");
     assert!(
         narrowed["signals"]
@@ -321,10 +305,6 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         "a narrowed inspect must still report the signals: {narrowed}"
     );
 
-    // `script` is the one name the whole list leaves out, because it is the node's own script
-    // rather than a property of it. A caller that names it has answered that objection — and a
-    // live turn asked a narrowed inspect for it on its first try and was told, of a node that
-    // plainly has one, `has no property script. Did you mean script?`.
     let scripted = session.call(
         "node.inspect",
         json!({"node": "/narrow/Caption", "properties": ["script", "text"]}),
@@ -341,7 +321,6 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         vec!["script", "text"],
         "a named script is answered: {scripted}"
     );
-    // And it is still left out of the list nobody narrowed.
     assert!(
         !whole["properties"]
             .as_array()
@@ -349,10 +328,6 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         "an inspect that names nothing must still leave `script` out"
     );
 
-    // A property the inspector shows under another name is answered when it is asked for. Godot
-    // registers `global_position` and friends with no usage flags at all, so the list nobody
-    // narrowed leaves them out — and the narrowed list used to refuse them, about properties
-    // `set_property` writes perfectly well, pointing at `node.inspect` as the way to see them.
     let computed = session.call(
         "node.inspect",
         json!({"node": "/narrow/Caption", "properties": ["global_position"]}),
@@ -361,17 +336,12 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         computed["properties"][0]["name"], "global_position",
         "a named property is answered whatever the inspector would do with it: {computed}"
     );
-    // The two operations have to agree about what a node has.
     session.mutate(
         "node.set_property",
         json!({"node": "/narrow/Caption", "property": "global_position",
                "value": {"type": "vector2", "value": [10, 20]}}),
     );
 
-    // A name the node does not have is refused, rather than left as a gap the caller reads as
-    // "this node holds no value for it". Near enough to a real one and it is corrected; not near
-    // enough and it is pointed at the call that lists them all — the rule `_nearest_property`
-    // already applies to a property that is written rather than read.
     let corrected = session.error(
         "node.inspect",
         json!({"node": "/narrow/Caption", "properties": ["posit"]}),
@@ -381,11 +351,6 @@ fn a_node_answers_with_only_the_properties_that_were_named() {
         corrected.contains("posit") && corrected.contains("position"),
         "a property one prefix short must be refused and corrected, said: {corrected}"
     );
-    // `postion` is a transposition, so nothing is a prefix of anything and there is no correction
-    // to give. What it gets instead is the call that would have answered it — and this refusal is
-    // the exact case that had to be spelled out, because it *is* `node.inspect`: a live turn read
-    // "node.inspect lists every property this node has" as "ask inspect about this property", did
-    // that, and met these same words again. Five times in one run.
     let refused = session.error(
         "node.inspect",
         json!({"node": "/narrow/Caption", "properties": ["postion"]}),
@@ -451,8 +416,6 @@ fn a_handler_written_after_the_script_was_loaded_can_still_be_connected() {
                "target": "/stale/Player"}),
     );
 
-    // And a method that is on neither copy is still refused, so the re-read is not a way past the
-    // check that stops a connection whose handler nobody wrote.
     let refused = session.error(
         "node.connect_signal",
         json!({"node": "/stale/Ticker", "signal": "timeout", "method": "_on_nothing",
@@ -693,8 +656,6 @@ fn a_node_becomes_another_class_and_keeps_what_the_new_one_can_hold() {
     assert_eq!(changed["node"], "/Level/Player", "{changed}");
     assert_eq!(changed["type"], "CharacterBody2D", "{changed}");
 
-    // The name, the class, the child, the group, and the property a Node2D and a CharacterBody2D
-    // both declare. And the place: `After` was created second and has to stay second.
     let node = session.call("node.inspect", json!({"node": "/Level/Player"}));
     assert_eq!(node["type"], "CharacterBody2D", "{node}");
     assert_eq!(node["groups"], json!(["player"]), "{node}");
@@ -726,14 +687,12 @@ fn a_node_becomes_another_class_and_keeps_what_the_new_one_can_hold() {
         "{tree}"
     );
 
-    // And the file, because a node the scene does not own is a node the save writes nothing about.
     session.mutate("scene.save", json!({}));
     let saved = std::fs::read_to_string(session.worktree.join("level.tscn")).expect("the scene");
     assert!(saved.contains("type=\"CharacterBody2D\""), "{saved}");
     assert!(saved.contains("groups="), "{saved}");
     assert!(saved.contains("[node name=\"Label\""), "{saved}");
 
-    // One undo, because the change was one action.
     session.mutate("session.undo", json!({}));
     let back = session.call("node.inspect", json!({"node": "/Level/Player"}));
     assert_eq!(back["type"], "Node2D", "{back}");
@@ -784,8 +743,6 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
         "node.create",
         json!({"parent": "/Level", "name": "Player", "type": "Node2D"}),
     );
-    // Scripts are Gofer's own commands rather than the addon's, so the file is written the way
-    // anything outside the editor writes one and the editor is told about it.
     std::fs::write(
         session.worktree.join("player.gd"),
         "extends Node2D\n\n@export var speed := 24.0\n",
@@ -801,15 +758,12 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
         }),
     );
 
-    // A CharacterBody2D is a Node2D, so a script extending Node2D attaches to it.
     session.mutate(
         "node.change_type",
         json!({"node": "/Level/Player", "type": "CharacterBody2D"}),
     );
     let node = session.call("node.inspect", json!({"node": "/Level/Player"}));
     assert_eq!(node["type"], "CharacterBody2D", "{node}");
-    // `node.inspect` does not name the script file, and it does not have to: `speed` is the
-    // script's own `@export` and nothing else could put it on a CharacterBody2D.
     let speed = node["properties"]
         .as_array()
         .expect("properties")
@@ -825,8 +779,6 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
     let saved = std::fs::read_to_string(session.worktree.join("scripted.tscn")).expect("the scene");
     assert!(saved.contains("player.gd"), "{saved}");
 
-    // A Node2D is not a CharacterBody2D, so the same script cannot go the other way. Godot drops
-    // it without a word; this says so instead of writing a node that lost its behaviour.
     std::fs::write(
         session.worktree.join("body.gd"),
         "extends CharacterBody2D\n",
@@ -853,7 +805,6 @@ fn a_script_travels_with_a_type_change_or_the_change_is_refused() {
         .expect_err("a script the new class cannot take is refused");
     assert!(refused.contains("script_incompatible"), "{refused}");
 
-    // And nothing changed: the node is still what it was, with the script it had.
     let unchanged = session.call("node.inspect", json!({"node": "/Level/Player"}));
     assert_eq!(unchanged["type"], "CharacterBody2D", "{unchanged}");
 }
@@ -898,7 +849,6 @@ fn an_instance_under_a_node_that_changes_type_is_still_an_instance() {
 
     let saved = std::fs::read_to_string(session.worktree.join("level.tscn")).expect("the scene");
     assert!(saved.contains("type=\"CharacterBody2D\""), "{saved}");
-    // The instance is still one line naming the scene, not the scene's contents copied in.
     assert!(
         saved.contains("instance=ExtResource"),
         "the instance has to stay an instance: {saved}"

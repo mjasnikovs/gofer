@@ -1,17 +1,3 @@
-/**
- * What does the generated tool schema actually refuse, before the router ever sees a call?
- *
- * Two repairs live in Rust for shapes a model was measured writing — `unbox_the_one` (a lone value
- * in a list) and `trim_a_name` (a padded value). The question this answers is whether the schema
- * the agent loop validates against still lets those shapes through to be repaired, or refuses them
- * first, which would make the repair reachable only from the desktop client and the acceptance
- * suites — never from the model it was measured on.
- *
- * It runs the real chain: `prepareArguments` (the normalizer), then ajv over the real generated
- * schema, exactly as `prepareToolCall` does in pi's agent loop.
- *
- *   GOFER_BENCH_CATALOG=/tmp/catalog.json node scripts/bench-schema-probe.mjs
- */
 import {readFileSync} from 'node:fs'
 import Ajv from 'ajv'
 import {createGodotTools} from './godot-tools.mjs'
@@ -27,19 +13,10 @@ const ajv = new Ajv({strict: false, allErrors: true})
 const byName = new Map(tools.map(tool => [tool.name, tool]))
 
 let refused = 0
-/**
- * Both halves of the chain, because they answer different questions.
- *
- * `raw` is what the schema alone would do; `repaired` is what the agent loop actually does, since
- * `prepareArguments` runs first. A shape the schema refuses raw and accepts repaired is a repair
- * doing its job. A shape refused both ways never reaches the router at all.
- */
 function verdict(label, toolName, args) {
     const tool = byName.get(toolName)
     const validate = ajv.compile(tool.parameters)
     const raw = validate(args)
-    // A throw is a refusal, not a crash: `prepareArguments` refuses an operation the tool does not
-    // have, which is one of the shapes this probe exists to measure.
     let prepared = args
     let refusal
     try {

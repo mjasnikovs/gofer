@@ -4,33 +4,14 @@ import KeyIcon from '@heroicons/react/24/outline/KeyIcon'
 import type {SecretName} from '../../models/settings'
 import type {KeyDraft, SettingsAction} from '../../models/settings-draft'
 
-/** The three secrets a person types. ChatGPT is the fourth, and it is a sign-in rather than a box. */
-/**
- * A secret that is typed into a box, which is every one but the ChatGPT credential.
- *
- * Exported because the AI tab's hosted-driver table names one per driver, and a table that could
- * name `chat-gpt` would be a table that renders a text field for a sign-in.
- */
 export type TypedSecret = Exclude<SecretName, 'chat-gpt'>
 
-/**
- * What one key box says, which is the whole of what ever differed between the three.
- *
- * Everything else — "Stored securely", "Leave blank to keep…", the removal button and when it is
- * shown — was written out once per secret and had to be kept in step by hand.
- */
 type StoredKeyCopy = Readonly<{
     label: string
-    /**
-     * The box's own hint, shown only while nothing is stored. A format example or a statement about
-     * the field, never its name: a placeholder that names the field disappears when it is typed in.
-     */
     placeholder: string
-    /** What to say when there is no stored key to leave alone. */
     description: string
     removeLabel: string
     keepLabel: string
-    /** Which of the two hints the label carries, and neither is the third answer: no hint at all. */
     isRequired: boolean
     isOptional: boolean
 }>
@@ -82,14 +63,6 @@ type StoredKeyFieldProps = Readonly<{
     dispatch: (action: SettingsAction) => void
 }>
 
-/**
- * One secret's box, and the button that takes the stored one off the machine.
- *
- * The two belong together: the box cannot mean "remove it" — the page never reads a stored secret
- * back, so an emptied box is "leave it alone" — and the button is the only thing that can. This was
- * written out three times, differing in a noun, and the removal button sat a screenful away from
- * the field it was about.
- */
 export function StoredKeyField({secret, draft, dispatch}: StoredKeyFieldProps) {
     const copy = STORED_KEY_COPY[secret]
     const isRemoving = draft.intent === 'clear'
@@ -102,12 +75,6 @@ export function StoredKeyField({secret, draft, dispatch}: StoredKeyFieldProps) {
                 isRequired={copy.isRequired}
                 isOptional={copy.isOptional}
                 startIcon={KeyIcon}
-                /*
-                 * Only a real format example is a placeholder. A placeholder reads as a typed value,
-                 * so a sentence in it — "Stored securely", "Not required by local servers" — looked
-                 * like something the user had entered. Every one of those statements is a
-                 * description, and they were already duplicated there.
-                 */
                 placeholder={draft.isStored ? '' : copy.placeholder}
                 description={
                     isRemoving ? 'The stored key will be removed when you save.'

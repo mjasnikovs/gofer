@@ -23,14 +23,8 @@ import {GDSCRIPT_LANGUAGE_ID} from '../../services/monaco-gdscript'
 type ScriptEditorProps = Readonly<{
     buffer: ScriptBuffer
     diagnostics: readonly ScriptDiagnostic[]
-    /**
-     * Where another panel asked the editor to go. `at` is the click that asked, so choosing the
-     * same problem twice reveals it twice.
-     */
     reveal?: Readonly<{path: string; line: number; at: number}> | undefined
-    /** Every open tab, so models for closed files are disposed instead of leaking. */
     openPaths: readonly string[]
-    /** Where each script's cursor and scroll were left when the project was last open. */
     views: ScriptViews
     onViewChange: (path: string, view: unknown) => void
     onChange: (path: string, text: string) => void
@@ -42,7 +36,6 @@ type ScriptEditorProps = Readonly<{
 
 const EDITOR_HOST_STYLE = {minHeight: 0, width: '100%'} as const
 const MARKER_OWNER = 'gofer-lsp'
-/** How long the cursor has to stay put before where it is counts as where it was left. */
 const VIEW_SETTLE_MS = 400
 
 const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
@@ -57,14 +50,6 @@ const EDITOR_OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
     renderWhitespace: 'selection'
 }
 
-/**
- * Hosts Monaco for the active buffer.
- *
- * One model per open file lives for as long as its tab does, so switching tabs keeps undo history
- * and scroll position. Text only flows into a model from outside when it actually differs — a
- * reload, a rename, or a formatter apply — and that write is flagged so it is not echoed back as a
- * user edit.
- */
 export function ScriptEditor({
     buffer,
     diagnostics,
@@ -78,28 +63,20 @@ export function ScriptEditor({
     onToggleBreakpoint,
     onOpenPath
 }: ScriptEditorProps) {
-    // The frame's banner, and the conversation behind it. Read rather than taken as a prop: there
-    // is one sink, and a prop is how the editor ended up writing into the one that was never on
-    // screen at the same time as the editor itself.
     const onError = useWorkspaceFailure()
     const hostRef = useRef<HTMLElement | null>(null)
     const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | undefined>(undefined)
     const modelsRef = useRef(new Map<string, Monaco.editor.ITextModel>())
-    // Seeded from the project, so a script reopens at the line it was left on rather than at the
-    // top. Monaco's view state is opaque JSON, which is exactly what was stored.
     const viewStatesRef = useRef(
         new Map<string, Monaco.editor.ICodeEditorViewState | null>(
             Object.entries(views) as [string, Monaco.editor.ICodeEditorViewState][]
         )
     )
-    /** A way to call off the pending record of where the file is being read, while one is pending. */
     const cancelSettleRef = useRef<(() => void) | undefined>(undefined)
     const decorationsRef = useRef<Monaco.editor.IEditorDecorationsCollection | undefined>(undefined)
     const applyingRef = useRef(false)
     const [monaco, setMonaco] = useState<typeof Monaco>()
 
-    // Monaco listeners are registered once against a live editor, so the newest callbacks are read
-    // through a ref instead of re-registering every render.
     const handlers = useRef({
         onChange,
         onSave,
@@ -150,8 +127,6 @@ export function ScriptEditor({
             },
             onError: reportError
         })
-        // Go-to-definition across files opens the target as a tab instead of failing silently,
-        // which is what a standalone editor does with a model it does not hold.
         const opener = monaco.editor.registerEditorOpener({
             openCodeEditor: (_source, resource) => {
                 const path = workspacePathFromUri(resource)
@@ -179,7 +154,6 @@ export function ScriptEditor({
         })
         const clicked = editor.onMouseDown(event => {
             const model = editor.getModel()
-            // The glyph margin is the breakpoint gutter; clicks anywhere else are the editor's.
             if (!model || event.target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
                 return
             }
@@ -197,8 +171,6 @@ export function ScriptEditor({
                 if (model) handlers.current.onSave(workspacePathFromUri(model.uri))
             }
         })
-        // Renaming runs through Gofer's own preview rather than Monaco's rename widget: the edit
-        // is applied as one validated filesystem transaction, not as model edits.
         editor.addAction({
             id: 'gofer.renameSymbol',
             label: 'Rename Symbol (Preview)',
@@ -214,12 +186,6 @@ export function ScriptEditor({
                 )
             }
         })
-        /*
-         * Remembers where the file is being read, once the reading settles.
-         *
-         * Cursor and scroll events arrive per keystroke and per wheel notch, and neither is worth
-         * a write on its own — what is worth keeping is where they came to rest.
-         */
         const settle = () => {
             cancelSettleRef.current?.()
             cancelSettleRef.current = schedule(() => {
@@ -246,7 +212,6 @@ export function ScriptEditor({
         }
     }, [monaco])
 
-    // One model per open path, disposed when its tab closes.
     useEffect(() => {
         if (!monaco) return
         const models = modelsRef.current
@@ -285,7 +250,6 @@ export function ScriptEditor({
         }
         if (model.getValue() !== buffer.text) {
             applyingRef.current = true
-            // `pushEditOperations` keeps undo history; `setValue` would discard it.
             model.pushEditOperations(
                 [],
                 [{range: model.getFullModelRange(), text: buffer.text}],
@@ -302,8 +266,6 @@ export function ScriptEditor({
         monaco.editor.setModelMarkers(model, MARKER_OWNER, [...toMarkers(diagnostics)])
     }, [buffer.path, diagnostics, monaco])
 
-    // Reveals what the Problems list or a debugger frame pointed at, once the buffer it names is
-    // the one on screen.
     useEffect(() => {
         const editor = editorRef.current
         if (!monaco || !editor || !reveal) return

@@ -1,6 +1,2 @@
-# Godot's own import cache. The sweep restores the workspace with `git clean`, and an ignored cache
-# is one the next run does not have to spend an import scan rebuilding.
 .godot/
-# The identifiers Godot stamps on each script when it imports them. A real project commits these;
-# this one is seeded fresh, so an ignored file is one less thing `git clean` puts back every run.
 *.uid

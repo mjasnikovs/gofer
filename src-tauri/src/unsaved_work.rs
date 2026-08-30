@@ -90,8 +90,6 @@ pub fn settle(answer: UnsavedWork) -> Result<(), CommandError> {
     if answer == UnsavedWork::Discard {
         return Ok(());
     }
-    // No session is no editor, and no editor is holding nothing. Every task operation runs whether
-    // or not one was ever started.
     let Some(rpc) = godot_session::rpc_session() else {
         return Ok(());
     };

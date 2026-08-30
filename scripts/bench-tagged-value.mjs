@@ -1,23 +1,3 @@
-/**
- * Does the model wrap a tagged value in a second copy of its own tag, and does any wording stop it?
- *
- * Measured over five live turns on 2026-08-22: of 86 tagged values written, 41 were double-wrapped
- * and 22 of those spelled the inner tag with Godot's capital. The normalizer repairs them; the
- * question here is whether the catalogue can stop them being written.
- *
- * Interleaved inside one process, alternating arms per seed, and only the sign of the gap is read —
- * the same rule `bench-prompt-line.mjs` documents.
- *
- * **And one this file learnt the hard way: a single-turn bench measures the FIRST answer, and
- * cannot measure a loop.** A sentence scored here at 0/15 against 15/15 — a clean, repeatable win —
- * and a live turn then sent one identical refused call twenty-nine times with that sentence in
- * front of it every time. Posing the loop directly, three identical refusals deep, both arms
- * recovered 15 of 15: the loop does not reproduce in a short conversation at all. So a win here is
- * a win about the first refusal, and nothing else. Say that much and no more when quoting it.
- *
- *   GOFER_BENCH_CATALOG=/tmp/catalog.json GOFER_BENCH_PROMPT=/tmp/prompt.txt \
- *     node scripts/bench-tagged-value.mjs 15
- */
 import {readFile} from 'node:fs/promises'
 import {createGodotTools} from './godot-tools.mjs'
 
@@ -35,13 +15,10 @@ const asSchema = tool => ({
     function: {name: tool.name, description: tool.description, parameters: tool.parameters}
 })
 
-/** The payload sentence each arm puts where the model will meet it. */
 const PAYLOAD_NOTE =
     'The payload is the bare value itself: a string, a number, an array of numbers, or {path} for'
     + ' a resource. Never a second {type, value} pair around it.'
 
-// Three arms over the same catalogue: the shipped one, the note on the JSON Schema property the
-// model fills in, and the note appended to the operation summary it reads first.
 function armedTools(arm) {
     const tools = createGodotTools(catalog, {call: async () => ({})}).map(asSchema)
     if (arm === 'shipped') return tools
@@ -93,7 +70,6 @@ function armedTools(arm) {
 
 const ARMS = ['shipped', 'schema', 'summary']
 
-// The moment a live turn reached: the nodes exist and the next call dresses them.
 const ASK =
     'The scene has /Main/PauseMenu (a CanvasLayer) holding /Main/PauseMenu/CenterContainer/'
     + 'ResumeButton (a Button). Set the button\'s text to "Resume", hide the PauseMenu, and set the'
@@ -102,7 +78,6 @@ const SESSION = 'Editor session: ready. Godot 4.7.2, scene res://scenes/main.tsc
 
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v)
 
-/** Every tagged value in a call, and how many of them carry a second tag inside. */
 function scoreTags(message) {
     let tagged = 0
     let doubled = 0
@@ -118,9 +93,7 @@ function scoreTags(message) {
     for (const call of message.tool_calls ?? []) {
         try {
             walk(JSON.parse(call.function?.arguments ?? '{}'))
-        } catch {
-            /* a call that is not JSON carries no tagged value to score */
-        }
+        } catch {}
     }
     return {tagged, doubled}
 }

@@ -55,8 +55,6 @@ impl ModelChoiceFile {
                 max_tokens: self.max_tokens.unwrap_or_else(default_max_tokens),
                 reasoning: self.reasoning.unwrap_or_default(),
                 supports_reasoning_effort: self.supports_reasoning_effort.unwrap_or_default(),
-                // A file written before the field. Nothing in that shape ever named a hosted
-                // catalogue, so nothing it can hold refuses to stop thinking.
                 reasoning_mandatory: false,
                 thinking_levels: self.thinking_levels.unwrap_or_default(),
                 input: self.input.unwrap_or_else(default_model_input),
@@ -166,7 +164,6 @@ impl From<AiSettingsFile> for AiSettings {
                     connections.insert(driver, profile);
                 }
             }
-            // Last, so the original wins over the copy of itself. See the note above.
             if let Some(model) = file.model {
                 connections.insert(
                     file.connection_type,
@@ -180,14 +177,6 @@ impl From<AiSettingsFile> for AiSettings {
                 );
             }
         }
-        // Every hosted driver this build knows, filled in where the file names none.
-        //
-        // Not only for a file that has no connections at all. A driver with no connection is not
-        // offered in the picker, and a driver that is not offered can never be selected in order
-        // to be configured — so a driver added after a settings file was written would be
-        // permanently invisible to every existing install, which is what happened the first time
-        // this was left to `default_connections` alone. Insert only where absent: what the user
-        // has configured is theirs, and this must never write over it.
         for (driver, shipped) in [
             (
                 AiConnectionType::OpenaiCodex,

@@ -1,35 +1,7 @@
-/**
- * An interleaved A/B of one clause in `godot_node`'s description, against a local model.
- *
- * The question. Across 26 recorded live turns, the most common shape that still reaches a refusal
- * before the router is `{"op": "save"}` batched onto `godot_node` — six calls in five runs, each
- * one taking a whole batch of good work down with it, because a list is refused as one. The
- * refusal names `godot_scene` and `godot_script`, so the model recovers; what it costs is the
- * round trip and everything the batch was carrying.
- *
- * `godot_node`'s description says how mutations are revisioned and what a path looks like. It has
- * never said that none of them writes the file. This measures whether saying so stops the call.
- *
- * The one rule that makes the numbers mean anything is `bench-prompt-line.mjs`'s: score every arm
- * inside one process, alternating, and read the sign of the gap.
- *
- *   GOFER_DUMP_CATALOG=/tmp/catalog.json GOFER_DUMP_PROMPT=/tmp/prompt.txt \
- *     cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib \
- *     -- dump_catalog_and_prompt --test-threads=1
- *
- *   GOFER_BENCH_CATALOG=/tmp/catalog.json GOFER_BENCH_PROMPT=/tmp/prompt.txt \
- *     node scripts/bench-where-save-lives.mjs 20
- *
- * Unmeasured as it stands: the day this was written, OpenRouter's free stealth tier ran out and
- * the local model was busy with a live turn. The arms and the priming are the question, ready to
- * be asked.
- */
-
 import {readFile} from 'node:fs/promises'
 import {createGodotTools} from './godot-tools.mjs'
 
 const ENDPOINT = process.env.GOFER_BENCH_ENDPOINT ?? 'http://127.0.0.1:8080/v1/chat/completions'
-/** The model to ask, and the key it needs. Both default to the local server, which wants neither. */
 const MODEL = process.env.GOFER_BENCH_MODEL ?? 'local'
 const AUTHORIZATION =
     process.env.OPENROUTER_API_KEY ?
@@ -44,7 +16,6 @@ const named = variable => {
 const catalog = JSON.parse(await readFile(named('GOFER_BENCH_CATALOG'), 'utf8'))
 const prompt = await readFile(named('GOFER_BENCH_PROMPT'), 'utf8')
 
-/** The clause under test, appended to `godot_node`'s description. */
 const ARMS = {
     shipped: '',
     saidSo: ' Nothing here writes the file. The scene is saved with godot_scene save.'
@@ -59,7 +30,6 @@ const asSchema = tool => ({
     }
 })
 
-/** The real catalogue, with one domain's description extended. */
 function toolsFor(clause) {
     const extended = catalog.map(domain =>
         domain.name === 'godot_node' ?
@@ -69,11 +39,6 @@ function toolsFor(clause) {
     return createGodotTools(extended, {call: async () => ({})}).map(asSchema)
 }
 
-/*
- * The moment `r12-ui` and `t12-ui` both reached, primed to the call before the mistake: the scene
- * exists, the nodes are in it, and the two buttons still need their handlers. Both runs answered
- * this with `[connect_signal, connect_signal, save]` and lost all three.
- */
 const ASK =
     'Add a pause menu to this game. Escape shows a CanvasLayer with a Resume button and a Quit '
     + 'button and pauses the game; Resume unpauses. Wire both buttons to a script.'
@@ -193,12 +158,6 @@ async function ask(clause, seed) {
     return body.choices?.[0]?.message ?? {}
 }
 
-/**
- * What the router would do with what the model wrote.
- *
- * `GOFER_BENCH_PEEK=1` prints every call instead of only the counts, which is how the priming
- * above was aimed: the first draft stopped a step early and neither arm ever reached a save.
- */
 function score(message) {
     if (process.env.GOFER_BENCH_PEEK)
         for (const call of message.tool_calls ?? [])

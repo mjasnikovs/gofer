@@ -3,22 +3,6 @@ import {readFileSync} from 'node:fs'
 import {fileURLToPath} from 'node:url'
 import {describe, expect, it} from 'vitest'
 
-/*
- * The renderer↔backend wire, checked.
- *
- * `src/services/desktop.ts` declares what the renderer may call and `tauri::generate_handler!`
- * declares what exists to be called. They are two hand-maintained lists in two languages, and
- * nothing in either build reconciles them: a command renamed on one side and not the other
- * compiles, typechecks, lints, and then fails at runtime as "command not found" — which is what a
- * setting that will not store looks like from the outside.
- *
- * Rust already checks `generate_handler!` against the permission grant, in
- * `the_window_is_granted_exactly_the_commands_it_registers`. This is the third side of the same
- * triangle, and the only one a frontend change can break on its own.
- *
- * Files rather than imports: the point is to read what is actually written down.
- */
-
 const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8')
 
 function between(source: string, opening: string, closing: string, what: string) {
@@ -29,7 +13,6 @@ function between(source: string, opening: string, closing: string, what: string)
     return block ?? ''
 }
 
-/** Command names the renderer declares, in the order they are written. */
 function declaredCommands() {
     const block = between(
         read('./desktop.ts'),
@@ -42,7 +25,6 @@ function declaredCommands() {
     )
 }
 
-/** Command names the application registers with Tauri, in the order they are written. */
 function registeredCommands() {
     const block = between(
         read('../../src-tauri/src/lib.rs'),
@@ -56,7 +38,6 @@ function registeredCommands() {
         .filter(name => name !== '')
 }
 
-/** Commands a Tauri plugin registers for itself. They are never in this application's handler. */
 const isPluginCommand = (name: string) => name.startsWith('plugin:')
 
 describe('the renderer and the backend agree on the command surface', () => {

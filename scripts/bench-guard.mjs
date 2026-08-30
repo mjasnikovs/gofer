@@ -1,21 +1,3 @@
-/**
- * When the repeat guard takes over, does dropping the original refusal help or hurt?
- *
- * `withoutRepeatingARefusal` replaces the tool's answer from the fourth identical call onward. Its
- * own doc calls that deliberate — "the lever is not a better sentence, it is a *different* one" —
- * and marks itself unmeasured. A live Breakout turn measured it: eight identical `instantiate`
- * calls, three plain refusals then five from the guard, and the model never changed the call.
- *
- * What the replacement costs is the shape. Refusals one to three carry
- * `It takes {parent: text, path: text, name?: text, index?: int}`; the guard carries no signature
- * at all, so a model that is stuck loses the one line naming what to write.
- *
- * Arms: the guard alone, against the guard followed by the answer it replaced. Interleaved inside
- * one process, alternating per seed, and only the SIGN of the gap is read.
- *
- *   GOFER_BENCH_CATALOG=/tmp/catalog.json GOFER_BENCH_PROMPT=/tmp/prompt.txt \
- *     node scripts/bench-guard.mjs 20
- */
 import {readFile} from 'node:fs/promises'
 import Ajv from 'ajv'
 import {createGodotTools} from './godot-tools.mjs'
@@ -38,7 +20,6 @@ const SESSION = 'Editor session: ready. Godot 4.7.2, scene res://scenes/main.tsc
 const ASK =
     'Place three instances of res://scenes/brick.tscn under /Main, named Brick1, Brick2 and Brick3.'
 
-// The exact entry a live turn sent eight times, and the exact answer it was given.
 const TORN = JSON.stringify({
     ops: [
         {
@@ -59,7 +40,6 @@ const GUARD =
     + ' Whatever is wrong is in the call itself: build it again from nothing rather than sending'
     + ' the one you have, or reach the same result another way.'
 
-/** The conversation as the loop leaves it: three plain refusals, then the guard. */
 function messages(guardCarriesTheAnswer) {
     const out = [
         {role: 'system', content: `${prompt}\n\n${SESSION}`},
@@ -111,12 +91,6 @@ async function ask(body, seed) {
     return (await response.json()).choices?.[0]?.message ?? {}
 }
 
-/**
- * Did the next call escape the loop?
- *
- * Escaped means: a `godot_node` call whose entries the router would take, with no key carrying a
- * quote or a brace in its name. Sending the identical torn call again is the failure this measures.
- */
 function escaped(message) {
     let sawACall = false
     for (const call of message.tool_calls ?? []) {

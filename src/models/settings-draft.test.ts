@@ -58,7 +58,6 @@ const SETTINGS: GoferSettings = {
     godot: DEFAULT_GODOT_SETTINGS
 }
 
-/** The live connection's model, which is what the AI tab's fields are about. */
 function chosen(state: {settings?: GoferSettings | undefined}): ModelChoice | undefined {
     return state.settings && activeConnection(state.settings.ai)?.model
 }
@@ -70,7 +69,6 @@ const PROMPT: AgentPrompt = {prompt: SHIPPED_PROMPT, defaultPrompt: SHIPPED_PROM
 
 const RESPONSE: SettingsResponse = {settings: SETTINGS, hasApiKey: false}
 
-/** Applies a run of actions in order, which is the only way the page ever reaches a state. */
 function apply(...actions: readonly (SettingsAction | SettingsTaskAction)[]): SettingsDraft {
     return actions.reduce(reduce, INITIAL_SETTINGS_DRAFT)
 }
@@ -99,8 +97,6 @@ describe('loading', () => {
         expect(state.isLoading).toBe(false)
     })
 
-    // A file written before the Godot tab existed says nothing about the rules. Reading that
-    // silence as "off" would quietly stop enforcing what the user never turned off.
     it('enforces both Godot rules for a file that predates them', () => {
         const sparse = {version: 1, ai: {model: 'gpt'}} as unknown as GoferSettings
         const state = apply({
@@ -166,9 +162,6 @@ describe('the request the page would send', () => {
     })
 
     it('holds every secret by the same three rules, in its own field of the request', () => {
-        // Every one of these matters because the page never reads a stored secret back. An empty
-        // field is "leave it alone"; only the removal button is "take it off the machine". One rule
-        // now, so this asserts it holds for each secret rather than that three copies agree.
         const fields = [
             {secret: 'brave', field: 'braveApiKey'},
             {secret: 'openrouter', field: 'openrouterApiKey'},
@@ -195,8 +188,6 @@ describe('the request the page would send', () => {
     })
 
     it('changes one key without disturbing the other', () => {
-        // Three separate credentials sharing one save. Typing a Brave key must not send the AI key,
-        // and clearing one must not clear the others.
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'key-typed', secret: 'brave', value: 'brave-1'}
@@ -238,7 +229,6 @@ describe('the request the page would send', () => {
         expect(state.keys.openrouter.isStored).toBe(false)
         expect(state.keys['chat-gpt'].isStored).toBe(true)
 
-        // Signing out is the only thing that removes the one secret with no box.
         const out = reduce(state, {type: 'chatgpt-auth-changed', isAuthenticated: false})
         expect(out.keys['chat-gpt'].isStored).toBe(false)
         expect(out.keys['ai-default'].isStored).toBe(true)
@@ -312,13 +302,6 @@ describe('editing the connection', () => {
         expect(chosen(reduce(loaded, {type: 'model-chosen', model}))?.thinkingLevel).toBe('off')
     })
 
-    /*
-     * The catalogue answering about the model the page already has chosen.
-     *
-     * The page used to list models for ChatGPT only, so a local connection opened with whatever the
-     * file said — including a `reasoning: false` written before any catalogue had been read — and
-     * its reasoning menu offered `off` and nothing else.
-     */
     it('re-reads what the chosen model can think without touching what was typed', () => {
         const model: AiModelOption = {
             id: 'local-model',
@@ -396,7 +379,6 @@ describe('choosing the model the sub-agent answers with', () => {
             connectionType: 'openai-compatible',
             model: {id: 'qwen', contextWindow: 32_768}
         })
-        // And the parent is untouched, which is the whole point of the child having its own.
         expect(chosen(state)?.id).toBe('qwen')
     })
 
@@ -411,7 +393,6 @@ describe('choosing the model the sub-agent answers with', () => {
             model: {
                 id: 'small',
                 contextWindow: 8192,
-                // A model that cannot reason has no level to keep.
                 thinkingLevel: 'off'
             }
         })
@@ -431,7 +412,6 @@ describe('choosing the model the sub-agent answers with', () => {
     })
 
     it('leaves the child borrowing when the chosen driver has no stored connection', () => {
-        // This fixture has never been configured for ChatGPT, so there is no connection to name.
         const state = reduce(loaded, {
             type: 'subagent-driver-chosen',
             connectionType: 'openai-codex'
@@ -516,8 +496,6 @@ describe('saving', () => {
         )
         expect(state.keys['ai-default'].isStored).toBe(true)
         expect(state.keys.brave.isStored).toBe(true)
-        // The save wrote all three, so all three boxes are empty and back to "leave it alone".
-        // Text left in one would be sent a second time by the next save.
         for (const key of Object.values(state.keys)) {
             expect(key.typed).toBe('')
             expect(key.intent).toBe('keep')
@@ -543,7 +521,6 @@ describe('the Godot rules', () => {
     it('moves the box before the backend answers', () => {
         const state = reduce(loaded, {type: 'godot-changed', update: {strictTyping: false}})
         expect(state.settings?.godot.strictTyping).toBe(false)
-        // The other rule is untouched: one checkbox writes one rule.
         expect(state.settings?.godot.embedGameWindow).toBe(true)
     })
 
@@ -572,8 +549,6 @@ describe('the Godot rules', () => {
         })
     })
 
-    // The page puts the tick back itself, by dispatching the previous value. What this pins is that
-    // a failure lands on the Godot tab rather than over the connection form on another one.
     it('reports a failed write on its own tab', () => {
         const notice = {
             status: 'error',
@@ -679,17 +654,10 @@ describe('the agent prompt', () => {
 
         const restored = reduce(edited, {type: 'prompt-restored'})
         expect(restored.agentPrompt).toBe(SHIPPED_PROMPT)
-        // Restoring only fills the box. The backend is told when the page is saved, like everything
-        // else on it, so until then the shipped text is still an unsaved change.
         expect(agentPromptIsUnsaved(restored)).toBe(false)
         expect(agentPromptIsDefault(restored)).toBe(true)
     })
 
-    /*
-     * The backend answers a save with what it will actually send, which is the shipped prompt
-     * whenever the stored text was the shipped one. Taking its word is what keeps the box from
-     * claiming an edit the project does not have.
-     */
     it('takes the saved prompt from the backend rather than from the box', () => {
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
@@ -701,26 +669,13 @@ describe('the agent prompt', () => {
     })
 })
 
-/*
- * The protocol itself, rather than eight copies of it.
- *
- * `began` before the work, `failed` with the caller's title if it throws, `ended` either way — an
- * order that used to live in eight try/catch/finally blocks on the page, agreeing with each other
- * only by hand. These are the tests that could not be written while it did.
- */
 describe('runSettingsTask', () => {
-    /**
-     * What a backend command rejects with: a coded failure carrying a sentence, which is what
-     * `commandErrorMessage` reads. An `Error` alone would print as "Error: …", which is the shape
-     * this repo stopped rejecting with once every command started answering with a code.
-     */
     class CommandFailure extends Error {
         readonly code = 'io_error'
         readonly retryable = false
         readonly details = {}
     }
 
-    /** Records what the runner dispatched, in order. */
     function recorder() {
         const taken: (SettingsAction | SettingsTaskAction)[] = []
         return {

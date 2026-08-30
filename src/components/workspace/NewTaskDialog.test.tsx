@@ -28,13 +28,6 @@ const show = (changes: readonly PendingChange[]) => {
 const createButton = () => screen.getByRole('button', {name: 'Create task'})
 
 describe('making a task', () => {
-    /*
-     * The dialog asks one question and no longer takes an ask.
-     *
-     * There is one place in Gofer to write what you want, and it is the composer — a second box here
-     * was a box that could hold neither an image nor a file mention, and planning is a control
-     * beside Send rather than a mode chosen before the chat exists.
-     */
     it('does not ask what the task is', () => {
         show(COPIED)
 
@@ -42,12 +35,6 @@ describe('making a task', () => {
         expect(screen.queryByRole('button', {name: /plan/iu})).not.toBeInTheDocument()
     })
 
-    /*
-     * The regression this dialog exists for.
-     *
-     * Files the user copied into the project by hand were committed onto the task being closed and
-     * then taken off disk by the checkout, with nothing anywhere saying so.
-     */
     it('keeps copied-in files by default, and names them', async () => {
         const {onCreate} = show(COPIED)
 
@@ -59,7 +46,6 @@ describe('making a task', () => {
         expect(onCreate).toHaveBeenCalledWith(true)
     })
 
-    // An edited file could be the closing task's own work, so that answer is not assumed.
     it('asks cold when a tracked file was edited', async () => {
         const {onCreate} = show([{path: 'main.tscn', isNew: false}])
 

@@ -1,16 +1,3 @@
-/**
- * The fixtures every AI turn test is written against: one settings object, one mock model server,
- * one temporary workspace, and the catalog of domain tools a turn is offered.
- *
- * These sat at the top of `ai-worker.test.mjs`, which is where all sixty-seven of these tests sat —
- * a file named after a module it never imported, holding the tests for five others. The tests moved
- * to the modules whose interfaces they cross. The fixtures they share moved here, because a fixture
- * four files reach for belongs to none of them.
- *
- * Not a test file: it declares nothing and asserts nothing. Everything here is scaffolding for
- * something that does.
- */
-
 import {createServer} from 'node:http'
 import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
@@ -31,13 +18,6 @@ export const settings = {
     }
 }
 
-/**
- * The same settings pointed at one server, with whatever this test needs changed on the way.
- *
- * `model` lands on the live connection's model half and `connection` on its address half; anything
- * else is the file's own tuning. Written once because forty-odd tests here differ from each other
- * only in which port the mock server came up on.
- */
 export function servedBy(baseUrl, {model = {}, connection = {}, ...tuning} = {}) {
     const live = settings.connections['openai-compatible']
     return {
@@ -134,8 +114,6 @@ export const catalog = [
         description: 'Project resources.',
         operations: [{op: 'delete', summary: 'Deletes a resource. Asks the user first.'}]
     },
-    // The tool the reachability pass was written for: it answers through a sidecar and a model
-    // cache, so it is the one that can be declared with nothing behind it.
     {
         name: 'godot_docs_search',
         description: 'The Godot documentation on this machine.',
@@ -143,13 +121,6 @@ export const catalog = [
     }
 ]
 
-/**
- * The backend's half of the startup reachability probe.
- *
- * Every fake backend below answers it, because a turn no longer starts against a tool that does
- * not answer — which is the whole point of the pass. A fake that stayed silent would be testing a
- * backend the application would refuse to talk to.
- */
 export function isProbe(call) {
     return call.params?.probe === true
 }
@@ -158,12 +129,10 @@ export function probeResult(call) {
     return {type: 'tool-result', id: call.id, ok: true, result: {tool: call.tool, reachable: true}}
 }
 
-/** The tool calls a turn made, with the startup probes taken out. */
 export function withoutProbes(calls) {
     return calls.filter(call => !isProbe(call))
 }
 
-/** A model that answers with one tool call, then with text once the tool result comes back. */
 export function startToolCallingServer(tool, args) {
     let turn = 0
     const server = createServer((request, response) => {
@@ -212,14 +181,6 @@ export function startToolCallingServer(tool, args) {
     return server
 }
 
-/**
- * A model scripted turn by turn: `calls` answers with tool calls, `text` ends the turn on a
- * message. The request bodies are kept because half of what these tests prove is what reaches the
- * model — an error code it must read, an image it must see, a tool it was never asked to confirm.
- *
- * `usage` is what the server says the request cost, which is the number compaction has to trust
- * over any estimate. `error` fails the request the way llama.cpp does, body and status and all.
- */
 export function startScriptedServer(turns) {
     const bodies = []
     let turn = 0
@@ -236,10 +197,6 @@ export function startScriptedServer(turns) {
                 response.writeHead(script.error.status ?? 400, {
                     'content-type': 'application/json'
                 })
-                // `body` for a gateway that answers with more than a sentence. OpenRouter puts the
-                // real cause and the one thing the user can do about it in `metadata`, and a test
-                // about how that reaches a person cannot be written against a shape this harness
-                // makes up. Absent, it is the one-line body llama.cpp sends.
                 response.end(
                     JSON.stringify(
                         script.error.body ?? {
@@ -312,13 +269,6 @@ export const NO_USAGE = {
     cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}
 }
 
-/**
- * A stored conversation long enough to cross the compaction line.
- *
- * Every turn reports no usage, so the size the worker measures comes from the text itself rather
- * than from a server's token accounting — which is what makes the line the test crosses a number
- * the test controls.
- */
 export function longConversation(pairs, characters) {
     const messages = []
     for (let index = 0; index < pairs; index += 1) {
@@ -337,13 +287,6 @@ export function longConversation(pairs, characters) {
     return messages
 }
 
-/**
- * One step of agentic work in the shape the agent stores it: a call, then its result.
- *
- * This is what a long turn is almost entirely made of. A conversation of six bubbles on screen was
- * two hundred and thirty five of these in the transcript on disk, so what a retry does to them is
- * what a retry does to the model's memory.
- */
 export function toolStep(marker, at) {
     return [
         {
@@ -370,7 +313,6 @@ export function toolStep(marker, at) {
     ]
 }
 
-/** One settled exchange in the shape the agent stores it. */
 export function settledTurn(prompt, answer, at) {
     return [
         {role: 'user', content: prompt, timestamp: at},
@@ -387,16 +329,8 @@ export function settledTurn(prompt, answer, at) {
     ]
 }
 
-/** The turn-level retry only. `maxRetries: 0` switches the provider's own HTTP retry off. */
 export const impatient = {maxRetries: 0}
 
-/**
- * A clock that owes nothing: every wait is written down and then run at once.
- *
- * The retry policy used to be proved by shortening it — `retryBaseDelayMs: 1` — which paid real
- * milliseconds to test a curve that was no longer the shipped one. On this clock the tests run the
- * defaults, five seconds doubling to a minute, and `waited` is what the loop actually asked for.
- */
 export function instantTimers() {
     const waited = []
     return {
@@ -415,7 +349,6 @@ export function instantTimers() {
     }
 }
 
-/** A child given a model of its own: a small one to read with, on the connection it names. */
 export const SMALL_MODEL = {
     connectionType: 'openai-compatible',
     model: {

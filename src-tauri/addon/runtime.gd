@@ -78,15 +78,6 @@ var _tree_budget: int = MAX_TREE_NODES
 var _tree_depth: int = MAX_TREE_DEPTH
 
 func _ready() -> void:
-    # The helper has to answer while the game it is inside is paused, which is the whole point of
-    # `pause`: a caller freezes the game precisely so it can look at it.
-    #
-    # Measured: it answers without this line too. The editor's messages arrive through
-    # `EngineDebugger`, which the main loop polls whether or not the tree is paused, and
-    # `SceneTree.process_frame` — which `wait` and `capture` await — is emitted either way. So this
-    # is a guard on the invariant rather than what makes it hold today: an op written later that
-    # uses `_process` would otherwise stop answering the moment somebody paused, and the failure
-    # would look like a hung game.
     process_mode = Node.PROCESS_MODE_ALWAYS
     print("GOFER_RUNTIME_READY:%d" % PROTOCOL_VERSION)
     if not EngineDebugger.is_active():
@@ -112,8 +103,6 @@ func _on_editor_message(message: String, data: Array) -> bool:
     if op == "ping":
         _announce_ready()
         return true
-    # `_serve` is a coroutine: calling it runs the op until its first await and the response is
-    # sent whenever the awaited frames have passed. The capture callback itself returns now.
     _serve(request as Dictionary)
     return true
 
@@ -199,9 +188,6 @@ func _as_far_as_the_path_goes(raw: String) -> String:
 
 func _node_not_found(parameter: String, path: String) -> Dictionary:
     var plain := "No running node at '%s'" % path
-    # A path read out of `get_tree` and used on the next call is the ordinary way to reach a node,
-    # and it is exactly wrong for a node that lives for a moment. One live turn building a shooter
-    # met this four times, always on a bullet or an enemy the spawner had never named.
     if _is_an_engine_name(path.get_file()):
         plain += (
             ". A name like that is the engine's own for a node nobody named: it belongs to one "
@@ -227,9 +213,6 @@ func _node_not_found(parameter: String, path: String) -> Dictionary:
 ## result at a fixed character count with no regard for the JSON, and the flag is inside whatever it
 ## cuts — so the answer is bounded here rather than explained after the fact.
 func _op_tree(params: Dictionary) -> Dictionary:
-    # Typed as `Node` rather than inferred: `get_tree().root` is a `Window`, and the lookup below
-    # answers with a `Node`. Inferring the first makes the second a parse error, which stops this
-    # whole script from loading and leaves every runtime call to time out.
     var start: Node = get_tree().root
     var from := str(params.get("root", ""))
     if not from.is_empty():
@@ -237,20 +220,12 @@ func _op_tree(params: Dictionary) -> Dictionary:
         if start == null:
             return _node_not_found("root", from)
     var levels := int(params.get("depth", MAX_TREE_DEPTH))
-    # Cast rather than assigned: a JSON number reaches the addon as a float, and a typed
-    # assignment from one is a runtime error that takes the whole response with it.
     var budget := int(params.get("limit", DEFAULT_TREE_NODES))
     _tree_nodes_seen = 0
     _tree_truncated = false
     _tree_budget = clampi(budget, 1, MAX_TREE_NODES)
     _tree_depth = clampi(levels, 0, MAX_TREE_DEPTH)
     var summary := _runtime_node_summary(start, 0)
-    # `paused` rides along because nothing else carries it and the tree is what gets asked for.
-    #
-    # It belongs to the SceneTree, which is not a Node, so `inspect_node` cannot reach it: two live
-    # turns asked for it as a property of `/root` and were told `/root has no property 'paused'`,
-    # which is true and useless. The only other way to it is `godot_debug evaluate`, which means
-    # attaching a debugger to read one boolean. A pause menu is the commonest reason to want it.
     return _succeed({
         "truncated": _tree_truncated,
         "root": summary,
@@ -271,8 +246,6 @@ func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
     return {
         "name": node.name,
         "type": node.get_class(),
-        # The class whose icon the editor would draw. The game has no editor theme to read, so the
-        # name is all the running tree can carry: the editor side resolves it to artwork.
         "icon": Params.icon_class(node),
         "path": str(node.get_path()),
         "children": children,
@@ -292,15 +265,11 @@ func _runtime_node_summary(node: Node, depth: int) -> Dictionary:
 func _op_wait(params: Dictionary) -> Dictionary:
     var wanted_ms := clampi(int(params.get("ms", 0)), 0, MAX_WAIT_MS)
     var wanted_frames := clampi(int(params.get("frames", 0)), 0, MAX_WAIT_FRAMES)
-    # Neither named is one frame: the commonest ask is simply "let this take effect".
     if wanted_ms == 0 and wanted_frames == 0:
         wanted_frames = 1
     var started := Time.get_ticks_msec()
     var deadline := started + (wanted_ms if wanted_ms > 0 else MAX_WAIT_MS)
     var frames := 0
-    # The deadline bounds every wait; the frame count bounds only a wait that named one. Bounding an
-    # `ms` wait by frames as well ended it early on a fast display — 600 frames is 4.2 seconds at
-    # 144Hz, so `{"ms": 5000}` came back having waited four.
     while Time.get_ticks_msec() < deadline:
         if wanted_frames > 0 and frames >= wanted_frames:
             break
@@ -321,8 +290,6 @@ func _op_wait(params: Dictionary) -> Dictionary:
 ## That is a tool gap solved in the product being built, which is the wrong place for it.
 func _op_pause(paused: bool) -> Dictionary:
     get_tree().paused = paused
-    # Read back rather than asserted: `paused` is a plain setter today, and a reply that says what
-    # the tree answers is the reply that stays true if it stops being one.
     return _succeed({"paused": get_tree().paused})
 
 ## Reads named properties off one live node. Property values cross the wire tagged through the
@@ -331,8 +298,6 @@ func _op_inspect(params: Dictionary) -> Dictionary:
     var path := str(params.get("path", ""))
     if path.is_empty():
         return _failure("invalid_params", "runtime.inspect_node requires a path")
-    # Trimmed for the reason the editor side trims: outer whitespace on a node path is never
-    # meaningful, and is what a model's JSON leaves behind when it slips.
     path = path.strip_edges()
     var node := get_tree().root.get_node_or_null(NodePath(path))
     if node == null:
@@ -382,8 +347,6 @@ func _op_input(params: Dictionary) -> Dictionary:
         return _failure("invalid_params", "runtime.input requires at least one event")
     for event in events:
         Input.parse_input_event(event)
-    # One frame dispatches the buffered events, the second lets scripts react, and frame_post_draw
-    # guarantees the capture reads pixels drawn after both.
     await get_tree().process_frame
     await get_tree().process_frame
     await RenderingServer.frame_post_draw
@@ -413,8 +376,6 @@ func _op_monitors(params: Dictionary) -> Dictionary:
     for entry in names:
         var monitor := str(entry)
         if not MONITORS.has(monitor):
-            # The names, because the set is closed and short. Every other closed vocabulary in this
-            # file says what it holds; this one only said what it does not.
             var offered: Array = MONITORS.keys()
             offered.sort()
             return _failure(
@@ -466,8 +427,6 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
     if typeof(raw) != TYPE_ARRAY:
         return _decode_failed("events must be an array of input event objects")
     var events: Array = []
-    # Which buttons and keys this call has already put down, so an event that does not spell
-    # `pressed` alternates rather than repeating. See `_pressed_or_released`.
     var held := {}
     for entry in raw:
         if typeof(entry) != TYPE_DICTIONARY:
@@ -480,11 +439,6 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 if code == KEY_NONE:
                     return _decode_failed("Unknown key '%s'" % key_name)
                 var key_event := InputEventKey.new()
-                # Both, because an event from a real keyboard carries both and the Input Map may
-                # be bound on either. `project.set_input_action` writes its bindings on the
-                # *physical* key, so a key injected with only `keycode` matched none of the actions
-                # Gofer itself registered: the event was delivered, matched nothing, and the game
-                # simply did not move — with no error anywhere to say why.
                 key_event.keycode = code
                 key_event.physical_keycode = code
                 key_event.pressed = _pressed_or_released(entry as Dictionary, held, "key:%d" % code)
@@ -494,10 +448,6 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 var button_index := MOUSE_BUTTON_LEFT
                 if typeof(button_name) == TYPE_STRING:
                     if not MOUSE_BUTTONS.has(button_name):
-                        # The names, because the set is five long and a refusal that does not carry
-                        # it is a refusal a caller cannot act on. One live turn sent the string
-                        # "1" — the number is accepted, the string spelling of it is not — and was
-                        # told only that "1" is unknown.
                         var offered: Array = MOUSE_BUTTONS.keys()
                         offered.sort()
                         return _decode_failed(
@@ -547,11 +497,6 @@ func _decode_runtime_events(raw: Variant) -> Dictionary:
                 )
                 events.append(axis_event)
             _:
-                # Named, because the kinds are the whole vocabulary and a caller that got one wrong
-                # has nowhere else to read them. A live turn sent an event with no kind at all and
-                # was answered `Input event kind '' is not supported` twenty-two times running —
-                # true, and naming nothing to send instead. The parameter contract refuses this
-                # before it reaches the socket now; this is what answers anything that gets past it.
                 if kind.is_empty():
                     return _decode_failed(
                         "An input event needs a kind: one of %s" % ", ".join(EVENT_KINDS)

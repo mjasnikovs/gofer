@@ -2,50 +2,8 @@ import {spawn} from 'node:child_process'
 import {cpus} from 'node:os'
 import {delimiter, resolve} from 'node:path'
 
-// Runs everything `npm run check` used to run one after another, in three lanes at once.
-//
-// The lanes are drawn around Cargo's build lock, not around the tests. Every `cargo` invocation
-// takes the same lock on `src-tauri/target` before it does anything, so two of them started at the
-// same time do not run at the same time — the second waits, and all that is gained is a confusing
-// progress display. Everything that holds that lock for its whole run therefore stays in one serial
-// lane, in the order it ran in before.
-//
-// `test:godot` gets a lane of its own because it is the exception: it takes the lock once to build,
-// then hands its 47 tests to the binary directly and never asks Cargo for anything again. Almost
-// all of its minute is spent holding no lock at all, which is the window the Cargo lane runs in.
-//
-// The wall time is now the longest lane rather than the sum of all three. That is the Godot lane,
-// and everything else — clippy, the Rust tests, Prettier, ESLint, tsc, Vitest, the Node tests, the
-// browser journey — now finishes while those editors are still booting, where before it was a
-// minute spent one command at a time with fifteen cores idle.
-//
-// A step is a label and the command it runs. The command is written here rather than kept as an
-// `npm run` script, because a script nothing else ever names is not a way in — it is a line in
-// `package.json` that exists so this file can spell it. Nine of them were exactly that. What stays
-// a script is what something else calls: CI, `tauri.conf.json`, the Rust sources, or a person.
-
-/** A step whose command is a `package.json` script, because something other than this file runs it. */
 const script = name => [name, `npm run --silent ${name}`]
 
-// How many cores each lane may claim.
-//
-// Every one of these tools sizes itself against the whole machine, and until they ran together each
-// was right to: Cargo builds and tests with a thread per core, Vitest forks one process per test
-// file up to the same number, and the Godot runner boots an editor per worker. Side by side they
-// ask for about forty threads on sixteen cores, and what that costs is not evenly spread slowness —
-// it is failures. `stopping_the_game_answers_only_once_the_game_is_gone` asserts that the game is
-// gone the instant `runtime.stop` answers, and a starved machine has not reaped the process yet.
-// That is a real assertion about a real contract, so the fix is to stop starving it.
-//
-// The Godot lane gets more than its third because a worker there spends most of its life waiting on
-// an editor that is booting rather than computing. Measured on sixteen cores, alternating whole
-// runs: eight Godot workers gave 63.9s, 63.8s and 64.4s, ten gave 61.6s, 61.9s and 61.1s. Ten and
-// four and four is eighteen on sixteen, which is the point — the lanes are not all busy at the same
-// moment, and pretending they are left two cores idle for a minute.
-//
-// Ten later read as flaky — five of five runs red — and the count was not why. Ten editors shared
-// Godot's one debugger port and games connected to the wrong editor; the fix is the per-worker
-// `debug_port` in `godot_editor_harness.rs`, and ten is green again.
 const CORES = Math.max(4, cpus().length)
 const GODOT_JOBS = Math.floor((CORES * 5) / 8)
 const CARGO_JOBS = Math.floor(CORES / 4)
@@ -89,19 +47,9 @@ const NODE_COVERAGE_EXCLUDES = [
     'memory-worker.mjs',
     'rag-warmup.mjs',
     'rag-retrieve-worker.mjs',
-    // The wire around `skills.mjs`, which is where the coverage is. The build spawns this one and
-    // refuses to ship a bundle that cannot answer its probe, which is a stronger check than a line
-    // count on twenty lines of stdin handling.
     'skills-worker.mjs',
-    // Every `bench-*.mjs` is a measurement harness: run by hand against a real model, never
-    // imported, never shipped. `bench-alone.mjs` was excluded by name and the family has since
-    // grown to eight, which left the gate 0.53 of a point above its own line — one more
-    // measurement away from failing for having measured something.
     'bench-*.mjs',
-    // Fixtures for the AI turn tests. Scaffolding, not a module anything ships.
     'ai-turn-harness.mjs',
-    // The declared contract as the worker receives it, for the two test files that need it.
-    // Scaffolding for the same reason.
     'declared-domains.mjs'
 ]
     .map(name => `--exclude='scripts/${name}'`)
@@ -117,16 +65,6 @@ const OTHER_LANE = [
     script('check:command-surface'),
     script('check:design'),
     ['test:coverage:frontend', `vitest run --coverage --maxWorkers=${OTHER_JOBS}`],
-    // The floor is 90/80 because the number it measures is 93.07/87.98. It was 80/75 against a
-    // measured 80.53, which is not a floor — it is a number one uncovered file away from failing,
-    // and eight of the files it was counting were `bench-*.mjs` measurement harnesses that nothing
-    // imports and nothing ships. Excluding those moved the real figure twelve and a half points,
-    // and the floor moved with it so the gate goes on meaning something about the code that ships.
-    //
-    // Both c8 runs need a directory of their own. Left to itself c8 writes its raw V8 output to
-    // `coverage/tmp` and wipes that directory on start, and these two are adjacent in a lane two
-    // workers wide — so the second to start deletes the first one's measurements out from under it
-    // and both report numbers taken from whatever survived the race.
     [
         'test:coverage:node',
         `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=coverage/node/tmp --reports-dir=coverage/node --reporter=text --check-coverage --lines 90 --branches 80 npm run --silent test:worker`
@@ -135,16 +73,10 @@ const OTHER_LANE = [
         'test:coverage:node-critical',
         "c8 --include='scripts/workspace-confinement.mjs' --temp-directory=coverage/node-critical/tmp --reports-dir=coverage/node-critical --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/workspace-confinement.test.mjs"
     ],
-    // The other file where a branch nobody exercised costs real money. What this one assembles is
-    // sent on the tail of every turn rather than on the system prompt, because the system prompt is
-    // where every provider's cache prefix begins — and a turn that lands one byte of this in the
-    // wrong place re-buys the whole conversation. A directory of its own, for the reason above.
     [
         'test:coverage:node-turn-context',
         "c8 --include='scripts/turn-context.mjs' --temp-directory=coverage/turn-context/tmp --reports-dir=coverage/turn-context --reporter=text --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --test scripts/turn-context.test.mjs"
     ],
-    // The source worker passing proves nothing about the file a built Gofer runs: that one is
-    // bundled, and a bundle can lose a module the source resolved fine.
     script('test:worker:bundled'),
     [
         'test:desktop:browser',
@@ -152,16 +84,8 @@ const OTHER_LANE = [
     ]
 ]
 
-// Two at a time, not all eleven. Vitest and the browser journey each spread over several cores of
-// their own, and the Cargo lane beside them is running six Godot editors — started all together
-// they finish no sooner and every one of them gets slower. Two is enough: this lane has about 45
-// seconds of work in it and the Cargo lane beside it runs for 80, so there is nothing to win by
-// crowding it, and a crowded machine is what made the Vitest suite time out.
 const LANE_WIDTH = 2
 
-// `npm run` puts this on PATH for the scripts it starts, and half the commands above are binaries
-// that live in it — `vitest`, `c8`, `wdio`, `start-server-and-test`. Run straight from a shell they
-// would be "command not found", which is the one thing that breaks by inlining them.
 const PATH_WITH_LOCAL_BINARIES = `${resolve('node_modules/.bin')}${delimiter}${process.env['PATH'] ?? ''}`
 
 const results = []
@@ -188,8 +112,6 @@ function run([label, command]) {
     })
 }
 
-// A lane is a queue its workers pull from, so a slow step holds up only its own worker. The Cargo
-// lane is one worker wide, which is what keeps it in order.
 async function lane(steps, width) {
     const queue = [...steps]
     const workers = Array.from({length: Math.min(width, queue.length)}, async () => {
@@ -201,8 +123,6 @@ async function lane(steps, width) {
 const started = Date.now()
 await Promise.all([lane(GODOT_LANE, 1), lane(CARGO_LANE, 1), lane(OTHER_LANE, LANE_WIDTH)])
 
-// Only failures print their output, and they print it whole. A check that passed has nothing to say
-// that is worth burying the one that did not.
 const failures = results.filter(result => result.status !== 0)
 for (const failure of failures) {
     process.stdout.write(`\n--- ${failure.label} ---\n${failure.output}\n`)

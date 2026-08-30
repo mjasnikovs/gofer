@@ -1,12 +1,5 @@
 export type Page = 'workspace' | 'settings'
 
-/**
- * An optional field of a task, as it arrives.
- *
- * Rust serializes an absent `Option` as `null`, and a task whose branch has never been merged
- * carries exactly that. Typing these as `string | undefined` and checking for `undefined` alone
- * rejected every task Gofer has ever created — which the sidebar showed by listing none of them.
- */
 type Absent = null | undefined
 
 type TaskWorktreeSummary = Readonly<{
@@ -27,7 +20,6 @@ export type TaskSummary = Readonly<{
     worktree?: TaskWorktreeSummary | Absent
 }>
 
-/** A file the checkout is carrying that no commit has. `isNew` is untracked: nobody's work but the user's. */
 export type PendingChange = Readonly<{
     path: string
     isNew: boolean
@@ -42,7 +34,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** An optional string, absent as either `undefined` or the `null` the backend actually sends. */
 function isOptionalText(value: unknown) {
     return value === undefined || value === null || typeof value === 'string'
 }

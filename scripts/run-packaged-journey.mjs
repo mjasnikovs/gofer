@@ -5,9 +5,6 @@ import {spawn} from 'node:child_process'
 import {createServer} from 'node:http'
 import {resolveGodotBinary} from './godot-binary.mjs'
 
-// The journey asserts the formatter answers from the bundled sidecar rather than from an override,
-// so the sidecar has to have been built. Failing here names the command; failing inside the
-// packaged run would only report `formatter_unavailable` from a window three processes away.
 const sidecar = resolve(
     'src-tauri/sidecar',
     process.platform === 'win32' ? 'gdformat.exe' : 'gdformat'
@@ -34,8 +31,6 @@ await new Promise((resolveListen, reject) => {
 })
 const address = modelServer.address()
 if (!address || typeof address === 'string') throw new Error('Fake model server has no port')
-// The journey drives a real editor session, so the pinned engine is resolved and verified here
-// rather than assumed: the application discovers it through this same variable.
 const environment = {
     ...process.env,
     GOFER_GODOT_BINARY: resolveGodotBinary(),
@@ -66,10 +61,6 @@ try {
     }
 } finally {
     await new Promise(resolveClose => modelServer.close(resolveClose))
-    // Windows releases a directory handle after the process holding it exits, not with it, so a
-    // worktree the editor session just closed can still be locked here. The retries wait that out.
-    // Housekeeping a temporary directory is not the journey's verdict, though: if the directory
-    // survives, say so and leave the exit code the specs earned rather than throwing over it.
     try {
         rmSync(fixtureRoot, {recursive: true, force: true, maxRetries: 10, retryDelay: 200})
     } catch (error) {

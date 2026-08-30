@@ -8,23 +8,12 @@ import ExclamationTriangleIcon from '@heroicons/react/24/outline/ExclamationTria
 
 type ErrorBoundaryProps = Readonly<{
     children: ReactNode
-    /** What stopped working, in the user's terms — a region, not a component name. */
     title: string
     description: string
 }>
 
 type ErrorBoundaryState = Readonly<{message?: string | undefined}>
 
-/**
- * Keeps one bad render inside the region it happened in.
- *
- * React unmounts the whole tree when a render throws and nothing catches it, so before this existed
- * a single unexpected value — one stream event with a field the timeline did not expect — replaced
- * the entire window with a blank page, with the conversation still safe on disk and no way to reach
- * it. The blast radius is now the region, and the region offers its way back.
- *
- * A class because that is the only thing React lets catch a render error.
- */
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     override state: ErrorBoundaryState = {}
 
@@ -33,8 +22,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     }
 
     override componentDidCatch(error: Error, info: ErrorInfo) {
-        // The stack says which component threw, and it is the only copy: nothing else in the
-        // application sees a render error at all.
         console.error(`${this.props.title}: ${error.message}`, info.componentStack)
     }
 

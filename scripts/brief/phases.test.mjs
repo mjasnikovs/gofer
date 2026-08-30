@@ -22,13 +22,6 @@ const ok = text => ({kind: 'ok', text, usage: {}, turns: 1})
 const failed = (cause, reason = 'because') => ({kind: 'failed', cause, reason, attempts: 1})
 const stopped = {kind: 'stopped', reason: 'the turn was stopped'}
 
-/**
- * A worker that answers from a script instead of a model, and records what it was asked.
- *
- * Every decision the phases make is a pure function of the verdict a worker comes back with, so
- * substituting the verdict is what makes the decisions testable at all — driving a real model to
- * produce a step ceiling would be testing the model.
- */
 function scriptedWorker(answers) {
     const calls = []
     return {
@@ -43,15 +36,11 @@ function scriptedWorker(answers) {
 
 const REFINED = 'GOAL\nAdd a pause menu.\n\nCONSTRAINTS\n- keep the existing input map\n'
 
-// ─── refine ──────────────────────────────────────────────────────────────────
-
 test('refine sharpens the ask, and falls back to it rather than ending the run', async () => {
     const sharp = scriptedWorker([ok(REFINED)])
     assert.equal(await refine('pause menu pls', {runWorker: sharp.run}), REFINED)
     assert.deepEqual(sharp.calls[0].toolNames, ['read'])
 
-    // Refine's deliverable is producible from the ask alone, so a refine that settled nothing is
-    // better replaced by the raw text than allowed to end a fifteen-minute run at its first step.
     const silent = scriptedWorker([failed('no-answer')])
     assert.equal(await refine('pause menu pls', {runWorker: silent.run}), 'pause menu pls')
 })
@@ -68,8 +57,6 @@ test('an optional block left out leaves the prompt byte-identical', async () => 
     assert.notEqual(bare.calls[0].prompt, withBlock.calls[0].prompt)
     assert.match(withBlock.calls[0].prompt, /step two does the HUD/u)
 })
-
-// ─── research ────────────────────────────────────────────────────────────────
 
 test('research assembles its four sections in a fixed order', async () => {
     const worker = scriptedWorker([
@@ -89,14 +76,6 @@ test('research assembles its four sections in a fixed order', async () => {
     assert.ok(text.indexOf('CONTEXT') < text.indexOf('TOOLING'))
 })
 
-/*
- * The behaviour a whole run used to die on.
- *
- * On a task that genuinely touches nothing — "make a folder with an index.html in it" — three of the
- * four workers correctly have nothing to report. Read as a failure, the weakest section kills a
- * healthy run. Read as an answer, the run finishes and the spec says outright that those sections
- * are empty.
- */
 test('a worker with nothing to say is retried once, then recorded as empty', async () => {
     const worker = scriptedWorker([
         failed('no-answer'),
@@ -182,8 +161,6 @@ test('the tooling worker is not shown the per-file checklist', () => {
     assert.equal(scopedGoal('no headings at all'), 'no headings at all')
 })
 
-// ─── grill ───────────────────────────────────────────────────────────────────
-
 const QUESTION =
     'QUESTION: Where does the menu live?\nA: its own scene\nB: inside the HUD\nWHY: it changes the tree'
 
@@ -204,7 +181,6 @@ test('only an ANSWER tag settles a question', () => {
         'its own scene, like every other menu'
     )
     assert.equal(parseAutoAnswer('UNKNOWN: the project does not say'), null)
-    // A reply that ignored the format is not evidence the question is settled.
     assert.equal(parseAutoAnswer('probably its own scene?'), null)
 })
 
@@ -233,10 +209,6 @@ test('grill answers from research where it can and asks the user where it cannot
     assert.deepEqual(asked, ['When does the menu live?'])
 })
 
-/*
- * Each question is generated knowing what has already been asked, because a weak model otherwise
- * re-asks one question four ways — and every re-ask costs a second model call to answer it.
- */
 test('what has been asked already travels into the next question', async () => {
     const worker = scriptedWorker([ok(QUESTION), ok('ANSWER: yes'), ok('NONE')])
     await grill(REFINED, 'RESEARCH', {runWorker: worker.run})
@@ -264,8 +236,6 @@ test('grill stops asking rather than asking forever', async () => {
     assert.equal(settled.length, 6)
 })
 
-// ─── compose ─────────────────────────────────────────────────────────────────
-
 const SPEC =
     'GOAL\nA pause menu.\n\nCONSTRAINTS\n- keep the input map\n\nSTEPS\n1. add src/ui/pause.tscn\n\n'
     + 'VERIFY\n```sh\nnpm run test:godot\n```\n'
@@ -274,37 +244,21 @@ test('a verify block is parsed only when it is actually closed', () => {
     assert.deepEqual(parseVerifyBlock(SPEC), ['npm run test:godot'])
     assert.deepEqual(parseVerifyBlock('VERIFY\n```\nnpm test\n```'), ['npm test'])
     assert.equal(parseVerifyBlock('VERIFY\nnpm run test:godot\n'), null)
-    // An unclosed fence would otherwise swallow the rest of the document as commands.
     assert.equal(parseVerifyBlock('VERIFY\n```sh\nnpm test\n\nSTEPS\n1. more'), null)
     assert.equal(parseVerifyBlock('VERIFY\n```sh\n# only a comment\n```'), null)
 })
 
-/**
- * A Godot project usually defines no command at all, and the gate used to demand one anyway. The
- * model filled the block with the nearest command-shaped text it had seen — the `npm run` line in
- * the compose prompt's own example — and the implementer then reported it could not run in a
- * workspace with no package.json. The sentinel is how a spec says that honestly instead.
- */
 test('a spec that declares no commands is verifiable, and the sentinel is not a command', () => {
     const none = 'GOAL\nA thing.\n\nVERIFY\n```sh\n(none)\n```\n'
     assert.equal(declaresNoCommands(none), true)
     assert.equal(parseVerifyBlock(none), null)
     assert.equal(declaresNoCommands(SPEC), false)
     assert.equal(declaresNoCommands('GOAL\nA thing.\n\nVERIFY\nnone\n'), false)
-    // A block holding both is a block with a command in it, not a declaration of emptiness.
     const both = 'VERIFY\n```sh\n(none)\nmake test\n```'
     assert.equal(declaresNoCommands(both), false)
     assert.deepEqual(parseVerifyBlock(both), ['make test'])
 })
 
-/**
- * A verify point needs a name, because a list of shell strings is not something a person watching
- * a task can read. Over one project's eleven planned tasks, twelve command lines were written and
- * three were ever run — and none of them said what it was for.
- *
- * The name is the `#` comment the format already allowed and already discarded, so nothing about
- * what compose writes has to change.
- */
 test('a verify point takes its name from the comment above it', () => {
     const named =
         'GOAL\nA boss.\n\nVERIFY\n```sh\n'
@@ -321,7 +275,6 @@ test('a verify point takes its name from the comment above it', () => {
         },
         {name: 'the project still starts', command: 'godot --headless --quit-after 600'}
     ])
-    // The gate above it reads the same block as it always did.
     assert.deepEqual(parseVerifyBlock(named), [
         'godot --headless --script .gofer/checks/centipede.gd',
         'godot --headless --quit-after 600'
@@ -329,13 +282,10 @@ test('a verify point takes its name from the comment above it', () => {
 })
 
 test('a point with no comment names itself, and a gap ends a name', () => {
-    // Two rows labelled by one comment would be two rows with the same label, which is worse in a
-    // list than a row that says what it runs.
     assert.deepEqual(parseVerifyPoints('VERIFY\n```sh\n# both\nmake a\nmake b\n```'), [
         {name: 'both', command: 'make a'},
         {name: 'make b', command: 'make b'}
     ])
-    // A comment cannot reach across a blank line to a command it was not written above.
     assert.deepEqual(parseVerifyPoints('VERIFY\n```sh\n# stale\n\nmake test\n```'), [
         {name: 'make test', command: 'make test'}
     ])
@@ -345,12 +295,9 @@ test('a point with no comment names itself, and a gap ends a name', () => {
 })
 
 test('a block that declares no commands declares no points', () => {
-    // The sentinel is the block saying there is nothing to run. A name written over it names
-    // nothing, and neither may become a row.
     assert.equal(parseVerifyPoints('GOAL\nA thing.\n\nVERIFY\n```sh\n(none)\n```\n'), null)
     assert.equal(parseVerifyPoints('VERIFY\n```sh\n# nothing to run\n(none)\n```'), null)
     assert.equal(parseVerifyPoints('VERIFY\n```sh\n# only a comment\n```'), null)
-    // An unclosed fence is no block at all, exactly as the gate reads it.
     assert.equal(parseVerifyPoints('VERIFY\n```sh\nmake test\n\nSTEPS\n1. more'), null)
     assert.equal(parseVerifyPoints('GOAL\nA thing.\n'), null)
 })
@@ -398,7 +345,6 @@ test('every settled decision reaches compose', async () => {
     assert.match(worker.calls[0].prompt, /DECISIONS/u)
     assert.match(worker.calls[0].prompt, /its own scene/u)
 
-    // And no decisions means no block at all, not an empty heading.
     const bare = scriptedWorker([ok(SPEC)])
     await compose(REFINED, 'RESEARCH', [], {runWorker: bare.run})
     assert.doesNotMatch(bare.calls[0].prompt, /DECISIONS/u)

@@ -28,12 +28,6 @@ const FORMATTED = 'extends Node\n\n\nfunc _ready():\n\tpass\n'
 const EXTERNAL = 'extends Node\n\nfunc _ready():\n\tprint("someone else")\n'
 const RENAMED = 'extends Node\n\nfunc _start():\n\tpass\n'
 
-/**
- * The backend, with the two answers this suite is actually about.
- *
- * The formatter's output and the plan a rename would apply are this suite's subject matter, so they
- * are named here; everything else — opening, updating, saving, watching — is the shared fake's.
- */
 function backend() {
     return installBackend(tauri, {
         files: [
@@ -47,7 +41,6 @@ function backend() {
             call_script_language: ({request}) => {
                 if (request.op === 'prepareRename')
                     return {op: 'prepareRename', placeholder: 'ready'}
-                // A rename crossing two files, only one of which has a tab open.
                 return {
                     op: 'rename',
                     files: [
@@ -70,10 +63,6 @@ function backend() {
     })
 }
 
-/**
- * The buffers belong to the workspace frame, so the test owns them the way the frame does and
- * opens a file the way the explorer would.
- */
 type HarnessProps = Readonly<{
     onError: (message: string) => void
     reveal?: ScriptReveal | undefined
@@ -101,11 +90,6 @@ function Harness({onError, reveal}: HarnessProps) {
     )
 }
 
-/**
- * The open tab strip. Astryx renders tabs as buttons inside a labelled nav rather than with the
- * ARIA tab role, and the file list holds a button with the same name, so the tab is addressed by
- * its own attribute.
- */
 function openTab() {
     const tab = document.querySelector('[data-tab-value]')
     if (!tab) throw new Error('No script tab is open')
@@ -121,8 +105,6 @@ async function openPlayer() {
     return user
 }
 
-// The change debounce and the editor's view-settle delay, both held: this file is about what the
-// buffers do, and neither delay decides any of it.
 let clock = createManualScheduler()
 
 beforeEach(() => {
@@ -161,9 +143,6 @@ describe('ScriptWorkspace', () => {
         await flush()
 
         expect(server.log.savedScripts).toEqual(['extends Node2D\n'])
-        // Read after the save landed, never inside a poll: a negative passes on the first poll,
-        // before the save has been attempted, so it scores a tab that never went dirty the same as
-        // a tab that went clean again.
         expect(openTab()).not.toHaveTextContent('•')
     })
 
@@ -230,7 +209,6 @@ describe('ScriptWorkspace', () => {
         await flush()
 
         expect(editor.state?.activeText()).toBe(FORMATTED)
-        // Applying formats the buffer only; writing it is still an explicit save.
         expect(server.log.savedScripts).toEqual([])
         expect(openTab()).toHaveTextContent('•')
     })
@@ -241,7 +219,6 @@ describe('ScriptWorkspace', () => {
 
         editor.state?.runAction('gofer.renameSymbol')
 
-        // The dialog opens on the identifier the server named, not on whatever the cursor touched.
         await flush()
         const name = screen.getByLabelText('New name')
         expect(name).toHaveValue('ready')
@@ -255,7 +232,6 @@ describe('ScriptWorkspace', () => {
             screen.getByText('2 file(s) would be rewritten as one transaction.')
         ).toBeInTheDocument()
         expect(screen.getByText('enemy.gd')).toBeInTheDocument()
-        // One diff per file, and nothing written by looking at them.
         expect(editor.state?.diffEditors).toBe(2)
         expect(server.log.renames).toEqual([])
         expect(server.state.script.text).toBe(SOURCE)
@@ -264,7 +240,6 @@ describe('ScriptWorkspace', () => {
         await flush()
 
         expect(server.log.renames).toEqual([['player.gd', 'enemy.gd']])
-        // The open buffer takes the text the transaction wrote, clean rather than dirty.
         expect(editor.state?.activeText()).toBe(RENAMED)
         expect(openTab()).not.toHaveTextContent('•')
     })
@@ -285,7 +260,6 @@ describe('ScriptWorkspace', () => {
         expect(
             screen.getByText('This file changed on disk while the buffer was edited.')
         ).toBeInTheDocument()
-        // The user's edit is still there: a conflict warns, it does not overwrite either side.
         expect(editor.state?.activeText()).toBe('extends Node2D\n')
         expect(server.log.savedScripts).toEqual([])
 
@@ -315,13 +289,6 @@ describe('ScriptWorkspace', () => {
         expect(screen.getByRole('button', {name: 'Reload from disk'})).toBeInTheDocument()
     })
 
-    /**
-     * The conflict is reported once, where it can be answered.
-     *
-     * The frame's banner has no dismissal but the user's own click, so a copy of this failure sent
-     * there outlives the conflict entirely: the workspace goes on saying the file could not be
-     * saved through every later save, every tab, and every task. Reported as a constant annoyance.
-     */
     it('does not also report a stale save to the frame, which cannot take it back', async () => {
         const server = backend()
         const report = vi.fn()

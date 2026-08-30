@@ -2,8 +2,6 @@
 
 Project-specific guidance for AI coding agents.
 
-<!-- ASTRYX:START -->
-
 Astryx v0.4.7 · 158 components CLI: run every command as `npx astryx <cmd>` (shown below as
 `astryx ...`).
 
@@ -42,7 +40,6 @@ cli-integrations, color, elevation, getting-started, icons, illustrations, inter
 layout, migration, motion, principles, shape, spacing, styling-libraries, styling, theme, tokens,
 typography, working-with-ai swizzle <Name> eject component source for deep customization upgrade
 --apply run after any @astryxdesign/core bump
-<!-- ASTRYX:END -->
 
 ## UI changes
 

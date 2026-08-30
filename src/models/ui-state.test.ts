@@ -45,13 +45,6 @@ describe('toWorkspaceLayout', () => {
         expect(toWorkspaceLayout('not a layout')).toEqual(DEFAULT_WORKSPACE_LAYOUT)
     })
 
-    /*
-     * A tab is two lists, and forgetting the second is silent.
-     *
-     * The union is what the compiler checks and the array is what a stored value is checked
-     * against. A tab added to one and not the other type-checks, renders, and then resets itself to
-     * Chat the next time the project is opened — which reads as the window losing its place.
-     */
     it('remembers every tab the centre column has', () => {
         for (const tab of [
             'chat',
@@ -65,11 +58,6 @@ describe('toWorkspaceLayout', () => {
             expect(toWorkspaceLayout({...STORED, centerTab: tab}).centerTab).toBe(tab)
     })
 
-    /*
-     * The stored value outlives the version that wrote it. A tab that has since been removed, a
-     * width the responsive contract no longer allows, and a half-written record all reach this,
-     * and none of them is a reason to throw the rest of the layout away.
-     */
     it('falls back field by field rather than discarding the layout', () => {
         const layout = toWorkspaceLayout({
             ...STORED,
@@ -83,12 +71,10 @@ describe('toWorkspaceLayout', () => {
         expect(layout.logSeverity).toBe('info')
         expect(layout.explorerWidth).toBe(EXPLORER_MAX)
         expect(layout.inspectorWidth).toBe(INSPECTOR_MIN)
-        // Everything that was readable is still there.
         expect(layout.explorerTab).toBe('files')
         expect(layout.openScripts).toEqual(STORED.openScripts)
     })
 
-    /** A tab that is not open cannot be the active one, or the editor opens showing nothing. */
     it('drops an active script that no tab holds', () => {
         expect(
             toWorkspaceLayout({...STORED, activeScript: 'scripts/gone.gd'}).activeScript
@@ -142,8 +128,6 @@ describe('toSideNavLayout', () => {
         expect(toSideNavLayout({width: 9000}).width).toBe(SIDE_NAV_MAX)
     })
 
-    // The resize hook reports a width before the nav has one, and a stored 0 would reopen every
-    // project at the minimum.
     it('refuses a width the sidebar cannot have', () => {
         expect(isSideNavWidth(0)).toBe(false)
         expect(isSideNavWidth(Number.NaN)).toBe(false)
@@ -155,7 +139,6 @@ describe('toSideNavLayout', () => {
 })
 
 describe('toScriptViews', () => {
-    /** A cursor kept for a file with no tab would grow the record for the life of the project. */
     it('keeps only the cursors of files that still have a tab', () => {
         expect(
             toScriptViews(
@@ -170,7 +153,6 @@ describe('toScriptViews', () => {
     })
 })
 
-/** Applies a run of actions in order, which is the only way a layout ever reaches a state. */
 function apply(...actions: readonly LayoutAction[]): WorkspaceLayout {
     return actions.reduce(reduceLayout, DEFAULT_WORKSPACE_LAYOUT)
 }
@@ -191,11 +173,6 @@ describe('reduceLayout', () => {
         expect(moved.bottomTab).toBe('output')
     })
 
-    /*
-     * The layout's identity is what triggers the write to the project's database. A tab click on
-     * the tab already open must therefore answer with the same value, or every idle click records
-     * the workspace as having been left differently.
-     */
     it('answers with the same value when a choice does not change', () => {
         expect(reduceLayout(DEFAULT_WORKSPACE_LAYOUT, {type: 'center-tab', tab: 'chat'})).toBe(
             DEFAULT_WORKSPACE_LAYOUT
@@ -219,7 +196,6 @@ describe('reduceLayout', () => {
         )
     })
 
-    /** Running the project is one change, so a collapsed panel cannot hide the debugger it opens. */
     it('shows the debugger and reopens the panel when the project runs', () => {
         const running = apply(
             {type: 'bottom-tab', tab: 'output'},
@@ -243,7 +219,6 @@ describe('reduceLayout', () => {
         })
     })
 
-    /** Re-clicking the node already selected is a no-op, not a fresh record of the same choice. */
     it('answers with the same value when the same node is chosen again', () => {
         const chosen = apply({
             type: 'node-chosen',
@@ -296,10 +271,6 @@ describe('reduceLayout', () => {
         expect(edited.breakpoints).toEqual({'scripts/player.gd': [4, 9]})
     })
 
-    /*
-     * The open scripts arrive as a fresh array on every render of the frame. Comparing by identity
-     * would make each render a change, and a debounced write that never settles.
-     */
     it('answers with the same value when the scripts are equal but newly built', () => {
         const edited = apply({
             type: 'scripts-changed',
@@ -347,7 +318,6 @@ describe('reduceLayout', () => {
         ).not.toBe(edited)
     })
 
-    /** Closing the last tab leaves no active script, which is not the same as leaving the old one. */
     it('forgets the active script when the last tab is closed', () => {
         const edited = apply(
             {
@@ -362,7 +332,6 @@ describe('reduceLayout', () => {
         expect(edited.openScripts).toEqual([])
     })
 
-    /** What is stored has to survive being read back, or the layout is remembered as something else. */
     it('answers with a layout the reader accepts unchanged', () => {
         const moved = apply(
             {type: 'center-tab', tab: 'docs'},
@@ -382,10 +351,6 @@ describe('reduceLayout', () => {
     })
 })
 
-/**
- * A node path is only a path. What it names is decided by the scene the editor has open, or by the
- * run of the game it was read out of, and neither of those is the same thing an hour later.
- */
 describe('nodeStillChosen', () => {
     const at = {scene: 'res://main.tscn', runtimeEpoch: 3}
     const edited = {selection: NODE, scene: 'res://main.tscn', runtimeEpoch: 0}
@@ -400,7 +365,6 @@ describe('nodeStillChosen', () => {
         expect(nodeStillChosen(edited, at)).toBe(NODE)
     })
 
-    /** The addon answers `Node Main/Player was not found`, which is right and unanswerable. */
     it('retires an edited node the moment the editor opens another scene', () => {
         expect(nodeStillChosen(edited, {...at, scene: 'res://level.tscn'})).toBeUndefined()
     })
@@ -409,20 +373,14 @@ describe('nodeStillChosen', () => {
         expect(nodeStillChosen(runtime, at)).toBe(RUNTIME_NODE)
     })
 
-    /** A node in a running game is a live object; the game after a restart has its own. */
     it('retires a runtime node when the game it belonged to ends', () => {
         expect(nodeStillChosen(runtime, {...at, runtimeEpoch: 4})).toBeUndefined()
     })
 
-    /** The scene it was read beside is not what makes a runtime node mean anything. */
     it('keeps a runtime node across a scene the editor opened underneath it', () => {
         expect(nodeStillChosen(runtime, {...at, scene: 'res://level.tscn'})).toBe(RUNTIME_NODE)
     })
 
-    /**
-     * A project reopens with no game running, so a stored runtime node names an object in a game
-     * that ended when the window closed. It is dropped on the way in rather than retired later.
-     */
     it('is never given a runtime node by a stored layout', () => {
         const stored = toWorkspaceLayout({
             ...STORED,

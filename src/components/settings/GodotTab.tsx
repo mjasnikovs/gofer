@@ -10,25 +10,11 @@ import type {GodotSettings} from '../../models/settings'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {SettingsTabView, SettingsView} from './settings-view'
 
-/**
- * The two rules Gofer holds the editor to, each stored the moment it is ticked.
- *
- * No footer, which is why this tab has none: a Save here would have had to write the other tabs'
- * drafts along with it.
- */
 export function useGodotTab(view: SettingsView): SettingsTabView {
     const {state, dispatch, run} = view
     const draft = state.settings
     const {busy} = state
 
-    /**
-     * Stores one Godot rule, on its own, the moment it is ticked.
-     *
-     * The tick is applied first so the box moves at once, and put back if the write fails — a
-     * checkbox left showing a state the file does not hold is worse than one that snaps back. The
-     * backend re-reads the file and replaces only this section, so a connection half-typed on
-     * another tab is not stored as a side effect of ticking a box here.
-     */
     const saveGodotSettings = async (update: Partial<GodotSettings>) => {
         const previous = draft?.godot
         if (!previous) return
@@ -40,8 +26,6 @@ export function useGodotTab(view: SettingsView): SettingsTabView {
                 })
                 dispatch({type: 'godot-saved', response})
             } catch (error) {
-                // The tick goes back before the failure is reported, so the box never sits showing
-                // a state the file does not hold. Rethrown: the runner still owns the banner.
                 dispatch({type: 'godot-changed', update: previous})
                 throw error
             }

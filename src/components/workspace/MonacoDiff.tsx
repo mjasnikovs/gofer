@@ -23,10 +23,6 @@ const DIFF_OPTIONS: Monaco.editor.IStandaloneDiffEditorConstructionOptions = {
     fontSize: 12
 }
 
-/**
- * A read-only diff of a proposed change. Both the formatter and rename previews use it, so what a
- * user approves is exactly the text that will be written.
- */
 export function MonacoDiff({path, original, modified, height}: MonacoDiffProps) {
     const hostRef = useRef<HTMLElement | null>(null)
     const [failed, setFailed] = useState(false)

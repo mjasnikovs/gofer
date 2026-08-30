@@ -4,7 +4,6 @@ import {join} from 'node:path'
 import test from 'node:test'
 import Ajv2020 from 'ajv/dist/2020.js'
 
-// Version 1 retired with the one-shot bridge it served; version 2 is the only wire contract left.
 const root = new URL('../protocol/', import.meta.url)
 const schemaNames = {
     v2: ['handshake', 'request', 'response', 'event', 'error', 'value']

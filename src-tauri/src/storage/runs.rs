@@ -478,9 +478,6 @@ mod tests {
             .expect("indexed warnings");
         assert_eq!(indexed, 1);
 
-        // The stored history is what survives the editor that produced it, so a search names the
-        // session as well as the run. A phrase the user typed carries FTS5 operators (`:` and `.`)
-        // that would make a bare match expression fail, which is why the needle is quoted.
         let hits = storage
             .runs()
             .search_logs(&SearchGodotLogsRequest {
@@ -560,7 +557,6 @@ mod tests {
             .expect("record output");
         drop(storage);
 
-        // Gofer is gone and comes back. Nothing stopped the run, because nothing was left to.
         let reopened = ProjectStorage::open(&data_root, &workspace).expect("reopen storage");
         let connection = reopened.connection().expect("connection");
         let (status, ended_at) = connection
@@ -572,9 +568,7 @@ mod tests {
             .expect("read the run back");
 
         assert_eq!(status, "aborted");
-        // Where it got to, not when it was noticed: the last line it recorded.
         assert_eq!(ended_at, i64::try_from(run.started_at + 5_000).unwrap());
-        // And appending to it is refused from here on, like any other run that has ended.
         assert!(
             reopened
                 .runs()

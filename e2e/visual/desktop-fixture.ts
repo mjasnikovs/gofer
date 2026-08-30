@@ -3,13 +3,6 @@ import type {Page} from '@playwright/test'
 export type VisualState =
     'first-run' | 'empty' | 'streaming' | 'settings' | 'error' | 'scripts' | 'inspector'
 
-/**
- * What else the fixture should build before the workspace opens.
- *
- * `seededMessages` puts a conversation of that length in stored chat, which is the only way to
- * measure what an existing conversation costs the rest of the window. Every visual test wants none
- * of them, so nothing changes for a caller that passes no options.
- */
 export type DesktopFixtureOptions = Readonly<{seededMessages?: number}>
 
 export async function installDesktop(
@@ -20,16 +13,12 @@ export async function installDesktop(
     await page.addInitScript(
         ({currentState, seededMessages}) => {
             const listeners = new Map<string, Set<(event: unknown) => void>>()
-            // Channels register their receiver through Tauri's IPC internals, which the browser
-            // fixture has to stand in for.
             let nextCallbackId = 1
             window.__TAURI_INTERNALS__ = {
                 transformCallback: () => nextCallbackId++,
                 unregisterCallback: () => undefined
             }
             const script = 'extends Node\n\n\nfunc _ready() -> void:\n\tprint("ready")\n'
-            // Stand-ins for the editor's own class icons: one flat rounded square per class, so a
-            // snapshot shows the tree drawing what the editor sent rather than a real theme's artwork.
             const FIXTURE_ICONS: Record<string, string> = {
                 Node2D: 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQAgMAAABinRfyAAAADFBMVEUAAABam9Vam9Vam9VG6tLsAAAAA3RSTlMAKLP1Q4hCAAAAKUlEQVQI12NggAPG/f8cGNj//7/AwP3//wMG/v//P+AmwErAisHa4AAAKswhZ5Fmo6UAAAAASUVORK5CYII=',
                 CharacterBody2D:
@@ -64,25 +53,9 @@ export async function installDesktop(
                     timeoutMs: 120_000
                 }
             }
-            // The approval prompt is still an event, and rightly so: it is a rare notification that
-            // has nothing to do with one invocation. The fixture needs a way to raise one.
             const emit = (event: string, payload: unknown) => {
                 for (const handler of listeners.get(event) ?? []) handler({event, payload})
             }
-            /**
-             * Puts one question with sketches on screen.
-             *
-             * The dialog is the hardest screen in this application to look at any other way: it only
-             * appears while a real model is holding a real turn open, and every layout defect it has
-             * shipped — a column sized by its own 1280-wide sketch, a badge pushing one column three
-             * pixels down, a button below the fold — was invisible to jsdom and obvious here.
-             */
-            /**
-             * A pause menu, drawn the way a model draws one.
-             *
-             * Shared by the question card and the sketches tab, because both draw the same kind of
-             * thing and a grey box would prove neither of them scales a real layout correctly.
-             */
             const sketch = (accent: string, name: string) =>
                 `<style>body{margin:0;width:1280px;height:720px;background:#0d1020;`
                 + `font-family:monospace;color:#dbe4ff}`
@@ -95,9 +68,6 @@ export async function installDesktop(
                 sketches: number,
                 design?: {revision?: number; delegated?: boolean}
             ) => {
-                // The call the question belongs to, made before the question exists. `ownerCallId` is
-                // the only link between the two, and the block that draws a question IS the row that
-                // call would otherwise have been.
                 window.__GOFER_TEST_EMIT_STREAM__?.({
                     type: 'tool-start',
                     id: 'ask-1',
@@ -120,7 +90,6 @@ export async function installDesktop(
                     ].slice(0, sketches)
                 })
             }
-            /** What the child is doing between rounds, on the block's own live line. */
             window.__GOFER_TEST_ASK_STEP__ = (step: string) => {
                 window.__GOFER_TEST_EMIT_STREAM__?.({
                     type: 'tool-update',
@@ -151,8 +120,6 @@ export async function installDesktop(
                     return () => handlers.delete(handler)
                 },
                 invoke: async (command: string, arguments_: unknown) => {
-                    // The health gate stands in front of every screen below, so the fixture workspace
-                    // has to answer it before any of them can render.
                     if (command === 'check_workspace_health')
                         return {
                             workspace: '/fixture/workspace',
@@ -167,9 +134,6 @@ export async function installDesktop(
                         return undefined
                     }
                     if (command === 'list_project_tasks') return []
-                    // Loose files are what opens the new-task dialog. A clean checkout skips it, so the
-                    // fixture keeps two here — one Git has seen and one it has not — because those are
-                    // the two the dialog's answers are about.
                     if (command === 'pending_project_changes')
                         return [
                             {path: 'scripts/player.gd', isNew: false},
@@ -363,9 +327,6 @@ export async function installDesktop(
                                     }
                                 ]
                             }
-                        // Every other language operation falls through unanswered, as it did before
-                        // the rename dialogs needed a fixture: the editor treats a missing answer as a
-                        // server that has nothing to say, and inventing a shape for one breaks it.
                         return undefined
                     }
                     if (command === 'query_godot_docs')
@@ -386,13 +347,6 @@ export async function installDesktop(
                             ]
                         }
                     if (command === 'load_chat') {
-                        /*
-                         * A conversation shaped like a real one, because a plain paragraph measures
-                         * nothing. What costs the window is the machinery around the words: a tool row
-                         * per call, each with its own tooltip and timestamp, a reasoning block, a
-                         * fenced code block, and a usage footer. A hundred rows of that is what a
-                         * working session looks like an hour in.
-                         */
                         const prose =
                             'The body resolves collisions against the tilemap and reports each one '
                             + 'through `get_slide_collision()`, which is what the follow camera reads '
@@ -435,9 +389,6 @@ export async function installDesktop(
                                 text: `Message ${String(id)}. ${prose}`,
                                 thinking: reasoning,
                                 tools,
-                                // The timeline draws a reply from `parts` and never from `thinking`
-                                // or `text`, so the words have to be here too or the rows measured
-                                // are lighter than the ones this fixture stands in for.
                                 parts: [
                                     {kind: 'thinking', text: reasoning},
                                     ...tools.map(tool => ({kind: 'tool', toolId: tool.id})),
@@ -458,10 +409,6 @@ export async function installDesktop(
                             defaultPrompt:
                                 'You are Gofer, a capable local coding agent. Work autonomously toward the user’s goal.'
                         }
-                    // The splash asks this before it installs anything, and only a cache that is
-                    // not already there sends it on to `initialize_rag`. The two scenarios whose
-                    // screens are the install — the first run and its failure — are the two that
-                    // have to answer with an empty one.
                     if (command === 'get_rag_cache_status')
                         return currentState === 'first-run' || currentState === 'error' ?
                                 {path: '/fixture/cache', sizeBytes: 0, state: 'not-installed'}
@@ -497,12 +444,6 @@ export async function installDesktop(
                         const requestId = request.requestId
                         if (typeof requestId !== 'number')
                             throw new Error('Invalid fixture request ID')
-                        /*
-                         * A turn shaped the way the agent's turns are shaped: it says what it is about
-                         * to do, does it, says what it found, does the next thing. The order is the
-                         * point — a fixture that calls every tool first and speaks once at the end
-                         * cannot tell a conversation that reads in order from one that does not.
-                         */
                         const events = [
                             {
                                 type: 'thinking-delta',
@@ -547,13 +488,6 @@ export async function installDesktop(
                                 isError: false,
                                 endedAt: 1_800_000_002_000
                             },
-                            /*
-                             * The row the cut-off name was actually reported on: a delegated question,
-                             * whose target is a paragraph flattened onto one line. `subagent` is short
-                             * enough that losing four characters leaves `subage…`, which names no tool
-                             * anyone can look up, while the same four characters off the target are
-                             * invisible.
-                             */
                             {
                                 type: 'tool-start',
                                 id: 'tool-3',
@@ -568,16 +502,6 @@ export async function installDesktop(
                                 isError: false,
                                 endedAt: 1_800_000_003_000
                             },
-                            /*
-                             * A question the turn asked and the user has answered, whose summary is a
-                             * sentence the model wrote rather than a label anyone chose.
-                             *
-                             * It is here for the width, not the words. `Collapsible` draws its trigger
-                             * as a flex row and gives the label a bare span, which sizes itself off
-                             * that whole sentence and cannot be shrunk from inside — so one answered
-                             * question put a horizontal scrollbar under every message in the task.
-                             * `src/theme/chat.css` frees the span; this is the row that proves it.
-                             */
                             {
                                 type: 'tool-start',
                                 id: 'tool-4',
@@ -611,20 +535,8 @@ export async function installDesktop(
                                 }
                             }
                         ]
-                        /*
-                         * A turn that never finishes, for the screens that only exist while one is
-                         * running.
-                         *
-                         * The design card is the only thing in this application that has to survive a
-                         * question being answered, and what keeps it alive is a live turn. Nothing else
-                         * in the fixture can hold one open: every other turn here pushes its events and
-                         * settles in the same tick.
-                         */
                         if (window.__GOFER_TEST_HOLD_TURN__ === true) {
                             stream.onmessage({requestId, event: events[0]})
-                            // The channel, kept where a test can push one more event down it. A
-                            // question is drawn by the block belonging to the tool call that asked it,
-                            // so a test cannot show one without first making that call exist.
                             window.__GOFER_TEST_EMIT_STREAM__ = (event: unknown) => {
                                 stream.onmessage({requestId, event})
                             }

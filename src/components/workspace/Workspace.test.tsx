@@ -19,12 +19,6 @@ const tauri = createDesktopFake()
 
 const editor = vi.hoisted(() => ({state: undefined as MonacoStubState | undefined}))
 
-/**
- * The actions object the composer was handed the first time it rendered.
- *
- * The workspace publishes one object for the life of the mount and swaps what it closes over
- * behind it, so this is the only way to hold the thing a control holds and call it later.
- */
 const composerProbe = vi.hoisted(() => ({mounted: undefined as ComposerActions | undefined}))
 
 vi.mock('../../hooks/useComposer', async importOriginal => {
@@ -56,7 +50,6 @@ interface StreamChannel {
     onmessage: (payload: {requestId: number; event: unknown}) => void
 }
 
-/** Stands in for what the agent remembers, as the worker reports it mid-turn. */
 const TRANSCRIPT = [{role: 'user'}, {role: 'assistant'}]
 
 const USAGE = {
@@ -68,14 +61,10 @@ const USAGE = {
     cost: {total: 0}
 }
 
-/** Every turn the renderer asked the backend to run, in order. */
 let sent: ChatRequest[] = []
-/** How the next turn ends. The backend rejects a crashed turn without ever sending `done`. */
 let ending: 'done' | 'crash' = 'done'
-/** The backend behind the seam, so a test can read what the renderer stored. */
 let server: Backend
 
-/** Runs the turn the way the worker does: deltas, a checkpoint, then an ending. */
 const runTurn: BackendAnswers['send_ai_message'] = ({request, stream}) => {
     sent.push(request)
     const channel = stream as unknown as StreamChannel
@@ -83,8 +72,6 @@ const runTurn: BackendAnswers['send_ai_message'] = ({request, stream}) => {
         requestId: request.requestId,
         event: {type: 'text-delta', delta: 'work so far'}
     })
-    // The worker checkpoints what it remembers at every step, so a turn that dies after this point
-    // has still reported it.
     channel.onmessage({
         requestId: request.requestId,
         event: {type: 'turn-state', agentMessages: TRANSCRIPT}
@@ -111,8 +98,6 @@ beforeEach(() => {
     setScheduler(immediateScheduler)
     installDesktopFake(tauri)
     server = installBackend(tauri, {answers: {send_ai_message: runTurn}})
-    // A brief reports its progress on a window event, not on the turn's channel, so a test that
-    // drives one has to be able to send those.
     tauri.listen.mockImplementation(async (name, handler) => {
         if (name === 'ai-brief') {
             briefListener = payload => {
@@ -130,7 +115,6 @@ afterEach(() => {
     briefListener = undefined
 })
 
-/** Whoever subscribed to the brief's progress, so a test can be the backend sending it. */
 let briefListener: ((payload: BriefEvent) => void) | undefined
 
 function announceBrief(event: BriefEvent) {
@@ -149,19 +133,7 @@ function storedTexts(chat: StoredChat | undefined) {
     return chat?.messages.map((message: Message) => message.text)
 }
 
-/*
- * A brief is an AI turn — that is what makes it stoppable, and what keeps the one checkout from
- * being switched under four workers reading it — but it is not the CHAT turn.
- *
- * The composer's Stop follows `isStreaming`, which only a chat turn sets, so a fifteen-minute plan
- * ran with no Stop button and a composer that would happily take another message the backend was
- * going to refuse. The only way out was closing the window.
- */
 describe('Workspace while a plan is running', () => {
-    /**
-     * Starts a plan the way the user does — type the ask, press the control beside Send — and
-     * reports what the brief was registered as.
-     */
     async function startPlan(user: ReturnType<typeof userEvent.setup>) {
         render(<Workspace taskId='task-1' />)
         await flush()
@@ -172,19 +144,11 @@ describe('Workspace while a plan is running', () => {
         await flush()
         const started = tauri.invoke.mock.calls.find(([command]) => command === 'run_task_brief')
         const requestId = (started?.[1] as {request: {requestId: number}}).request.requestId
-        // The run announces itself before its first phase, which is what puts the panel on screen.
         announceBrief({type: 'brief-started'})
         await flush()
         return requestId
     }
 
-    /*
-     * The one moment the choice exists, and the only place it is offered.
-     *
-     * Planning reads the project and writes a specification for the agent to work from, which it can
-     * only do before there is a conversation to work from instead. Pressing Send is the other answer
-     * to the same question, so either press takes the control away.
-     */
     it('offers the plan control until the first message, and never after', async () => {
         const user = userEvent.setup()
         render(<Workspace taskId='task-1' />)
@@ -197,7 +161,6 @@ describe('Workspace while a plan is running', () => {
         expect(screen.queryByRole('button', {name: 'Execute as plan'})).not.toBeInTheDocument()
     })
 
-    // The ask goes with the plan. Left behind it would be a copy waiting to be sent a second time.
     it('takes the ask out of the composer and plans it', async () => {
         const user = userEvent.setup()
         await startPlan(user)
@@ -212,13 +175,6 @@ describe('Workspace while a plan is running', () => {
         expect(screen.queryByRole('button', {name: 'Execute as plan'})).not.toBeInTheDocument()
     })
 
-    /*
-     * Cancel, not Stop, and on the panel rather than on the composer.
-     *
-     * The panel stands where the composer stood, so the composer's Stop is not on screen to press.
-     * And the word is the honest one: a second run rewrites the stored row from its first phase and
-     * is handed only the raw ask, so nothing the cancelled run finished is ever read again.
-     */
     it('cancels the plan by the identifier it was started under', async () => {
         const user = userEvent.setup()
         const requestId = await startPlan(user)
@@ -232,13 +188,6 @@ describe('Workspace while a plan is running', () => {
         expect(tauri.invoke).toHaveBeenCalledWith('cancel_ai_request', {requestId})
     })
 
-    /*
-     * There is nothing to send from, which is the point.
-     *
-     * The panel takes the composer's place for the minutes a plan runs. An empty box left beside it
-     * invites a second ask that the backend would refuse by name, and a refusal the user never asked
-     * for is worse than never offering the press.
-     */
     it('has no composer to send from while the plan runs', async () => {
         const user = userEvent.setup()
         await startPlan(user)
@@ -247,7 +196,6 @@ describe('Workspace while a plan is running', () => {
         expect(tauri.invoke).not.toHaveBeenCalledWith('send_ai_message', expect.anything())
     })
 
-    // Nothing is running before one starts, so nothing is offered to stop.
     it('offers no Stop when no plan and no turn is running', async () => {
         render(<Workspace taskId='task-1' />)
         await flush()
@@ -288,7 +236,6 @@ describe('Workspace retry', () => {
             'work so far'
         ])
         expect(after?.messages.at(-1)?.status).toBe('complete')
-        // Rewritten in place: the row the failed reply was stored under is the row it kept.
         expect(after?.messages.map(message => message.id)).toEqual(
             before?.messages.map(message => message.id)
         )
@@ -338,7 +285,6 @@ describe('Workspace retry', () => {
         await send(user, 'first prompt')
         await flush()
 
-        // On disk before anything else happens: a crashed turn is not a turn the model forgets.
         expect(server.log.saved.at(-1)?.agentMessages).toEqual(TRANSCRIPT)
 
         ending = 'done'
@@ -348,14 +294,6 @@ describe('Workspace retry', () => {
         expect(sent.at(-1)?.agentMessages).toEqual(TRANSCRIPT)
     })
 
-    /*
-     * The turn after a restart, or after a task switch: the transcript is not in memory, it is on
-     * disk, and the only thing that puts it back is the read this mount does.
-     *
-     * Every other test here builds its transcript inside one mount, so the read has never had to
-     * carry one. Four real conversations on this machine show the shape of that gap: turn one holds
-     * its tool calls, and every turn after it holds prose alone.
-     */
     it('sends the transcript it read from disk with the first turn of a mount', async () => {
         const stored = [
             {role: 'user', content: 'Make the spiders flock'},
@@ -440,8 +378,6 @@ describe('Workspace resilience', () => {
             answers: {
                 send_ai_message: ({request, stream}) => {
                     const channel = stream as unknown as StreamChannel
-                    // A worker one version ahead, or one field renamed: `text` where `delta` is
-                    // meant.
                     channel.onmessage({
                         requestId: request.requestId,
                         event: {type: 'text-delta', text: 'wrong field name'}
@@ -465,7 +401,6 @@ describe('Workspace resilience', () => {
         await send(user, 'go')
         await flush()
 
-        // The window is still a window, and the good delta still landed.
         expect(await screen.findByText('the real answer')).toBeTruthy()
         expect(screen.getByRole('combobox', {name: 'Message input'})).toBeTruthy()
     })
@@ -490,7 +425,6 @@ describe('Workspace resilience', () => {
 
 describe('Workspace persistence', () => {
     it('saves what the debounce was still holding when the task is switched away', async () => {
-        // The real clock never fires here, so nothing but the flush can produce a write.
         const clock = createManualScheduler()
         setScheduler(clock.schedule)
         const user = userEvent.setup()
@@ -501,7 +435,6 @@ describe('Workspace persistence', () => {
         await flush()
         expect(server.log.saved).toHaveLength(0)
 
-        // Switching tasks changes the workspace's key, which is an unmount.
         view.unmount()
         await flush()
 
@@ -528,11 +461,6 @@ describe('Workspace persistence', () => {
 })
 
 describe('Workspace recovery', () => {
-    /**
-     * Both chats found in the wild were stored exactly like this: a reply left `streaming` by a
-     * window that stopped mid-turn. It came back as a turn that was still working, so the indicator
-     * never stopped and Retry — which is offered on a turn that ended badly — was never offered.
-     */
     it('picks up a turn the window stopped in the middle of', async () => {
         server = installBackend(tauri, {
             chat: {
@@ -558,16 +486,7 @@ describe('Workspace recovery', () => {
     })
 })
 
-/**
- * The screenshot control beside the file picker.
- *
- * Asking about what is on screen is most of what a game is debugged with, and the picture used to
- * come from a system capture tool, a save dialog, and a trip back through the file picker. The
- * game can take its own, so it does — but only while there is a game to take one of, which is what
- * the control has to say for itself when there is not.
- */
 describe('Workspace game screenshots', () => {
-    /** A model that reads images, which is what offers either attach control at all. */
     const readsImages: BackendAnswers = {
         load_settings: () => ({
             settings: {
@@ -628,10 +547,6 @@ describe('Workspace game screenshots', () => {
         expect(screen.getByAltText('Attached image: game-screenshot.png')).toBeInTheDocument()
     })
 
-    /*
-     * The scratchpad is reached by pressing the picture, which is the only affordance an image has.
-     * Capture stays one press: a user who wants the frame as it is never sees this dialog.
-     */
     it('opens the scratchpad on the attachment that was pressed', async () => {
         const user = userEvent.setup()
         render(<Workspace />)
@@ -651,15 +566,9 @@ describe('Workspace game screenshots', () => {
         expect(
             screen.queryByRole('img', {name: 'Drawing surface for game-screenshot.png'})
         ).not.toBeInTheDocument()
-        // The picture it was opened on is untouched by opening and closing it.
         expect(screen.getByAltText('Attached image: game-screenshot.png')).toBeInTheDocument()
     })
 
-    /*
-     * A game that ended takes the control with it. The editor reports its own play state, so a game
-     * that crashed or was closed from its own window greys this out without anything being told —
-     * the alternative is a press that can only come back with `runtime_not_running`.
-     */
     it('withdraws the screenshot when the game the editor was playing ends', async () => {
         const user = userEvent.setup()
         render(<Workspace />)
@@ -678,16 +587,7 @@ describe('Workspace game screenshots', () => {
     })
 })
 
-/*
- * A picture is part of the ask, whichever way the ask is sent.
- *
- * Planning is the composer's other Send. A user who pastes a screenshot and presses Execute as plan
- * has said "plan THIS", and every phase after refine reads text — so the picture has to reach the
- * one worker that reads the raw ask, and the turn the specification starts, or it reaches nothing at
- * all and the plan is written about a sentence describing a screen nobody looked at.
- */
 describe('Workspace planning with a picture attached', () => {
-    /** A model that reads images, which is what offers the attach controls at all. */
     const readsImages: BackendAnswers = {
         load_settings: () => ({
             settings: {
@@ -717,7 +617,6 @@ describe('Workspace planning with a picture attached', () => {
         server = installBackend(tauri, {answers: {...readsImages, send_ai_message: runTurn}})
     })
 
-    /** Attaches the running game's own frame, which is one press and needs no file picker. */
     async function attachPicture(user: ReturnType<typeof userEvent.setup>) {
         await user.click(screen.getByRole('button', {name: 'Run Game'}))
         await flush()
@@ -737,7 +636,6 @@ describe('Workspace planning with a picture attached', () => {
         await user.click(screen.getByRole('button', {name: 'Execute as plan'}))
         await flush()
 
-        // The bytes are on disk before the backend is asked to read them by id.
         expect(tauri.invoke).toHaveBeenCalledWith(
             'save_chat_attachment',
             expect.anything() as unknown
@@ -767,15 +665,7 @@ describe('Workspace planning with a picture attached', () => {
     })
 })
 
-/*
- * Send to chat is the only way a saved layout reaches the agent: a sketch lives in Gofer's own data,
- * which none of the agent's tools can read. The paste is guarded against a repeat, and the guard
- * used to compare the first line of the message — whose only variable part is the label the model
- * chose. Two questions it named the same thing produced the same first line, so the second layout
- * was dropped with nothing said, and a draft that happened to quote that sentence dropped the first.
- */
 describe('Workspace sending a saved sketch to the chat', () => {
-    /** Two questions, one name. Nothing stops the model from calling both of them the same thing. */
     const PAUSE: ProjectSketch = {
         id: 'question-1-run',
         taskId: null,
@@ -794,7 +684,6 @@ describe('Workspace sending a saved sketch to the chat', () => {
         savedAt: 1_600_000_000_000
     }
 
-    /** The buildable markup, which is what the paste is worth reading for. */
     const SOURCE: Readonly<Record<string, string>> = {
         'question-1-run': '<p>pause</p>',
         'question-2-run': '<p>inventory</p>'
@@ -813,7 +702,6 @@ describe('Workspace sending a saved sketch to the chat', () => {
         })
     })
 
-    /** Sends one layout the way the user does, and leaves the panel as it found it. */
     async function sendSketch(user: ReturnType<typeof userEvent.setup>, question: RegExp) {
         await user.click(screen.getByRole('button', {name: 'Design'}))
         await flush()
@@ -827,7 +715,6 @@ describe('Workspace sending a saved sketch to the chat', () => {
         await flush()
     }
 
-    /** Sends the draft, and reports the text the backend was handed — newlines and all. */
     async function submitDraft(user: ReturnType<typeof userEvent.setup>) {
         const composer = await screen.findByRole('combobox', {name: 'Message input'})
         await user.click(composer)
@@ -877,24 +764,11 @@ describe('Workspace sending a saved sketch to the chat', () => {
     })
 })
 
-/*
- * The composer's actions are one object for the life of the mount, and every control in the
- * composer is handed it once. What they close over is replaced behind them through a ref, so this
- * is the only thing holding them to the commit they were called against: an action that read a
- * stale closure would stop a turn nobody is running, send without the image just attached, or
- * write the draft under the previous task's key — none of which says anything on screen.
- */
 describe('Workspace composer actions', () => {
     beforeEach(() => {
         composerProbe.mounted = undefined
     })
 
-    /*
-     * Stop is the sharpest of them: it is not one function with changing state behind it but two
-     * different functions, and which one it is changes when a plan starts. Held from the mount, it
-     * is the chat turn's stop — which does nothing at all when no chat turn is running — so a
-     * stale read here cancels nothing and the plan runs on with the button already pressed.
-     */
     it('stops the plan that is running now, not the turn it was built against', async () => {
         const user = userEvent.setup()
         render(<Workspace taskId='task-1' />)

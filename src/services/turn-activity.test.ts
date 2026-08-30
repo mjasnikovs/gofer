@@ -16,28 +16,16 @@ describe('whether the agent is occupied', () => {
         expect(isTurnRunning()).toBe(false)
     })
 
-    /*
-     * The sidebar read the chat's flag alone, so it offered New task through a fifteen-minute plan
-     * and the backend refused it by name. A brief holds the same single provider operation a chat
-     * turn does; that is what makes it stoppable and what stops the checkout moving under it.
-     */
     it('counts a brief, which is a turn the chat never sees', () => {
         setTurnRunning('brief', true)
         expect(isTurnRunning()).toBe(true)
     })
 
-    /*
-     * The third kind, and the same failure a third time: `run_judge` and `run_sweep` begin the same
-     * `AiTurn` a chat message does, and a sweep of eighty rows holds it for over an hour. Nothing
-     * on this side said so, so for that hour the window believed the agent was idle.
-     */
     it('counts a memory run, which no conversation is watching', () => {
         setTurnRunning('memory', true)
         expect(isTurnRunning()).toBe(true)
     })
 
-    // Two runs cannot really overlap — the backend allows one — but the readers must not care, and
-    // one ending must not clear the other's fact.
     it('stays occupied until every run has ended', () => {
         setTurnRunning('chat', true)
         setTurnRunning('brief', true)
@@ -47,7 +35,6 @@ describe('whether the agent is occupied', () => {
         expect(isTurnRunning()).toBe(false)
     })
 
-    // A watcher woken for a change that did not happen re-renders the sidebar on every phase event.
     it('wakes its watchers only when the answer changes', () => {
         const notify = vi.fn()
         const stop = watchTurn(notify)

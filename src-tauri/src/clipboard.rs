@@ -63,7 +63,6 @@ pub fn read_image() -> Result<Option<ClipboardImage>, String> {
     };
     let image = match clipboard.get_image() {
         Ok(image) => image,
-        // Every "there is no image here" case arrives as an error, and they are not failures.
         Err(arboard::Error::ContentNotAvailable) => {
             return Ok(None);
         }

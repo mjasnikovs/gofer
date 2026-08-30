@@ -36,69 +36,31 @@ type ExplorerPanelProps = Readonly<{
     selection: GodotSelection | undefined
     onSelect: (selection: GodotSelection) => void
     onOpenFile: (path: string) => void
-    /** Opens a scene in the managed editor, which is what every scene-reading panel follows. */
     onOpenScene: (path: string) => void
-    /** Opens the scene `project.godot` names, for an editor that is editing none. */
     onOpenMainScene: () => void
     onStartSession: () => void
 }>
 
 const MAX_LISTED_FILES = 400
 
-/**
- * The addon's own ceiling on a scene-tree walk, from `MAX_TREE_NODES` in `plugin.gd`.
- *
- * A call naming nothing is answered with the agent's default of 150 nodes, kept small so a tool
- * result survives the character cap the worker holds it to. A person looking at a tree has no such
- * cap, so the panel asks for everything the addon will give — and says so when that is not all of
- * it, because this walk was unbounded before the agent's default arrived.
- */
 const MAX_TREE_NODES = 4096
 
-/** The bound this panel reads a scene tree under. */
 const WHOLE_TREE = {limit: MAX_TREE_NODES} as const
-/** Generated sidecars and imported artefacts are noise in a project explorer. */
 const HIDDEN_SUFFIXES = ['.import', '.uid', '.tmp']
 const HIDDEN_PREFIXES = ['.godot/', '.git/', 'addons/gofer/']
-/** Only text Gofer can actually open in Monaco is clickable; the rest is listed as context. */
 const EDITABLE_SUFFIXES = ['.gd', '.cfg', '.godot', '.json', '.md', '.txt', '.tres']
-/**
- * A scene is opened in the editor rather than in Monaco.
- *
- * Its text is the editor's serialization, not something a person edits by hand, and every panel
- * that reads a scene — the tree, the inspector, the debugger's Run — reads the *edited* scene. A
- * scene opened as text would leave all of them empty while looking like it had been opened.
- */
 const SCENE_SUFFIX = '.tscn'
 
-/*
- * A deep branch leaves a long name less room, and a name that refuses to shrink drags the row wider
- * than the column — taking the row's action off the right edge with it. `HStack` has no prop for
- * either, so this is the whole of what the row still carries by hand.
- */
 const ROW_LABEL_STYLE = {minWidth: 0, overflow: 'hidden'} as const
 
-/** The name itself, which is the part allowed to run out of room. */
 const ROW_NAME_STYLE = {minWidth: 0} as const
 
-/**
- * Godot draws its class icons at 16 px; the slot holds that whether or not an icon fills it.
- *
- * The element stays raw: Astryx has no component for a bitmap another process drew, and an empty
- * span is the only way to hold the width while none has arrived. Both values are spacing tokens.
- */
 const NODE_ICON_STYLE = {
     width: 'var(--spacing-4)',
     height: 'var(--spacing-4)',
     flexShrink: 0
 } as const
 
-/*
- * No placeholder in these filter boxes. The label is hidden — a filter row in a narrow panel
- * cannot spare a label line above a 28 px box — and a placeholder that only repeats the label
- * leaves the field looking like it already holds a value. The magnifier says what the box is for,
- * and the hidden label is what a screen reader announces.
- */
 function isListable(path: string) {
     if (HIDDEN_SUFFIXES.some(suffix => path.endsWith(suffix))) return false
     return !HIDDEN_PREFIXES.some(prefix => path.startsWith(prefix))
@@ -112,13 +74,6 @@ function isScene(path: string) {
     return path.endsWith(SCENE_SUFFIX)
 }
 
-/**
- * A row's class icon, the artwork the editor itself draws.
- *
- * The class is the image's alternative text, so a row still announces what it is even though the
- * tree no longer prints the class under every name. Until the icons arrive — or for a class the
- * editor has no icon for — the slot keeps its width, so no tree ever reflows around a late answer.
- */
 function NodeIcon({icon, type}: Readonly<{icon: string | undefined; type: string}>) {
     if (icon === undefined) {
         return (
@@ -138,18 +93,6 @@ function NodeIcon({icon, type}: Readonly<{icon: string | undefined; type: string
     )
 }
 
-/**
- * A row's own `@`: it names what the row shows inside the message being written.
- *
- * Raw span, and deliberately: the wrapper exists so `src/theme/rows.css` can reveal the button when
- * its row is hovered or focused, which is a relationship between two elements that no component
- * prop expresses.
- *
- * Every caller puts it in `startContent`, at the head of the row and ahead of any icon, because
- * that is where the row's own width is guaranteed: the end of a row is the first thing a long name
- * in a deep branch takes away. The at sign is the gesture people already know — it names a thing
- * inside a message rather than creating one, which is what a plus promised and this does not do.
- */
 function MentionButton({
     name,
     reference,
@@ -161,10 +104,6 @@ function MentionButton({
                 label={`Mention ${name} in the message`}
                 size='sm'
                 variant='ghost'
-                // Through Astryx's `Icon`, which puts a width and a height on the drawing. A bare
-                // Heroicon carries only a `viewBox`: Chromium then stretches it to its box, WebKit
-                // — the engine the desktop actually renders in — draws it at nothing at all, so the
-                // button was there and empty on every row.
                 icon={
                     <Icon
                         icon={AtSymbolIcon}
@@ -184,7 +123,6 @@ type NodeTreeContext = Readonly<{
     selected: string | undefined
     icons: ClassIcons
     onSelect: (selection: GodotSelection) => void
-    /** Absent wherever there is no conversation to add a node to. */
     references: ChatReferenceSink | undefined
 }>
 
@@ -192,18 +130,9 @@ function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData 
     const {origin, selected, icons, onSelect, references} = context
     return {
         id: `${origin}:${node.path}`,
-        // Godot's own scene tree names a node once and lets its icon say what class it is. Printing
-        // the class under every name said the same thing twice and made the two lines compete; the
-        // class is on the row's tooltip and on the icon's alternative text instead.
-        //
-        // Icon and name are one trigger, filling the row: the tooltip has to survive the pointer
-        // crossing from the name to the icon, which two separate triggers cannot do.
         label: (
             <Tooltip
                 content={node.type}
-                // Under the row and anchored to its start: the trigger is the full row, so an
-                // end-placed tooltip hangs off the right of a 260 px column and lands in the next
-                // pane entirely.
                 placement='below'
                 alignment='start'
                 hasHoverIndication={false}
@@ -250,7 +179,6 @@ function nodeItems(node: GodotNode, context: NodeTreeContext): TreeListItemData 
 type FileTreeContext = Readonly<{
     onOpenFile: (path: string) => void
     onOpenScene: (path: string) => void
-    /** Absent wherever there is no conversation to add a file to. */
     references: ChatReferenceSink | undefined
 }>
 
@@ -260,13 +188,6 @@ function fileItems(nodes: readonly PathTreeNode[], context: FileTreeContext): Tr
         const canOpen = isEditable(node.path) || isScene(node.path)
         return {
             id: node.path,
-            /*
-             * A file Gofer cannot open says so by being the quieter of the two, not by being
-             * disabled. Astryx puts `pointer-events: none` on a disabled row, which would take the
-             * row's `@` with it — and a `.png` is exactly the file worth naming in a message and
-             * never worth opening in Monaco. Without an `onClick` the row is not interactive
-             * anyway, so nothing is lost but the greying.
-             */
             label:
                 node.isDirectory || canOpen ?
                     node.name
@@ -276,8 +197,6 @@ function fileItems(nodes: readonly PathTreeNode[], context: FileTreeContext): Tr
                     >
                         {node.name}
                     </Text>,
-            // A folder is mentioned with the trailing slash the composer's own menu leaves behind,
-            // which is both the mark of a folder and the text that scopes the next search.
             ...(references && {
                 startContent: (
                     <MentionButton
@@ -303,21 +222,6 @@ function fileItems(nodes: readonly PathTreeNode[], context: FileTreeContext): Tr
     })
 }
 
-/**
- * The explorer column: the scene the editor has open, the tree of the game that is running, and the
- * project's own files.
- *
- * The edited scene and the running scene stay separate concepts here and everywhere else — one is
- * what the editor would save, the other is what the game currently holds in memory, and conflating
- * them would make an inspector reading of a live node look like an editable property.
- */
-/**
- * What a tree says when it stopped short of the whole scene.
- *
- * Both walks are bounded now — the running one always was, at the addon's own node ceiling, and the
- * edited one gained a ceiling when the model's default arrived. A partial tree drawn as if it were
- * whole is the one thing this panel must not do, and the addon already reports it.
- */
 function truncatedNotice(truncated: boolean | undefined) {
     if (truncated !== true) return null
     return (
@@ -355,32 +259,14 @@ export function ExplorerPanel({
         follows: runtimeEpoch
     })
 
-    /**
-     * "No game is running" arrives as an error code, and for this panel it is the ordinary state.
-     *
-     * The addon answers `runtime.get_tree` with `runtime_not_running` whenever no game holds the
-     * Gofer helper, which is true of every session that has not pressed Run. Rendering that as
-     * "The runtime tree could not be read" told the user something had gone wrong, and made the
-     * empty message this panel already has — "The game is not running" — unreachable.
-     */
     const isGameIdle = runtime.error?.code === 'runtime_not_running'
 
-    // Both trees draw from one icon cache: a running game is the same project's classes, and the
-    // editor is the only half that has a theme to read them from.
     const shownRoot = tab === 'runtime' ? runtime.data?.root : scene.data?.root
     const icons = useGodotClassIcons(call, shownRoot, isSessionReadable(state) && tab !== 'files')
     const references = useChatReferences()
-    /*
-     * Both filter boxes are local, and neither is remembered. A stored search reopens the project
-     * with files hidden and no sign of why, so `interface-state` deliberately keeps neither — which
-     * left `fileFilter` being held by the frame and drilled down for no reason at all, while its
-     * sibling `nodeFilter` sat here.
-     */
     const [fileFilter, setFileFilter] = useState('')
     const [nodeFilter, setNodeFilter] = useState('')
 
-    // What each tree draws once the filter has had its say. A filter that matches nothing leaves an
-    // empty tree, which the panel already reports as an empty state rather than as a broken read.
     const sceneRoot = useMemo(() => {
         const root = scene.data?.root
         return root ? filterSceneTree(root, nodeFilter) : undefined
@@ -390,15 +276,6 @@ export function ExplorerPanel({
         return root ? filterSceneTree(root, nodeFilter) : undefined
     }, [runtime.data, nodeFilter])
 
-    /*
-     * The rows themselves, kept until something they draw from moves.
-     *
-     * `nodeItems` walks the whole tree and builds a `Tooltip` and an `IconButton` per node, which
-     * made it the most expensive thing this panel does — and it was doing it on every render,
-     * including the ones caused by the filter box beside it and by the session's own reconcile
-     * tick. The selected path is depended on rather than the selection, because the rest of the
-     * selection says nothing about how a row is drawn.
-     */
     const selectedPath = selection?.path
     const sceneItems = useMemo(
         () =>
@@ -487,8 +364,6 @@ export function ExplorerPanel({
                     value='scene'
                     label='Scene'
                 />
-                {/* Files sits second because Runtime is empty until the game is run, and a tab
-                    that is empty most of the day does not belong between two that are not. */}
                 <Tab
                     value='files'
                     label='Files'
@@ -536,7 +411,6 @@ export function ExplorerPanel({
                             />
                         }
                     />
-                    {/* No tree, nothing to filter: an offline panel offers to start the session. */}
                     {!isOffline && (
                         <VStack
                             paddingInline={2}

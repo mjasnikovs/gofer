@@ -15,8 +15,6 @@ test('reads one version out of every file that carries it', async () => {
 })
 
 test('takes the crate version out of Cargo.toml and not a dependency it lists', () => {
-    // Every dependency below `[package]` has a `version` too, and the first one in the file is the
-    // crate's only by luck. A pattern that matched loosely renamed a dependency instead.
     const cargo = SOURCES.find(source => source.file.endsWith('Cargo.toml'))
     const manifest = [
         '[package]',

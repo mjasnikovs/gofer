@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# On the local model, while OpenRouter's free stealth tier is spent for the day.
-# q23 verifies iteration 25 on the task that produced the corpus's largest inspect answer.
-# q36 is one of the two surfaces batch6 never reached.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/local-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# The two tasks batch 4 never got to, then the two that reproduced iterations 15 and 16 — run
-# again, same prompt, so the before is on record and the after is measurable.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/ox-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

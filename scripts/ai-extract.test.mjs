@@ -15,8 +15,6 @@ import {
 } from './ai-extract.mjs'
 
 test('every corpus the prompts can name is a corpus the matchers recognise', () => {
-    // The whole reason this table exists: an emitter and a matcher that disagree score a real
-    // non-answer as an answer. Adding a corpus must not be able to leave one behind.
     for (const corpus of CORPORA) {
         assert.equal(isAbstention(abstentionSentence(corpus)), true, corpus)
         assert.equal(isCoverageMiss(notCoveredSentence(corpus)), true, corpus)
@@ -27,12 +25,9 @@ test('every corpus the prompts can name is a corpus the matchers recognise', () 
 })
 
 test('abstention matches when wrapped, coverage only when it is the whole answer', () => {
-    // Readers wrap the abstention in a sentence, so anchoring there would miss the real ones.
     assert.equal(isAbstention('Unclear from this page — the README does not say.'), true)
     assert.equal(isAbstention('The page is clear about this.'), false)
 
-    // The coverage rule elsewhere asks for a partial answer that NAMES what is missing, and a
-    // sourced answer may contain the phrase. Only a bare sentinel is a dead end.
     assert.equal(isCoverageMiss('not covered by this page'), true)
     assert.equal(isCoverageMiss('not covered by this page.'), true)
     assert.equal(
@@ -80,7 +75,6 @@ test('the warning appears only for a quote that is not there', () => {
         formatResultText(parsed, true, {unverifiedWarning: 'MADE UP'}).includes('MADE UP'),
         false
     )
-    // No quote means nothing to warn about and nothing to show.
     assert.equal(formatResultText({answer: 'a'}, false, {unverifiedWarning: 'MADE UP'}), 'a')
     assert.match(formatResultText(parsed, true, {header: 'Per Tween:'}), /^Per Tween:/u)
 })

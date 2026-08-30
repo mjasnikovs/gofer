@@ -52,16 +52,11 @@ pub(crate) fn check_set(
     object: &serde_json::Map<String, Value>,
 ) -> Result<(), ToolFailure> {
     let shape = signature(spec);
-    // Inside a structure the call's own name is already spent, so the sentence points at the
-    // entry: "`files[0]` has no `edits` key" rather than "has no `edits` parameter".
     let (at, noun, takes) = if where_.is_empty() {
         (String::new(), "parameter", "It takes")
     } else {
         (format!(" `{where_}`"), "key", "Each entry takes")
     };
-    // An operation whose every parameter is hidden has an empty signature, and the sentence then
-    // read `godot_scene reload has no \`x\` parameter. It takes .` — which a live run was sent.
-    // What the model needs to hear there is that the operation takes nothing at all.
     let takes_shape = if shape.is_empty() {
         format!("{takes} no parameters.")
     } else {
@@ -75,29 +70,6 @@ pub(crate) fn check_set(
                 && !(where_.is_empty() && UNIVERSAL.contains(&key.as_str()))
         })
         .collect();
-    // More than one key it does not take, and at least one of them could never have been a name.
-    //
-    // The loop below answers about the first bad key and returns, which is right when there is one
-    // and costs a round trip per key when there are several. A live turn wrote three coins as three
-    // `instantiate` entries, the JSON tore across all three, and the entry arrived carrying
-    // `nameCoin1`, `name": "Coin1"}, {` and `path": "res://scenes/coin.tscn", ` beside an intact
-    // `op`, `parent` and `path`. Gofer named one key per refusal: `nameCoin1` first, with
-    // `Did you mean \`name\`?`, then the next, then the next. Five round trips and 3.6k tokens
-    // before the repeat guard finally told it to build the call again, which it then did in one.
-    //
-    // Two or more unknown keys with a tear among them is not a vocabulary problem, so the spelling
-    // hint is withheld: it sends a model looking for a better word for wreckage. The wording is the
-    // one measured 15 of 15 on [`torn_object`] — name the intact keys, and ask for the whole call.
-    //
-    // And it names the cause, because by the time an object has come apart in several places there
-    // is only one. A live turn placing fifteen coins was refused for hitting the output ceiling,
-    // then answered with 30 wreckage keys, then 10, then 10, then 15, then 9 — ten refusals in a
-    // row, each a batch too long to finish writing, salvaged from a truncated answer. Asking for
-    // the call again is no help when the call is what does not fit; asking for fewer operations
-    // in it is the only thing that can succeed.
-    //
-    // The single-tear branch below is left alone: where a key tore and took its value with it, and
-    // its head names a real parameter, that refusal was measured and this one must not preempt it.
     let single_tear = unknown.iter().any(|key| {
         tore_away_the_value(key, object.get(*key))
             && spec
@@ -105,10 +77,6 @@ pub(crate) fn check_set(
                 .any(|param| !param.hidden && param.name == the_name_at_the_head(key))
     });
     if !single_tear && unknown.len() > 1 && unknown.iter().any(|key| !could_be_a_name(key)) {
-        // Only the keys the operation declares. The other branch's list is "could be a name",
-        // which is right where one key tore; here a name-shaped piece of wreckage — `nameCoin1`,
-        // the parameter glued to the value it was about to carry — would be read back as a key
-        // that landed, and the whole sentence is about what did not.
         let intact: serde_json::Map<String, Value> = object
             .iter()
             .filter(|(name, _)| spec.iter().any(|param| param.name == name.as_str()))
@@ -135,15 +103,6 @@ pub(crate) fn check_set(
         {
             continue;
         }
-        // A tear that took the value with it. Naming the key back is the right answer when the
-        // key still holds the value — that is the 15-of-15 line below — and the wrong one when it
-        // holds nothing: the sentence then describes the caller's own wreckage instead of what to
-        // write, and puts that wreckage back into the conversation. One live turn sent
-        // `{"name": "Enemy", "op": "instantiate", "parent\": ": ", "}`, was told thirteen times
-        // running that the operation "has no `parent\": ` parameter", and resent it unchanged
-        // thirteen times; it then abandoned the operation and hand-wrote the resource with the
-        // file tools. What is missing is the part a caller can act on, so that is what it hears,
-        // with the tear named and never quoted.
         if tore_away_the_value(key, object.get(key))
             && let Some(head) = spec
                 .iter()
@@ -154,10 +113,6 @@ pub(crate) fn check_set(
                 .filter(|(name, _)| could_be_a_name(name))
                 .map(|(name, held)| (name.clone(), held.clone()))
                 .collect();
-            // A required parameter still missing is the thing to lead with. When nothing required
-            // is missing the call is short of an optional one, and dropping it quietly would build
-            // a node under a name nobody asked for — so it is still a refusal, and it still never
-            // quotes the key.
             let missing = spec
                 .iter()
                 .find(|param| param.required && !object.contains_key(param.name));
@@ -189,14 +144,6 @@ pub(crate) fn check_set(
                 json!({"op": op, "param": path(where_, named.name), "takes": shape}),
             ));
         }
-        // A key holding the start of the next operation. Not a word chosen wrongly — the `ops`
-        // list came apart between two of its entries, or the answer was cut off part-way through
-        // writing one, and what should have closed an entry ended up inside a name.
-        //
-        // The commonest tear there is: `name": "Coin1"}, {`, `name': null}]…'}, {`,
-        // `size 16: null}, {`, `name": "Coin1"}, {"op": "instantiate", "parent": "/Main", "p` —
-        // five of nine live runs on the local model, and every one of them was answered
-        // ``Did you mean `name`?``, which is the one thing that is not wrong.
         if let Some(swallowed) = the_start_of_another_operation(key) {
             return Err(failure(
                 "torn_param",
@@ -210,14 +157,6 @@ pub(crate) fn check_set(
                 json!({"op": op, "param": path(where_, key), "takes": shape}),
             ));
         }
-        // A spelling hint first: when one key is a word away from a parameter this operation has,
-        // that is the whole of it. Only when no word here reaches one is the operation itself
-        // worth questioning.
-        // The whole key set outranks any one key. A word that resembles a parameter is evidence
-        // about that word; a key set that is another operation's parameter list exactly, and only
-        // that operation's, is evidence about the call. `godot_scene create` sent
-        // `{parent, name, type}` is told ``Did you mean `rootName`?`` by the spelling rule — a real
-        // parameter, a plausible sentence, and the wrong thing to do with a node creation.
         let hint = where_
             .is_empty()
             .then(|| the_operation_these_keys_belong_to(call, spec, object))
@@ -230,11 +169,6 @@ pub(crate) fn check_set(
                 )
             })
             .or_else(|| {
-                // A key that is the name of an operation next door. `capture` is not something
-                // `input` will ever take, and it is one entry away.
-                // Only for the call's own parameters. Inside `files[0]` there is no list of
-                // operations to add an entry to, and the sentence would also shadow the spelling
-                // hint, which is the useful one for a near-miss key in an entry.
                 (where_.is_empty() && an_operation_of_this_tool(call, key)).then(|| {
                     format!(
                         " `{key}` is an operation of this tool rather than a parameter of this one, \
@@ -335,12 +269,6 @@ fn the_operation_these_keys_belong_to(
     spec: &[Param],
     object: &serde_json::Map<String, Value>,
 ) -> Option<String> {
-    // A hidden parameter of the operation this was sent to is not something the caller wrote: the
-    // router supplies `expectedRevision` from the last answer that carried one, and it lands in the
-    // object before any of this runs. Counting it as a written key is what defeated this rule in
-    // `loc-71-autoload` — `{parent, name, type}` fits `godot_node create` exactly, and
-    // `{parent, name, type, expectedRevision}` fits nothing, so the call was read as three wrong
-    // words instead of one misplaced operation.
     let supplied: Vec<&str> = spec
         .iter()
         .filter(|param| param.hidden)
@@ -363,8 +291,6 @@ fn the_operation_these_keys_belong_to(
                 let holds_all = visible()
                     .filter(|param| param.required)
                     .all(|param| written.contains(&param.name));
-                // Hidden parameters count on this side: a candidate the caller could have
-                // written is one whose own router-supplied names are no objection to.
                 let nothing_extra = written
                     .iter()
                     .all(|key| operation.params.iter().any(|param| param.name == *key));
@@ -372,10 +298,6 @@ fn the_operation_these_keys_belong_to(
             })
         })
         .collect();
-    // The operation it was sent to comes first. `godot_node add_to_group` and `remove_from_group`
-    // take the same two parameters, so every good call to one is the other's parameter list
-    // exactly — and a call that fits where it was sent is not misplaced, whatever else it also
-    // fits. Only a call its own operation refuses is looking for another one.
     if fitting.iter().any(|named| named == call) {
         return None;
     }
@@ -451,8 +373,6 @@ fn fits(kind: Kind, value: &Value) -> bool {
         Kind::Choice(allowed) => value.as_str().is_some_and(|text| allowed.contains(&text)),
         Kind::Either(kinds) => kinds.iter().any(|one| fits(*one, value)),
         Kind::Tagged => value.is_object(),
-        // The bracket only. An entry that does not fit is named by its position in `check_inside`,
-        // rather than folded into "this one was an array of three items".
         Kind::ListOf(_) => value.is_array(),
     }
 }
@@ -499,9 +419,6 @@ fn check_one(
         return check_inside(call, op, &here, param, value);
     }
     let expected = wanted(param.kind);
-    // A hash is the one parameter a caller copies by hand, so the failure counts the characters
-    // rather than describing the string: "sixty-three characters" is the whole diagnosis, and
-    // "changed since it was read" — what this used to become — is a lie that reads as true.
     let counted = match (param.kind, value.as_str()) {
         (Kind::Hash, Some(text)) => format!(
             " That is {} character{}, so it is a copy that slipped rather than a hash of anything. \
@@ -699,8 +616,6 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
             let four = inner
                 .as_array()
                 .is_some_and(|items| items.len() == 4 && items.iter().all(Value::is_number));
-            // The engine reads the name; this only refuses what is neither shape. A name it does
-            // not know is refused on the wire, where the table that knows the names lives.
             let named = inner.as_str().is_some_and(|text| !text.trim().is_empty());
             (!four && !named).then(|| {
                 "four numbers, or a name like skyblue, or a hex string like #8b5a2b".to_owned()
@@ -714,10 +629,6 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
             let held = inner.as_object().and_then(|object| object.get("path"));
             match held.and_then(Value::as_str) {
                 Some(path) if !path.trim().is_empty() => None,
-                // The wrapper is right and the path inside it is not. Saying "takes an object
-                // carrying a path, and this one was an object holding path" is a sentence that
-                // contradicts itself and never names the mistake — one live turn wrote
-                // `{"path": ""}` for a material it had not made yet and read exactly that.
                 Some(_) => Some("a path, and this one's is empty".to_owned()),
                 None if held.is_some() => Some("a path written as a string".to_owned()),
                 None => Some("an object carrying a path".to_owned()),
@@ -728,10 +639,6 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
         return Ok(());
     };
 
-    // The correction, with the model's own value already in it, wherever the value is recoverable
-    // from what arrived. A generic example is one the model has to adapt, and a live run showed
-    // what that costs: `{"x": 32, "y": 32}` for a vector2, thirteen times, each refused by a
-    // sentence that said what was wanted and never what to send.
     let fix = match payload {
         Payload::ResourcePath => {
             let path = inner.as_str().unwrap_or("res://…");
@@ -753,7 +660,6 @@ fn check_tagged(call: &str, here: &str, param: &Param, value: &Value) -> Result<
         join(
             format!(
                 "{call} `{here}`: a {tag} value takes {expected}{}.{fix}",
-                // A sentence that has already named what arrived does not name it twice.
                 if expected.starts_with("a path") {
                     String::new()
                 } else {
@@ -815,18 +721,6 @@ pub(crate) fn repair_set(spec: &[Param], params: &mut Value) {
     let Some(object) = params.as_object_mut() else {
         return;
     };
-    // A key onto the parameter it was plainly meant to be, before anything is held to it.
-    //
-    // The refusal already worked this out: ``set_autoload has no `nameSettings` parameter … Did
-    // you mean `name`?``. One live turn was told that nineteen times and resent the same call
-    // unchanged every time — a third of everything it did — with the sentence naming the answer
-    // in front of it each time. That is the same finding that made a whitespace-padded key a
-    // repair rather than a refusal.
-    //
-    // Narrower than the hint, on purpose. The hint names the *first* parameter a key could have
-    // meant, because one guess in a sentence beats none; this renames only when the key could
-    // have meant exactly one, and only when that parameter is not already there. Anything else is
-    // left where it is for `check` to refuse by name, with the hint still saying what to try.
     put_the_pair_back(spec, object);
     drop_the_wreckage_of_a_pair_that_survived(spec, object);
     fold_a_tag_written_flat(spec, object);
@@ -849,22 +743,6 @@ pub(crate) fn repair_set(spec: &[Param], params: &mut Value) {
         })
         .filter(|(_, name)| !object.contains_key(*name))
         .collect();
-    // Two wrong keys that both read as the same parameter are two answers, so neither is taken.
-    // Whichever won would be whichever the map happened to iterate first, and a rename nobody can
-    // predict is worse than the refusal that names both.
-    //
-    // Unless they are the same answer. A live turn sent `create_shape` this, in both of its
-    // operations:
-    //
-    //     {"op": "create_shape", "path": …, "shapeType": "RectangleShape2D",
-    //      "size2": [16, 16], "size_value": [16, 16]}
-    //
-    // Both keys read as `size`, so the contest refused the whole call over `size2` and never said
-    // a word about `size_value`. But there is nothing to pick between: every contender holds
-    // `[16, 16]`, so `size` ends up holding `[16, 16]` whichever one wins, and the unpredictability
-    // the rule above exists for is not there. So a contest whose contenders all hold the same value
-    // is settled — the first is renamed and the rest are taken away — and only a contest that
-    // disagrees is left for `check` to refuse by name.
     let mut rename: Vec<(String, &'static str)> = Vec::new();
     let mut spare: Vec<String> = Vec::new();
     for (wrong, right) in &wanted {
@@ -962,16 +840,6 @@ fn a_pair_written_as_one_key(spec: &[Param], object: &mut serde_json::Map<String
         if tail.is_empty() {
             continue;
         }
-        // Either half may hold the value. `{"size [16, 16]": null}` wrote it into the key and
-        // left nothing beside it; `{"index 0": 0}` and `{"name: Coin1": "Coin1"}` wrote it into
-        // both, and there the value that arrived is the value — the tail is that same value said
-        // again, which is how this tells the shape apart from a key that merely reads as a name.
-        //
-        // "Left nothing beside it" is [`carries_a_value`]'s question, not `null`'s. A live
-        // `godot_logs read` wrote `{"limit\":\": 40, ": ""}` — the value is in the key and what is
-        // beside it is an empty string, which is the same nothing a `null` is. Reading that as a
-        // value the caller wrote meant the tail was never looked at, and the call was refused over
-        // a key naming the number it wanted.
         let beside = object
             .get(&key)
             .filter(|held| carries_a_value(Some(held)))
@@ -984,8 +852,6 @@ fn a_pair_written_as_one_key(spec: &[Param], object: &mut serde_json::Map<String
                 None => continue,
             },
         };
-        // The same pair a second time, torn. Nothing to read, and the refusal it would otherwise
-        // earn is about a key the caller cannot see.
         if object.get(&head) == Some(&written) {
             object.remove(&key);
             continue;
@@ -1028,22 +894,6 @@ fn a_value_out_of(tail: &str) -> Option<Value> {
     if let Ok(held) = serde_json::from_str::<Value>(tail) {
         return Some(held);
     }
-    // The same tail with the brackets and commas the object lost still trailing it. Three recorded
-    // `godot_logs read` calls end exactly here:
-    //
-    // ```text
-    // {"limit\":\": 40, ": "",     "limit\":\": 60}]": null,     "limit\":\": 30}]": null}
-    // ```
-    //
-    // Each tail is a whole value with the tear's punctuation after it — `40,` and `60}]` — and
-    // `serde_json` refuses both for the trailing bytes. Refusing them cost more than any other
-    // message in the corpus: those calls went round the repeat guard, and `godot_logs`' guard is
-    // the worst-recovering answer measured anywhere in it, **1 of 10**.
-    //
-    // Trimmed from the end only, so a value that opens what it closes is untouched: `[16, 16]`
-    // parses on the line above and never reaches this, and `16, 16]` — a tear that took the
-    // opening bracket — trims to `16, 16`, which still refuses. What this rescues is a scalar with
-    // wreckage behind it, and nothing else.
     let closed = tail
         .trim_end_matches(|one: char| one.is_whitespace() || matches!(one, ',' | '}' | ']' | ')'));
     if closed != tail
@@ -1097,9 +947,6 @@ fn drop_the_wreckage_a_complete_call_can_spare(
         .filter(|key| {
             !spec.iter().any(|param| param.name == key.as_str())
                 && !UNIVERSAL.contains(&key.as_str())
-                // The router resolves the operation and takes `op` off before the table sees the
-                // entry. A caller holding its own — the desktop client, a test — leaves it on, and
-                // it is the one key here that names something without being a parameter.
                 && !(key.as_str() == "op" && object[key.as_str()].is_string())
         })
         .cloned()
@@ -1143,15 +990,6 @@ fn fold_a_lone_entry_into_the_list_it_belongs_to(
     let [target] = absent.as_slice() else {
         return;
     };
-    // The stray entry, and nothing the operation declares for itself.
-    //
-    // This used to keep every key but `op` and `UNIVERSAL`, so it swept in the operation's own
-    // top-level parameters along with the entry that had been flattened out of its list —
-    // `set_cells`'s `node`, and the hidden `expectedRevision` a caller lifts onto any mutating
-    // call. `exactly_fits` then said no, the single-key branch counted three keys rather than one,
-    // and the fold declined; the call was refused for a missing `cells` with every value it needed
-    // written in front of it. `the_operation_these_keys_belong_to` already reads the spec this way,
-    // for the same parameter; only this half was left reading the whole object.
     let spread: serde_json::Map<String, Value> = object
         .iter()
         .filter(|(key, _)| !UNIVERSAL.contains(&key.as_str()) && key.as_str() != "op")
@@ -1786,8 +1624,6 @@ fn a_tag_inside_its_own(held: &Value) -> Option<(String, Value)> {
 }
 
 fn repair_tagged(held: &mut Value) {
-    // The tag first, because the payload repairs below are chosen by it, and then the wrapper,
-    // because what is inside a wrapper is what the payload repairs are about.
     fold_the_tag(held);
     unwrap_a_tag_written_twice(held);
     put_the_payload_back_in_its_slot(held);
@@ -1807,8 +1643,6 @@ fn repair_tagged(held: &mut Value) {
         Payload::Numeric => sole_entry(inner).filter(|one| one.is_number()).cloned(),
         Payload::Str => sole_entry(inner).filter(|one| one.is_string()).cloned(),
         Payload::Boolean => sole_entry(inner).filter(|one| one.is_boolean()).cloned(),
-        // `resource` carries an object on purpose, `array` and `dictionary` carry their own lists,
-        // and `null` takes anything. None of them is a value in a box.
         _ => None,
     };
     let Some(repaired) = repaired else {
@@ -1863,11 +1697,6 @@ fn describe(value: &Value) -> String {
             if names.is_empty() {
                 "an empty object".to_owned()
             } else {
-                // A blank name is written as `""` rather than as nothing. An `AnimationPlayer`'s
-                // default library really is keyed with the empty string, so a live turn sent
-                // `{"type": "dictionary", "value": {"": …}}` and read back `a dictionary value
-                // takes an array of {key, value} tagged pairs, and this one was an object holding
-                // .` — true, and a sentence that stops before it says anything.
                 let written: Vec<String> = names
                     .iter()
                     .map(|name| {
@@ -1900,10 +1729,6 @@ fn the_start_of_another_operation(key: &str) -> Option<&'static str> {
     if squashed.contains("\"op\"") || squashed.contains("'op'") {
         return Some("another entry's `op`");
     }
-    // Not a bare `}]`. `size": [32, 32]}]edits` ends a list too, and it is a different tear — two
-    // whole calls that ran into each other, with the second one's text still attached. The
-    // refusal for that one is measured, 0 of 15 recoveries against 15 of 15, and it works by
-    // quoting the scrap that arrived. See `two_calls_that_ran_into_each_other_are_refused…`.
     None
 }
 
@@ -1931,7 +1756,6 @@ fn torn_object(key: &str, value: Option<&Value>) -> String {
     let Some(carried) = value.and_then(|held| serde_json::to_string(held).ok()) else {
         return String::new();
     };
-    // A long value is not the evidence; the shape of it is. The whole point is that it is a scrap.
     if carried.chars().count() > 60 {
         return String::new();
     }
@@ -2108,39 +1932,9 @@ fn only_one_meaning(key: &str, value: Option<&Value>, spec: &[Param]) -> Option<
         .filter(|param| !param.hidden && reads_as(key, param));
     let first = fitting.next()?;
     fitting.next().is_none().then_some(())?;
-    // Never onto a parameter the value could not be, whatever the key looks like. The clause below
-    // has said this for a torn key since a live turn wrote `"size)": false`; a key that is merely
-    // misspelled was exempt, and a live turn found the hole:
-    //
-    //     {"op": "create_shape", "shapeType": "RectangleShape2D",
-    //      "size_list": [16, 16], "height_list": [16, 16]}
-    //
-    // Both keys are name-shaped and each reads as exactly one parameter, so both were renamed.
-    // `size` was right; `height` is a number and now held a pair, and the whole call came back
-    // ``\`height\` takes a number, and this one was an array of 2`` — about a key the model never
-    // wrote, on an operation whose `height` a RectangleShape2D does not read at all. Left unnamed,
-    // `check` refuses `height_list` by its own name and the sentence is at least true.
     value
         .is_some_and(|held| could_become(first.kind, held))
         .then_some(())?;
-    // A key that is not shaped like a name at all did not arrive by choosing the wrong word — it
-    // arrived torn. Two things have to hold before it is renamed anyway, and both were watched in
-    // live turns failing.
-    //
-    // The value has to be one this parameter could take. One turn wrote `"size)": false` where
-    // `"size": [32, 32]` was meant, was told ``\`size\` takes an array, and this one was false`` —
-    // about a key it had never written — resent the identical call, and then abandoned the
-    // operation and hand-wrote the `.tres` with the file tools.
-    //
-    // And the key has to hold nothing past the name but punctuation. `path:` is a stray colon and
-    // renaming it is right. `size": [32, 32]}]edits` is two tool calls that ran into each other:
-    // the name reads as `size`, the value that came with it was a list of *edits*, and a list is
-    // what `size` takes — so the rename fired, `check` passed, and the addon answered "A
-    // RectangleShape2D takes size as two numbers" three times running about a call whose real
-    // `size` was sitting inside the key.
-    //
-    // When either fails the key stays for `check` to name, and that refusal quotes the mangled key
-    // and what it held — the sentence a live turn recovered from in one call.
     if !could_be_a_name(key)
         && !(only_punctuation_past_the_name(key)
             && value.is_some_and(|held| could_become(first.kind, held)))
@@ -2254,9 +2048,6 @@ fn reads_as(key: &str, param: &Param) -> bool {
 /// cheap prefix-and-case comparison finds them without a distance matrix.
 fn nearest(key: &str, spec: &[Param]) -> Option<&'static str> {
     spec.iter()
-        // A hidden parameter is one the prompt tells the model never to pass, so offering it as
-        // the near miss sends the model to write the one key it must not write. A live run was
-        // told `Did you mean \`expectedRevision\`?` about a key that was not one at all.
         .filter(|param| !param.hidden)
         .find(|param| reads_as(key, param))
         .map(|param| param.name)
@@ -2305,21 +2096,15 @@ mod tests {
         let edits = json!([{"oldText": "extends Node\nclass_name GameState\n", "newText": "extends Node\n"}]);
         let folded = json!({"files": [{"path": "scripts/game_state.gd", "edits": edits}]});
 
-        // Spread across the call. An earlier surface took this shape, and a live turn's `edit`
-        // answered `replaced: 1` for the file it names.
         let mut spread = json!({"path": "scripts/game_state.gd", "edits": edits});
         repair("godot_script", "edit", &mut spread);
         assert_eq!(spread, folded, "one entry written flat is that entry");
         check_ok("godot_script", "edit", spread);
 
-        // Under a name of its own. `g01-hud` wrote this, was refused, and resent
-        // `{"files": [{"path": …, "edits": …}]}` — which is what the fold writes.
         let mut named = json!({"edit": {"path": "scripts/game_state.gd", "edits": edits}});
         repair("godot_script", "edit", &mut named);
         assert_eq!(named, folded, "one entry under one key is that entry");
 
-        // Not everything that resembles an entry is one. A call missing the entry's own required
-        // field says less than it needs to, and is refused by the name of what is absent.
         let mut partial = json!({"edits": edits});
         repair("godot_script", "edit", &mut partial);
         assert!(
@@ -2338,9 +2123,6 @@ mod tests {
     fn an_operation_written_to_the_wrong_tool_is_told_which_tool_it_is() {
         let misplaced = json!({"parent": "/Platformer", "name": "Floor", "type": "StaticBody2D"});
 
-        // Left exactly as written. Read one key at a time, `name` reads as `rootName` and `type` as
-        // `rootType` — both real parameters of the operation it was sent to, and both renames
-        // erase the one thing this call says clearly.
         let mut untouched = misplaced.clone();
         repair("godot_scene", "create", &mut untouched);
         assert_eq!(
@@ -2354,8 +2136,6 @@ mod tests {
             "the refusal names the operation these parameters are: {refused}"
         );
 
-        // A key set that fits many operations names none of them. `{path}` alone is eleven
-        // operations, and a sentence that picked one would be a guess wearing a fact's clothes.
         let vague = message(
             "godot_scene",
             "get_tree",
@@ -2366,9 +2146,6 @@ mod tests {
             "a shape that fits everything says nothing: {vague}"
         );
 
-        // And a synonym the catalogue declares still wins. `{node, properties}` is
-        // `godot_node inspect`'s parameter list exactly, and it is also `inspect_node` written with
-        // the word its own note says means the same thing.
         let mut synonym = json!({"node": "/root/Game/Player", "properties": ["global_position"]});
         repair("godot_runtime", "inspect_node", &mut synonym);
         check_ok("godot_runtime", "inspect_node", synonym);
@@ -2394,7 +2171,6 @@ mod tests {
             check_ok("godot_node", "set_property", call);
         }
 
-        // A tag holding its own payload is left alone, whatever the payload is.
         for whole in [
             json!({"type": "vector2", "value": [12, 34]}),
             json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}}),
@@ -2409,8 +2185,6 @@ mod tests {
             );
         }
 
-        // And nothing outside a tagged slot is read as one. A node creation carries `name`,
-        // `parent` and `type`, and folding those would build a scene nobody asked for.
         let entry = json!({"name": "Player", "parent": "/Main", "type": "CharacterBody2D"});
         let mut creation = json!({"nodes": [entry.clone()]});
         repair("godot_node", "create_nodes", &mut creation);
@@ -2487,16 +2261,9 @@ mod tests {
                 };
                 let least = the_least_call(params);
                 if check(domain.name, operation.op, &least).is_err() {
-                    // Not every operation's smallest call is legal — some refuse a value this
-                    // builder cannot know about. Those are not what this test is for.
                     continue;
                 }
                 seen += 1;
-                // And it is never read as a call meant for somewhere else. This is the property
-                // that broke: `add_to_group` and `remove_from_group` take the same two parameters,
-                // so every good call to one fitted the other exactly, the guard called it misplaced
-                // and `repair` returned without doing anything. Nothing was rewritten, so an
-                // equality check below could not see it — the repairs simply stopped running.
                 assert_eq!(
                     the_operation_these_keys_belong_to(
                         &format!("{} {}", domain.name, operation.op),
@@ -2548,7 +2315,6 @@ mod tests {
             "{refused}"
         );
 
-        // Its own name is not another operation, so a repeated key is still just unknown.
         let itself = message(
             "godot_runtime",
             "input",
@@ -2559,7 +2325,6 @@ mod tests {
             "an operation is not next door to itself: {itself}"
         );
 
-        // And a word that spells its way to a real parameter is answered by that, first.
         let spelled = message("godot_runtime", "run", json!({"scenes": "res://a.tscn"}));
         assert!(
             spelled.contains("Did you mean `scene`?"),
@@ -2586,11 +2351,6 @@ mod tests {
         );
         check_ok("godot_logs", "read", torn);
 
-        // A value the parameter could take is not this rule's to touch, and it does not: `5` is an
-        // int, so the guard declines. What happens to it then is the spelling rename that was here
-        // first — `limit20` reads as `limit` by prefix, and `5` is a value `limit` can hold. That
-        // is a different judgement, made before this rule existed. Asserted as it is rather than as
-        // I first expected it; either way the number the caller wrote is the one kept.
         let mut usable = json!({"limit20": 5});
         repair("godot_logs", "read", &mut usable);
         assert_eq!(
@@ -2598,7 +2358,6 @@ mod tests {
             json!({"limit": 5}),
             "the number beside the key is kept, and the digits in the key are not read as a second"
         );
-        // Nor onto a parameter that is already there.
         let mut held = json!({"limit": 10, "limit20": true});
         repair("godot_logs", "read", &mut held);
         assert_eq!(
@@ -2607,8 +2366,6 @@ mod tests {
             "the answer is already written"
         );
 
-        // And only where digits can be the value. `contains` takes text, so `contains2` is a word
-        // the caller chose and `check` names it.
         let mut wordy = json!({"contains2": true});
         repair("godot_logs", "read", &mut wordy);
         assert!(
@@ -2686,8 +2443,6 @@ mod tests {
                 let Some(object) = least.as_object() else {
                     continue;
                 };
-                // Only the shapes that name one operation and no other. Anything else is a set the
-                // rule is right to stay quiet about.
                 let named = format!("{} {}", domain.name, operation.op);
                 let mut fitting: Vec<(&str, &str)> = CATALOG
                     .iter()
@@ -2701,10 +2456,6 @@ mod tests {
                             })
                     })
                     .collect();
-                // The one with keys of its own to supply, where there is one. Taking the first
-                // match instead made this test pass with the fix removed: every operation it
-                // happened to pick had no hidden parameters, so the second half of the check
-                // compared a call with nothing added against a call with nothing added.
                 fitting.sort_by_key(|(tool, op)| {
                     u8::from(
                         !params_of(tool, op)
@@ -2761,11 +2512,6 @@ mod tests {
         );
         check_ok("godot_runtime", "inspect_node", written);
 
-        // The note is the whole rule. `godot_node instantiate` is missing exactly one required
-        // parameter, `parent`, and one stray key, `node`, holds a value it could take — and a live
-        // turn's own next call proves `node` there was the path of the node about to exist,
-        // `/Main/Coin`, not the parent `/Main`. Nothing says `parent` is ever called `node`, so
-        // nothing moves and the refusal names the key that was written.
         let mut elsewhere = json!({"node": "/Main/Coin", "path": "res://scenes/coin.tscn"});
         repair("godot_node", "instantiate", &mut elsewhere);
         assert_eq!(
@@ -2778,12 +2524,6 @@ mod tests {
             "and the caller is told about the key it wrote"
         );
 
-        // A note is prose, and prose about a list talks about what is in the list. `godot_script
-        // edit`'s `files` says "Every `oldText` must match one region of that file exactly", which
-        // to a rule that only reads backticks is indistinguishable from a declared synonym. It
-        // renamed `{"oldText": […]}` onto `files`, and the call was then refused for an entry that
-        // was a string. `oldText` is a field two levels inside `files`: it is what `files` is made
-        // of, and never another word for it.
         let mut inside = json!({"oldText": ["var speed := 1.0"]});
         repair("godot_script", "edit", &mut inside);
         assert_eq!(
@@ -2792,11 +2532,6 @@ mod tests {
             "a field of the parameter is not a second name for the parameter"
         );
 
-        // The third note that declares a synonym, and the reason it is safe both ways.
-        // `godot_script apply_rename`'s `files` says "The list `rename` answered with", and
-        // `rename` really answers `{"files": [...]}` — an object. A caller that passes the list
-        // means `files` and gets it; a caller that passes the whole answer is not folded, because
-        // an object is not a list, and is refused by the name it wrote.
         let mut planned = json!({"rename": [{"path": "a.gd"}]});
         repair("godot_script", "apply_rename", &mut planned);
         assert_eq!(
@@ -2831,8 +2566,6 @@ mod tests {
             );
         }
 
-        // Neither shape is neither. The name itself is read on the wire, where the engine's own
-        // table of names lives, so an unknown one is refused there rather than guessed at here.
         let neither = message(
             "godot_node",
             "set_property",
@@ -2868,7 +2601,6 @@ mod tests {
             "{empty}"
         );
 
-        // A wrapper with no path at all is still the wrapper being wrong.
         let shapeless = message(
             "godot_node",
             "set_property",
@@ -2900,14 +2632,12 @@ mod tests {
         assert_eq!(padded["name"], json!("Light"), "{padded}");
         check_ok("godot_node", "create", padded);
 
-        // A choice reads as one too, so a padded shape name is the shape.
         let mut shape = json!({"path": " a.tres ", "shapeType": "CircleShape2D ", "radius": 4});
         repair("godot_resource", "create_shape", &mut shape);
         assert_eq!(shape["shapeType"], json!("CircleShape2D"), "{shape}");
         assert_eq!(shape["path"], json!("a.tres"), "{shape}");
         check_ok("godot_resource", "create_shape", shape);
 
-        // And a script's own text is content: what is round it is part of what was written.
         let mut written = json!({"path": "a.gd", "text": "extends Node\n\n\n"});
         repair("godot_script", "save", &mut written);
         assert_eq!(written["text"], json!("extends Node\n\n\n"), "{written}");
@@ -2921,9 +2651,6 @@ mod tests {
             "{edited}"
         );
 
-        // So is the buffer handed to the formatter. Trimmed, gdformat put the trailing newline
-        // back and every already-formatted buffer came back `changed: true` — the one answer that
-        // tells the caller to write the file again.
         let mut formatting =
             json!({"source": "extends Node\n\n\nfunc value() -> int:\n\treturn 1\n"});
         repair("godot_script", "format", &mut formatting);
@@ -2952,8 +2679,6 @@ mod tests {
         assert!(doubled.get("expression}: ").is_none(), "{doubled}");
         check_ok("godot_debug", "evaluate", doubled);
 
-        // The parameter is absent, so there is something for the caller to write and the refusal
-        // says so rather than the key quietly going away.
         let mut absent = json!({"frameId": 0});
         absent["expression}: "] = json!(", ");
         repair("godot_debug", "evaluate", &mut absent);
@@ -2961,10 +2686,6 @@ mod tests {
         let refused = message("godot_debug", "evaluate", absent);
         assert!(refused.contains("requires `expression`"), "{refused}");
 
-        // And the parameter that tore away is an optional one, so nothing required is missing and
-        // the call would go through without it — under a name nobody asked for. Observed live:
-        // `godot_node instantiate` with `parent` and `path` intact and `name": ` over a comma.
-        // Still a refusal, still without quoting the key.
         let mut optional = json!({"parent": "/Game", "path": "res://enemy.tscn"});
         optional["name\": "] = json!(", ");
         let torn = check("godot_node", "instantiate", &optional).expect_err("refused");
@@ -3030,17 +2751,12 @@ mod tests {
             "the hint still names what it read as: {}",
             refused.message
         );
-        // And what arrived under the key, which is the line that tells a model its object tore
-        // rather than that it picked a wrong word. Measured: 0 of 15 recoveries without it,
-        // 15 of 15 with it.
         assert!(
             refused.message.contains("It arrived carrying"),
             "the refusal quotes the scrap that arrived: {}",
             refused.message
         );
 
-        // A stray colon still is a stray colon: the key holds nothing past the name but punctuation
-        // and the value is intact, so the rename is still the right answer.
         let mut colon = json!({"shapeType": "RectangleShape2D"});
         colon["path:"] = json!("assets/player_shape.tres");
         repair("godot_resource", "create_shape", &mut colon);
@@ -3104,7 +2820,6 @@ mod tests {
             "the refusal has to name the key that arrived: {refused}"
         );
 
-        // The value survived the tear, so the rename is still the right answer.
         let mut readable = json!({
             "path": "scenes/enemy_shape.tres",
             "shapeType": "RectangleShape2D",
@@ -3144,7 +2859,6 @@ mod tests {
         );
         check_ok("godot_resource", "create_shape", said_twice);
 
-        // A contest whose keys disagree is still two answers, and still refused by name.
         let mut disagrees = json!({
             "path": "res://shapes/player_shape.tres",
             "shapeType": "RectangleShape2D",
@@ -3177,8 +2891,6 @@ mod tests {
         assert_eq!(misnamed["files"][0]["path"], json!("scripts/player.gd"));
         check_ok("godot_script", "edit", misnamed);
 
-        // A list that is already written is not a name to be corrected: a stray beside it is a
-        // second copy, and `drop_a_value_the_call_already_carries` is what decides that.
         let mut already_there = json!({
             "files": [{"path": "a.gd", "edits": [{"oldText": "a", "newText": "b"}]}],
             "somethings": [{"path": "b.gd", "edits": [{"oldText": "c", "newText": "d"}]}]
@@ -3187,13 +2899,10 @@ mod tests {
         assert!(already_there.get("somethings").is_some(), "{already_there}");
         assert!(message("godot_script", "edit", already_there).contains("`somethings`"));
 
-        // Entries that do not fit the declared entry exactly are not that list under another name.
-        // `{path}` alone is missing the `edits` every `files` entry requires.
         let mut partial = json!({"somethings": [{"path": "a.gd"}]});
         repair("godot_script", "edit", &mut partial);
         assert!(partial.get("somethings").is_some(), "{partial}");
 
-        // And a stray carrying anything the entry does not declare is not it either.
         let mut extra = json!({
             "somethings": [{
                 "path": "a.gd",
@@ -3232,7 +2941,6 @@ mod tests {
         );
         check_ok("godot_script", "edit", said_twice);
 
-        // A flat key that names a file the list does not is saying something, and keeps its refusal.
         let mut disagrees = json!({
             "files": [{
                 "path": "scripts/player.gd",
@@ -3263,7 +2971,6 @@ mod tests {
         assert!(said_twice.get("node").is_none(), "{said_twice}");
         check_ok("godot_node", "create", said_twice);
 
-        // A stray naming somewhere else is saying something, and keeps its refusal.
         let mut elsewhere = json!({
             "name": "TickTimer",
             "node": "/Somewhere",
@@ -3274,8 +2981,6 @@ mod tests {
         assert_eq!(elsewhere["node"], json!("/Somewhere"), "{elsewhere}");
         assert!(message("godot_node", "create", elsewhere).contains("`node`"));
 
-        // And a call that is not whole without the key is never made whole by taking it away: the
-        // refusal that names the missing parameter is the one worth having.
         let mut incomplete = json!({"name": "TickTimer", "node": "/ProtocolFixture"});
         repair("godot_node", "create", &mut incomplete);
         assert_eq!(
@@ -3306,8 +3011,6 @@ mod tests {
         assert_eq!(trailing_brackets["limit"], json!(60), "{trailing_brackets}");
         check_ok("godot_logs", "read", trailing_brackets);
 
-        // A tear that took the *opening* bracket is not a value, and stays for `check` to refuse:
-        // trimming the end of `16, 16]` leaves `16, 16`, which is two numbers rather than one.
         let mut half_a_list = json!({
             "path": "res://shapes/x.tres",
             "shapeType": "RectangleShape2D",
@@ -3319,7 +3022,6 @@ mod tests {
             "half a list is not a size: {half_a_list}"
         );
 
-        // And a whole list still reads as one, because it parses before any of this.
         let mut whole = json!({
             "path": "res://shapes/x.tres",
             "shapeType": "RectangleShape2D",
@@ -3349,8 +3051,6 @@ mod tests {
         assert_eq!(borrowed["rootName"], json!("Player"), "{borrowed}");
         check_ok("godot_scene", "create", borrowed);
 
-        // The floor. A key shorter than four characters may not answer for a name it merely ends,
-        // which is the rule `_nearest_property` holds to in the addon for the same reason.
         let mut too_short = json!({"path": "res://scenes/x.tscn", "rootType": "Node2D", "pe": "X"});
         repair("godot_scene", "create", &mut too_short);
         assert!(too_short.get("rootType").is_some() && too_short["rootType"] == json!("Node2D"));
@@ -3370,7 +3070,6 @@ mod tests {
     fn an_object_whose_only_name_is_blank_still_says_what_it_held() {
         let blank = describe(&json!({"": 1}));
         assert_eq!(blank, "an object holding \"\"", "{blank}");
-        // Named keys are untouched, which is what the older refusals assert.
         assert_eq!(describe(&json!({"y": 1, "x": 2})), "an object holding x, y");
         assert_eq!(describe(&json!({})), "an empty object");
     }
@@ -3393,7 +3092,6 @@ mod tests {
                 "cells": [{"x": 10, "y": 12, "width": 2, "height": 2}]
             }),
         );
-        // The pair itself is still a pair: an `atlas` that is present has to be one.
         assert!(
             message(
                 "godot_node",
@@ -3411,15 +3109,6 @@ mod tests {
     /// a third of everything it did — each answered with ``Did you mean `name`?`` and each resent
     /// unchanged. `tile` is the counter-case the catalogue actually holds: `create_tileset` takes
     /// both `tileSize` and `tiles`, so `tile` names neither and stays for `check` to refuse.
-    /*
-     * A whole `'name': 'value',` fragment that tore into a key is put back as both.
-     *
-     * `only_one_meaning` renames a torn key only when the value *beside* it carries a letter or a
-     * digit — otherwise `"name': ": ", "` registers an autoload called `, `. This is the case that
-     * rule cannot reach: the value is inside the key, not beside it. One live turn building a large
-     * project met it thirteen times — six `set_cells`, four `set_property`, three `create` — each
-     * key carrying the node path the call was about, with `", "` as its value.
-     */
     #[test]
     fn a_pair_that_tore_into_its_key_is_put_back() {
         let mut torn = json!({
@@ -3431,7 +3120,6 @@ mod tests {
         assert!(torn.get("node': '/GameLevel/Ground', ").is_none(), "{torn}");
         check_ok("godot_node", "set_cells", torn);
 
-        // Both halves of one call, and a `create` shape from the same turn.
         let mut two = json!({
             "parent': '/GameLevel', ": ", ",
             "type": "Node2D",
@@ -3441,9 +3129,6 @@ mod tests {
         assert_eq!(two["parent"], json!("/GameLevel"), "{two}");
         check_ok("godot_node", "create", two);
 
-        // Nothing to recover: no value inside the key, so these stay refused — which is the rule
-        // `only_one_meaning` already gets right. `null` and `false` are words rather than values
-        // here, and a word inside a torn key is far more likely to be the next key's wreckage.
         for (op, key) in [
             ("set_cells", "node': null, "),
             ("create", "parent**: false, "),
@@ -3456,31 +3141,21 @@ mod tests {
             );
         }
 
-        // A name that is not a parameter of this operation is not one to put back.
         let mut elsewhere = json!({"nonesuch': '/A', ": ", "});
         repair("godot_node", "set_cells", &mut elsewhere);
         assert!(elsewhere.get("nonesuch': '/A', ").is_some(), "{elsewhere}");
 
-        // A parameter already carrying a value is not overwritten by a fragment.
         let mut held = json!({"node': '/Wrong', ": ", ", "node": "/Right",
                               "cells": [{"x": 0, "y": 0, "atlas": [0, 0]}]});
         repair("godot_node", "set_cells", &mut held);
         assert_eq!(held["node"], json!("/Right"), "{held}");
 
-        // And a parameter that does not take a string is left alone: the fragment carries text.
         let mut wrong_kind = json!({"index': '3', ": ", ", "parent": "/A", "type": "Node2D",
                                     "name": "N"});
         repair("godot_node", "create", &mut wrong_kind);
         assert!(wrong_kind.get("index").is_none(), "{wrong_kind}");
     }
 
-    /*
-     * A lone value in a list is the value, in a box.
-     *
-     * Watched live in one turn building a large project: `godot_node add_to_group `node` takes a
-     * string, and this one was an array of 1` — four times, and once more for `set_cells`. Every one
-     * held the single node path the call was about.
-     */
     #[test]
     fn a_lone_value_in_a_list_comes_out_of_it() {
         let mut boxed = json!({"node": ["/Player"], "group": "players"});
@@ -3488,25 +3163,20 @@ mod tests {
         assert_eq!(boxed, json!({"node": "/Player", "group": "players"}));
         check_ok("godot_node", "add_to_group", boxed);
 
-        // Two is a shape, not a box: nothing is chosen between them.
         let mut two = json!({"node": ["/A", "/B"], "group": "players"});
         repair("godot_node", "add_to_group", &mut two);
         assert_eq!(two["node"], json!(["/A", "/B"]), "{two}");
         assert!(message("godot_node", "add_to_group", two).contains("`node`"));
 
-        // One of the wrong kind is not the value at all.
         let mut wrong = json!({"node": [7], "group": "players"});
         repair("godot_node", "add_to_group", &mut wrong);
         assert_eq!(wrong["node"], json!([7]), "{wrong}");
 
-        // A parameter that takes a list itself keeps it. `godot_resource rescan` takes one path or
-        // several on purpose, and unwrapping there would change what was asked.
         let mut listed = json!({"path": ["res://a.png"]});
         repair("godot_resource", "rescan", &mut listed);
         assert_eq!(listed["path"], json!(["res://a.png"]), "{listed}");
         check_ok("godot_resource", "rescan", listed);
 
-        // And an entry inside a list is repaired the same way, because `repair_set` walks in.
         let mut nested = json!({
             "properties": [{"node": ["/Player"], "property": "position",
                             "value": {"type": "vector2", "value": [1, 2]}}]
@@ -3537,7 +3207,6 @@ mod tests {
         );
         check_ok("godot_project", "set_autoload", written);
 
-        // Two parameters it could have been is not one, so nothing moves and the refusal stands.
         let mut ambiguous = json!({"path": "res://t.tres", "texture": "res://t.png", "tile": 16});
         repair("godot_resource", "create_tileset", &mut ambiguous);
         assert_eq!(ambiguous["tile"], json!(16), "{ambiguous}");
@@ -3546,27 +3215,17 @@ mod tests {
             "an ambiguous key is still refused by name"
         );
 
-        // A parameter already written is never overwritten by a near miss for it.
         let mut both = json!({"name": "Real", "nameSettings": "Other", "path": "res://a.gd"});
         repair("godot_project", "set_autoload", &mut both);
         assert_eq!(both["name"], json!("Real"));
         assert_eq!(both["nameSettings"], json!("Other"));
 
-        // A torn key whose value survived is put back: `"path:": "scripts/main.gd"` is a stray
-        // colon on the key and an intact path beside it. A live debugger turn wrote this three
-        // times in a row and was refused three times.
         let mut colon = json!({"line": 13});
         colon["path:"] = json!("scripts/main.gd");
         repair("godot_debug", "breakpoint_locations", &mut colon);
         assert_eq!(colon["path"], json!("scripts/main.gd"), "{colon}");
         check_ok("godot_debug", "breakpoint_locations", colon);
 
-        // The same tear with double quotes, which is what a model writes when its JSON comes apart:
-        // the key carries the quote and the comma from the line it lost, and its value is the
-        // wreckage. Five of these in the recordings. What must never happen is the *key* being
-        // renamed onto `method`, which would register `", "` as the method and call it a
-        // well-formed call; the value inside the key is the one the caller meant, and it is put
-        // back with the wreckage discarded.
         let mut torn = json!({"signal": "coin_collected", "binds": []});
         torn["method\": \"_on_coin_collected\", "] = json!(", ");
         repair("godot_node", "connect_signal", &mut torn);
@@ -3576,28 +3235,23 @@ mod tests {
             "{torn}"
         );
 
-        // A number tears the same way and is put back the same way. Watched live twice in one turn,
-        // under a value made entirely of the harness's own closing tags.
         let mut numeric = json!({"expression": "velocity"});
         numeric["frameId': 0}, {"] = json!(": 0}]}]'</parameter></function>");
         repair("godot_debug", "evaluate", &mut numeric);
         assert_eq!(numeric["frameId"], json!(0), "{numeric}");
         check_ok("godot_debug", "evaluate", numeric);
 
-        // An ordinary typo is a word, and there the near-miss hint is the right answer on its own.
         let typo = json!({"nameSettings": "A", "path": "res://a.gd", "name": "Taken"});
         let hinted = message("godot_project", "set_autoload", typo);
         assert!(hinted.contains("Did you mean `name`?"), "{hinted}");
         assert!(!hinted.contains("It arrived carrying"), "{hinted}");
 
-        // Two wrong keys that both read as the same parameter are two answers, so neither moves.
         let mut contested = json!({"nameSettings": "A", "nameOfIt": "B", "path": "res://a.gd"});
         repair("godot_project", "set_autoload", &mut contested);
         assert_eq!(contested["nameSettings"], json!("A"), "{contested}");
         assert_eq!(contested["nameOfIt"], json!("B"), "{contested}");
         assert!(contested.get("name").is_none(), "{contested}");
 
-        // Inside an entry of a list parameter, at the position that entry declares.
         let mut nested = json!({
             "files": [{"pathName": "scripts/a.gd", "edits": [{"oldText": "a", "newText": "b"}]}]
         });
@@ -3765,11 +3419,8 @@ mod tests {
             "inspect",
             json!({"node": "/Main/Label", "properties": ["text", "position"]}),
         );
-        // Naming none of them is still the whole list, so the narrowing is not a second operation.
         check_ok("godot_node", "inspect", json!({"node": "/Main/Label"}));
 
-        // The position is in the refusal, for the reason every other entry check carries one: the
-        // caller has to know which of the names it wrote is the one that is not a name.
         let refused = message(
             "godot_node",
             "inspect",
@@ -3779,7 +3430,6 @@ mod tests {
             refused.contains("properties[1]") && refused.contains("a string"),
             "the entry that is not a string must be named by its position: {refused}"
         );
-        // And the bracket itself is still checked.
         assert!(
             message(
                 "godot_node",
@@ -3809,7 +3459,6 @@ mod tests {
                 "expectedRevision": 3
             }),
         );
-        // A tagged value inside an entry is checked as one, and says where it was.
         let refused = message(
             "godot_node",
             "set_properties",
@@ -3856,33 +3505,18 @@ mod tests {
             json!({"node": "/Player", "value": {"type": "int", "value": 1}, "expectedRevision": 1}),
         );
         assert!(refused.contains("requires `property`"), "{refused}");
-        // `expectedRevision` is accepted here and absent from the shape: the router supplies it,
-        // and a refusal that names it teaches the model to start carrying one.
         assert!(
             refused.contains("{node: text, property: text, value: tagged}"),
             "{refused}"
         );
-        // And what did arrive, which is the difference between the two shapes rather than the
-        // absence of one key.
         assert!(
             refused.contains("This one carries expectedRevision, node, value."),
             "{refused}"
         );
     }
 
-    /*
-     * A missing parameter names the keys that were sent instead.
-     *
-     * `godot_script edit \`files[0]\` requires \`path\`` is the second commonest refusal in the
-     * recorded live turns and was the only frequent one saying nothing about what arrived. Three
-     * separate turns in three separate sessions hit it, and not one of their traces can say what
-     * shape they wrote.
-     */
     #[test]
     fn a_missing_parameter_names_what_did_arrive() {
-        // The shape three live turns actually wrote: the edits in place and the path somewhere
-        // else. Every key it does carry is one the entry takes, so nothing else in the refusal
-        // says what is different about it.
         let pathless = message(
             "godot_script",
             "edit",
@@ -3894,12 +3528,9 @@ mod tests {
         );
         assert!(pathless.contains("This one carries edits."), "{pathless}");
 
-        // An empty object says so rather than listing nothing.
         let empty = message("godot_script", "edit", json!({"files": [{}]}));
         assert!(empty.contains("This one is empty."), "{empty}");
 
-        // A wide object is counted rather than recited, and a key long enough to be wreckage is
-        // cut: a refusal is not the place to hand a torn call back in full.
         let mut wide = serde_json::Map::new();
         for index in 0..13 {
             wide.insert(format!("k{index:02}"), json!(1));
@@ -3963,7 +3594,6 @@ mod tests {
         assert_eq!(one["value"], json!({"type": "vector2", "value": [32, 48]}));
         assert!(check("godot_node", "set_property", &one).is_ok());
 
-        // Inside a list parameter's entries, and beside an entry that was already right.
         let mut listed = json!({
             "properties": [
                 {
@@ -3989,7 +3619,6 @@ mod tests {
         );
         assert!(check("godot_node", "set_properties", &listed).is_ok());
 
-        // A colour, whose four names are the other order the table knows.
         let mut colour = json!({
             "node": "/Main/Player",
             "property": "modulate",
@@ -4028,8 +3657,6 @@ mod tests {
             json!({"type": "bool", "value": true})
         );
 
-        // One entry, and of the type the tag wants. Two entries is a shape, and one entry of the
-        // wrong type is not the value in a box — both are left for the refusal to name.
         for wrong in [
             json!({"type": "float", "value": {"number": 3.5, "unit": "degrees"}}),
             json!({"type": "float", "value": {"number": "3.5"}}),
@@ -4065,7 +3692,6 @@ mod tests {
             );
         }
 
-        // And a value that was already right is not touched.
         let mut right = json!({
             "node": "/Main/Player",
             "property": "script",
@@ -4100,8 +3726,6 @@ mod tests {
             "{refused}"
         );
 
-        // The numbers keep the form they were written in, because a model comparing its own call
-        // against the correction should find its own numbers in it.
         let colour = message(
             "godot_node",
             "set_property",
@@ -4282,7 +3906,6 @@ mod tests {
             "a mistyped hash must not be blamed on the file: {refused}"
         );
 
-        // Sixty-four characters that are not hex is the same mistake wearing the right length.
         let wrong = format!("{}Z", "a".repeat(63));
         assert!(
             check(
@@ -4348,13 +3971,6 @@ mod tests {
             json!({"type": "vector2", "value": [32, 48]})
         );
 
-        // The protocol's word outside and the engine's inside. One live turn wrote
-        // `{type: "string", value: {type: "String", value: "Resume"}}` and was refused sixteen
-        // times over twelve minutes, while `{type: "bool", value: {type: "bool", value: false}}` in
-        // the same call went straight through. Across five recorded turns 41 of 86 tagged values
-        // were wrapped twice and 22 of the 41 spelled the inner tag with the engine's capital. No
-        // two protocol tags differ only in case, so folding it is safe, and the value that comes
-        // out carries the lowercase spelling whichever side wrote it.
         for wrapper in [
             json!({"type": "string", "value": {"type": "String", "value": "Resume"}}),
             json!({"type": "String", "value": {"type": "string", "value": "Resume"}}),
@@ -4366,17 +3982,11 @@ mod tests {
             );
         }
 
-        // And one wrapper written the same way. The model that knew both words wrote Godot's
-        // spelling in the tag it wrote once as readily as in the tag it wrote twice, and `check`
-        // looks the tag up case-sensitively — so `{type: "String", value: "Resume"}` was refused
-        // with "`String` is not a value type" while the double-wrapped form beside it in the same
-        // call was repaired.
         assert_eq!(
             repaired(json!({"type": "String", "value": "Resume"})),
             json!({"type": "string", "value": "Resume"})
         );
 
-        // Three copies is the same mistake as two.
         assert_eq!(
             repaired(json!({
                 "type": "int",
@@ -4385,21 +3995,15 @@ mod tests {
             json!({"type": "int", "value": 2})
         );
 
-        // Only the same tag twice. Two different tags is not a wrapper a caller meant to write, and
-        // guessing which of them is the real one is not this layer's to do — the refusal says what
-        // it received. A word that is not a tag in any case keeps the spelling it arrived in, so
-        // the refusal quotes what the caller wrote.
         for left in [
             json!({"type": "vector2", "value": {"type": "float", "value": 1}}),
             json!({"type": "int", "value": {"type": "float", "value": 1}}),
             json!({"type": "Vektor2", "value": [1, 2]}),
-            // A `resource` carries an object with a `path`, which is not a tag inside a tag.
             json!({"type": "resource", "value": {"path": "res://scripts/player.gd"}}),
         ] {
             assert_eq!(repaired(left.clone()), left, "{left}");
         }
 
-        // Inside a list parameter's entries too, which is where `set_properties` carries them.
         let mut listed = json!({"properties": [
             {"node": "/P", "property": "position",
              "value": {"type": "vector2", "value": {"type": "vector2", "value": [1, 2]}}},
@@ -4536,8 +4140,6 @@ mod tests {
             "it names the keys that survived: {}",
             refused.message
         );
-        // And the cause. Ten refusals in a row on one live turn were a batch the answer was cut
-        // off part-way through writing, and asking for the same call again cannot fix that.
         assert!(refused.message.contains("cut off"), "{}", refused.message);
         assert!(
             refused.message.contains("fewer operations"),
@@ -4596,15 +4198,10 @@ mod tests {
             check_ok("godot_resource", "create_shape", held);
         }
 
-        // The value half alone was always repaired and still is.
         let mut lone = json!({"path": "a.tres", "shapeType": "CircleShape2D", "radiusValue": 8});
         repair("godot_resource", "create_shape", &mut lone);
         assert_eq!(lone["radius"], json!(8), "{lone}");
 
-        // A type half with no value half beside it is not a flattened tag, and nothing here throws
-        // it away. It is not renamed either: `size` takes a list and "Vector2" is a word, and a
-        // rename never lands a value on a parameter that could not hold it. So `check` names the
-        // key the caller actually wrote.
         let mut alone = json!({
             "path": "a.tres", "shapeType": "RectangleShape2D", "sizeType": "Vector2"
         });
@@ -4618,9 +4215,6 @@ mod tests {
             refused.message
         );
 
-        // And a type half carrying a real value is not a type slot. `points` is declared here, so
-        // the head reads as one; what sits beside it is a list, which no `{type, value}` pair has
-        // in its type half, and throwing it away would lose what the caller wrote.
         let mut carried = json!({
             "path": "a.tres", "shapeType": "SegmentShape2D",
             "pointsType": [0, 0], "pointsValue": [0, 0, 8, 8]
@@ -4648,7 +4242,6 @@ mod tests {
         assert_eq!(held["size"], json!([16, 16]), "{held}");
         check_ok("godot_resource", "create_shape", held);
 
-        // Two keys that both hold something are still two answers, and neither is taken.
         let mut contested = json!({
             "path": "a.tres", "shapeType": "RectangleShape2D",
             "size_a": [16, 16], "size_b": [32, 32]
@@ -4682,11 +4275,6 @@ mod tests {
             "the refusal names the key the caller wrote: {}",
             refused.message
         );
-        // A note on the four dimension parameters, saying which shape reads each, was tried here
-        // and reverted: `bench-size-shape.mjs`, catalogue-with-notes against catalogue-without,
-        // 14 seeds interleaved, **0 of 24 against 0 of 27**. It is the second thing measured to
-        // make no difference to how this model writes `size` — printing the shape in the signature
-        // was the first, 0 of 4 either way. Prose does not reach this field; the repairs do.
     }
 
     /// A name and its value written as one key, with the separator lost between them.
@@ -4697,7 +4285,6 @@ mod tests {
     /// key beside it named nothing.
     #[test]
     fn a_name_and_its_value_written_as_one_key_are_read_as_a_pair() {
-        // The whole recorded entry, wreckage and all.
         let mut held = json!({
             "path": "shapes/player_shape.tres",
             "shapeType": "RectangleShape2D",
@@ -4707,7 +4294,6 @@ mod tests {
         assert_eq!(held["size"], json!([16, 16]), "{held}");
         check_ok("godot_resource", "create_shape", held);
 
-        // A plain word is a value too: a path, a class name, a node path.
         let mut worded = json!({
             "path shapes/floor_shape.tres": Value::Null,
             "shapeType RectangleShape2D": Value::Null,
@@ -4719,7 +4305,6 @@ mod tests {
         assert_eq!(worded["size"], json!([640, 16]), "{worded}");
         check_ok("godot_resource", "create_shape", worded);
 
-        // Both halves holding the value: the key swallowed it and it arrived beside the key too.
         let mut both = json!({
             "index 0": 0,
             "name Coin1": Value::Null,
@@ -4740,8 +4325,6 @@ mod tests {
         assert_eq!(colon["name"], json!("Coin1"), "{colon}");
         check_ok("godot_node", "instantiate", colon);
 
-        // The same pair a second time, torn, beside the one that survived. It says nothing the
-        // call has not already said.
         let mut twice = json!({
             "node": "/Main/Player",
             "node /Main/Player": Value::Null,
@@ -4755,7 +4338,6 @@ mod tests {
     /// And what is not a value stays for `check` to name.
     #[test]
     fn a_key_that_swallowed_two_calls_is_not_read_as_a_pair() {
-        // Two calls that ran into each other. The tail begins with a list and does not end there.
         let mut ran_together = json!({
             "path": "a.tres",
             "shapeType": "RectangleShape2D",
@@ -4764,12 +4346,10 @@ mod tests {
         repair("godot_resource", "create_shape", &mut ran_together);
         assert!(ran_together.get("size").is_none(), "{ran_together}");
 
-        // Two operations written as one key. A comma is not part of a path.
         let mut both = json!({"path shapes/a.tres, shapes/b.tres": Value::Null});
         repair("godot_resource", "rescan", &mut both);
         assert!(both.get("path").is_none(), "{both}");
 
-        // And a tail the parameter could not hold. `size` takes a list, and this is a number.
         let mut wrong =
             json!({"path": "a.tres", "shapeType": "RectangleShape2D", "size 16": Value::Null});
         repair("godot_resource", "create_shape", &mut wrong);
@@ -4784,7 +4364,6 @@ mod tests {
     /// and the board never got its bricks.
     #[test]
     fn wreckage_over_a_call_that_is_complete_without_it_is_taken_away() {
-        // The entry as the router sees it: the operation is resolved and taken off first.
         let mut entry = serde_json::Map::new();
         entry.insert("parent".to_owned(), json!("/Main"));
         entry.insert("path".to_owned(), json!("res://scenes/brick.tscn"));
@@ -4803,8 +4382,6 @@ mod tests {
         );
         check_ok("godot_node", "instantiate", held);
 
-        // And a caller that holds its own `op` — the desktop client, a test — is not read as
-        // having written a key with a value in it, which would stop the wreckage being dropped.
         let mut with_op = json!({
             "op": "instantiate",
             "parent": "/Main",
@@ -4814,7 +4391,6 @@ mod tests {
         repair("godot_node", "instantiate", &mut with_op);
         assert!(with_op.get("name': null}]").is_none(), "{with_op}");
 
-        // The same shape on `godot_script edit`, four more refusals in the same turn.
         let mut edited = json!({
             "files": [{"path": "a.gd", "edits": [{"oldText": "x", "newText": "y"}]}],
             "op_save": Value::Null
@@ -4826,13 +4402,11 @@ mod tests {
     /// And a call that is not complete, or wreckage that holds something, keeps its refusal.
     #[test]
     fn a_call_short_of_a_required_parameter_still_names_what_is_wrong() {
-        // `path` is required here and absent, so the call cannot run whatever is dropped.
         let mut short = json!({"parent": "/Main", "namexx": Value::Null});
         repair("godot_node", "instantiate", &mut short);
         assert!(short.get("namexx").is_some(), "{short}");
         check("godot_node", "instantiate", &short).expect_err("still refused");
 
-        // A key holding something is a value the caller wrote and may have meant.
         let mut noted = json!({
             "files": [{"path": "a.gd", "edits": [{"oldText": "x", "newText": "y"}]}],
             "edits_note": "ball keeps wall bounces"
@@ -4879,7 +4453,6 @@ mod tests {
             );
         }
 
-        // An ordinary misspelling still gets the near miss.
         let ordinary = check(
             "godot_node",
             "instantiate",

@@ -1,14 +1,6 @@
 import readline from 'node:readline'
 import {probeRetriever, runRetrieve} from '../../scripts/rag-retrieve.mjs'
 
-// The embedding index is the one part of documentation retrieval that cannot be a test fixture:
-// it is hundreds of megabytes of ONNX models and a LanceDB table built from the Godot manual. So
-// `retrieve` is scripted here — the same edge the acceptance model is scripted at — and every
-// layer downstream of it stays real: the response framing, the passage bounds, the vector
-// stripping, and the Rust sidecar that reads all three.
-//
-// The chunks carry a `vector` the way a real RankedChunk does, because a raw embedding reaching a
-// model prompt or the renderer is exactly what the strip exists to prevent.
 const chunks = [
     {
         text: 'Signals are Godot’s observer pattern: connect one with Node.connect or the editor’s Node dock, and the receiver runs when the signal is emitted.',
@@ -33,8 +25,6 @@ const chunks = [
     }
 ]
 
-// The reachability probe is answered the same way the shipped sidecar answers it, because the
-// probe is part of what this fixture stands in for: the router spawns this worker for it too.
 const isProbe = line => {
     try {
         return JSON.parse(line)?.probe === true

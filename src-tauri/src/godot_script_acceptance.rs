@@ -66,19 +66,13 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     let worktree = worktree_with_probes(&directory);
     let lsp_port = free_port();
     let editor = launch(&worktree, lsp_port);
-    // Held rather than cleared at the end: an assertion below panicking would otherwise leave this
-    // editor bound for every later test in the process, long after it has been torn down.
     let _bound = BoundEditor::external(lsp_port, 0, &worktree);
 
-    // Opening is the renderer's first contact: it returns the text, the hash the next write must
-    // replace, and the document version the server assigned.
     let opened = open_when_ready(MATH_PATH, &editor);
     assert_eq!(opened.text, MATH_UTILS);
     assert_eq!(opened.version, 1);
     assert!(!opened.hash.is_empty());
 
-    // A buffer change bumps exactly one version. Rust owns the counter, so a UI edit and an AI
-    // edit of the same file can never disagree about which version the server holds.
     let edited =
         format!("{MATH_UTILS}\n\nstatic func doubled(value: int) -> int:\n\treturn value * 2\n");
     let changed = script::update_document(UpdateScriptRequest {
@@ -90,7 +84,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     assert!(changed.hash.is_none(), "an in-memory change writes nothing");
     assert_eq!(read(&worktree, MATH_PATH), MATH_UTILS);
 
-    // Saving writes through the workspace transaction and reports the save to the server.
     let saved = script::save_document(SaveScriptRequest {
         path: MATH_PATH.to_owned(),
         text: edited.clone(),
@@ -102,7 +95,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     let saved_hash = saved.hash.expect("a save reports the new hash");
     assert_ne!(saved_hash, opened.hash);
 
-    // The stale hash is exactly what a second editor of the same file would send.
     let conflict = script::save_document(SaveScriptRequest {
         path: MATH_PATH.to_owned(),
         text: "extends RefCounted\n".to_owned(),
@@ -112,14 +104,10 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     assert_eq!(conflict.code, "file_conflict");
     assert_eq!(read(&worktree, MATH_PATH), edited);
 
-    // Re-opening the same file re-synchronizes one document instead of stacking a second one.
     let reopened = open_when_ready(MATH_PATH, &editor);
     assert_eq!(reopened.hash, saved_hash);
     assert!(reopened.version > saved.version);
 
-    // An edit writes both files in one call and answers with what the real server published for
-    // each, which is the whole reason the operation exists: the caller sends the lines it is
-    // changing and needs no second call to learn whether they parse.
     let edits = script::edit_documents(EditScriptRequest {
         files: vec![
             ScriptFileEdit {
@@ -141,8 +129,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     assert!(read(&worktree, MATH_PATH).contains("return value * 3"));
     assert!(read(&worktree, KEEPER_PATH).contains("var total: int = 0"));
 
-    // An anchor quoted from text the last edit replaced is how a stale edit presents itself, and
-    // it is refused before anything is written.
     let stale = script::edit_documents(EditScriptRequest {
         files: vec![ScriptFileEdit {
             path: MATH_PATH.to_owned(),
@@ -153,8 +139,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     assert_eq!(stale.code, "anchor_not_found");
     assert!(read(&worktree, MATH_PATH).contains("return value * 3"));
 
-    // The verdict is the server's, not Gofer's: breaking the file has to come back as a real
-    // diagnostic on the same call that broke it.
     let broken = script::edit_documents(EditScriptRequest {
         files: vec![ScriptFileEdit {
             path: MATH_PATH.to_owned(),
@@ -187,10 +171,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
         repaired[0].diagnostics
     );
 
-    // A whole-file write earns the same answer an anchor edit does. Creating a script is the one
-    // way a caller reaches a file that does not exist yet, and the question it has afterwards is
-    // the question an edit is already answered: does this parse. Answering only with the byte
-    // count spends a second call and a second wait to learn what this call already knew.
     let created_path = "scripts/created_by_save.gd";
     let broken_save = script::save_and_publish(SaveScriptRequest {
         path: created_path.to_owned(),
@@ -213,7 +193,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
         broken_save.diagnostics
     );
 
-    // And the repair clears it on the same call, so a caller never has to ask twice.
     let fixed_save = script::save_and_publish(SaveScriptRequest {
         path: created_path.to_owned(),
         text: "extends RefCounted\n\nfunc broken() -> int:\n\treturn 1 + 1\n".to_owned(),
@@ -232,7 +211,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
     let keeper = open_when_ready(KEEPER_PATH, &editor);
     assert!(keeper.text.contains("var total: int = 0"));
 
-    // Renaming plans across both scripts and writes nothing until the plan is applied.
     let usage = script_position(SCORE_KEEPER, "add_score");
     let planned = script::call(ScriptRequest::Rename {
         path: KEEPER_PATH.to_owned(),
@@ -260,7 +238,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
         assert!(!text.contains("add_score"), "{path}: {text}");
     }
 
-    // Navigation answers in workspace-relative paths, never in engine-owned file URIs.
     let located = script::call(ScriptRequest::Definition {
         path: KEEPER_PATH.to_owned(),
         position: script_position(&read(&worktree, KEEPER_PATH), "sum_score"),
@@ -280,7 +257,6 @@ fn the_editor_serves_monaco_through_the_script_commands() {
         path: KEEPER_PATH.to_owned(),
     })
     .expect("close the document");
-    // Closing a document the server no longer holds is not an error: tabs outlive sessions.
     script::close_document(OpenScriptRequest {
         path: KEEPER_PATH.to_owned(),
     })

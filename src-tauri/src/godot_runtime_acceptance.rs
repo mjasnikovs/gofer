@@ -148,21 +148,11 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     let mut session = start_session();
     let events = session.rpc().subscribe_events();
 
-    // Registered before the game starts, because the game reads the Input Map from the project.
-    // This is the addon's own writer, so the binding is the physical-key one every action Gofer
-    // registers gets — which is the whole point of asking whether injected input can fire it.
-    // F13 rather than a key a person has: this event is injected *unstamped*, because a device
-    // marker is what keeps an action from matching at all — the Input Map binds the keyboard's own
-    // device, and an event carrying 7777 matches no keyboard binding. Unstamped is also how an
-    // agent injects, so it is the path worth proving. A key no keyboard carries is what keeps a
-    // developer typing during the suite out of the count.
     session.call(
         "project.set_input_action",
         json!({"name": "acceptance_probe_action", "events": [{"kind": "key", "key": "F13"}]}),
     );
 
-    // Nothing runs yet: inspection fails retryably and the state says so. The session's own view
-    // agrees, which is what the badge reads.
     session.await_session_view(Readiness::Ready, false);
     let state = session.call("runtime.get_state", json!({}));
     assert_eq!(state["running"], false);
@@ -174,8 +164,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "inspection without a game must fail before any debugger message is sent"
     );
 
-    // The launch answer rides back with the first rendered frame — the proof the game produced
-    // pixels, captured automatically as every successful run must.
     let run = session
         .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
         .unwrap_or_else(|error| {
@@ -186,9 +174,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         });
     assert_eq!(run["running"], true);
     assert_frame(&run["frame"]);
-    // Godot is playing the project, and the session says so without being asked: the addon polls
-    // `EditorInterface.is_playing_scene()` every frame and announces the transition. This is what
-    // turns the toolbar's Run Game into Stop Game.
     session.await_session_view(Readiness::Ready, true);
     assert_eq!(
         await_event(&events, "runtime.ready")["protocolVersion"],
@@ -203,14 +188,8 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "a second launch must be refused while the game is up"
     );
 
-    // The remote tree is the running game's tree — the autoloaded helper and the probe scene sit
-    // under the root window — and it stays a separate concept from the edited scene's tree.
     let tree = session.call("runtime.get_tree", json!({}));
     assert_eq!(tree["truncated"], false);
-    // Whether the tree is paused, which belongs to the SceneTree and not to any node — so
-    // `inspect_node` cannot reach it. Two live turns asked for it as a property of `/root` and were
-    // told `/root has no property 'paused'`, which is true and no use. It rides with the tree
-    // because the tree is what gets asked for.
     assert_eq!(
         tree["paused"], false,
         "a game nobody paused reports the tree it actually has: {tree}"
@@ -230,8 +209,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "the main scene must be running: {names:?}"
     );
 
-    // The same three bounds the edited tree takes, on the tree that actually overran them: a live
-    // project's running tree was 235,113 characters, and the worker cuts a tool result at 24,000.
     let shallow = session.call("runtime.get_tree", json!({"depth": 0}));
     assert!(
         shallow["root"]["children"]
@@ -252,9 +229,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "a root the game does not hold is named rather than answered with an empty tree"
     );
 
-    // Waiting happens inside the game, so the frames really are rendered before the answer leaves.
-    // Thirteen of thirty bash calls in one live project were `sleep`, which stops the agent instead
-    // and lets the game run unobserved.
     let waited = session.call("runtime.wait", json!({"frames": 5}));
     assert_eq!(waited["frames"], 5, "{waited}");
     let timed = session.call("runtime.wait", json!({"ms": 120}));
@@ -262,23 +236,12 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         timed["ms"].as_i64().expect("a wait reports its duration") >= 120,
         "a wait named in milliseconds has to last them: {timed}"
     );
-    // Both bounds are held, so a wait can never outlast the request carrying it.
     let capped = session.call("runtime.wait", json!({"frames": 100_000, "ms": 150}));
     assert!(
         capped["frames"].as_i64().expect("frames") < 100_000,
         "the duration has to end a frame count it outlives: {capped}"
     );
 
-    // And the game the wait is waiting on is actually running.
-    //
-    // It was not. Both fixtures set `window/size/no_focus` so a test game cannot take the
-    // developer's keystrokes, and an X11 window that is never focused is never given a vblank —
-    // so every frame Godot waited for one and timed out at about half a second. Measured
-    // interleaved: 2.0 frames a second with the setting, 1125 without it, 3200 with it and vsync
-    // off. Every runtime test above this line, and every live agent verifying its own game, was
-    // watching something that rendered five frames in four seconds. The fixtures now cap at 60,
-    // so half a second is thirty frames; five is a long way under that and a long way over the one
-    // the throttle allowed.
     let rate = session.call("runtime.wait", json!({"ms": 500}));
     assert!(
         rate["frames"].as_i64().expect("frames") > 5,
@@ -286,9 +249,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
          test is not running: {rate}"
     );
 
-    // The edited scene cannot be mutated while the game is playing, and the refusal has to say
-    // which call clears that. It used to end at "cannot be mutated", which names no way forward:
-    // two live tasks met it and neither one stopped the game.
     let playing = session.error(
         "node.create",
         json!({"parent": "/RuntimeProbe", "name": "Late", "type": "Marker2D"}),
@@ -305,8 +265,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
 
     assert_eq!(label_text(&session), "presses: 0 (none)");
 
-    // The step's done-criteria: an injected key press changes fixture state, and the response's
-    // automatically captured frame plus the following inspection both postdate the change.
     let key = session.call(
         "runtime.input",
         json!({"events": [
@@ -317,9 +275,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     assert_eq!(key["applied"], 2, "press and release are both applied");
     assert_frame(&key["frame"]);
     assert_eq!(label_text(&session), "presses: 1 (key)");
-    // The event arriving is not the same as the game being driven. An injected key has to match
-    // the action the Input Map binds to it, or a level built with these tools cannot be played by
-    // them: the press lands, nothing answers it, and no error is raised anywhere.
     let bound = session.call(
         "runtime.input",
         json!({"events": [
@@ -335,10 +290,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
          these tools cannot be played by them"
     );
 
-    // Input this test did not stamp belongs to whoever is using the desktop the game window opened
-    // on. An unstamped event takes the same path into `_input` that a real keystroke does — the
-    // engine assigns it a device of its own — so this is the assertion that says the count above
-    // cannot be changed by a developer typing while the suite runs.
     let stray = session.call(
         "runtime.input",
         json!({"events": [
@@ -363,17 +314,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
     assert_eq!(click["applied"], 2, "press and release are both applied");
     assert_eq!(label_text(&session), "presses: 2 (mouse)");
 
-    // The release a caller did not spell.
-    //
-    // Every call above says `pressed` both times, and every call a model writes does not: the
-    // catalogue says "send the release as a second event", and a model that reads that writes the
-    // same event twice. `pressed` used to default to `true`, so that was two presses and no
-    // release — and a Godot `Button` answers the button *up*, so a menu clicked that way never
-    // opens. One live turn spent twenty calls on a Start button, each answered `applied: 2` and
-    // each changing nothing.
-    //
-    // The probe counts presses, so two presses would count two. One is the assertion that the
-    // second event was read as the release.
     let unspelled = session.call(
         "runtime.input",
         json!({"events": [
@@ -408,11 +348,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
             .starts_with("unsupported_value"),
         "an unknown key must be refused by the helper, not injected"
     );
-    // The five named buttons are a closed set, so a refusal that does not carry them is one the
-    // caller cannot act on. A live turn clicking a menu sent the *string* "1" — the number is
-    // accepted and its spelling is not — and was told only that "1" is unknown.
-    // A monitor that is not one names the monitors there are. Every other closed vocabulary in that
-    // file says what it holds; this one only said what it does not.
     let no_monitor = session.error(
         "runtime.get_monitors",
         json!({"monitors": ["frames_per_second"]}),
@@ -432,10 +367,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         unnamed.contains("left") && unnamed.contains("wheel_up") && unnamed.contains("as a number"),
         "the refusal has to name the buttons there are: {unnamed}"
     );
-    // The five kinds are the whole vocabulary and a caller that got one wrong has nowhere else to
-    // read them. A live turn building a playable game sent an event with no kind at all and was
-    // answered `Input event kind '' is not supported` twenty-two times running. The parameter
-    // contract refuses that before it reaches this socket now; the helper still has to say it.
     for (sent, expected) in [
         (
             json!({"events": [{"key": "A"}]}),
@@ -482,7 +413,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
             .starts_with("node_not_found")
     );
 
-    // Performance monitors report from inside the game process.
     let monitors = session.call(
         "runtime.get_monitors",
         json!({"monitors": ["fps", "object_node_count"]}),
@@ -504,7 +434,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
             .starts_with("unknown_monitor")
     );
 
-    // Manual capture works on demand; the headless editor honestly refuses its own viewport.
     let capture = session.call("runtime.capture", json!({}));
     assert_frame(&capture["frame"]);
     assert!(
@@ -514,7 +443,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "a headless editor has no viewport to capture"
     );
 
-    // Restart replaces the process: the probe's state resets, proving the old game is gone.
     let restarted = session
         .try_call_within("runtime.restart", json!({}), LAUNCH_TIMEOUT_MS)
         .unwrap_or_else(|error| {
@@ -532,7 +460,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "the replacement game announces itself too, over the same debugger session"
     );
 
-    // Stop tears the helper down: readiness clears and inspection fails retryably again.
     let stopped = session.call("runtime.stop", json!({}));
     assert_eq!(stopped["running"], false);
     session.await_stopped();
@@ -544,10 +471,6 @@ fn the_runtime_loop_drives_input_and_proves_it_with_tree_and_screenshots() {
         "inspection after stop must fail before any debugger message is sent"
     );
 
-    // The editor is killed, which is what a crash and a person closing the window both look like.
-    // Nothing is told: the addon is gone with the process, so there is no event and no reply. The
-    // session still has to stop reporting a ready editor, because everything on screen is derived
-    // from this and it used to go on saying ready over a corpse until something was clicked.
     session.kill_editor();
     session.await_session_view(Readiness::Starting, false);
 }
@@ -661,11 +584,6 @@ fn quitting_the_editor_takes_the_game_with_it() {
 
     session.quit_editor();
 
-    // No wait of this test's own: the editor answers `session.quit` before it acts and only leaves
-    // a frame later, so by the time it has actually gone the game it stopped first has been gone
-    // longer. `port_released` is still what asks, because the Windows teardown it allows for is a
-    // property of how that operating system closes a killed process's sockets rather than of which
-    // test is asking — and on Linux and macOS its budget is zero, which is this comment exactly.
     assert!(
         port_released(port),
         "the game outlived the editor that launched it: port {port} is still held"
@@ -714,7 +632,6 @@ fn a_call_that_was_waiting_for_a_frame_says_so() {
     session
         .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
         .expect("the game must launch");
-    // Long enough that the spin has started, so the deadline is what answers.
     std::thread::sleep(Duration::from_secs(6));
 
     let refused = session
@@ -732,19 +649,10 @@ fn a_call_that_was_waiting_for_a_frame_says_so() {
         refused.contains("draws a frame") || refused.contains("draw a frame"),
         "a frame-awaiting call must say what it was waiting for: {refused}"
     );
-    // The two that need no frame are named, because trying one is how the caller tells a halted
-    // game from a wedged one. Naming them is the whole point; asserting which this game is would
-    // be asserting something the addon cannot know.
     assert!(
         refused.contains("inspect_node") && refused.contains("get_tree"),
         "the refusal must name the calls that answer without a frame: {refused}"
     );
-    // And it names the debugger as *one* cause rather than as the cause, which the comment above
-    // asked for before the sentence did it. `loc-24-debug2` met the old wording three times, at
-    // twenty seconds each, on a game the debugger had let go four calls earlier — `terminate`,
-    // then a plain `godot_runtime run` that answered with a frame — and went looking for a debug
-    // stop that was not there. Gofer's own side appends the definite sentence when the debugger
-    // really does hold the game; this one must not claim it from inside the editor.
     assert!(
         !refused.contains("A game halted in the debugger"),
         "the addon cannot know a debugger is holding this game: {refused}"
@@ -754,11 +662,6 @@ fn a_call_that_was_waiting_for_a_frame_says_so() {
         "and it offers the debugger as a thing to check: {refused}"
     );
 
-    // And the asymmetry the sentence describes, on the very same game, so it can never become a
-    // lie: the call that needs no frame answers while the one that needs a frame cannot. This is
-    // what both live turns worked out for themselves, and it is a property of where each op is
-    // served from — `get_tree` off the debugger message pump the main loop polls regardless,
-    // `input` off two process frames and a `frame_post_draw` that a game like this never reaches.
     let answered = session
         .try_call("runtime.get_tree", json!({}), None)
         .expect("a call that needs no frame answers even here");
@@ -767,11 +670,6 @@ fn a_call_that_was_waiting_for_a_frame_says_so() {
         "the frame-free call must answer with the real tree: {answered}"
     );
 
-    // The game goes before the session does, and this test more than most: the probe spins its
-    // main thread, so nothing in it will ever notice a closed socket. Dropping the session kills
-    // the editor and nothing else — which is the orphan `quitting_the_editor_takes_the_game_with_it`
-    // is about, and leaving one here would hold a core and this port for as long as the machine
-    // stays up, with the worktree deleted underneath it.
     session
         .try_call("runtime.stop", json!({}), None)
         .expect("the wedged game must be stopped rather than left running");
@@ -822,26 +720,15 @@ fn stopping_the_game_answers_only_once_the_game_is_gone() {
                 session.output()
             )
         });
-    // The port proves the game is up before anything is claimed about it being down.
     let held = std::net::TcpListener::bind(("127.0.0.1", port));
     assert!(
         held.is_err(),
         "the game must be holding its port before the stop is asked for"
     );
-    // Long enough that the spin has started and the debugger channel is dead.
-    //
-    // Polling for those two rather than sleeping through them was tried and reverted: asking
-    // `runtime.get_state` while the game is wedged is a question the editor answers slowly, and
-    // under `npm run check` the loop turned an 11s test into a 33s failure. The wait is cheap and
-    // the thing being waited for is not observable without disturbing it.
     std::thread::sleep(Duration::from_secs(6));
 
     let stopped = session.call("runtime.stop", json!({}));
     assert_eq!(stopped["running"], false, "{stopped}");
-    // Nothing sleeps between the response and this bind: the answer has to be true when it is
-    // written, not true a moment later. `port_released` holds that on Linux and macOS with a zero
-    // budget; only Windows, which closes a killed process's sockets after the kill returns, gets a
-    // teardown window, and it says there why.
     assert!(
         port_released(port),
         "runtime.stop answered `running: false` while the game still held its port\n--- editor output ---\n{}",
@@ -900,8 +787,6 @@ fn a_named_scene_runs_without_becoming_the_project_entry_point() {
     assert_eq!(run["running"], true);
     assert_frame(&run["frame"]);
 
-    // The running tree is the named scene's, and the project's main scene is untouched — which is
-    // the whole point: the detour this replaces left the project pointing somewhere else.
     let running = session.call("runtime.get_tree", json!({}));
     assert!(
         running.to_string().contains("OtherScene"),
@@ -913,7 +798,6 @@ fn a_named_scene_runs_without_becoming_the_project_entry_point() {
         "running one scene must not rewrite the project's entry point: {settings}"
     );
 
-    // A restart restarts what is running, not what the project starts with.
     let restarted = session
         .try_call_within("runtime.restart", json!({}), LAUNCH_TIMEOUT_MS)
         .unwrap_or_else(|error| panic!("runtime.restart failed: {error}"));
@@ -925,7 +809,6 @@ fn a_named_scene_runs_without_becoming_the_project_entry_point() {
     );
 
     session.call("runtime.stop", json!({}));
-    // And a scene that is not there is refused by name, before anything is launched.
     let refused = session.error("runtime.run", json!({"scene": "res://nope.tscn"}), None);
     assert!(
         refused.starts_with("scene_not_found") && refused.contains("nope.tscn"),
@@ -970,14 +853,10 @@ fn a_game_that_stops_at_an_error_ends_the_launch_waiting_on_it() {
         "the failure took {waited:?}, which is the deadline rather than the break"
     );
 
-    // The state answers what the launch did. `running` is honestly true — the process is alive and
-    // the editor is still playing it — which is exactly why the break has to be sayable on its own.
     let state = session.call("runtime.get_state", json!({}));
     assert_eq!(state["broke"], true, "{state}");
     assert_eq!(state["runtimeReady"], false, "{state}");
 
-    // Nothing forwarded to a paused game can be answered either, and it fails now rather than on
-    // its own deadline.
     let forwarded = Instant::now();
     let refused = session
         .try_call("runtime.get_tree", json!({}), None)
@@ -992,7 +871,6 @@ fn a_game_that_stops_at_an_error_ends_the_launch_waiting_on_it() {
         forwarded.elapsed()
     );
 
-    // The game is still there to stop, and stopping it clears the break.
     let stopped = session.call("runtime.stop", json!({}));
     assert_eq!(stopped["running"], false, "{stopped}");
     session.await_stopped();
@@ -1033,7 +911,6 @@ fn a_launch_that_outlives_its_deadline_while_playing_says_the_game_is_up() {
     std::fs::write(worktree.join("scripts/stall.gd"), STALLING_AUTOLOAD)
         .expect("write the autoload");
     let project = worktree.join("project.godot");
-    // Gofer's own autoload is appended to `[autoload]`, so one written here runs ahead of it.
     let configured = std::fs::read_to_string(&project).expect("read the fixture project")
         + "\n[autoload]\n\nStall=\"*res://scripts/stall.gd\"\n";
     std::fs::write(&project, configured).expect("write the project");
@@ -1063,7 +940,6 @@ fn a_launch_that_outlives_its_deadline_while_playing_says_the_game_is_up() {
         "the failure has to name the call that reads the state instead of another launch: {error}"
     );
 
-    // And the state it points at agrees: the game is there, its helper is not.
     let state = session.call("runtime.get_state", json!({}));
     assert_eq!(state["running"], true, "{state}");
     assert_eq!(state["runtimeReady"], false, "{state}");
@@ -1119,7 +995,6 @@ fn a_running_game_can_be_frozen_and_read_and_let_go_again() {
             .expect("an x")
     };
 
-    // It moves.
     let started = where_it_is(&session);
     session.call("runtime.wait", json!({"frames": 20}));
     let moved = where_it_is(&session);
@@ -1128,8 +1003,6 @@ fn a_running_game_can_be_frozen_and_read_and_let_go_again() {
         "the probe must be moving: {started} {moved}"
     );
 
-    // Frozen, and the helper still answers — both the wait and the inspection below run while the
-    // tree is paused.
     let stopped = session.call("runtime.pause", json!({}));
     assert_eq!(stopped["paused"], true, "{stopped}");
     let held = where_it_is(&session);
@@ -1143,16 +1016,11 @@ fn a_running_game_can_be_frozen_and_read_and_let_go_again() {
         true
     );
 
-    // A frozen game is still a game to look at: rendering does not stop with processing, so a
-    // capture answers with pixels. Asserted because a pause a caller cannot photograph would be a
-    // poor place to have led one.
     let photographed = session.call("runtime.capture", json!({}));
     assert_eq!(
         photographed["frame"]["encoding"], "png-base64",
         "{photographed}"
     );
-    // The probe draws nothing, so the picture is a blank window and its PNG is small — what is
-    // asserted is that there is one, with the window's own size on it.
     assert!(
         photographed["frame"]["data"]
             .as_str()
@@ -1164,8 +1032,6 @@ fn a_running_game_can_be_frozen_and_read_and_let_go_again() {
         "{photographed}"
     );
 
-    // And input reaches a frozen game and changes nothing, which is what a pause means: the events
-    // are applied, and the node they would have moved does not move.
     let injected = session.call(
         "runtime.input",
         json!({"events": [{"kind": "key", "key": "Right", "pressed": true}]}),
@@ -1176,7 +1042,6 @@ fn a_running_game_can_be_frozen_and_read_and_let_go_again() {
         "a paused game must not move for input either: {held}"
     );
 
-    // And let go again.
     assert_eq!(session.call("runtime.resume", json!({}))["paused"], false);
     session.call("runtime.wait", json!({"frames": 20}));
     assert!(
@@ -1237,20 +1102,14 @@ fn a_running_node_answers_its_groups_and_a_path_the_engine_named_says_why_it_is_
         .collect();
     assert_eq!(groups, vec!["coins"], "{inspected}");
 
-    // The named property is still answered beside them, and nothing was asked for `groups`.
     assert_eq!(
         inspected["properties"]["position"]["type"], "vector2",
         "{inspected}"
     );
 
-    // And the edited scene, read at the same moment, knows nothing about it — which is the whole
-    // reason this cannot be answered from the file.
     let authored = session.call("node.inspect", json!({"node": "/RuntimeProbe"}));
     assert_eq!(authored["groups"], json!([]), "{authored}");
 
-    // A path to a node the engine named itself says what such a name is. A spawner's bullet has
-    // one, and it is gone between the `get_tree` that reported it and the `inspect_node` that
-    // names it — which one live turn building a shooter met four times.
     let refused = session
         .try_call(
             "runtime.inspect_node",
@@ -1264,7 +1123,6 @@ fn a_running_node_answers_its_groups_and_a_path_the_engine_named_says_why_it_is_
         "{refused}"
     );
 
-    // A name somebody wrote gets the plain refusal, with nothing invented about it.
     let plain = session
         .try_call(
             "runtime.inspect_node",
@@ -1369,8 +1227,6 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
     let session = Session::start_on_worktree(worktree, ledger, Some(directory));
     let events = session.rpc().subscribe_events();
 
-    // Nothing is open yet, and a session with no question outstanding must say so rather than
-    // leave the field out — the renderer and the model both read the absence as "carry on".
     let quiet = session.call("session.get_state", json!({}));
     assert!(
         quiet["dialog"].is_null(),
@@ -1399,10 +1255,6 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         "the refusal must quote what the editor asked, which is the only thing that tells the \
          caller what to fix: {error}"
     );
-    // Which call answers a dialog, and — this is the launch path, so — that a game is queued behind
-    // it. `loc-06-recover` answered four of these and then asked for a fifth run, and was told
-    // `already_running`: the launch behind the last dialog had gone through while the caller
-    // thought its `run` had been refused outright. See `Params.after_a_dialog`.
     assert!(
         error.contains("session.answer_dialog"),
         "the refusal has to name the call that answers a dialog: {error}"
@@ -1417,9 +1269,6 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         "the failure took {waited:?}, which is the deadline rather than the dialog"
     );
 
-    // The dialog is still up — nothing dismissed it — so the session has to keep reporting it.
-    // This is what the agent reads before it tries anything else, and what stops it from asking
-    // for the same launch again.
     let state = session.call("session.get_state", json!({}));
     let dialog = &state["dialog"];
     assert!(
@@ -1446,8 +1295,6 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         );
     }
 
-    // Nothing had to ask. A dialog a person opens by hand is the same event, and without it the
-    // only way to learn the editor is blocked is for something else to fail first.
     let announced = await_event(&events, "session.dialog");
     assert!(
         announced["dialog"]["text"]
@@ -1456,9 +1303,6 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         "the dialog opening must be announced, not only answerable: {announced}"
     );
 
-    // Every refusal carries it, not just the launch that opened it. A model reads results and
-    // nothing else: an unrelated command failing for its own reason is often the only thing it
-    // looks at, and that is where it has to learn the editor is waiting on a person.
     let unrelated = session
         .rpc()
         .call(CallRequest::new(
@@ -1474,15 +1318,12 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         unrelated.details
     );
 
-    // A button that is not there is refused by name, with the ones that are.
     let refused = session.error("session.answer_dialog", json!({"button": "Nope"}), None);
     assert!(
         refused.starts_with("unknown_button") && refused.contains("Select Current"),
         "a button the dialog does not have must be refused with the ones it has: {refused}"
     );
 
-    // And the way out: the same press a person would make. Cancel is the safe one — Select opens
-    // a file dialog and Select Current rewrites the project's main scene.
     let answered = session.call("session.answer_dialog", json!({"button": "Cancel"}));
     assert_eq!(answered["answered"], "Cancel", "{answered}");
 
@@ -1497,7 +1338,6 @@ fn a_launch_the_editor_answers_with_a_question_reports_the_question() {
         "the answered dialog must be gone from the state as well: {after}"
     );
 
-    // With nothing open, answering is a refusal rather than a silent no-op.
     let none = session.error("session.answer_dialog", json!({"button": "Cancel"}), None);
     assert!(
         none.starts_with("no_dialog_open"),
@@ -1564,8 +1404,6 @@ fn a_game_continued_after_a_break_answers_again() {
         .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
         .expect("the game must launch");
 
-    // Attached rather than launched: the game is the one the editor is already running, which is
-    // the game every runtime command is about.
     let client = dap_client(dap_port, &session);
     let events = client.subscribe_events();
     client.attach().expect("attach to the running game");
@@ -1584,7 +1422,6 @@ fn a_game_continued_after_a_break_answers_again() {
         .expect("the game must stop at the breakpoint rather than terminate");
     assert_eq!(stopped.reason, "breakpoint", "{stopped:?}");
 
-    // A paused game is refused for the reason it cannot answer, which is the state under test.
     let state = session.call("runtime.get_state", json!({}));
     assert_eq!(state["broke"], true, "{state}");
     let refused = session
@@ -1622,7 +1459,6 @@ fn a_game_continued_after_a_break_answers_again() {
     let after = session.call("runtime.get_state", json!({}));
     assert_eq!(after["broke"], false, "{after}");
 
-    // The game outlives the editor that spawned it, so a test that starts one stops it.
     let stopped = session.call("runtime.stop", json!({}));
     assert_eq!(stopped["running"], false, "{stopped}");
     session.await_stopped();
@@ -1652,7 +1488,6 @@ fn a_running_path_that_stops_matching_names_what_is_under_the_node_it_reached() 
         .try_call_within("runtime.run", json!({}), LAUNCH_TIMEOUT_MS)
         .unwrap_or_else(|error| panic!("runtime.run failed: {error}\n{}", session.output()));
 
-    // The helper answers at all, which is what says `params.gd` loaded in the game process.
     session.call(
         "runtime.inspect_node",
         json!({"path": "/root/RuntimeProbe", "properties": ["position"]}),
@@ -1674,10 +1509,6 @@ fn a_running_path_that_stops_matching_names_what_is_under_the_node_it_reached() 
         "and what is under it: {refused}"
     );
 
-    // The other shape it was written for: a name the engine made up, guessed at rather than read.
-    // `NodePath("@Area2D@214")` resolves like any other name — measured on 4.7.2, an unnamed child
-    // really is reachable as `@Node2D@2` — so a made-up one is simply absent, and the walk stops at
-    // the node above it and says what is there.
     let invented = session
         .try_call(
             "runtime.inspect_node",

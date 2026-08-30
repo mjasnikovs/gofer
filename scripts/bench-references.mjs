@@ -1,34 +1,3 @@
-/**
- * An interleaved A/B of whether the language-server operations say enough to be reached for.
- *
- * The question. Eight of `godot_script`'s intelligence operations carry a summary that is an IDE
- * menu label rather than a sentence — `references` says "Find references.", `declaration` says "Go
- * to declaration." Across 122 recorded live runs and 1,608 tool calls, those eight account for
- * **four calls**, and `references`, `declaration`, `highlights` and `signature_help` account for
- * none at all. What the runs did instead is grep: the rename task ran three `bash grep`s, and three
- * move tasks each paid 50–220 seconds for a sub-agent whose whole question was "find every
- * reference to this".
- *
- * Every one of the thirteen operations no live run has ever called has a summary under 120
- * characters; not one of the fifty-one with a longer summary is uncalled. That is a correlation and
- * not a cause — a short summary is often short because the operation is small. This measures the
- * one direction that can be measured cheaply: whether saying what `references` answers, and when to
- * prefer it to grep, moves the first call the model writes.
- *
- * The prose is a fact rather than a persuasion. `godot_journey_acceptance` drives `references`
- * against a real editor and asserts it answers workspace-relative `locations` and finds the
- * declaration in another script, so the arm says exactly that.
- *
- *   GOFER_DUMP_CATALOG=/tmp/catalog.json GOFER_DUMP_PROMPT=/tmp/prompt.txt \
- *     cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib \
- *     -- dump_catalog_and_prompt --test-threads=1
- *
- *   GOFER_BENCH_CATALOG=/tmp/catalog.json GOFER_BENCH_PROMPT=/tmp/prompt.txt \
- *     GOFER_BENCH_ENDPOINT=https://openrouter.ai/api/v1/chat/completions \
- *     GOFER_BENCH_MODEL=z-ai/glm-5.3-flash OPENROUTER_API_KEY=… \
- *     node scripts/bench-references.mjs 10
- */
-
 import {readFile} from 'node:fs/promises'
 import {createGodotTools} from './godot-tools.mjs'
 
@@ -47,12 +16,6 @@ const named = variable => {
 const catalog = JSON.parse(await readFile(named('GOFER_BENCH_CATALOG'), 'utf8'))
 const prompt = await readFile(named('GOFER_BENCH_PROMPT'), 'utf8')
 
-/**
- * The summaries under test, keyed by operation. Every clause is something the acceptance suites
- * already hold the operation to: `locations` and its workspace-relative paths come from
- * `godot_journey_acceptance`, the open-first rule from the domain description, and the
- * GDScript-only limit from the handler, which asks the language server and nothing else.
- */
 const WRITTEN = {
     references:
         'Every place a symbol is used, across every script the language server has indexed.'
@@ -100,11 +63,6 @@ function toolsFor(arm) {
     return createGodotTools(extended, {call: async () => ({})}).map(asSchema)
 }
 
-/*
- * Four asks whose answer is "find out what refers to this before you touch it". The first two are
- * verbatim the opening asks of recorded runs that answered them with `bash grep` and with a
- * sub-agent; the other two are the same shape against a symbol rather than a file.
- */
 const ASKS = [
     "Rename the player's speed variable to move_speed everywhere it is used, in every script."
         + ' Prove nothing still refers to the old name.',
@@ -136,7 +94,6 @@ async function ask(arm, question, seed) {
     return body.choices?.[0]?.message ?? {}
 }
 
-/** What the model reached for: the language server, a shell grep, a sub-agent, or something else. */
 function score(message) {
     const reached = new Set()
     for (const call of message.tool_calls ?? []) {

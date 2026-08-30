@@ -1,12 +1,6 @@
 import {describe, expect, it} from 'vitest'
 import {isTaskSummary} from './app'
 
-/**
- * The task list is guarded because a malformed answer would render as a broken sidebar. The guard
- * therefore has to accept what the backend actually sends, which is where it went wrong: Rust
- * writes an absent `Option` as `null`, and a task whose branch has never been merged carries
- * exactly that. Rejecting it hid every task the user had.
- */
 const fromBackend = {
     id: '019fd410-6cc2-7a01-b0e5-d742c56074e3',
     title: 'New task',

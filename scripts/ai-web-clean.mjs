@@ -1,29 +1,3 @@
-/**
- * Fetching a web page and reducing it to the text it is actually about.
- *
- * A page is mostly not its content. Navigation, cookie banners, sidebars, related-article rails and
- * footers are the bulk of the markup, and handing all of it to a model spends the page budget on
- * chrome and buries the paragraph the question was about. So the HTML goes through Readability —
- * Firefox's own reader-mode extractor — and what survives is turned into markdown.
- *
- * Not every URL is a page. Markdown, plain text, JSON and XML arrive already clean and are passed
- * through untouched; a PDF or an image is refused by name rather than decoded into mojibake and
- * handed over as though it were prose. A missing content-type is read as text, because the plain
- * endpoints that omit it — `llms.txt`, `robots.txt` — are exactly the ones worth reading.
- *
- * Three things bound a fetch, and each covers a hole the others cannot see:
- *
- *   timeoutMs  the whole request. A server that accepts a connection and then says nothing holds
- *              the turn open with no error to report.
- *   maxBytes   the response. Counted while streaming and aborted mid-body, so a multi-gigabyte URL
- *              costs the first megabyte rather than the machine's memory.
- *   signal     the parent's. A stopped turn must not leave a download running behind it.
- *
- * `fetch` is a parameter rather than the global, so a test scripts a response instead of mutating
- * the process. Node runs test files in parallel; a global swapped in one file is a global swapped
- * under every other.
- */
-
 import {Readability} from '@mozilla/readability'
 import {parseHTML} from 'linkedom'
 import TurndownService from 'turndown'
@@ -31,12 +5,6 @@ import TurndownService from 'turndown'
 const DEFAULT_TIMEOUT_MS = 15_000
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 
-/**
- * What Gofer calls itself to the sites it reads.
- *
- * A real name and a real URL, because a fetcher that lies about what it is gets blocked once
- * somebody notices, and the block looks like the page being empty.
- */
 const USER_AGENT = 'Gofer/1.0 (+https://github.com/mjasnikovs/gofer)'
 
 const turndown = new TurndownService({
@@ -45,7 +13,6 @@ const turndown = new TurndownService({
     bulletListMarker: '-'
 })
 
-/** Every way a fetch can end without a page, in one type the caller can tell apart. */
 export class FetchAndCleanError extends Error {
     constructor(message, kind, cause) {
         super(message)
@@ -55,12 +22,6 @@ export class FetchAndCleanError extends Error {
     }
 }
 
-/**
- * How a response is handled, decided by its content-type alone.
- *
- * The header rather than the extension or the body: a `.txt` served as HTML is HTML, and sniffing
- * the body means deciding what a page is from the first bytes of chrome.
- */
 export function classifyContentType(contentType) {
     const mime = contentType.split(';')[0].trim().toLowerCase()
     if (mime === '') return 'text'
@@ -72,12 +33,6 @@ export function classifyContentType(contentType) {
     return 'reject'
 }
 
-/**
- * The decoder the response's own charset asks for, or UTF-8.
- *
- * Never fatal: a page that declares one encoding and serves another is common, and a replacement
- * character in one word is worth more than no page at all.
- */
 export function decoderFor(contentType) {
     const charset = /charset=([^;]+)/iu
         .exec(contentType)?.[1]
@@ -86,9 +41,7 @@ export function decoderFor(contentType) {
     if (charset) {
         try {
             return new TextDecoder(charset, {fatal: false})
-        } catch {
-            // An encoding label this runtime does not know. UTF-8 reads more of it than nothing.
-        }
+        } catch {}
     }
     return new TextDecoder('utf-8', {fatal: false})
 }
@@ -111,14 +64,6 @@ function formatBytes(count) {
     return `${String(count)} B`
 }
 
-/**
- * HTML to markdown, with the article kept and the furniture dropped.
- *
- * Readability answers with the article when it finds one and with nothing when it does not — a
- * single-page app whose content arrives by script has no article in the HTML at all. The fallback
- * turns the whole body instead, which is worth little but is not nothing: the caller sees a short
- * page and can say so, rather than seeing an error that reads as though the URL were wrong.
- */
 export function cleanHtml(html, baseUrl) {
     const {document} = parseHTML(html)
     const article = new Readability(document).parse()
@@ -206,8 +151,6 @@ export async function fetchAndClean(url, options = {}) {
                 if (done) break
                 if (!value) continue
                 bytesRead += value.byteLength
-                // Aborted mid-body rather than after it: the cap exists to stop a huge URL being
-                // downloaded at all, and a check that ran after the read would have paid for it.
                 if (bytesRead > maxBytes) {
                     sizeExceeded = true
                     controller.abort()
@@ -236,7 +179,6 @@ export async function fetchAndClean(url, options = {}) {
 
         const finalUrl = response.url || url
         if (kind === 'html') return cleanHtml(text, finalUrl)
-        // Already clean. Turning markdown or JSON into markdown would only damage it.
         return {title: hostnameOf(finalUrl), markdown: text.trim(), finalUrl}
     } finally {
         clearTimeout(timer)

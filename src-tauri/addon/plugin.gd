@@ -36,36 +36,19 @@ var _readiness: String = "starting"
 var _startup_open_settled_frames: int = 0
 ## The dialog the last `session.dialog` event described, as text. Empty means none was open.
 var _reported_dialog: String = ""
-# Gofer assigns the session id in its handshake response; events carry it as their envelope id.
 var _session_id: String = "gofer-session"
 
-# Edited scene state. A revision starts at 0 when a scene is opened or created and increments on
-# every accepted mutation. Save keeps the revision and clears dirty; reload resets both.
 var _current_scene_path: String = ""
 var _scene_revision: int = 0
-# Play mode is not a protocol readiness, so it is tracked apart from `_readiness`.
 var _playing: bool = false
 
-# The scene-tree walk in progress: how many nodes it has written, how many it may, how deep it may
-# go, and whether it stopped short of the whole tree.
 var _tree_nodes_seen: int = 0
 var _tree_truncated: bool = false
 var _tree_budget: int = MAX_TREE_NODES
 var _tree_depth: int = MAX_TREE_DEPTH
 
-# Requests waiting on the editor to switch scenes. `EditorInterface.open_scene_from_path` and
-# `reload_scene_from_path` only *ask* for the switch — the editor ignores the request outright
-# while it is busy with another one (an `is_changing_scene` guard GDScript cannot read). An answer
-# sent as soon as the request was made therefore claims a scene the editor may not be editing, and
-# the next command resolves its nodes against whatever scene really is. `_sweep_scene_pending`
-# re-asks until the editor obeys and answers only then, so the answer means what it says.
 var _scene_pending: Array[Dictionary] = []
 
-# Requests waiting on a project-wide rescan. `EditorFileSystem.scan()` only *starts* the walk — it
-# returns on the frame it was called and the editor imports what it found afterwards. An answer
-# sent when the call returns therefore says an asset is there while `load` still answers nothing,
-# and the caller acting on that answer is told the file it just wrote does not exist.
-# `_sweep_scan_pending` answers when the scan the request started has finished.
 var _scan_pending: Array[Dictionary] = []
 ## How many project scans have completed, which is how a parked request knows its own is over.
 var _scans_completed: int = 0
@@ -116,7 +99,6 @@ const SCENE_SWITCH_TIMEOUT_MS := 30000
 ## errors and a stack of modal dialogs.
 const SCENE_SWITCH_RETRY_MS := 1000
 
-# Runtime bridge state. `_runtime_session_id` names the debugger session of the running game and
 ## The autoloads registered while this editor session has been running.
 ##
 ## The editor's GDScript compiler resolves an autoload's name from the map it built at startup, and
@@ -131,9 +113,6 @@ var _autoloads_added_here: Array[String] = []
 ## point, which is a different game whenever `run` named a scene.
 var _runtime_scene: String = ""
 
-# `_runtime_ready` flips when its GoferRuntime autoload announces itself. `_runtime_pending` holds
-# RPC requests waiting on the game — forwarded queries, launches waiting for the helper, and the
-# first-frame capture chained onto every launch — each with a deadline `_process` sweeps.
 var _debugger_bridge: GoferDebuggerBridge
 var _runtime_session_id: int = -1
 var _runtime_ready: bool = false
@@ -350,18 +329,12 @@ class GoferDebuggerBridge extends EditorDebuggerPlugin:
     func _setup_session(session_id: int) -> void:
         var session := get_session(session_id)
         if session != null:
-            # The editor reuses one session across play/stop/play cycles, so the connections must
-            # survive every stop; a one-shot would be consumed by the first restart.
             var stopped := _on_session_stopped.bind(session_id)
             if not session.stopped.is_connected(stopped):
                 session.stopped.connect(stopped)
-            # A game paused at an error is running and silent, which is indistinguishable from a
-            # slow one until the debugger says otherwise.
             var breaked := _on_session_breaked.bind(session_id)
             if not session.breaked.is_connected(breaked):
                 session.breaked.connect(breaked)
-            # A resumed game answers again, and it may never speak first: without this the break
-            # state would outlive the break.
             var continued := _on_session_continued.bind(session_id)
             if not session.continued.is_connected(continued):
                 session.continued.connect(continued)
@@ -407,9 +380,6 @@ func _apply_debug_port() -> void:
         return
     var name := "network/debug/remote_port"
     var settings := EditorInterface.get_editor_settings()
-    # Guarded and read back, like `editor.set_setting`. `set_setting` on a name the editor does not
-    # have declares a new custom one instead of failing, and a value of the wrong type is dropped
-    # in silence — either way the editor keeps 6007 and the only symptom is the suite going flaky.
     if not settings.has_setting(name):
         push_error("GOFER_DEBUG_PORT: this editor has no setting '%s'" % name)
         return
@@ -424,9 +394,6 @@ func _enter_tree() -> void:
     _apply_debug_port()
     _debugger_bridge = GoferDebuggerBridge.new(self)
     add_debugger_plugin(_debugger_bridge)
-    # The one thing the editor says out loud when a project scan is over. Polling `is_scanning`
-    # cannot stand in for it: `scan()` is threaded, so the frame after the call reads idle for a
-    # scan that has not started yet.
     EditorInterface.get_resource_filesystem().filesystem_changed.connect(_on_filesystem_scanned)
     _peer = StreamPeerTCP.new()
     var port := _rpc_port()
@@ -451,10 +418,6 @@ func _process(_delta: float) -> void:
     if _quit_countdown > 0:
         _quit_countdown -= 1
         if _quit_countdown == 0:
-            # The editor's own quit, not a signal from outside. Godot writes EditorSettings on the
-            # way out of this path and on no other: SIGTERM, SIGINT and SIGKILL all leave the
-            # settings file untouched, so an editor Gofer killed threw away every editor setting
-            # an agent had changed while `editor.set_setting` answered as though it had kept them.
             EditorInterface.get_base_control().get_tree().quit()
             return
     _sweep_runtime_pending()
@@ -469,10 +432,6 @@ func _process(_delta: float) -> void:
         if status == StreamPeerTCP.STATUS_CONNECTED:
             _send_handshake()
         else:
-            # The connection is what carried the announcement, so the announcement goes with it.
-            # Leaving `_ready_notified` set meant a reconnected addon never said it was ready
-            # again: `_readiness` stayed on the "unavailable" the drop wrote, every mutation was
-            # refused `not_ready` against a perfectly healthy editor, and nothing said why.
             _ready_notified = false
             _playing = false
             _set_readiness("unavailable")
@@ -644,9 +603,6 @@ func _respond_error(id: String, code: String, message: String, retryable: bool, 
 
 func _dispatch_command(command: String, params: Dictionary, expected_revision: Variant, expected_scene: String = "") -> Dictionary:
     if MUTATING_COMMANDS.has(command):
-        # Before the revision, because a revision only means anything inside one scene. The counter
-        # resets to zero on every scene change, so a caller holding zero for the scene it read
-        # matches a freshly opened different scene exactly — and used to be allowed to write to it.
         var scene_check := _require_current_scene(expected_scene)
         if scene_check.has("_gofer_error"):
             return scene_check
@@ -789,14 +745,6 @@ func _check_mutation_prerequisites(expected_revision: Variant) -> Dictionary:
                 "details": {}
             }
         }
-    # Measured on 2026-08-28, by taking this guard out and watching what happens: a `node.create`
-    # while the game plays is accepted, the edited scene gains the node, the running game does not
-    # change, `scene.save` writes the file the running game already loaded, and the game afterwards
-    # reports `broke: false, running: true, runtimeReady: true`. **Nothing breaks.** So this is a
-    # choice rather than a necessity — an agent should not rewrite the scene a person is watching
-    # play — and it is written down here because it was not written down anywhere, and the next
-    # reader will otherwise measure it again. It costs one round trip in sixteen recorded runs,
-    # across four models.
     if _playing:
         return {
             "_gofer_error": {
@@ -863,27 +811,12 @@ func _editor_finished_starting() -> bool:
     var filesystem := EditorInterface.get_resource_filesystem()
     if filesystem.is_scanning():
         return false
-    # A project whose main scene is unset, missing, or not a scene at all has no startup open to
-    # wait for; the editor settles on an empty tab.
-    #
-    # The type is asked of the editor's own filesystem rather than of `ResourceLoader`. This used
-    # to be `ResourceLoader.exists(main_scene)`, which is true for a `.gd` file — and a project
-    # naming a script as its main scene is an everyday defect, the one the editor itself refuses
-    # to play with "Selected scene ... is not a scene file". The session then waited for an open
-    # that was never coming: `session.get_state` answered `importing` for as long as the editor
-    # lived and every mutation was refused `not_ready`. `ResourceLoader.exists(path, "PackedScene")`
-    # is no defence — verified on the pinned 4.7.2, it answers true for a script. `get_file_type`
-    # is the one that answers "GDScript".
     var main_scene := str(ProjectSettings.get_setting("application/run/main_scene", ""))
     if main_scene.is_empty() or filesystem.get_file_type(main_scene) != "PackedScene":
         return true
     if _edited_root() != null:
         _startup_open_settled_frames = 0
         return true
-    # A scene the editor cannot build never arrives either, and it is a scene by every question
-    # that can be asked of it before it is loaded. Measured on the pinned 4.7.2, the editor opens
-    # its startup scene on the very frame the first scan lands — even on a project padded with
-    # four thousand resources — so a scene that is still missing frames later is not late.
     _startup_open_settled_frames += 1
     return _startup_open_settled_frames > STARTUP_OPEN_SETTLED_FRAMES
 
@@ -900,14 +833,12 @@ func _set_readiness(readiness: String) -> void:
 ## scene, starts a game with nothing in it. Every panel that refetches on `scene.changed` would
 ## likewise keep showing whatever it read before the editor had opened anything.
 func _track_edited_scene() -> void:
-    # A switch Gofer asked for is still in flight; the sweep owns the adoption and the answer.
     if not _scene_pending.is_empty():
         return
     var root := _edited_root()
     var path := "" if root == null else root.scene_file_path
     if path == _current_scene_path:
         return
-    # A different scene is a different revision baseline, exactly as a Gofer-driven switch is.
     _current_scene_path = path
     _scene_revision = 0
     _send_event("scene.changed", {
@@ -920,9 +851,6 @@ func _track_edited_scene() -> void:
 ## and reports the transition. Gofer maps these events onto its own session lifecycle.
 func _track_play_state() -> void:
     var playing := EditorInterface.is_playing_scene()
-    # The session's stopped signal is the primary teardown path; this play-state poll is the
-    # fallback for a game that died without one (a crash or a kill), which would otherwise leave
-    # readiness stuck on a helper that no longer exists.
     if _runtime_ready and not playing:
         _on_runtime_debugger_session_stopped(_runtime_session_id)
     if playing == _playing:
@@ -958,8 +886,6 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
             _respond_result(id, {
                 "running": EditorInterface.is_playing_scene(),
                 "runtimeReady": _runtime_ready,
-                # A running game that answers nothing is worth saying out loud, because every
-                # other field here describes it as healthy.
                 "broke": _runtime_broke,
             })
         "runtime.run":
@@ -968,12 +894,6 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
             _runtime_launch(id, true, _runtime_scene)
         "runtime.stop":
             _runtime_stop()
-            # Answered from what the editor holds, not from a `false` this used to assert. The
-            # literal was right every time it was hunted — `stop_playing_scene` kills the game on
-            # the calling frame, even one spinning its main thread with the debugger unable to
-            # reach it — but it was the one answer here nothing checked, and every bug found at
-            # this boundary has been an answer describing work the editor had not done yet. A
-            # game that does outlive the request parks like every other deferred answer.
             if EditorInterface.is_playing_scene():
                 _runtime_pending.append({"id": id, "kind": "stop", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
             else:
@@ -1005,9 +925,6 @@ func _handle_runtime_request(id: String, command: String, params: Dictionary) ->
         "runtime.resume":
             _runtime_forward(id, "resume", params)
         _:
-            # `RUNTIME_COMMANDS` and this match are two lists of the same commands. A command in
-            # one and not the other would leave its caller waiting out the whole timeout for a
-            # response that is never coming, so the mismatch answers instead of hanging.
             _respond_error_dict(id, Params.unknown_command_error(command)["_gofer_error"])
 
 ## Stops the game. The helper it carried is gone from this moment on, so readiness drops here
@@ -1039,19 +956,14 @@ func _runtime_launch(id: String, restart: bool, scene: String) -> void:
         )
         return
     if playing:
-        # Stopping is asynchronous; the sweep starts the new instance once the old one is gone.
         _runtime_scene = scene
         _runtime_stop()
         _runtime_pending.append({"id": id, "kind": "restart", "deadline": _runtime_deadline(_runtime_launch_timeout_ms)})
         return
-    # An editor already asking a question will not start a game, and pressing Play again only adds
-    # a second dialog on top of the first.
     var asking: Variant = _editor_dialog()
     if asking != null:
         _respond_dialog_open(id, asking)
         return
-    # Remembered only now, because everything above this line answers without starting anything —
-    # and a `restart` after one of those would otherwise restart a scene that never ran.
     _runtime_scene = scene
     _runtime_play()
     _runtime_pending.append(_launch_pending(id, "run"))
@@ -1107,21 +1019,9 @@ func _runtime_forward(id: String, op: String, params: Dictionary) -> void:
     if not _runtime_ready or _runtime_session_id < 0:
         _respond_error(id, "runtime_not_running", "No game with the Gofer runtime helper is running", true)
         return
-    # A paused game reads the message and never runs the frame that would answer it.
-    #
-    # Every break sets `_runtime_broke`, not only the one a bad script causes: a breakpoint Gofer's
-    # own adapter set stops the game exactly the same way. The sentence used to say "paused at an
-    # error … read the error in the session output, then fix it and run again", which is the wrong
-    # situation for most of the calls that meet it, and it never named the debugger call that
-    # actually gets the game moving. Measured over the recorded runs: of the fifteen callers that
-    # met this and did something next, **eleven reached for the debugger** — five `set_breakpoints`,
-    # two `continue`, two `stack_trace`, one `attach`, one `terminate` — and two did what the
-    # sentence asked. So the debugger goes first and the error case stays, because a game that
-    # broke while starting really is waiting on the session output.
     if _runtime_broke:
         _respond_error(id, "runtime_broke", "The game is paused in the debugger and cannot answer until it runs on. godot_debug continue lets it go, and godot_debug stack_trace says where it is stopped. If it stopped while starting, what stopped it is in the session output - read that, fix it, and run again", true)
         return
-    # The op travels with the pending entry so the sweep can say what the call was waiting for.
     _runtime_pending.append({
         "id": id,
         "kind": "game",
@@ -1183,11 +1083,6 @@ func _on_runtime_debugger_session_stopped(session_id: int) -> void:
     _runtime_session_id = -1
     _runtime_ready = false
     _runtime_broke = false
-    # Forwarded queries died with the game, and so did the first-frame capture chained onto a
-    # launch: `run_frame` only exists because *this* session's helper announced itself. A `run` is
-    # kept, because it may already belong to the instance replacing this one — the sweep ends that
-    # one by watching the editor's play state instead. A `restart` is waiting for exactly this
-    # teardown.
     _fail_pending(["game", "run_frame"], "runtime_not_running", "The game stopped before it could answer")
     _send_event("runtime.stopped", {})
 
@@ -1205,8 +1100,6 @@ func _fail_pending(kinds: Array, code: String, message: String) -> void:
 func _on_runtime_debugger_message(message: String, data: Array, session_id: int) -> void:
     if data.is_empty() or typeof(data[0]) != TYPE_DICTIONARY:
         return
-    # The game spoke, so it is not sitting at a break: this is the only clearing of that state the
-    # game itself pays for, and the only one no signal can be missing.
     _runtime_broke = false
     var payload: Dictionary = data[0]
     if message == "gofer:ready":
@@ -1231,7 +1124,6 @@ func _complete_pending_run() -> void:
             "id": pending["id"],
             "kind": "run_frame",
             "deadline": _runtime_deadline(_runtime_request_timeout_ms),
-            # The helper just spoke from inside the game, so this one has certainly played.
             "seen_playing": true,
         })
         _send_runtime_message({"id": pending["id"], "op": "capture", "params": {}})
@@ -1284,26 +1176,15 @@ func _sweep_runtime_pending() -> void:
     var now := Time.get_ticks_msec()
     var playing := EditorInterface.is_playing_scene()
     var kept: Array[Dictionary] = []
-    # Asked once for the whole sweep: walking the editor's windows is not free, and every pending
-    # launch is waiting on the same editor.
     var asking: Variant = null if playing else _editor_dialog()
     for pending in _runtime_pending:
         var launching: bool = LAUNCH_KINDS.has(pending["kind"])
         if launching and playing:
             pending["seen_playing"] = true
         if launching and asking != null and not pending.get("seen_playing", false):
-            # `play_main_scene()` does not always start a game. A main scene that is not a scene,
-            # or one the editor cannot build, turns the launch into a dialog and the editor then
-            # waits for a person — while this list waited for a game, and answered `runtime_timeout`
-            # about one that was never started.
             _respond_dialog_open(pending["id"], asking, true)
         elif int(pending["deadline"]) < now:
             if launching and playing:
-                # The game is up; only its helper is late. Answered apart from a timeout because
-                # the two ask for opposite things. A live project met this nine times, and six of
-                # them were followed by a `get_state` reporting `running: true, runtimeReady: true`
-                # about the game the timeout had just described as unresponsive — after which the
-                # agent stopped it and ran it again, twice, throwing away a game that was working.
                 _respond_error(
                     pending["id"],
                     "runtime_slow_start",
@@ -1312,23 +1193,6 @@ func _sweep_runtime_pending() -> void:
                     {"running": true}
                 )
             elif FRAME_AWAITING_OPS.has(str(pending.get("op", ""))):
-                # A timeout is the only answer these three had, and it is the one that reads as a
-                # slow game. Measured on a live turn: nine of them, twenty seconds each, against a
-                # game whose `get_state` said `broke: false, running: true, runtimeReady: true` and
-                # whose `inspect_node` answered in 49ms between two of them. The game was alive and
-                # not drawing, which is a different thing from slow, and nothing said so — both
-                # agents that met it worked the asymmetry out for themselves and spent the turn
-                # doing it.
-                #
-                # The debugger is named as one cause rather than as the cause, which is a
-                # correction. This sentence used to open "A game halted in the debugger draws
-                # none", and `loc-24-debug2` met it three times — twenty seconds each — on a game
-                # the debugger had let go four calls earlier: `terminate`, then a plain
-                # `godot_runtime run` that answered with a frame, then three of these. Its
-                # `inspect_node` answered, its `get_tree` said `paused: false`, and the sentence
-                # sent it looking for a debug stop that was not there. Gofer's own side appends the
-                # definite sentence when the debugger really does hold the game, so this one does
-                # not have to guess from inside the editor.
                 _respond_error(
                     pending["id"],
                     "runtime_timeout",
@@ -1385,8 +1249,6 @@ func _window_overlays() -> Array:
         var image := window.get_texture().get_image()
         if image == null:
             continue
-        # Both positions are the desktop's, so the difference is where the window lands on the
-        # editor. A window off the edge of the editor is clipped by the composite.
         overlays.append({"image": image, "offset": window.position - main.position})
     return overlays
 
@@ -1436,9 +1298,6 @@ func _editor_dialog() -> Variant:
     return {
         "title": asking.title,
         "text": asking.dialog_text,
-        # Read off the dialog rather than from `get_ok_button()` and `get_cancel_button()`: the
-        # choices that matter are usually neither. The editor's "not a scene file" confirmation
-        # offers Cancel, Select and Select Current, and only the first two have an accessor.
         "buttons": labels,
     }
 
@@ -1455,7 +1314,6 @@ func _topmost_dialog() -> AcceptDialog:
 func _dialog_button_nodes(node: Node) -> Array[Button]:
     var buttons: Array[Button] = []
     for child in node.get_children(true):
-        # A dialog can own another window; its buttons belong to it, not to this one.
         if child is Window:
             continue
         if child is Button and (child as Button).visible:
@@ -1479,12 +1337,6 @@ func _session_state() -> Dictionary:
         "dirty": _scene_is_dirty(),
         "canUndo": _history_depths()["undoDepth"] > 0,
         "canRedo": _history_depths()["redoDepth"] > 0,
-        # An editor waiting on a person is not something any other field can say. It is not a
-        # readiness — commands are answered normally while a dialog is up — and on a real desktop
-        # it is not in a screenshot either, because the dialog is a native window of its own.
-        # Without this the whole session looked healthy while nothing a person did not click could
-        # move: the launch that opened the dialog answered `runtime_timeout` half a minute later,
-        # and asking again stacked one more modal on the editor.
         "dialog": _editor_dialog(),
     }
 
@@ -1493,12 +1345,6 @@ func _session_state() -> Dictionary:
 ## Answers before it acts: the quit takes the socket with it, and a caller that lost its answer
 ## cannot tell an orderly shutdown from a crashed editor.
 func _session_quit() -> Dictionary:
-    # The game goes first. An editor quit does not take the game it launched with it: measured
-    # against the pinned 4.7.2, a game was still holding a port it bound in `_ready` ninety seconds
-    # after its editor had gone, on the editor's own `get_tree().quit()` and on a kill alike.
-    # `--editor-pid` is a hint about which window to embed in, not a lifetime. So the process Gofer
-    # started on the user's behalf outlived the app that started it, with no window in the way of
-    # noticing on a headless run and nothing left to stop it with.
     _runtime_stop()
     _quit_countdown = 2
     return {"quitting": true}
@@ -1546,9 +1392,6 @@ func _session_answer_dialog(params: Dictionary) -> Dictionary:
     for button in _dialog_button_nodes(dialog):
         if button.text != wanted:
             continue
-        # The dialog connects its own handlers to each button's `pressed` signal, so emitting it is
-        # the same answer a click gives — verified against the pinned 4.7.2's "not a scene file"
-        # confirmation, which closes on it.
         button.emit_signal("pressed")
         return {"answered": wanted, "dialog": asking}
     return Params.error(
@@ -1587,7 +1430,6 @@ func _session_cancel(params: Dictionary) -> Dictionary:
         else:
             kept_scenes.append(pending)
     _scene_pending = kept_scenes
-    # Readiness belonged to the switch, so it is given back with it — but only once none is left.
     if cancelled and _scene_pending.is_empty():
         _set_readiness("ready")
 
@@ -1600,7 +1442,6 @@ func _session_cancel(params: Dictionary) -> Dictionary:
             kept_runtime.append(pending)
     _runtime_pending = kept_runtime
 
-    # A request that already answered is not an error: the caller gave up and the reply crossed it.
     return {"requestId": request_id, "cancelled": cancelled}
 
 ## Takes back the action just committed, so a refusal is true about the scene.
@@ -1623,7 +1464,6 @@ func _undo() -> Dictionary:
     var before := history.get_version()
     if not history.undo():
         return _history_error("undo_unavailable", "The editor refused to undo the last action")
-    # Read-back: the history's own version, which only moves when a step was really taken.
     if history.get_version() == before:
         return _readback_error(
             "session.undo", "a step back through the history", "version %d, unmoved" % before
@@ -1640,7 +1480,6 @@ func _redo() -> Dictionary:
     var before := history.get_version()
     if not history.redo():
         return _history_error("redo_unavailable", "The editor refused to redo the next action")
-    # Read-back: the same version, forward. `redo()` answers true for a list it walked without doing.
     if history.get_version() == before:
         return _readback_error(
             "session.redo", "a step forward through the history", "version %d, unmoved" % before
@@ -1787,8 +1626,6 @@ func _saved_scene_holds(path: String, root: Node) -> Dictionary:
     var state := (written as PackedScene).get_state()
     var stored: Array[String] = []
     for index in range(state.get_node_count()):
-        # A SceneState writes a child as `./Body` where `get_path_to` answers `Body`; the root is
-        # `.` on both sides.
         stored.append(String(state.get_node_path(index)).trim_prefix("./"))
     stored.sort()
     var editing := _owned_paths(root)
@@ -1826,7 +1663,6 @@ func _project_search_settings(params: Dictionary) -> Dictionary:
     var total := 0
     for info in ProjectSettings.get_property_list():
         var name := str(info.get("name", ""))
-        # The property list opens with a category header that is not a setting at all.
         if name.is_empty() or not ProjectSettings.has_setting(name):
             continue
         if not Params.name_holds_every_word(name, wanted):
@@ -1897,15 +1733,9 @@ func _project_set_setting(params: Dictionary) -> Dictionary:
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: the setting as ProjectSettings answers it now. A write the engine declined leaves
-    # `get_setting` on the value it always had, or on null for a name it never took.
     var stored: Variant = ProjectSettings.get_setting(name)
     if not Params.same_value(fitted["value"], stored):
         return _readback_error("project.set_setting %s" % name, fitted["value"], stored, {"name": name})
-    # `created` is the difference between changing the project and inventing a corner of it. A
-    # caller that misspells a built-in setting otherwise gets `saved: true` for a setting nothing
-    # reads, and can even read its own value back — which is what a mistyped
-    # `application.run.main_scene` did: the project kept running the scene it always had.
     return {
         "name": name,
         "saved": true,
@@ -1948,7 +1778,6 @@ func _project_reset_setting(params: Dictionary) -> Dictionary:
             "'%s' has a typed command; use %s instead" % [name, typed],
             {"name": name, "command": typed}
         )
-    # Read before the write, because what this answers with is the difference.
     var before: Variant = ProjectSettings.get_setting(name)
     var wanted: Variant = null
     if ProjectSettings.property_can_revert(name):
@@ -1957,17 +1786,9 @@ func _project_reset_setting(params: Dictionary) -> Dictionary:
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: what the setting reads as now, which for a removal is nothing at all.
     var stored: Variant = ProjectSettings.get_setting(name)
     if not Params.same_value(wanted, stored):
         return _readback_error("project.reset_setting %s" % name, wanted, stored, {"name": name})
-    # What it did, not merely that the name is real.
-    #
-    # This used to answer `{name, exists}`, and `exists` is `has_setting`, which is true of every
-    # setting that has a default — so it was true before the call and true after it, and said only
-    # that the caller had spelled a real name. A live turn read it beside `remove_autoload`'s
-    # `removed: true` and `remove_input_action`'s `removed: true` and had nothing to compare.
-    # Worse, "exists: true" reads as though the setting were still set and the reset had failed.
     return {
         "name": name,
         "value": Protocol.encode(stored),
@@ -2013,23 +1834,17 @@ func _project_set_autoload(params: Dictionary) -> Dictionary:
         return Params.error(
             "invalid_params", "Autoload path '%s' must start with res://" % path, {"path": path}
         )
-    # An autoload that points nowhere is only discovered on the next editor start, which then
-    # fails to load the project the session depends on.
     if not FileAccess.file_exists(path):
         return Params.error(
             "autoload_path_not_found", "No file at '%s'" % path, {"name": name, "path": path}
         )
     var entry := ("*" if enabled else "") + path
     ProjectSettings.set_setting("autoload/" + name, entry)
-    # Remembered because the editor's script compiler does not learn it. See
-    # `_reread_the_script_on`: a script naming this autoload cannot be recompiled in this editor
-    # session, and the refusal that follows has to say so rather than blame the script.
     if not _autoloads_added_here.has(name):
         _autoloads_added_here.append(name)
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: the autoload entry as project.godot now holds it, leading star and all.
     var stored := str(ProjectSettings.get_setting("autoload/" + name, ""))
     if stored != entry:
         return _readback_error("project.set_autoload %s" % name, entry, stored, {"name": name})
@@ -2051,7 +1866,6 @@ func _project_remove_autoload(params: Dictionary) -> Dictionary:
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: the entry has to be gone from ProjectSettings, not only from this call's intent.
     if ProjectSettings.has_setting(setting):
         return _readback_error(
             "project.remove_autoload %s" % name,
@@ -2086,7 +1900,6 @@ func _project_list_input_actions(params: Dictionary) -> Dictionary:
         var setting := str(info.get("name", ""))
         if not setting.begins_with("input/"):
             continue
-        # Entries like input/ui_close_dialog.macos are per-platform overrides of another action.
         if setting.contains("."):
             continue
         var data: Variant = ProjectSettings.get_setting(setting)
@@ -2104,7 +1917,6 @@ func _project_list_input_actions(params: Dictionary) -> Dictionary:
                 "name": name,
                 "deadzone": data.get("deadzone", 0.5),
                 "events": Params.encode_input_events(data.get("events", [])),
-                # Godot's built-in actions all carry the ui_ prefix; custom ones never should.
                 "builtIn": name.begins_with("ui_")
             }
         )
@@ -2149,8 +1961,6 @@ func _project_set_input_action(params: Dictionary) -> Dictionary:
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: the action as project.godot now holds it, and the reply is built from that rather
-    # than from the events this call assembled.
     var stored: Variant = ProjectSettings.get_setting(setting)
     if typeof(stored) != TYPE_DICTIONARY:
         return _readback_error(
@@ -2203,7 +2013,6 @@ func _project_remove_input_action(params: Dictionary) -> Dictionary:
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: the action has to be gone from ProjectSettings.
     if ProjectSettings.has_setting(setting):
         return _readback_error(
             "project.remove_input_action %s" % name,
@@ -2236,7 +2045,6 @@ func _project_reset_input_action(params: Dictionary) -> Dictionary:
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: an override project.godot still carries is an action that was not handed back.
     if ProjectSettings.has_setting(setting):
         return _readback_error(
             "project.reset_input_action %s" % name,
@@ -2244,7 +2052,6 @@ func _project_reset_input_action(params: Dictionary) -> Dictionary:
             ProjectSettings.get_setting(setting),
             {"name": name}
         )
-    # The editor's own InputMap keeps the overridden binding until it reloads the project.
     return {"name": name, "reset": true, "restartRequired": true}
 
 func _project_list_plugins() -> Dictionary:
@@ -2280,8 +2087,6 @@ func _project_set_plugin_enabled(params: Dictionary) -> Dictionary:
     var failure := _save_project_or_error()
     if not failure.is_empty():
         return failure
-    # Read-back: what the editor says about the plugin now. A plugin whose `_enter_tree` fails is
-    # asked to enable, reports nothing, and stays off.
     var actual := EditorInterface.is_plugin_enabled(plugin)
     if actual != enabled:
         return _readback_error(
@@ -2343,8 +2148,6 @@ func _editor_set_setting(params: Dictionary) -> Dictionary:
     if not decoded["ok"]:
         return Params.error("unsupported_value", decoded["message"], {"name": name})
     settings.set_setting(name, decoded["value"])
-    # Read-back: EditorSettings keeps its own declared types and quietly ignores a value of the
-    # wrong one, so the reply reports what the editor holds rather than what it was handed.
     var stored: Variant = settings.get_setting(name)
     if not Params.same_value(decoded["value"], stored):
         return _readback_error("editor.set_setting %s" % name, decoded["value"], stored, {"name": name})
@@ -2378,8 +2181,6 @@ func _editor_class_icons(params: Dictionary) -> Dictionary:
         var png := _class_icon_png(name, theme, scripted)
         if not png.is_empty():
             icons[name] = Marshalls.raw_to_base64(png)
-    # A class with no icon is simply absent: the renderer falls back on its own, and a missing
-    # icon is never worth failing a scene tree over.
     return {"encoding": "png-base64", "icons": icons}
 
 ## Every class the project declares in a script, by name, with the icon and base class it names.
@@ -2412,8 +2213,6 @@ func _class_icon_png(name: String, theme: Theme, scripted: Dictionary) -> Packed
 
 func _class_icon(name: String, theme: Theme, scripted: Dictionary) -> Texture2D:
     var current := name
-    # Walk the script classes first: only they can carry an `@icon`, and one that does not ends up
-    # drawn as the engine class it ultimately extends.
     for _step in range(MAX_ICON_BASE_DEPTH):
         if not scripted.has(current):
             break
@@ -2462,10 +2261,6 @@ func _resource_rescan(params: Dictionary) -> Dictionary:
     if requested.has("_gofer_error"):
         return requested
     var paths: Array = requested["value"]
-    # Nothing happens on this frame. The editor may be scanning or importing right now, and both
-    # of those make every route through here lie: `get_filesystem_path` answers null for a
-    # directory that is plainly there while a scan runs, and `reimport_files` refuses outright
-    # while an import does.
     return {"_gofer_pending_scan": {
         "paths": paths,
         "walked": false,
@@ -2584,10 +2379,6 @@ func _run_scan_sweep() -> void:
     var kept: Array[Dictionary] = []
     for pending in _scan_pending:
         if int(pending["deadline"]) < now:
-            # The message has to match the editor in front of it. Still importing after half a
-            # minute is a slow project and asking again is the right advice; idle after half a
-            # minute is a fault, and the old sentence sent a model round that loop for as long as
-            # it was willing to keep asking.
             if settled:
                 _respond_error(
                     pending["id"],
@@ -2610,13 +2401,7 @@ func _run_scan_sweep() -> void:
             kept.append(pending)
             continue
         if bool(pending["walked"]):
-            # A walk this rescan started. `filesystem_changed` is what says one has landed, and the
-            # editor emits it at the end of every import too, so the counter is only trusted on a
-            # frame where nothing is running.
             if _scans_completed > int(pending["scans"]):
-                # The walk is the last resort, so what it left behind is the answer. Reporting
-                # `scanned: true` without looking is what sent a caller to `create_tileset` with a
-                # texture the editor had never imported.
                 var missing := _paths_not_loadable(pending["paths"])
                 if missing.is_empty():
                     _respond_result(pending["id"], _rescan_result(pending))
@@ -2645,23 +2430,9 @@ func _run_scan_sweep() -> void:
             kept.append(pending)
             continue
         var paths: Array = pending["paths"]
-        # A rescan asked for the walk itself. `_import_batch` answers a `.tres` straight away —
-        # nothing about it needs importing — and that is the right answer for loading it and the
-        # wrong one for its UID, which only a finished walk writes into `.godot/uid_cache.bin`.
         if not bool(pending.get("walk", false)) and not paths.is_empty() and _import_batch(paths):
             _respond_result(pending["id"], _rescan_result(pending))
             continue
-        # Either the caller asked for the whole project, or a named file is past what `update_file`
-        # can reach, or the import did not leave it loadable. A walk is the last resort and the
-        # only one left: it is the one thing that registers a directory the editor has never seen.
-        #
-        # A sidecar left by an import that produced nothing goes first, or the walk is not a last
-        # resort at all: the editor reads that file as one it has already imported and steps over
-        # it, whatever the bytes underneath have become since. A live turn wrote a malformed PNG,
-        # was answered `import_failed`, wrote a real one over the same path, and was answered
-        # `import_failed` again — about an image `file(1)` reads as a PNG. It got out by running
-        # `rm -f assets/*.import` in the shell, which a Windows install cannot do and this tool
-        # should not need. Taking the sidecar away is the same thing, done where it belongs.
         for path: String in paths:
             _discard_failed_import(path)
         filesystem.scan()
@@ -2709,9 +2480,6 @@ func _rescan_result(pending: Dictionary) -> Dictionary:
         "path": pending.get("path", ""),
         "paths": pending.get("paths", []),
     }
-    # A command that wrote the file itself waits on the same scan, and its own answer rides here so
-    # the caller gets one reply rather than a rescan's. `resource.rescan` carries nothing and is
-    # unchanged by this.
     return answer.merged(pending.get("result", {}), true)
 
 ## The answer a resource writer hands back, held until the project knows the UID it just stamped.
@@ -2879,7 +2647,6 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
     var tile_set := TileSet.new()
     tile_set.tile_size = tile_size
     if not solid.is_empty():
-        # `add_physics_layer` answers nothing in 4.7, so the layer it appended is the last one.
         tile_set.add_physics_layer()
     var source := TileSetAtlasSource.new()
     source.texture = texture
@@ -2905,9 +2672,6 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
         )
 
     var replaced := ResourceLoader.exists(path)
-    # A directory that does not exist yet is not a mistake worth an error: `res://tiles/world.tres`
-    # is where a caller would put one, and `ResourceSaver` would only answer that it could not open
-    # the file.
     var folder := path.get_base_dir()
     if not DirAccess.dir_exists_absolute(folder):
         var made := DirAccess.make_dir_recursive_absolute(folder)
@@ -2926,10 +2690,6 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
         )
     EditorInterface.get_resource_filesystem().update_file(path)
 
-    # Read-back: the tileset is loaded again from the file it was written to, cache ignored, so the
-    # reply describes what a caller opening that path finds rather than the resource still in
-    # memory. A tile's collision polygon is the part that goes missing quietly — the file opens as a
-    # tileset either way, and the level built on it simply has no floor.
     var written := ResourceLoader.load(path, "TileSet", ResourceLoader.CACHE_MODE_IGNORE)
     if written == null or not (written is TileSet):
         return Params.error(
@@ -3019,8 +2779,6 @@ func _resource_create_shape(params: Dictionary) -> Dictionary:
         return built
     var shape: Shape2D = built["value"]
 
-    # A directory that does not exist yet is not a mistake worth an error, for the same reason a
-    # tileset's is not: `res://shapes/hitbox.tres` is where a caller would put one.
     var folder := path.get_base_dir()
     if not DirAccess.dir_exists_absolute(folder):
         var made := DirAccess.make_dir_recursive_absolute(folder)
@@ -3040,8 +2798,6 @@ func _resource_create_shape(params: Dictionary) -> Dictionary:
         )
     EditorInterface.get_resource_filesystem().update_file(path)
 
-    # Read-back: the shape as the file holds it. A property filled from this path loads the same
-    # bytes, so the class on disk is the only one that matters.
     var written := ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
     if written == null:
         return Params.error(
@@ -3099,8 +2855,6 @@ func _resource_create_texture(params: Dictionary) -> Dictionary:
     if painted.has("_gofer_error"):
         return painted
 
-    # A directory that does not exist yet is where a caller would put art, exactly as it is for a
-    # shape or a tileset.
     var folder := path.get_base_dir()
     if not DirAccess.dir_exists_absolute(folder):
         var made := DirAccess.make_dir_recursive_absolute(folder)
@@ -3188,9 +2942,6 @@ func _paint_texture_rects(image: Image, size: Vector2i, raw: Variant) -> Diction
                     % [area.size.x, area.size.y]
                 )
             )
-        # A rectangle that hangs over the edge is clipped, which is how anyone draws. One that is
-        # wholly outside drew nothing at all, and answering as though it had is how a caller ends up
-        # looking at a blank image wondering which call did it.
         var drawn := area.intersection(canvas)
         if drawn.size.x < 1 or drawn.size.y < 1:
             return Params.error(
@@ -3280,9 +3031,6 @@ func _scene_list() -> Dictionary:
     return {"scenes": Array(EditorInterface.get_open_scenes())}
 
 func _scene_open(params: Dictionary) -> Dictionary:
-    # The editor names every scene it edits `res://…`, and the switch is only ever confirmed by
-    # comparing against that name. A caller's `scenes/hud.tscn` opens the scene and then matches
-    # nothing, so the request expired against a switch that had already happened.
     var path := Params.as_resource_path(params.get("path", ""))
     if path.is_empty():
         return {
@@ -3294,8 +3042,6 @@ func _scene_open(params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
-    # A scene the editor cannot load would never satisfy the switch, so it is refused here rather
-    # than left to expire against `SCENE_SWITCH_TIMEOUT_MS`.
     if not ResourceLoader.exists(path):
         return Params.error("scene_not_found", "Scene %s does not exist" % path, {"path": path})
     return _switch_edited_scene(path)
@@ -3313,15 +3059,6 @@ func _scene_create(params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
-    # A scene already at this path is not a scene to create. `ResourceSaver.save` below writes over
-    # whatever is there, and a live turn tidying a project sent
-    # `{"op": "create", "path": "scenes/main.tscn", "rootName": "Main", "rootType": "Node2D"}`
-    # against the scene it had open — which replaced the whole file with an empty root. It noticed,
-    # and spent the rest of the turn rebuilding the scene from what it had read earlier. Nothing
-    # said a word while the file went.
-    #
-    # The revision check in front of this guards the *unsaved* work in the open scene, which the
-    # summary says; it has nothing to say about a saved file at another path.
     if FileAccess.file_exists(path):
         return Params.error(
             "already_exists",
@@ -3349,13 +3086,8 @@ func _scene_create(params: Dictionary) -> Dictionary:
                 "details": {"rootType": root_type}
             }
         }
-    # `rootName` is what the caller asked the root to be called; the file's own name is only the
-    # fallback. Ignoring it left every agent-created scene rooted at `level_1` however clearly the
-    # request named `Level1`.
     var root_name: String = params.get("rootName", "")
     root.name = root_name if not root_name.is_empty() else path.get_file().get_basename()
-    # Godot rewrites a name it will not accept, so what the root is really called is read off the
-    # node rather than taken from the request.
     var named := String(root.name)
     var scene := PackedScene.new()
     var pack_error := scene.pack(root)
@@ -3371,10 +3103,6 @@ func _scene_create(params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
-    # A directory that does not exist yet is where a caller would put a scene, exactly as it is for
-    # a shape or a tileset, both of which have made theirs since they were written. This one did
-    # not, and `ResourceSaver.save` answers ERR_CANT_OPEN for it — 19, which is what reached the
-    # model, twice running, about `res://scenes/bullet.tscn` in a project with no `scenes` folder.
     var folder := path.get_base_dir()
     if not DirAccess.dir_exists_absolute(folder):
         var made := DirAccess.make_dir_recursive_absolute(folder)
@@ -3409,10 +3137,6 @@ func _scene_create(params: Dictionary) -> Dictionary:
         }
     root.queue_free()
 
-    # Read-back: the file that was just written, loaded again from disk rather than reported from
-    # the PackedScene still in memory. `ResourceSaver.save` answers OK for a write the filesystem
-    # refused, and the scene switch that follows would then wait thirty seconds on a file that is
-    # not there.
     var written := ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)
     if written == null or not (written is PackedScene):
         _set_readiness("ready")
@@ -3431,15 +3155,7 @@ func _scene_create(params: Dictionary) -> Dictionary:
         _set_readiness("ready")
         return _readback_error("scene.create rootType", root_type, saved_type, {"path": path})
 
-    # The scene was written behind the editor's back, so its filesystem is told about the file
-    # before it is asked to open it — an unknown resource is one the editor refuses to load.
     EditorInterface.get_resource_filesystem().update_file(path)
-    # A scene is stamped with a UID `update_file` does not register either — see
-    # [`_uid_is_unregistered`] — and the walk that would register it cannot go here. Kicking one
-    # off before `open_scene_from_path` and letting the switch's own wait cover it passed the
-    # readback suite and then took `every_scene_command_answers_from_the_file_it_wrote` from 3.8s
-    # to 90.4s in the gate, which is the scene-switch timeout: the walk and the open contend. The
-    # two `.tres` writers wait for their walk properly and a scene switch has nowhere to wait.
     return _switch_edited_scene(path)
 
 func _scene_save(_params: Dictionary) -> Dictionary:
@@ -3464,21 +3180,6 @@ func _scene_save(_params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
-    # A scene Godot does not list as unsaved is one whose file already holds what the editor holds.
-    # Saving it anyway is not free. `save_scene` rewrites the file from the tree in memory, so an
-    # `ext_resource` the editor cannot resolve at that moment loses its `uid` — and the uid is the
-    # only reference that survives the file it points at being moved. A live turn moved a script,
-    # saved the scene without changing it, and the `uid` was gone from the line that named the
-    # script. Every node also gained a `unique_id` and the scene a `uid` of its own: a diff nobody
-    # asked for, on a call that was told nothing had changed.
-    #
-    # `_scene_is_dirty` is the guard, and it is Godot's own answer rather than any bookkeeping of
-    # ours. The readback beside it is a second opinion and not more than one: `_saved_scene_holds`
-    # compares the node paths in the file against the node paths in the tree, and nothing else — a
-    # file whose structure matches while a property or an `ext_resource` does not would satisfy it.
-    # It is here because `save_scene` returning OK for a save that wrote nothing is the reason that
-    # function exists at all, so a file that does not even hold the right nodes is worth catching
-    # before the write is skipped.
     if not _scene_is_dirty():
         var unchanged := _saved_scene_holds(_current_scene_path, root)
         if unchanged.is_empty():
@@ -3510,8 +3211,6 @@ func _scene_save(_params: Dictionary) -> Dictionary:
     }
 
 func _scene_save_as(params: Dictionary) -> Dictionary:
-    # `root.scene_file_path` below is the editor's own `res://…` name for the file, so the request's
-    # path has to be the same shape or the save is reported as having landed somewhere else.
     var path := Params.as_resource_path(params.get("path", ""))
     if path.is_empty():
         return {
@@ -3534,8 +3233,6 @@ func _scene_save_as(params: Dictionary) -> Dictionary:
                 "details": {}
             }
         }
-    # The same folder `scene.create` makes. `save_scene_as` answers nothing, so a missing directory
-    # here does not fail loudly — it fails as a read-back that finds no file.
     var folder := path.get_base_dir()
     if not DirAccess.dir_exists_absolute(folder):
         var made := DirAccess.make_dir_recursive_absolute(folder)
@@ -3555,8 +3252,6 @@ func _scene_save_as(params: Dictionary) -> Dictionary:
     var verified := _saved_scene_holds(path, root)
     if not verified.is_empty():
         return verified
-    # Which file the edited scene belongs to now is the editor's own answer. A save-as that wrote
-    # the file and left the tab on the old one would otherwise make every later save go elsewhere.
     var owned := String(root.scene_file_path)
     if owned != path:
         return _readback_error(
@@ -3624,9 +3319,6 @@ func _scene_switch_failure(path: String) -> String:
     var resource := ResourceLoader.load(path, "PackedScene")
     if resource == null or not (resource is PackedScene):
         return "%s is not a scene the editor can read" % path
-    # `can_instantiate` answers for the scene's *types*, not for its contents: a node that names no
-    # parent passes it and then fails to build. Building it is the only question worth asking, and
-    # by this point the editor has already refused to for thirty seconds.
     var probe: Node = (resource as PackedScene).instantiate()
     if probe == null:
         var reason := "%s could not be built into a scene: the editor rejected its contents."
@@ -3699,8 +3391,6 @@ func _scene_tree(params: Dictionary) -> Dictionary:
         start = _find_node(from)
         if start == null:
             return _node_not_found_error(from)
-    # Cast rather than assigned: a JSON number reaches the addon as a float, and a typed
-    # assignment from one is a runtime error that takes the whole response with it.
     var budget := int(params.get("limit", DEFAULT_TREE_NODES))
     var levels := int(params.get("depth", MAX_TREE_DEPTH))
     _tree_nodes_seen = 0
@@ -3817,9 +3507,6 @@ func _node_create_nodes(params: Dictionary) -> Dictionary:
         )
 
     var root := _edited_root()
-    # The nodes this batch is about to add, under the path the caller will know them by. A parent is
-    # looked for here before the tree, so an entry can hang off one the same batch has not attached
-    # yet — which is what building a subtree in one call means.
     var pending: Dictionary = {}
     var plan: Array = []
     for entry in entries:
@@ -3862,9 +3549,6 @@ func _node_create_nodes(params: Dictionary) -> Dictionary:
         undo.add_do_reference(step[1])
     undo.commit_action()
 
-    # Read-back, per node, for the same reason `node.create` does it one at a time: a node that was
-    # never taken by the editor still answers for its own name and type, so a reply built from the
-    # objects in hand would describe a scene that does not have them.
     var created: Array = []
     for step in plan:
         var attached := _attached_node(
@@ -3910,12 +3594,6 @@ func _attached_node(
 func _node_instantiate(params: Dictionary) -> Dictionary:
     var scene: String = params.get("scene", "")
     var parent_path: String = params.get("parent", "")
-    # Named the way the editor names it, before anything is loaded or compared. Godot answers
-    # `scene_file_path` as `res://scenes/coin.tscn` whatever the caller wrote, so a caller who
-    # wrote `scenes/coin.tscn` — which `ResourceLoader` accepts and which every other scene command
-    # here already normalises — placed the instance correctly and was then told
-    # `readback_mismatch: the write asked for scenes/coin.tscn and Godot holds res://scenes/coin.tscn`
-    # about the scene it had just placed. Watched once, in a live turn building three coins.
     var path := Params.as_resource_path(params.get("path", ""))
     var node_name: String = params.get("name", "")
     var index: int = params.get("index", -1)
@@ -3973,9 +3651,6 @@ func _node_instantiate(params: Dictionary) -> Dictionary:
             }
         }
 
-    # `GEN_EDIT_STATE_INSTANCE` is what makes this an instance rather than a copy: the scene keeps a
-    # reference to the file, so the children collapse into one `instance=ExtResource(…)` line and an
-    # edit to the source reaches every placement of it.
     var node: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE)
     if node == null:
         return {
@@ -4000,8 +3675,6 @@ func _node_instantiate(params: Dictionary) -> Dictionary:
     var attached := _attached_node(parent, node, root, "node.instantiate", {"path": path})
     if attached.has("_gofer_error"):
         return attached
-    # Read-back: the placed node has to still name the file it was instanced from, or it is a copy
-    # of that scene rather than an instance of it, and an edit to the source reaches none of them.
     var instanced := String(node.scene_file_path)
     if instanced != path:
         return _readback_error(
@@ -4080,12 +3753,6 @@ func _node_rename(params: Dictionary) -> Dictionary:
         return _node_not_found_error(node_path_str)
     var old_name := String(node.name)
 
-    # A sibling with that name already, checked before anything is committed. Godot does not refuse
-    # a clash — a node's name is unique among its siblings, so it appends a number and carries on —
-    # and two live turns in one run renamed onto `UI` and `Player` under parents that already had
-    # one. What came back was the read-back mismatch below, which says the write asked for `UI` and
-    # Godot holds `UI2`: the mismatch, and not the reason for it. Worse, that refusal was a lie
-    # about the scene, which held `UI2` from then on.
     var parent := node.get_parent()
     if new_name != old_name and parent != null:
         var sibling := parent.get_node_or_null(NodePath(new_name))
@@ -4105,14 +3772,8 @@ func _node_rename(params: Dictionary) -> Dictionary:
     undo.add_undo_method(node, "set_name", old_name)
     undo.commit_action()
 
-    # Read-back: what the node is called now. Godot rewrites a name with a character it will not
-    # take, so the name asked for is not always the name the caller has to address the node by
-    # afterwards.
     var named := String(node.name)
     if named != new_name:
-        # And the refusal has to be true about the scene. The action is already committed, so it is
-        # taken back before answering: a caller told the write did not land must not find the node
-        # under a name it never asked for.
         _take_back_the_last_action()
         return _readback_error("node.rename", new_name, named, {"node": node_path_str})
 
@@ -4201,9 +3862,6 @@ func _node_change_type(params: Dictionary) -> Dictionary:
     if node == null:
         return _node_not_found_error(node_path_str)
     var root := _edited_root()
-    # The scene's own root is what the file is *of*, so replacing it is a different scene rather
-    # than a changed node — the editor treats it that way too. Refused by name, with the two calls
-    # that do what this was reaching for.
     if node == root:
         return Params.error(
             "invalid_node",
@@ -4228,15 +3886,8 @@ func _node_change_type(params: Dictionary) -> Dictionary:
             {"type": node_type}
         )
 
-    # The script first, so the properties it declares are properties the replacement has by the
-    # time they are copied. A script that extends the class being left behind cannot attach to the
-    # one being moved to, and Godot says nothing about it — the node simply arrives without it, and
-    # every `@export` and every method the scene relied on is gone. So it is checked here.
     var script := node.get_script()
     if script != null:
-        # Asked before it is set, because `set_script` is not the thing that refuses. Godot takes a
-        # script whose base the node is not — `get_script` answers with it, the editor shows it, and
-        # the node is simply broken when the scene runs. So the class is compared here.
         var base := ""
         if script.has_method("get_instance_base_type"):
             base = str(script.get_instance_base_type())
@@ -4308,9 +3959,6 @@ func _node_delete(params: Dictionary) -> Dictionary:
     var index := node.get_index()
     var root := _edited_root()
 
-    # The root has no parent to be detached from, so the delete ran, changed nothing, and came back
-    # as a read-back mismatch comparing a path to a name — which a live turn was sent and could not
-    # act on. Refused by name instead, with the two calls that do what it was reaching for.
     if node == root:
         return Params.error(
             "cannot_delete_root",
@@ -4329,8 +3977,6 @@ func _node_delete(params: Dictionary) -> Dictionary:
     undo.add_undo_reference(node)
     undo.commit_action()
 
-    # Read-back: the path has to resolve to nothing in the edited tree. `deleted: true` about a node
-    # the scene still holds is the whole shape this refactor removes.
     var lingering := _find_node(node_path_str)
     if lingering != null:
         return _readback_error(
@@ -4396,8 +4042,6 @@ func _node_set_property(params: Dictionary) -> Dictionary:
     undo.add_undo_method(node, "set", property, old_value)
     undo.commit_action()
 
-    # Read-back: the property as the node answers it now. `Object.set` takes a value a setter then
-    # ignores, clamps or replaces, and there is no error when it does.
     var stored: Variant = node.get(property)
     if not Params.same_value(new_value, stored):
         return _readback_error(
@@ -4449,9 +4093,6 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
         )
 
     var plan: Array = []
-    # What each property should read as afterwards, keyed by the node and the property. Two entries
-    # may name the same one, and the last write is what decided it, so the read-back is checked
-    # against this rather than against every entry that passed over it.
     var expected: Dictionary = {}
     for entry in entries:
         if typeof(entry) != TYPE_DICTIONARY:
@@ -4492,8 +4133,6 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
         undo.add_undo_method(step[0], "set", step[1], step[3])
     undo.commit_action()
 
-    # Read-back: the property as the node answers it now, for the same reason the single write does
-    # it. `Object.set` takes a value a setter then ignores, clamps or replaces, with no error.
     var written: Array = []
     for key in expected:
         var wanted: Array = expected[key]
@@ -4540,7 +4179,6 @@ func _node_add_to_group(params: Dictionary) -> Dictionary:
     undo.add_undo_method(node, "remove_from_group", group)
     undo.commit_action()
 
-    # Read-back: the node's own membership, which is also what the reply lists.
     if not node.is_in_group(group):
         return _readback_error(
             "node.add_to_group", group, ", ".join(Params.authored_groups(node)), {"group": group}
@@ -4571,7 +4209,6 @@ func _node_remove_from_group(params: Dictionary) -> Dictionary:
     undo.add_undo_method(node, "add_to_group", group, true)
     undo.commit_action()
 
-    # Read-back: the group has to be gone from the node, not only from this call's intent.
     if node.is_in_group(group):
         return _readback_error(
             "node.remove_from_group",
@@ -4654,9 +4291,6 @@ func _node_set_cells(params: Dictionary) -> Dictionary:
         plan.append([origin, width, height, source_id, atlas, alternative])
 
     var cells: Array = []
-    # What each covered cell should read as afterwards. Entries may overlap, and the last write to a
-    # cell is the one that decided it, so the read-back is checked against this rather than against
-    # every entry that passed over it.
     var expected: Dictionary = {}
     var painted := 0
     var erased := 0
@@ -4698,9 +4332,6 @@ func _node_set_cells(params: Dictionary) -> Dictionary:
     undo.add_undo_method(self, "_do_paint_cells", layer, previous)
     undo.commit_action()
 
-    # Read-back: every covered cell, asked of the layer again. `set_cell` takes a coordinate the
-    # tileset does not define and leaves the cell empty, so a paint that wrote nowhere reports the
-    # same tally as one that worked.
     for at in expected:
         var coords: Vector2i = at
         var wanted: Array = expected[at]
@@ -4736,9 +4367,6 @@ func _node_get_cells(params: Dictionary) -> Dictionary:
     limit = clampi(limit, 1, MAX_REPORTED_TILES)
     var listed: Array = []
     var used := layer.get_used_cells()
-    # Which tiles were painted, counted. A level is longer than any list a response can carry, and
-    # the tally is what says a layer holds pipes and a flag rather than only the ground row that
-    # happens to come first.
     var tally: Dictionary = {}
     for coords in used:
         var atlas := layer.get_cell_atlas_coords(coords)
@@ -4836,12 +4464,6 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
     var target: Node = resolved["target"]
     var signal_name: String = resolved["signal"]
     var method: String = resolved["method"]
-    # The method the caller named is written first and connected second, so the file on disk is
-    # ahead of the script the editor loaded — and `has_method` reads the loaded one. A live turn
-    # wrote `_on_score_timer_timeout` into `player.gd`, rescanned, saved and reloaded the scene,
-    # and was told three times running that the node's script declares only `_process`; the third
-    # refusal tripped the repeated-call guard and the connection was abandoned. Re-read before
-    # refusing, never before accepting: a connection that already works costs nothing here.
     var recompiled := true
     if not target.has_method(method):
         recompiled = _reread_the_script_on(target)
@@ -4890,10 +4512,6 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
             }
         }
 
-    # `Object.CONNECT_PERSIST` is what makes a connection part of the scene rather than a passing
-    # thought: without it the connection works in the editor and is dropped when the scene is
-    # packed, which is the same failure as a collision shape with no shape in it — the editor looks
-    # right and the game does nothing. Every connection made here therefore carries it.
     var flags := Object.CONNECT_PERSIST
     if bool(params.get("deferred", false)):
         flags |= Object.CONNECT_DEFERRED
@@ -4905,9 +4523,6 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
     undo.add_undo_method(node, "disconnect", signal_name, callable)
     undo.commit_action()
 
-    # Read-back: the live connection, and the flags Godot recorded for it rather than the ones this
-    # call asked for. A connection made without CONNECT_PERSIST works in the editor and is dropped
-    # when the scene is packed, which is the same lie as a save that wrote nothing.
     if not node.is_connected(signal_name, callable):
         return _readback_error(
             "node.connect_signal",
@@ -4933,8 +4548,6 @@ func _node_disconnect_signal(params: Dictionary) -> Dictionary:
     var signal_name: String = resolved["signal"]
     var method: String = resolved["method"]
 
-    # The bound arguments are part of a callable's identity, so a connection made with them can only
-    # be found by naming them again — which is why they are read back by `node.inspect`.
     var bound := Protocol.decode_items(params.get("binds", []))
     if not bound["ok"]:
         return {
@@ -4964,7 +4577,6 @@ func _node_disconnect_signal(params: Dictionary) -> Dictionary:
     undo.add_undo_method(node, "connect", signal_name, callable, flags)
     undo.commit_action()
 
-    # Read-back: the connection has to be gone before the reply says it is.
     var connected := node.is_connected(signal_name, callable)
     if connected:
         return _readback_error(
@@ -5091,9 +4703,6 @@ func _node_inspect(params: Dictionary) -> Dictionary:
     for name in params.get("properties", []) as Array:
         wanted.append(str(name))
     var properties := Params.node_properties(node, wanted)
-    # A name that is not answered is refused rather than left as a gap, which is the rule
-    # `runtime.inspect_node` already follows: an answer missing the property the caller came for
-    # reads as "this node holds no value for it", and the caller acts on that instead of on a typo.
     if not wanted.is_empty():
         var answered: Array[String] = []
         for property in properties:
@@ -5159,17 +4768,11 @@ func _reread_the_script_on(target: Node) -> bool:
     if not (script is Script):
         return true
     var path := (script as Script).resource_path
-    # An unsaved or built-in script has nothing on disk to be behind.
     if path.is_empty() or not FileAccess.file_exists(path):
         return true
     var text := FileAccess.get_file_as_string(path)
     if text.is_empty():
         return true
-    # Assigned and recompiled without first asking whether the text changed. That check was here
-    # and it is the wrong question: `godot_script edit` writes through the editor, so the script
-    # resource can already hold the new source while the compiled class every instance runs on is
-    # still the old one — which is exactly the state this is called in. It is called only when the
-    # method the caller named is already missing, so there is nothing to save by skipping.
     var loaded := script as Script
     loaded.source_code = text
     return loaded.reload(true) == OK
@@ -5212,7 +4815,6 @@ func _as_far_as_the_path_goes(raw: String) -> String:
 ## thing the caller already knew. Both are answered with the name the root actually has, because
 ## that is the fact that repairs them — every node path in the edited scene begins with it.
 func _node_not_found_error(raw: String) -> Dictionary:
-    # Trimmed like the lookup itself, or the sentence names a string nobody can see the end of.
     var path := raw.strip_edges()
     var message := "Node %s was not found in the edited scene" % path
     var root := _edited_root()
@@ -5237,10 +4839,6 @@ func _node_not_found_error(raw: String) -> Dictionary:
         and path != root_path
         and not path.begins_with(root_path + "/")
     ):
-        # A path under a root this scene does not have. Two live turns in a row wrote /Arena/...
-        # into create_nodes against a scene still rooted at ProtocolFixture, having named the root
-        # they were about to make rather than the one that is there. Repeating the path back said
-        # only that it is absent. The root's name is the whole repair, and it costs one clause.
         message = (
             "%s. Every node path here starts at the scene's own root, which is %s."
         ) % [message, root_path]
@@ -5263,12 +4861,6 @@ func _find_node(raw: String) -> Node:
     var root := _edited_root()
     if root == null:
         return null
-    # Trimmed the way `_as_resource_path` already trims a file path, and for the same reason: outer
-    # whitespace on a node path is never meaningful and is exactly what a model's JSON leaves behind
-    # when it slips. One live turn sent `{"parent ": "/Level3D ", "type ": "DirectionalLight3D"}` —
-    # the router puts the padded *keys* back onto their parameters, and the padded value went
-    # through untouched. `Node /Level3D  was not found … the scene's own root is /Level3D` came
-    # back twelve times, naming two strings that look identical on screen.
     var path := raw.strip_edges()
     if path == root.name or path == "/" + root.name or path == "":
         return root
@@ -5325,7 +4917,6 @@ func _send_event(event: String, data: Dictionary) -> void:
     }
     _put_json(envelope)
 
-# Sequences start at 0 and increase by one per session, so Gofer can spot a dropped event as a gap.
 var _sequence: int = 0
 func _next_sequence() -> int:
     var sequence := _sequence

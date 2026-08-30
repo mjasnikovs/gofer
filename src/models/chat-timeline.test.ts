@@ -35,10 +35,6 @@ function replay(events: readonly AiStreamEvent[], from: Message = assistant()) {
 }
 
 describe('applyStreamEvent', () => {
-    /**
-     * Every point sends twice — once when it starts, once when it answers — so a reducer that
-     * appended would draw a running row and a finished row for the same check.
-     */
     it('upserts a verification point by name and keeps the order it ran in', () => {
         const message = replay([
             {
@@ -138,12 +134,6 @@ describe('applyStreamEvent', () => {
         ])
     })
 
-    /*
-     * A delegation runs a whole agent for minutes, and the row used to say the question and then
-     * nothing at all until it answered. The step is what it is doing NOW, so it is dropped the
-     * moment the call ends — left on, it reads as the result, and it is stored with the chat, so it
-     * would still be reading that way when the task is reopened.
-     */
     it('carries what a long call is doing now, and drops it when the call ends', () => {
         const running = replay([
             {type: 'tool-start', id: 'a', name: 'subagent', target: 'find the menu', startedAt: 1},
@@ -164,7 +154,6 @@ describe('applyStreamEvent', () => {
         expect(done.tools?.[0]?.target).toBe('find the menu')
     })
 
-    // The step is optional, so a worker that sends none is not a malformed event to be dropped.
     it('accepts a tool update with no step, and rejects one whose step is not text', () => {
         expect(isAiStreamEvent({type: 'tool-update', id: 'a', output: 'x'})).toBe(true)
         expect(isAiStreamEvent({type: 'tool-update', id: 'a', output: 'x', step: 'bash: ls'})).toBe(
@@ -173,14 +162,6 @@ describe('applyStreamEvent', () => {
         expect(isAiStreamEvent({type: 'tool-update', id: 'a', output: 'x', step: 7})).toBe(false)
     })
 
-    /*
-     * The reason a turn ended is optional, and a `done` without one is still a `done`.
-     *
-     * `JSON.stringify` drops an `undefined`, so a producer that let the field through unset put no
-     * field on the wire at all. Required, that failed the guard whole: the reply text, the usage and
-     * the model went with it and the turn was drawn as stopped with nothing in it. Only `aborted`
-     * is ever read, so absent is a turn that ended normally.
-     */
     it('accepts a completion that names no reason, and reads it as a finished turn', () => {
         const done = {
             type: 'done',
@@ -199,8 +180,6 @@ describe('applyStreamEvent', () => {
     })
 
     it('keeps everything the agent said, not only its last step', () => {
-        // The backend takes `done.text` from the final `turn_end`, which for a turn that called
-        // tools is the last step alone. Preferring it dropped every earlier narration.
         const message = replay([
             {type: 'text-delta', delta: 'Let me inspect the scene.'},
             {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
@@ -222,10 +201,6 @@ describe('applyStreamEvent', () => {
     })
 
     it('marks a completion the model was stopped mid-way as stopped, not as complete', () => {
-        // The worker answers the backend's cancel line now: it aborts its own agent, checkpoints
-        // what the model had done and ends the turn on its own completion. That completion arrives
-        // AFTER the `aborted` the backend mints, and a `done` that always meant `complete` marked
-        // the stopped turn finished — the last event won, and it was the wrong one.
         const message = replay([
             {type: 'text-delta', delta: 'Half an ans'},
             {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
@@ -241,15 +216,11 @@ describe('applyStreamEvent', () => {
             }
         ])
         expect(message.status).toBe('aborted')
-        // What it managed to say is kept, which is the whole reason the worker is asked before it
-        // is killed.
         expect(message.text).toBe('Half an ans')
         expect(message.tools?.[0]?.status).toBe('error')
     })
 
     it('settles the calls a stopped turn left running, on the completion as well', () => {
-        // A stop the backend never had to mint an `aborted` for: the worker answered, so the
-        // completion is the only event saying the turn ended, and the spinning row is still there.
         const message = replay([
             {type: 'tool-start', id: 'a', name: 'godot_scene', startedAt: 1},
             {
@@ -305,8 +276,6 @@ describe('applyStreamEvent', () => {
         expect(message.tools?.[0]?.tokens).toBe(1967)
     })
 
-    // The rows are only worth reading if they add up, so a shared ask is split without losing the
-    // remainder, and a call from another ask is left alone.
     it('splits an ask between its calls and leaves other calls untouched', () => {
         const message = replay([
             {type: 'tool-start', id: 'a', name: 'godot_node', startedAt: 1},
@@ -336,13 +305,10 @@ describe('applyStreamEvent', () => {
                 errorMessage: 'connection refused'
             }
         ])
-        // Still running: a settled turn stops the indicator and offers a Retry button, and the turn
-        // is already retrying itself.
         expect(message.status).toBe('streaming')
         expect(message.activity).toContain('20s')
         expect(message.activity).toContain('2 of 10')
         expect(message.activity).toContain('connection refused')
-        // What the model managed to say is not thrown away between attempts.
         expect(message.text).toBe('Looking at it')
     })
 
@@ -440,13 +406,6 @@ describe('settleRunningTools', () => {
         expect(settleRunningTools(message, 'stopped')).toBe(message)
     })
 
-    /**
-     * A call that was reporting progress keeps what it said and is told why it stopped.
-     *
-     * One recorded row is a sub-agent asked why a blue tileset renders green, ended after two
-     * steps, and stored with `Working — 2 steps so far: bash: pwd; …` as its answer. The reason it
-     * ended was never written down, because the output it already had was taken instead.
-     */
     it('adds the reason to a call that had already said something, rather than instead of it', () => {
         const message: Message = {
             ...assistant(),
@@ -511,13 +470,6 @@ describe('retryPlan', () => {
         expect(plan?.prompt.id).toBe(3)
     })
 
-    /*
-     * What a long agentic reply really looks like on screen: one bubble holding every step.
-     *
-     * A real stopped turn was found holding a hundred and twenty eight steps of work in the
-     * transcript and, after a Retry, an empty bubble on screen and in the database. This is the
-     * shape that has to survive.
-     */
     const worked: Message = {
         id: 2,
         sender: 'assistant',
@@ -547,8 +499,6 @@ describe('retryPlan', () => {
             {kind: 'tool', toolId: 'a'},
             {kind: 'tool', toolId: 'b'}
         ])
-        // The prose the turn ended on is dropped, and `text` is what the kept prose says — the
-        // same trailing answer the worker takes off the transcript before it carries on.
         expect(reopened?.text).toBe('Looking at it.')
         expect(reopened?.status).toBe('streaming')
     })

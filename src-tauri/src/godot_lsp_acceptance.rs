@@ -97,14 +97,10 @@ fn the_editor_reports_diagnostics_and_navigation_across_scripts() {
     let keeper = file_uri(&workspace, "scripts/score_keeper.gd").expect("keeper uri");
     let broken = file_uri(&workspace, "scripts/broken.gd").expect("broken uri");
 
-    // Diagnostics: subscribing before didOpen, then waiting out the parser, must deliver the
-    // syntax error the broken script carries.
     let diagnostics = client.subscribe_diagnostics();
     client
         .open_document(&broken, BROKEN)
         .expect("open broken.gd");
-    // The budget is for broken.gd's diagnostics, not for each notification: a chatty editor that
-    // never mentions broken.gd must fail on time, and with the editor output attached.
     let deadline = Instant::now() + DIAGNOSTICS_TIMEOUT;
     let reported = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -134,7 +130,6 @@ fn the_editor_reports_diagnostics_and_navigation_across_scripts() {
         .open_document(&keeper, SCORE_KEEPER)
         .expect("open score_keeper.gd");
 
-    // Outline: the class and its static function must both appear.
     let symbols = client
         .document_symbols(&math)
         .expect("document symbols")
@@ -157,7 +152,6 @@ fn the_editor_reports_diagnostics_and_navigation_across_scripts() {
         "add_score must be outlined, got {names:?}"
     );
 
-    // Navigation: a static call through a global class must resolve across files.
     let usage = position_of(SCORE_KEEPER, "add_score");
     let targets = definition_uris(
         client
@@ -173,8 +167,6 @@ fn the_editor_reports_diagnostics_and_navigation_across_scripts() {
     let hover = client.hover(&math, position_of(MATH_UTILS, "add_score"));
     assert!(hover.is_ok(), "hover must answer: {hover:?}");
 
-    // Rename across both files: the server proposes the edit, the workspace applies it as one
-    // validated transaction.
     let prepared = client
         .prepare_rename(&keeper, usage)
         .expect("prepare rename request");
@@ -211,8 +203,6 @@ fn the_editor_reports_diagnostics_and_navigation_across_scripts() {
     assert!(!renamed_math.contains("add_score"), "{renamed_math}");
     assert!(!renamed_keeper.contains("add_score"), "{renamed_keeper}");
 
-    // Workspace-wide symbols are synthesized from document symbols because Godot reports
-    // `workspaceSymbolProvider: false`. The good scripts still hold `MathUtils` after the rename.
     let server_provides_symbols = matches!(
         client.server_capabilities().workspace_symbol_provider,
         Some(lsp_types::OneOf::Left(true)) | Some(lsp_types::OneOf::Right(_))

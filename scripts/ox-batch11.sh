@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Two tasks aimed at the surface no recorded run has ever touched.
-#
-# 43 of the catalogue's 109 operations have never been answered in any live turn, and eleven of
-# those are `godot_script`'s language-server intelligence — `references`, `rename`, `apply_rename`,
-# `declaration`. The rename path is covered by `godot_lsp_acceptance` against a real editor, so
-# what these ask is not whether it works but whether a model ever reaches for it.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/local-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

@@ -16,15 +16,6 @@ import type {
     ScriptSymbolInformation
 } from '../models/script'
 
-/**
- * Translation between Godot's language server and Monaco, plus the providers that carry it.
- *
- * The two protocols disagree on almost every number: LSP counts lines and UTF-16 characters from
- * zero, Monaco counts lines and columns from one, and their severity, completion, and symbol
- * enumerations are unrelated. Every conversion lives here so no provider re-derives one.
- */
-
-/** Monaco's `MarkerSeverity`, keyed by the LSP severity that produced it. */
 const MARKER_SEVERITY: Readonly<Record<number, number>> = {
     1: 8, // error
     2: 4, // warning
@@ -32,7 +23,6 @@ const MARKER_SEVERITY: Readonly<Record<number, number>> = {
     4: 1 // hint
 }
 
-/** Monaco's `CompletionItemKind`, keyed by the LSP `CompletionItemKind`. */
 const COMPLETION_KIND: Readonly<Record<number, number>> = {
     1: 18,
     2: 0,
@@ -61,35 +51,26 @@ const COMPLETION_KIND: Readonly<Record<number, number>> = {
     25: 24
 }
 
-/** Monaco's `DocumentHighlightKind`, keyed by the LSP kind. */
 const HIGHLIGHT_KIND: Readonly<Record<number, number>> = {
     1: 0, // text
     2: 1, // read
     3: 2 // write
 }
 
-/** LSP `InsertTextFormat.Snippet`. */
 const SNIPPET_FORMAT = 2
-/** Monaco's `CompletionItemInsertTextRule.InsertAsSnippet`. */
 const INSERT_AS_SNIPPET = 4
-/** Monaco's `CompletionItemKind.Text`, used when the server names no kind. */
 const DEFAULT_COMPLETION_KIND = 18
-/** Monaco's `SymbolKind.Variable`, used when the server names no kind. */
 const DEFAULT_SYMBOL_KIND = 12
 
 const COMPLETION_TRIGGERS = ['.', ':', '$', '@', '"', "'", '/']
 const SIGNATURE_TRIGGERS = ['(', ',']
 
 export type ScriptLanguageBridge = Readonly<{
-    /** Sends one language request to Rust. */
     request: (request: ScriptRequest) => Promise<ScriptResponse>
-    /** The workspace-relative path a model holds, or undefined for a model Gofer does not own. */
     pathForModel: (model: Monaco.editor.ITextModel) => string | undefined
-    /** Reports a failed provider request. Providers themselves answer empty so typing continues. */
     onError?: ((error: unknown) => void) | undefined
 }>
 
-/** Converts an LSP range to the one-based, inclusive-start range Monaco ranges use. */
 export function toMonacoRange(range: ScriptRange): Monaco.IRange {
     return {
         startLineNumber: range.start.line + 1,
@@ -99,12 +80,10 @@ export function toMonacoRange(range: ScriptRange): Monaco.IRange {
     }
 }
 
-/** Converts a Monaco position to the zero-based LSP position the server expects. */
 export function toScriptPosition(position: Monaco.IPosition): ScriptPosition {
     return {line: position.lineNumber - 1, character: position.column - 1}
 }
 
-/** Turns published diagnostics into the markers Monaco renders in the gutter and overview ruler. */
 export function toMarkers(
     diagnostics: readonly ScriptDiagnostic[]
 ): readonly Monaco.editor.IMarkerData[] {
@@ -214,10 +193,6 @@ function isNested(
     return first === undefined || 'selectionRange' in first
 }
 
-/**
- * Godot answers `documentSymbol` with nested symbols, but the protocol allows the flat form, so
- * both are accepted rather than trusting one shape.
- */
 export function toDocumentSymbols(
     symbols: readonly ScriptDocumentSymbol[] | readonly ScriptSymbolInformation[]
 ): Monaco.languages.DocumentSymbol[] {
@@ -234,7 +209,6 @@ export function toDocumentSymbols(
     return symbols.map(symbol => ({
         name: symbol.name,
         detail: symbol.detail ?? '',
-        // Monaco's SymbolKind is the LSP kind minus one, all the way through TypeParameter.
         kind: (symbol.kind || DEFAULT_SYMBOL_KIND + 1) - 1,
         tags: [],
         range: toMonacoRange(symbol.range),
@@ -243,7 +217,6 @@ export function toDocumentSymbols(
     }))
 }
 
-/** The model URI Gofer gives a workspace file, and its inverse. */
 export function modelUri(monaco: typeof Monaco, path: string): Monaco.Uri {
     return monaco.Uri.from({scheme: 'file', path: `/${path}`})
 }
@@ -262,11 +235,6 @@ export function toMonacoLocations(
     }))
 }
 
-/**
- * Registers every provider Monaco can answer from the language server. Rename is deliberately
- * absent: Monaco's rename UI applies its own edits, and Gofer applies a multi-file rename as one
- * validated filesystem transaction after the user approves the preview.
- */
 export function registerScriptProviders(
     monaco: typeof Monaco,
     languageId: string,

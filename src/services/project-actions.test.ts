@@ -3,13 +3,6 @@ import {createProjectActions, resourcePath} from './project-actions'
 import {refusal} from '../test/fake-session'
 import type {GodotCall} from '../models/workspace'
 
-/**
- * What the frame does to the project, checked without a frame.
- *
- * Each of these used to be a rendered toolbar button and a mounted IDE. They are sequences and
- * branches, so they are checked as sequences and branches.
- */
-
 function actions(
     overrides: Readonly<{
         answer?: (command: string) => Promise<unknown>
@@ -78,10 +71,6 @@ describe('stopping the project', () => {
         expect(call).not.toHaveBeenCalled()
     })
 
-    /**
-     * A game the Game tab's own Run started has no debug session behind it. Terminating would fail
-     * naming an adapter the user never asked for, so the editor is asked to stop the game instead.
-     */
     it('stops a game the editor started by asking the editor', async () => {
         const {project, debug, call} = actions({isLaunched: false})
         await project.stop()
@@ -126,7 +115,6 @@ describe('opening the main scene', () => {
         expect(call).toHaveBeenCalledWith('scene.open', {path: 'res://scenes/main.tscn'})
     })
 
-    /** A project with no main scene has none to open, which is a fact rather than a failure. */
     it('says so when the project names none', async () => {
         const {project, call, report} = actions({
             answer: () => Promise.resolve({mainScene: ''})

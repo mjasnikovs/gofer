@@ -1,84 +1,17 @@
-/**
- * The reasoning level Gofer stores, translated into one pi-ai understands.
- *
- * Gofer has a level pi-ai does not: `on`. It is the whole menu for a local server whose chat
- * template thinks but names no efforts — llama.cpp reports that as `supports_preserve_reasoning`
- * with `supports_reasoning_effort` false, and the template raises on any effort it is handed. So
- * the only two states are on and off, and `on` is the word for the first of them.
- *
- * pi-ai's scale is `off · minimal · low · medium · high · xhigh · max`, and every request is passed
- * through `clampThinkingLevel` before it is built. An unrecognised level is not passed through: it
- * is clamped to the lowest level the model offers, which is `off`. The chat-template argument then
- * resolves `enable_thinking` from whether an effort survived, so every request went out saying
- * thinking was disabled — the exact opposite of the setting the user chose, and worse than sending
- * nothing at all.
- *
- * Which level `on` becomes does not reach the server. A template with no efforts is never told one:
- * `reasoning_effort` is left out of the chat-template arguments entirely, and the top-level field is
- * only written for a connection that said it takes efforts. All that matters is that it is above
- * `off`, so the switch resolves to true.
- */
 export function piThinkingLevel(level, model = {}) {
     if (level === 'on') return 'medium'
     const chosen = level || 'off'
     if (chosen !== 'off' || !model.reasoningMandatory) return chosen
-    // A model that refuses to stop thinking, asked to stop. `off` resolves to
-    // `reasoning: {enabled: false}` on the wire, and OpenRouter answers HTTP 400 `Reasoning is
-    // mandatory for this endpoint and cannot be disabled` — measured against `stealth/ox-alpha` on
-    // 2026-08-25, where it took out `godot_docs_search ask` and every delegation for the whole run.
-    //
-    // The least effort the model named, not its default: the setting said as little thinking as
-    // possible, and that is the nearest thing to it this model has. Nothing named means no effort
-    // field is written at all, so which level this is never leaves the building — all that matters
-    // is that it is above `off`.
     return leastEffort(model.thinkingLevels)
 }
 
-/** The cheapest effort a model named, or `medium` when it named none. See `piThinkingLevel`. */
 function leastEffort(levels) {
     const named = new Set(levels ?? [])
     return KNOWN_EFFORTS.find(effort => named.has(effort)) ?? 'medium'
 }
 
-/**
- * Every effort Gofer has a word for, which is every one a settings file can hold.
- *
- * `off` is not among them: it is the absence of an effort, not one of them. The same list, in the
- * same order, is `KNOWN_EFFORTS` in `model_server.rs`, which is what reads them out of a template,
- * and `NAMED_EFFORTS` in `settings.rs`. `check-command-surface.mjs` holds all of them to each
- * other, membership and order both, rather than leaving this sentence to be believed.
- */
 const KNOWN_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
-/**
- * The levels a local model may be asked at, as pi-ai needs them written down.
- *
- * pi-ai keeps its own idea of which levels a model has. `xhigh` and `max` are only available to a
- * model that maps them, and every other level is available unless it is mapped to null. Whatever is
- * unavailable is not refused — it is clamped to the nearest thing that is.
- *
- * Left unwritten, that clamp is silent and wrong in both directions. Measured against a real
- * Qwen3.8 build whose template accepts `('xhigh', 'medium', 'low')` and raises on anything else:
- * Gofer offered xhigh because the server named it, pi-ai found no map, and the request went out
- * saying `high`. It survived only because that template aliases high onto xhigh one line earlier.
- * Without the alias, llama.cpp answers every request with HTTP 500.
- *
- * So the map is the server's own list: what it named maps to itself, and what it did not is null,
- * which puts it out of the clamp's reach entirely.
- *
- * `off` is mapped only where the model has a word for it. pi-ai reads a mapped `off` as an
- * instruction of its own — it sends that word as the effort — which is exactly right for a provider
- * that has one and wrong everywhere else. Only Cerebras' shipped table names one, and only for the
- * model that honours it: `gemma-4-31b` takes `reasoning_effort: "none"` and comes back having
- * thought about nothing. Left unmapped, as it is for every other driver, `off` sends no effort
- * field at all and a model that thinks by default goes on thinking — which is what `off` has always
- * quietly meant here, and is still what it means wherever no word was named.
- *
- * Nothing when the server named no efforts, whatever `offEffort` says. That connection has one
- * level, `on`, and the effort field never leaves the building — so a word for stopping would have
- * nowhere to be written. The table cannot produce that pair, and this is where it would be ignored
- * if it did.
- */
 export function piThinkingLevelMap(levels, offEffort) {
     const named = new Set(levels ?? [])
     if (named.size === 0) return undefined

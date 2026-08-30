@@ -14,12 +14,6 @@ import {
 const here = dirname(fileURLToPath(import.meta.url))
 const fixture = name => readFileSync(join(here, '__fixtures__', name), 'utf8')
 
-/**
- * A server that answers once, from a script.
- *
- * Passed in rather than swapped onto `globalThis`, because `node --test` runs test files in
- * parallel: a global replaced in this file is replaced under every other one at the same time.
- */
 function servedWith(body, {status = 200, statusText = 'OK', headers = {}, url} = {}) {
     const calls = []
     const respond = (requested, init) => {
@@ -32,8 +26,6 @@ function servedWith(body, {status = 200, statusText = 'OK', headers = {}, url} =
             })
         )
     }
-    // `Response.url` is read-only and empty on a constructed response, so a redirect's final URL is
-    // supplied the way the real one reports it.
     return {
         calls,
         fetch:
@@ -65,8 +57,6 @@ test('ads and sidebars are stripped, and the real paragraph is kept', () => {
 })
 
 test('a page whose content arrives by script cleans to almost nothing', () => {
-    // Not an error. The caller reports a short page as a page it could not read, which is a
-    // different thing to say than "that URL is wrong".
     const result = cleanHtml(fixture('spa-empty.html'), 'https://example.com/app')
 
     assert.ok(result.markdown.length < 50)
@@ -82,7 +72,6 @@ test('code blocks stay fenced', () => {
 test('every table cell survives the conversion', () => {
     const result = cleanHtml(fixture('with-tables.html'), 'https://example.com/t')
 
-    // Turndown emits no pipe tables without the gfm plugin. What matters is that no cell is lost.
     assert.ok(result.markdown.includes('a1'))
     assert.ok(result.markdown.includes('b2'))
     assert.ok(result.markdown.includes('Col A'))
@@ -135,14 +124,11 @@ test('markdown, plain text and JSON pass through untouched', async () => {
         const result = await fetchAndClean('https://e.co/f', {fetch: server.fetch})
 
         assert.match(result.markdown, expected)
-        // Already clean, so its title is the host — there is no <title> to read.
         assert.equal(result.title, 'e.co')
     }
 })
 
 test('a response with no content-type at all is read as text', async () => {
-    // The endpoints that omit the header — llms.txt, robots.txt — are exactly the ones worth
-    // reading, so an absent type must not be treated the same as an unknown one.
     assert.equal(classifyContentType(''), 'text')
 
     const server = servedWith('plain words', {headers: {'content-type': ''}})
@@ -163,8 +149,6 @@ test('xhtml goes down the HTML path', async () => {
 })
 
 test('a page that declares its charset is decoded with it', async () => {
-    // 0x63 0xe9 is "cé" in ISO-8859-1 and invalid UTF-8. Decoded as UTF-8 it is "c<replacement>",
-    // which reaches the model as a word that does not exist.
     const server = servedWith(new Uint8Array([0x63, 0xe9]), {
         headers: {'content-type': 'text/plain; charset=iso-8859-1'}
     })
@@ -186,8 +170,6 @@ test('the fetcher says what it is', async () => {
 
     await fetchAndClean('https://example.com/p', {fetch: server.fetch})
 
-    // A fetcher that lies about what it is gets blocked once somebody notices, and the block looks
-    // like the page being empty.
     assert.match(server.calls[0].init.headers['user-agent'], /^Gofer\//u)
     assert.equal(server.calls[0].init.redirect, 'follow')
 })
@@ -227,8 +209,6 @@ test('a stopped turn stops the fetch, and says so as a stop', async () => {
             signal: AbortSignal.abort()
         }),
         error => {
-            // Not "network": a turn the user stopped is not a fault, and wording it as one sends
-            // the caller looking for a problem with the site.
             assert.equal(error.kind, 'aborted')
             return true
         }
@@ -248,7 +228,6 @@ test('a request that never answers is given up on', async () => {
     })
 
     await assert.rejects(result, error => {
-        // The clock is Gofer's, not the user's, so this is a network fault rather than a stop.
         assert.equal(error.kind, 'network')
         return true
     })

@@ -72,16 +72,9 @@ describe('the questions the agent is waiting on', () => {
         expect(tauri.invoke).toHaveBeenCalledWith('respond_user_question', {
             request: {questionId: 'q-1', answer: 'its own scene'}
         })
-        // Dropped at once: the agent resumes the moment the backend has the answer, and the card
-        // must not outlive that.
         expect(view.result.current.questions).toHaveLength(0)
     })
 
-    /*
-     * A skip is a decision, not an absent answer. The agent is told the user read the question and
-     * left it to them, and told not to ask again — an empty string would read as a decision nobody
-     * made.
-     */
     it('sends a skip as a skip', async () => {
         const {view} = mount()
         await flush()

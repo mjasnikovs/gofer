@@ -60,16 +60,12 @@ fn a_ready_session_owns_the_edited_scene() {
     let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
     let scene = "res://owned.tscn";
 
-    // Ready means started up: the scene the editor opens for itself is already the edited one, so
-    // there is no second open still coming.
     assert_eq!(
         session.call("scene.get_tree", json!({}))["root"]["name"],
         "ProtocolFixture",
         "the editor must have finished opening its own scene before the session is ready"
     );
 
-    // And so the scene the session opens stays the edited one, which is the only reason the node
-    // below can be addressed at all.
     session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
     session.mutate(
         "node.create",
@@ -81,9 +77,6 @@ fn a_ready_session_owns_the_edited_scene() {
         vec!["Marker".to_owned()],
         "the created node must appear in the scene the session opened"
     );
-    // The tree is the one command documented as the source of `expectedRevision`, and it is not a
-    // mutating command — so the revision has to be in its own result or an agent that reads the
-    // tree before every mutation has no number to send back.
     assert_eq!(
         tree["revision"].as_u64(),
         Some(session.revision()),
@@ -143,16 +136,12 @@ fn the_addon_authors_scenes_undoably_inside_a_real_editor() {
     let mut session = Session::start();
     let scene = "res://acceptance.tscn";
 
-    // Reaching this line already proves the handshake agrees on the project path Godot globalizes,
-    // and that the supervisor's own heartbeat did not close the connection.
     let settings = session.call("project.get_settings", json!({}));
     assert_eq!(settings["projectName"], "Gofer Protocol Fixture");
 
     let created = session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
     assert_eq!(created["scene"], scene);
 
-    // No `scene`: the AI tool catalog documents none, so an authoring call that omits it has to
-    // mean the scene the editor is editing rather than be refused against the empty string.
     session.mutate(
         "node.create",
         json!({"parent": "/acceptance", "name": "Sprite", "type": "Sprite2D"}),
@@ -173,8 +162,6 @@ fn the_addon_authors_scenes_undoably_inside_a_real_editor() {
         }),
     );
 
-    // Undo has to walk the scene's own history. An addon that cannot reach it answers an error, and
-    // one that mishandles its depth bookkeeping reports a redo that is not available.
     let undone = session.mutate("session.undo", json!({}));
     assert_eq!(undone["undoDepth"], 1, "undo must consume one action");
     assert_eq!(undone["redoDepth"], 1, "undo must offer the action back");
@@ -218,8 +205,6 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
     let scene = "res://batch.tscn";
     session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
 
-    // A later entry parents onto a node an earlier entry creates, which is what makes this one call
-    // rather than one call per level of the tree.
     let created = session.mutate(
         "node.create_nodes",
         json!({
@@ -250,8 +235,6 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
         "the batch must build the tree in the order it was given: {tree}"
     );
 
-    // Different nodes in one call: the whole point, since a scene sets one or two properties per
-    // node rather than six on one.
     let written = session.mutate(
         "node.set_properties",
         json!({
@@ -281,8 +264,6 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
         "the batched write must reach the node"
     );
 
-    // All-or-nothing: an entry naming a node that is not there stops the command with nothing
-    // written, so a refused batch does not leave the caller guessing which half landed.
     let refused = session.error(
         "node.set_properties",
         json!({
@@ -310,7 +291,6 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
         "the entry before the refused one must not have been written"
     );
 
-    // One batch is one editor action, so one undo takes the whole subtree back.
     session.mutate("session.undo", json!({}));
     session.mutate("session.undo", json!({}));
     assert!(
@@ -333,11 +313,6 @@ fn the_addon_authors_a_whole_subtree_in_one_call() {
 fn the_session_outlives_its_own_heartbeat() {
     let session = Session::start();
 
-    // Gofer sends `session.heartbeat` as a request and the addon answers it like any other request.
-    // Because no correlation entry is ever created for it, a supervisor that recognizes only
-    // correlated replies reads that answer as a stale reply and closes the connection — so the
-    // session dies one heartbeat interval after a handshake that looked perfectly healthy. Only a
-    // test that outlives the interval can see it.
     thread::sleep(Duration::from_millis(HEARTBEAT_INTERVAL_MS * 2 + 500));
 
     let state = session
@@ -390,7 +365,6 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
             .starts_with("revision_conflict"),
         "a missing expectedRevision must be refused"
     );
-    // A bare JSON value is not a tagged value; a coercing decoder would write (0, 0) instead.
     assert!(
         session
             .error("node.set_property", with_value(json!(42)), Some(current))
@@ -428,9 +402,6 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         "an unknown node must be refused"
     );
 
-    // Four spellings that are not a missing node but the other tool's, or no node path at all.
-    // Every one was written by a real model at a real editor. The refusal for each has to carry
-    // the spelling that works, because repeating the path back says only what the caller knew.
     let refused =
         |node: &str| session.error("node.inspect", json!({"scene": scene, "node": node}), None);
     let the_runtime_spelling = refused("/root/refusals/Sprite");
@@ -452,10 +423,6 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         "a res:// path names a scene, not a node in one, and the answer must say so: \
          {a_scene_path}"
     );
-    // A signal the node does not emit. The third refusal of this shape — `node_not_found` and
-    // `property_not_found` were the first two — and the same reasoning: naming the absence repairs
-    // nothing. A live turn asked to connect `/Main/ScoreLabel` to `score_changed`, which belongs to
-    // an autoload rather than to a Label, and was told only that the Label has no such signal.
     let no_signal = session.error(
         "node.connect_signal",
         json!({
@@ -483,20 +450,12 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         "and the near one when there is one: {near_signal}"
     );
 
-    // A node path with whitespace round it is the same path. One live turn sent
-    // `{"parent ": "/Level3D ", "type ": "DirectionalLight3D"}` — the router puts the padded keys
-    // back onto their parameters, and the padded value went through untouched. `Node /Level3D  was
-    // not found … the scene's own root is /Level3D` came back twelve times, naming two strings that
-    // look identical on screen. `_as_resource_path` has trimmed a file path since it was written.
     let padded = session.call(
         "node.inspect",
         json!({"scene": scene, "node": "  /refusals/Sprite  "}),
     );
     assert_eq!(padded["path"], "/refusals/Sprite", "{padded}");
 
-    // A property the node does not have. Four live turns in four separate runs were told only that
-    // it is absent — about `transform_2d`, which is one edit from a property the node really has,
-    // and about `spacing` on a VBoxContainer, which is a theme override no near miss reaches.
     let no_property = |property: &str| {
         session.error(
             "node.set_property",
@@ -519,10 +478,6 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         nowhere_near.contains("node.inspect"),
         "and with nothing near it, the call that lists them all: {nowhere_near}"
     );
-    // Which call, exactly. `node.inspect` lists everything only when `properties` is left out, and
-    // the sentence used to stop short of saying so — so a live turn read it as "ask inspect about
-    // this property", did that, and met the identical refusal. Five of them in one run, then the
-    // repeat guard, then it restarted the editor.
     assert!(
         nowhere_near.contains("with no `properties`")
             && nowhere_near.contains("refused the same way"),
@@ -530,10 +485,6 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
          {nowhere_near}"
     );
 
-    // A path under a root this scene does not have. Two live turns in a row wrote `/Arena/...`
-    // into `create_nodes` against a scene still rooted at `ProtocolFixture`, and the refusal —
-    // "Node /Arena was not found in the edited scene" — repeated the one thing they already knew.
-    // The root's name is the whole repair: every node path in this tree begins with it.
     let a_root_this_scene_has_not = refused("/Arena/Ground");
     assert!(
         a_root_this_scene_has_not.contains("/refusals"),
@@ -549,7 +500,6 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
         "a path already under the right root is not told where the root is"
     );
 
-    // Nothing above may have changed the scene.
     assert_eq!(
         session.revision(),
         current,
@@ -577,8 +527,6 @@ fn the_addon_refuses_stale_revisions_and_malformed_values() {
 fn the_addon_wires_a_scene_with_groups_and_signals() {
     let directory = TempDir::new().expect("temporary directory");
     let worktree = fixture_worktree(&directory);
-    // The handler has to exist before the connection names it, exactly as it does for a person: the
-    // editor's own connect dialog offers to write one and refuses to connect to nothing.
     std::fs::write(
         worktree.join("wiring.gd"),
         "extends Node2D\n\n\nfunc _on_coin_body_entered(_body: Node2D) -> void:\n\tpass\n",
@@ -607,7 +555,6 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
         json!({"node": "/wiring/Coin", "group": "coins"}),
     );
     assert_eq!(grouped["groups"], json!(["coins"]), "{grouped}");
-    // No `target`: it defaults to the scene root, which is where a scene's script lives.
     let connected = session.mutate(
         "node.connect_signal",
         json!({
@@ -622,10 +569,6 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
         "an editor connection the scene does not keep is not an editor connection"
     );
 
-    // Inspect is where a caller reads its own work back, so it has to report both — and only the
-    // groups a caller put the node in. The engine keeps its own on a CanvasItem, named after an
-    // object id (`_root_canvas1653562408967`), and a live agent was answered with one beside the
-    // group it had just added.
     let inspected = session.call("node.inspect", json!({"node": "/wiring/Coin"}));
     assert_eq!(inspected["groups"], json!(["coins"]));
     assert!(
@@ -657,7 +600,6 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
         "the saved scene must keep the connection: {saved}"
     );
 
-    // Both are ordinary editor actions, so both undo.
     session.mutate("session.undo", json!({}));
     session.mutate("session.undo", json!({}));
     let undone = session.call("node.inspect", json!({"node": "/wiring/Coin"}));
@@ -673,7 +615,6 @@ fn the_addon_wires_a_scene_with_groups_and_signals() {
     session.mutate("session.redo", json!({}));
     session.mutate("session.redo", json!({}));
 
-    // Removing them is the same transaction in reverse, and both refuse what is not there.
     session.mutate(
         "node.disconnect_signal",
         json!({
@@ -723,8 +664,6 @@ fn a_file_the_importer_cannot_read_is_refused_rather_than_waited_out() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
-    // A PNG header over bytes that decode to nothing. The editor takes the file, tries it as an
-    // image because of the extension, and never produces an imported texture.
     let mut broken = b"\x89PNG\r\n\x1a\n".to_vec();
     broken.extend_from_slice(&[0u8; 64]);
     std::fs::write(worktree.join("broken.png"), &broken).expect("write the unreadable png");
@@ -733,19 +672,6 @@ fn a_file_the_importer_cannot_read_is_refused_rather_than_waited_out() {
     let sidecar_before = sidecar.exists();
 
     let started = std::time::Instant::now();
-    // `_paths_not_loadable` skips a named file on three conditions — no file, no `.import` beside
-    // it, or a load that returns something — and a success here means one of them was met without
-    // saying which. Nightly Windows runs answered `scanned: true` about this file and the panic
-    // could only print the answer, so the sidecar is sampled on both sides of the call.
-    //
-    // What that can and cannot settle, stated rather than implied. The sweep deletes the sidecar
-    // before its walk and the editor writes a new one during it, so neither sample is the instant
-    // the addon read; `false` after a walk that has finished is still strong evidence, because the
-    // skip the sidecar causes is the one this test never intended — it is there so that a `.py`
-    // beside the assets is not called a failed import. Two samples that are both `true` leave the
-    // load as the remaining condition, and distinguishing that one needs the addon to carry its
-    // skip reason back in the answer, which is a change to the success payload and not a
-    // diagnostic.
     let refusal =
         match session.try_call("resource.rescan", json!({"path": "res://broken.png"}), None) {
             Err(refusal) => refusal,
@@ -771,14 +697,11 @@ fn a_file_the_importer_cannot_read_is_refused_rather_than_waited_out() {
         "the editor is idle, and saying otherwise is what sent a live run round the loop: \
          {refusal}"
     );
-    // The old answer took the whole deadline. This one is evidence, so it arrives when the walk
-    // does — well inside the thirty seconds that used to be the only way out.
     assert!(
         started.elapsed() < std::time::Duration::from_secs(25),
         "the refusal waited out the deadline instead of answering from the walk"
     );
 
-    // And the session is still usable: the sweep cleared its own latch rather than stranding it.
     let scanned = session.call("resource.rescan", json!({}));
     assert_eq!(scanned["scanned"], json!(true), "{scanned}");
 }
@@ -793,11 +716,8 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
     std::fs::write(worktree.join("tiles.png"), ATLAS).expect("write the atlas");
     let ledger = directory.path().join("ledger.json");
     let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
-    // The atlas arrived after the editor started, so the import scan has to be told about it or
-    // `load` answers nothing for a file that is plainly there.
     session.call("resource.rescan", json!({}));
 
-    // Ground, brick and the pipe's mouth collide; the cloud is scenery a player passes through.
     let built = session.call(
         "resource.create_tileset",
         json!({
@@ -819,7 +739,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
     );
     assert_eq!(built["replaced"], false);
 
-    // What the caller reads back before painting, which is where the tile coordinates come from.
     let described = session.call(
         "resource.describe_tileset",
         json!({"path": "res://tiles/world.tres"}),
@@ -846,7 +765,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         json!({"parent": "/level", "name": "Terrain", "type": "TileMapLayer"}),
     );
 
-    // A layer with no tileset cannot be painted, and the refusal has to say what to do about it.
     let bare = session.error(
         "node.set_cells",
         json!({"node": "/level/Terrain", "cells": [{"x": 0, "y": 0, "atlas": [0, 0]}]}),
@@ -866,8 +784,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         }),
     );
 
-    // A tile the tileset does not define draws nothing at all, so it is refused rather than
-    // painted: `set_cell` takes any coordinate and leaves an empty layer that looks painted.
     let missing = session.error(
         "node.set_cells",
         json!({"node": "/level/Terrain", "cells": [{"x": 0, "y": 0, "atlas": [40, 40]}]}),
@@ -878,7 +794,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         "a tile outside the atlas must be refused by name: {missing}"
     );
 
-    // The ground of a level is one rectangle, not two hundred cells.
     let painted = session.mutate(
         "node.set_cells",
         json!({
@@ -896,7 +811,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
     assert_eq!(painted["usedRect"], json!([0, 8, 40, 6]), "{painted}");
     assert_eq!(painted["tileSet"], "res://tiles/world.tres");
 
-    // Read back through the command a caller checks its own work with.
     let read = session.call(
         "node.get_cells",
         json!({"node": "/level/Terrain", "limit": 4}),
@@ -904,8 +818,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
     assert_eq!(read["cells"], 85);
     assert_eq!(read["cellsListed"].as_array().expect("cells").len(), 4);
     assert_eq!(read["truncated"], true);
-    // The tally covers every cell even when the list is cut short, which is the only way to say
-    // what a level-sized layer is made of.
     let mut painted_tiles: Vec<(Value, u64)> = read["tiles"]
         .as_array()
         .expect("the tile tally")
@@ -925,7 +837,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         "four different tiles were painted: {read}"
     );
 
-    // An entry with no atlas erases, which is how a level gets the gap Mario falls down.
     let erased = session.mutate(
         "node.set_cells",
         json!({
@@ -936,7 +847,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
     assert_eq!(erased["erased"], 4, "{erased}");
     assert_eq!(erased["cells"], 81);
 
-    // Painting is an editor action like any other, so it takes back.
     session.mutate("session.undo", json!({}));
     assert_eq!(
         session.call("node.get_cells", json!({"node": "/level/Terrain"}))["cells"],
@@ -958,7 +868,6 @@ fn the_addon_builds_a_tile_level_from_an_atlas() {
         "the saved scene must reference the tileset rather than embed one: {saved}"
     );
 
-    // A cell command only means anything on a layer, and says so rather than doing nothing.
     let wrong = session.error("node.get_cells", json!({"node": "/level"}), None);
     assert!(
         wrong.starts_with("wrong_node_type") && wrong.contains("TileMapLayer"),
@@ -997,7 +906,6 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
-    // Named on its own: the editor never walked this file, so the rescan has to import it.
     std::fs::write(worktree.join("named.png"), ATLAS).expect("write the named atlas");
     session.call("resource.rescan", json!({"path": "res://named.png"}));
     let named = session
@@ -1009,7 +917,6 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
         .expect("a named rescan must leave the asset loadable");
     assert_eq!(named["grid"], json!([8, 2]), "{named}");
 
-    // The project-wide form, which must not answer while the scan it started is still running.
     std::fs::write(worktree.join("swept.png"), ATLAS).expect("write the swept atlas");
     session.call("resource.rescan", json!({}));
     let swept = session
@@ -1021,10 +928,6 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
         .expect("a project rescan must not answer before its own scan has landed");
     assert_eq!(swept["grid"], json!([8, 2]), "{swept}");
 
-    // Redrawn art over the same path. The file has an `.import` beside it by now, so it looks
-    // settled and `load` answers — with the old pixels. `update_file` does not re-run an importer,
-    // and a project scan only notices a timestamp that moved, which a rewrite inside one second
-    // does not. An agent iterating on a sprite saw its first draft for the rest of the session.
     std::fs::write(worktree.join("named.png"), NARROW).expect("redraw the named atlas");
     session.call("resource.rescan", json!({"path": "res://named.png"}));
     let redrawn = session.call(
@@ -1037,11 +940,6 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
         "a rescan must see the pixels on disk now, not the ones imported before: {redrawn}"
     );
 
-    // An asset that leaves the worktree — moved away, or deleted — does not stop existing when its
-    // file does: the editor's import of it still sits under `.godot`, so `load` keeps answering.
-    // Tilesets were cut from textures that were no longer in the project, and reported as
-    // successes. A rescan of the path it left is what makes the editor let go, which is why
-    // `ai_tools::tell_the_editor_the_worktree_moved` runs one after every move and delete.
     std::fs::remove_file(worktree.join("swept.png")).expect("delete the swept atlas");
     session.call("resource.rescan", json!({"path": "res://swept.png"}));
     let vanished = session.error(
@@ -1054,7 +952,6 @@ fn the_addon_imports_an_asset_that_arrives_after_startup() {
         "a deleted texture must stop being a texture: {vanished}"
     );
 
-    // An image nobody wrote is still missing, and the refusal names the step that would fix it.
     let missing = session.error(
         "resource.create_tileset",
         json!({"path": "res://absent.tres", "texture": "res://absent.png", "tileSize": 16}),
@@ -1082,8 +979,6 @@ fn the_addon_answers_a_cancellation() {
         json!({"path": "res://cancelled.tscn", "rootType": "Node2D"}),
     );
 
-    // Nothing is parked, so there is nothing to retract — and that is an answer, not an error: the
-    // caller gave up and the reply crossed it on the way.
     let unknown = session.call("session.cancel", json!({"requestId": "never-sent"}));
     assert_eq!(unknown["requestId"], "never-sent");
     assert_eq!(unknown["cancelled"], false);
@@ -1095,7 +990,6 @@ fn the_addon_answers_a_cancellation() {
         "a cancellation naming no request must be refused"
     );
 
-    // Cancelling nothing changes nothing: the session is still editing what it was.
     assert_eq!(
         session.call("session.get_state", json!({}))["state"],
         "ready"
@@ -1135,24 +1029,15 @@ fn the_addon_gives_up_a_request_it_is_still_holding() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree, ledger, Some(directory));
 
-    // The launch is issued from its own thread because it does not answer until it is cancelled,
-    // and the cancellation has to be sent while it is waiting.
     let rpc = session.rpc().clone();
     let launch = thread::spawn(move || {
-        // Longer than the addon's own launch budget, so a park that is never retracted fails this
-        // test as a timeout of the addon's making rather than of the transport's.
         rpc.call(
             CallRequest::new("runtime.run", json!({}))
-                // Named rather than minted: the cancellation below has to reach this exact request
-                // while it is still parked, so the test has to know its id in advance.
                 .named(PARKED)
                 .within(Some(60_000)),
         )
     });
 
-    // The addon has to be holding it before it can give it up, and nothing announces that it is.
-    // So the cancellation is retried until it takes: `cancelled: false` means the request has not
-    // arrived yet, which is the same answer it gives for a request that never existed.
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut answer = json!({});
     while Instant::now() < deadline {
@@ -1169,22 +1054,17 @@ fn the_addon_gives_up_a_request_it_is_still_holding() {
         session.output()
     );
 
-    // The caller is answered rather than left to its own timeout — that is the point of the
-    // command, and it is the difference between stopping a turn and waiting out the launch.
     let error = launch
         .join()
         .expect("the parked call returns")
         .expect_err("a cancelled request must fail rather than answer");
     assert_eq!(error.code, "cancelled", "{}", error.message);
 
-    // And the session is usable straight afterwards: readiness came back with the request.
     assert_eq!(
         session.call("session.get_state", json!({}))["state"],
         "ready"
     );
 
-    // Cancelling the request did not stop the game it started, and a game spinning its main thread
-    // outlives the editor that launched it unless the editor kills it.
     session.call("runtime.stop", json!({}));
     session.await_stopped();
 }
@@ -1225,10 +1105,6 @@ fn the_addon_places_instances_of_a_saved_scene() {
         vec!["Brick1".to_owned(), "Brick2".to_owned()]
     );
 
-    // A path written the way the project spells it, which is what the tools tell the model to
-    // write. Godot answers `scene_file_path` as `res://…` however it was asked, so the read-back
-    // compared `brick.tscn` against `res://brick.tscn` and refused a scene it had just placed
-    // correctly — watched in a live turn building three coins.
     let bare = session.mutate(
         "node.instantiate",
         json!({"parent": "/level", "path": "brick.tscn", "name": "Brick3"}),
@@ -1251,14 +1127,11 @@ fn the_addon_places_instances_of_a_saved_scene() {
         3,
         "all three placements must be instances: {saved}"
     );
-    // A copy would write the brick's own children into this file. An instance does not, which is
-    // exactly what makes one edit to brick.tscn reach every placement of it.
     assert!(
         !saved.contains("parent=\"Brick1\""),
         "an instance must not write the source scene's children into the level: {saved}"
     );
 
-    // One undo takes back one placement, and the third brick was placed last.
     session.mutate("session.undo", json!({}));
     assert_eq!(
         child_names(&session.call("scene.get_tree", json!({}))),
@@ -1288,8 +1161,6 @@ fn the_addon_refuses_an_instance_that_would_contain_itself() {
     session.mutate("scene.save", json!({}));
     let current = session.revision();
 
-    // Straight into itself. Saved, this file could never be opened again: the loader recurses until
-    // it runs out of stack, and the failure lands on whoever opens it next.
     assert!(
         session
             .error(
@@ -1301,8 +1172,6 @@ fn the_addon_refuses_an_instance_that_would_contain_itself() {
         "a scene must not be instantiated inside itself"
     );
 
-    // The same trap one step further out: inner holds nothing, but outer holds inner, so putting
-    // outer inside inner would close the loop.
     session.open_scene("res://inner.tscn");
     let inner_revision = session.revision();
     assert!(
@@ -1384,11 +1253,6 @@ fn the_addon_refuses_wiring_that_would_never_fire() {
             .starts_with("signal_not_found"),
         "a signal the node cannot emit must be refused"
     );
-    // `Object.connect` takes a method the target does not have and says so only when the signal
-    // first fires — in the running game, as an error with no author.
-    // The root carries the script, so the refusal names what that script really declares. Two live
-    // turns were told only `\/Pickup has no method _on_body_entered to receive body_entered`, twice
-    // each, which is true and repairs nothing.
     let absent = session.error(
         "node.connect_signal",
         json!({"node": coin, "signal": "body_entered", "method": "_on_nothing"}),
@@ -1423,7 +1287,6 @@ fn the_addon_refuses_wiring_that_would_never_fire() {
             .starts_with("group_not_found"),
         "removing a group the node is not in must be refused"
     );
-    // A target with no script at all is the commonest reason there is no method, and says so.
     session.mutate(
         "node.create",
         json!({"parent": "/refused_wiring", "name": "Bare", "type": "Node2D"}),
@@ -1494,7 +1357,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
     {
         let session = Session::start_on_worktree(worktree.clone(), ledger.clone(), None);
 
-        // Typed reads: values cross the wire tagged, and restart-required settings are marked.
         let name = session.call(
             "project.get_setting",
             json!({"name": "application/config/name"}),
@@ -1520,13 +1382,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 >= search["settings"].as_array().expect("settings").len() as u64
         );
 
-        // A settings name is slashes and underscores and never a space, so a query matched as one
-        // substring makes every natural way of asking a guaranteed miss. One live turn asked for
-        // "line numbers", "split mode", "grid step", "filesystem split", "2d snap" and eight more,
-        // got nothing every time, and concluded two of the three things it wanted were not
-        // settings at all. Every word, in any order, is what a person means.
-        // A setting that does not exist points at the search that finds one. Two live turns met
-        // `setting_not_found` and had nothing to do with it but guess again.
         let absent = session.error(
             "project.get_setting",
             json!({"name": "physics/3d/.gravity"}),
@@ -1543,7 +1398,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 == "audio/general/text_to_speech",
             "a two-word query has to reach a name that holds both: {spoken}"
         );
-        // One word is still the substring match it always was, and order does not matter.
         let backwards = session.call(
             "project.search_settings",
             json!({"query": "speech general"}),
@@ -1561,7 +1415,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "every word has to be there: {missing}"
         );
 
-        // Set persists to project.godot immediately; reading it back proves the round trip.
         let set = session.call(
             "project.set_setting",
             json!({
@@ -1572,7 +1425,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         assert_eq!(set["saved"], true);
         assert_eq!(set["restartRequired"], false);
 
-        // A custom setting has no default, so resetting it removes it entirely.
         session.call(
             "project.set_setting",
             json!({"name": "gofer_acceptance/temporary", "value": {"type": "int", "value": 7}}),
@@ -1581,9 +1433,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "project.reset_setting",
             json!({"name": "gofer_acceptance/temporary"}),
         );
-        // `changed` and `previous` rather than `exists`: the field that used to be here was
-        // `has_setting`, true of everything Godot ships a default for, so it could not tell a
-        // reset that happened from one that had nothing to do.
         assert_eq!(reset["changed"], true, "{reset}");
         assert_eq!(
             reset["previous"],
@@ -1600,7 +1449,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("setting_not_found")
         );
 
-        // Settings with typed commands refuse the generic write path.
         assert!(
             session
                 .error(
@@ -1611,7 +1459,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("reserved_setting")
         );
 
-        // A setting the engine declared keeps the type it declared.
         assert!(
             session
                 .error(
@@ -1631,8 +1478,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "a refused write must leave the setting alone"
         );
 
-        // A packed array crosses the wire as a plain array and is rebuilt from the type the
-        // setting was declared with, so a value read out can be written straight back.
         let tags = session.call(
             "project.get_setting",
             json!({"name": "application/config/tags"}),
@@ -1666,14 +1511,12 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "a mistyped element must be refused, not coerced"
         );
 
-        // Search answers with settings only: the property list opens with a category header.
         let searched = session.call("project.search_settings", json!({"query": ""}));
         for entry in searched["settings"].as_array().expect("settings") {
             let name = entry["name"].as_str().expect("name");
             session.call("project.get_setting", json!({"name": name}));
         }
 
-        // Autoloads: Gofer's own is visible but protected; ordinary ones come and go.
         let autoloads = session.call("project.list_autoloads", json!({}));
         let managed = find_named(&autoloads, "autoloads", "GoferRuntime");
         assert_eq!(managed["goferManaged"], true);
@@ -1721,10 +1564,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("gofer_managed")
         );
 
-        // A setting written with dots where Godot uses slashes is a different setting, and the
-        // difference is invisible: it saves, it reads back, and the one that governs the project is
-        // untouched. A live agent set `application.run.main_scene`, was told `saved: true`, read its
-        // own value back to confirm it, and the game went on running the scene it always had.
         let mistyped = session.error(
             "project.set_setting",
             json!({
@@ -1738,7 +1577,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 && mistyped.contains("application/run/main_scene"),
             "a mistyped built-in must be refused by naming the one it meant: {mistyped}"
         );
-        // A custom setting is not a mistake, so it is still allowed — and says it made one.
         let invented = session.call(
             "project.set_setting",
             json!({"name": "acceptance/custom_knob", "value": {"type": "int", "value": 7}}),
@@ -1753,7 +1591,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "a setting that already existed was changed, not created"
         );
 
-        // Input Map: actions round-trip as typed events, built-ins are marked and protected.
         let action = session.call(
             "project.set_input_action",
             json!({"name": "acceptance_jump", "events": [{"kind": "key", "key": "Space"}]}),
@@ -1765,8 +1602,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             find_named(&actions, "actions", "acceptance_jump")["builtIn"],
             false
         );
-        // A built-in nobody has touched is named rather than written out. Godot registers 72 of
-        // them and four recorded live runs each read all 72, none of which the project had chosen.
         let untouched: Vec<&str> = actions["atEngineDefault"]
             .as_array()
             .unwrap_or_else(|| panic!("no atEngineDefault: {actions}"))
@@ -1779,7 +1614,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             find_named_or_none(&actions, "actions", "ui_accept").is_none(),
             "{actions}"
         );
-        // And naming it answers it in full, which is how its events are read.
         let asked = session.call(
             "project.list_input_actions",
             json!({"names": ["ui_accept", "acceptance_jump"]}),
@@ -1829,8 +1663,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("builtin_input_action")
         );
 
-        // A built-in action is rebound and then handed back: reset drops the override so the
-        // engine's own binding applies again, which is why project.godot must not keep it.
         session.call(
             "project.set_input_action",
             json!({"name": "ui_accept", "events": [{"kind": "key", "key": "F9"}]}),
@@ -1858,10 +1690,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
             "a custom action has no built-in binding to return to"
         );
 
-        // The key names the catalog advertises are held to the engine by `godot_api_drift`, which
-        // is its own gate: they can only break when the pinned Godot version moves.
-
-        // Plugins: the Gofer plugin reports itself and refuses to be disabled mid-session.
         let plugins = session.call("project.list_plugins", json!({}));
         let gofer = find_named(&plugins, "plugins", "gofer");
         assert_eq!(gofer["enabled"], true);
@@ -1885,8 +1713,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
                 .starts_with("plugin_not_found")
         );
 
-        // Editor settings are machine-wide, so the write path is exercised by setting a value back
-        // to itself: the developer's real settings file must not change under a test.
         let found = session.call("editor.search_settings", json!({"query": "font_size"}));
         let candidate = found["settings"]
             .as_array()
@@ -1903,12 +1729,9 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         );
         assert_eq!(written["machineWide"], true);
     }
-    // Dropping the session killed the editor and unstaged the addon.
 
-    // The write survived in project.godot while every Gofer-owned entry was removed.
     let saved =
         std::fs::read_to_string(worktree.join("project.godot")).expect("saved project.godot");
-    // Godot writes a dotted setting as a section plus a key, not as one literal line.
     assert!(
         saved.contains("[gofer_acceptance]") && saved.contains("persisted=\"survives-restart\""),
         "the setting must persist in project.godot:\n{saved}"
@@ -1930,7 +1753,6 @@ fn configuration_editors_persist_across_restarts_and_clean_up() {
         );
     }
 
-    // A fresh editor on the same worktree reads the value back.
     let restarted = Session::start_on_worktree(worktree, ledger, None);
     let persisted = restarted.call(
         "project.get_setting",
@@ -1981,8 +1803,6 @@ fn an_editor_setting_survives_the_editor_it_was_written_in() {
         let size = candidate["value"]["value"]
             .as_i64()
             .expect("an integer font size");
-        // A value the default settings cannot already hold, so reading it back proves the write
-        // rather than the default.
         let target = size + 7;
         let result = session.call(
             "editor.set_setting",
@@ -1990,8 +1810,6 @@ fn an_editor_setting_survives_the_editor_it_was_written_in() {
         );
         assert_eq!(result["value"], json!({"type": "int", "value": target}));
         assert_eq!(result["machineWide"], true);
-        // What `godot_session::stop` now does before it falls back to killing. Dropping the
-        // session instead is the kill, and the kill is what used to throw the setting away.
         session.quit_editor();
         (name, target)
     };
@@ -2057,8 +1875,6 @@ fn the_editor_takes_every_rule_gofer_enforces() {
             session.output()
         );
     }
-    // 1 is Embed Game. 2 also embeds and then floats the workspace back out of the editor, which is
-    // the opposite of what the rule is for.
     assert_eq!(
         reads_as(&mut session, GAME_EMBED_MODE, "editor.get_setting"),
         json!({"type": "int", "value": 1}),
@@ -2106,11 +1922,6 @@ fn the_addon_imports_every_asset_of_a_batch_rescan() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
-    // The directory is put into the editor's tree *before* any art is written into it, which is
-    // the state the live run was in and the only state in which a by-path rescan takes the
-    // `update_file` path at all. A directory the editor has never seen falls back to a project
-    // walk, and a project walk imports everything it finds — so a test that skips this step
-    // never reaches the code that broke.
     let assets = worktree.join("assets");
     std::fs::create_dir_all(&assets).expect("create the assets directory");
     std::fs::write(assets.join("gen.py"), "# generator\n").expect("write the generator");
@@ -2120,9 +1931,6 @@ fn the_addon_imports_every_asset_of_a_batch_rescan() {
         std::fs::write(assets.join(format!("{name}.png")), ATLAS).expect("write the atlas");
     }
 
-    // One batch, the way an agent sends them: the answers must not depend on how many are in it.
-    // They are staggered by a few milliseconds because that is how a batch really arrives — and
-    // because a request that lands *during* another one's import is the case that broke.
     let rpc = session.rpc();
     thread::scope(|scope| {
         for (index, name) in names.iter().enumerate() {
@@ -2144,8 +1952,6 @@ fn the_addon_imports_every_asset_of_a_batch_rescan() {
 
     assert_cuttable(&session, &assets_names(&names), "as separate calls");
 
-    // And the shape the command is now for: everything just written, named in one call. The
-    // engine's own `reimport_files` takes a list, and one call is the only way it imports one.
     let listed = ["brick", "pipe", "coin", "flag"];
     for name in listed {
         std::fs::write(assets.join(format!("{name}.png")), ATLAS).expect("write the atlas");
@@ -2214,9 +2020,6 @@ fn a_rescan_that_lands_during_an_import_still_imports_its_file() {
     std::fs::write(worktree.join("first.png"), ATLAS).expect("write the first atlas");
     std::fs::write(worktree.join("second.png"), ATLAS).expect("write the second atlas");
 
-    // The second rescan is sent while the first one's import is running, which is the whole point:
-    // sent together they are read in one frame and settled one after another, and the window this
-    // test is about never opens.
     let rpc = session.rpc();
     thread::scope(|scope| {
         scope.spawn(|| {
@@ -2271,15 +2074,11 @@ fn a_parked_project_walk_waits_for_its_own_scan() {
     let ledger = directory.path().join("ledger.json");
     let session = Session::start_on_worktree(worktree.clone(), ledger, Some(directory));
 
-    // A directory the editor has never walked, so only the project-wide form can register it, and
-    // enough art in it that the walk cannot be over in a frame.
     let art = worktree.join("art");
     std::fs::create_dir_all(&art).expect("create the art directory");
     for index in 0..24 {
         std::fs::write(art.join(format!("tile_{index}.png")), ATLAS).expect("write the atlas");
     }
-    // The file whose own rescan will emit `filesystem_changed` from its reimport while the walk
-    // is parked behind its scan.
     std::fs::write(worktree.join("beside.png"), ATLAS).expect("write the atlas beside it");
 
     let rpc = session.rpc();
@@ -2303,7 +2102,6 @@ fn a_parked_project_walk_waits_for_its_own_scan() {
         });
     });
 
-    // The walk has answered. Everything it was walking over must be loadable now.
     let refused: Vec<String> = (0..24)
         .filter_map(|index| {
             session
@@ -2356,8 +2154,6 @@ fn a_project_whose_main_scene_is_not_a_scene_still_becomes_ready() {
         );
     std::fs::write(&project, configured).expect("write the project");
     let ledger = directory.path().join("ledger.json");
-    // Starting the session is the assertion: it polls `session.get_state` until the addon answers
-    // ready, and gives up with the editor's output when it never does.
     let mut session = Session::start_on_worktree(worktree, ledger, Some(directory));
 
     let state = session.call("session.get_state", json!({}));
@@ -2368,7 +2164,6 @@ fn a_project_whose_main_scene_is_not_a_scene_still_becomes_ready() {
          {state}"
     );
 
-    // Ready has to mean usable, not just labelled: a mutation is what `not_ready` was refusing.
     let scene = "res://authored.tscn";
     session.mutate("scene.create", json!({"path": scene, "rootType": "Node2D"}));
     session.mutate(
@@ -2481,7 +2276,6 @@ fn the_dirty_flag_answers_for_the_editor_across_a_scene_switch() {
     session.open_scene(second);
     session.open_scene(first);
 
-    // The editor's own answer first: it is the fact the session's flag has to agree with.
     assert_eq!(
         unsaved_scenes(&mut session),
         vec![first.to_owned()],
@@ -2493,7 +2287,6 @@ fn the_dirty_flag_answers_for_the_editor_across_a_scene_switch() {
         "a scene the editor is still holding changes to must read as dirty: {state}"
     );
 
-    // And the agreement has to hold the other way, or the flag is merely stuck on.
     session.mutate("scene.save", json!({}));
     assert_eq!(
         unsaved_scenes(&mut session),
@@ -2572,17 +2365,6 @@ fn undo_answers_for_the_editors_history_across_a_scene_switch() {
     );
 }
 
-/*
- * A size written under a Control's own floor says which floor, and how to move it.
- *
- * `Control.size` is clamped to `get_combined_minimum_size()`, and a `Label`'s minimum is the text
- * in it. Measured here and in three shapes beside it: a `Panel`, a `ColorRect` and a `Panel` inside
- * a `VBoxContainer` all take (64, 64) exactly. So this is not a property that cannot be written —
- * it is one with a floor, and only a write under the floor is refused.
- *
- * Two live turns met it, in two different runs: a `Label` asked for (0, 0) and answered (1, 23),
- * and a body asked for (64, 64) and answered (80, 80).
- */
 #[test]
 fn a_size_under_a_controls_floor_says_which_floor() {
     let mut session = Session::start();
@@ -2616,7 +2398,6 @@ fn a_size_under_a_controls_floor_says_which_floor() {
         "the refusal must name the floor to move: {refused}"
     );
 
-    // A size the node will take is not refused at all, which is most of them.
     let held = session.mutate(
         "node.set_property",
         json!({
@@ -2628,7 +2409,6 @@ fn a_size_under_a_controls_floor_says_which_floor() {
     );
     assert_eq!(held["value"]["value"], json!([64.0, 64.0]));
 
-    // And a property that is not a size keeps the refusal it had.
     let elsewhere = session.error(
         "node.set_property",
         json!({
@@ -2639,10 +2419,6 @@ fn a_size_under_a_controls_floor_says_which_floor() {
         }),
         Some(session.revision()),
     );
-    // The size refusal's own sentence, and not the string `custom_minimum_size`, which the anchors
-    // refusal now names too — a Control a Container places is sized by the container, and that is
-    // one of the three things it says. What must not happen is `anchors_preset` being answered as
-    // though it were a size that had grown to its floor.
     assert!(
         !elsewhere.contains("held at its own minimum"),
         "{elsewhere}"
@@ -2650,15 +2426,6 @@ fn a_size_under_a_controls_floor_says_which_floor() {
     assert!(elsewhere.contains("layout_mode"), "{elsewhere}");
 }
 
-/*
- * The preset a child cannot take is one its `layout_mode` refuses, and a root takes it outright.
- *
- * A live UI turn sent nine properties across four Controls in one `set_properties`, and the same
- * `anchors_preset = 15` was accepted on the scene root and refused on the node under it. The
- * refusal said `anchors_preset` "is the editor inspector's own control and no scene stores it, so
- * this write can never take" — measured on children only, and untrue of both halves. This is the
- * measurement that says what the property actually does, so the sentence can.
- */
 #[test]
 fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
     let mut session = Session::start();
@@ -2668,8 +2435,6 @@ fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
         json!({"path": scene, "rootType": "Control"}),
     );
 
-    // The root takes it. Godot gives a Control with no Control parent `layout_mode` 3 —
-    // uncontrolled — and the preset applies there.
     let root = session.mutate(
         "node.set_property",
         json!({
@@ -2686,7 +2451,6 @@ fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
         json!({"scene": scene, "parent": "/anchorroot", "name": "Child", "type": "Panel"}),
     );
 
-    // The child does not, because it starts at `layout_mode` 0, position.
     let refused = session.error(
         "node.set_property",
         json!({
@@ -2702,8 +2466,6 @@ fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
         refused.contains("layout_mode"),
         "the refusal must name the one line that makes the same write take: {refused}"
     );
-    // And the other way onward is still named, because a caller wanting one edge rather than a
-    // preset needs those four anyway.
     for named in ["anchor_left", "anchor_top", "anchor_right", "anchor_bottom"] {
         assert!(refused.contains(named), "{refused}");
     }
@@ -2712,7 +2474,6 @@ fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
         "the write can take, and a caller told otherwise stops looking: {refused}"
     );
 
-    // On anchors, the same write takes.
     session.mutate(
         "node.set_property",
         json!({
@@ -2733,8 +2494,6 @@ fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
     );
     assert_eq!(taken["value"]["value"], json!(15));
 
-    // And a scene does store it — both of them — which is the other half of what the sentence used
-    // to claim.
     session.mutate("scene.save", json!({}));
     let saved =
         std::fs::read_to_string(session.worktree.join("anchorroot.tscn")).expect("saved scene");
@@ -2745,16 +2504,6 @@ fn the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed() {
     );
 }
 
-/*
- * Creating a scene where the project's own starting scene already is.
- *
- * `scene.create` has always refused a path that already holds a scene. Watched four times across
- * four live turns, and three of the four named `res://main.tscn` — an arena, a shooter and a 3D
- * scene, each building the game the project starts with and reaching for the path it starts at.
- * Neither way onward the refusal offered was what they wanted: opening it keeps the old scene, and
- * `save_as` writes whatever is being edited, which is that same old scene until something else is
- * made first.
- */
 #[test]
 fn creating_over_the_projects_main_scene_names_the_setting_that_moves_it() {
     let mut session = Session::start();
@@ -2779,8 +2528,6 @@ fn creating_over_the_projects_main_scene_names_the_setting_that_moves_it() {
         "the way onward the turns actually wanted has to be named: {refused}"
     );
 
-    // Another path that happens to exist is the plain refusal, or every collision grows a
-    // paragraph about a setting it has nothing to do with.
     let elsewhere = "res://elsewhere.tscn";
     session.mutate(
         "scene.create",
@@ -2795,19 +2542,6 @@ fn creating_over_the_projects_main_scene_names_the_setting_that_moves_it() {
     assert!(!plain.contains("main_scene"), "{plain}");
 }
 
-/*
- * The Control a Container places, which is the case `layout_mode` cannot reach.
- *
- * `the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed` measured a child of a plain
- * `Control`, and the sentence it produced said "set `layout_mode` to 1 first and the same write
- * takes". Inside a `Container` that is false — and it is the same over-generalisation that sentence
- * was written to replace, measured on one shape and told to every caller. Measured here on the
- * other shape, from a fresh node with nothing set first:
- *
- * * `anchors_preset = 15` reads back 0.
- * * `layout_mode = 1` reads back **2**: the container holds it.
- * * `size_flags_horizontal` is what the container actually reads, and it takes.
- */
 #[test]
 fn a_control_a_container_places_is_held_at_the_layout_mode_it_has() {
     let mut session = Session::start();
@@ -2844,7 +2578,6 @@ fn a_control_a_container_places_is_held_at_the_layout_mode_it_has() {
         "a caller a container is placing needs the container's own sizing: {refused}"
     );
 
-    // And the mode the sentence sends a *Control's* child after is one this node cannot have.
     let held = session.error(
         "node.set_property",
         inside("layout_mode", 1),
@@ -2852,25 +2585,10 @@ fn a_control_a_container_places_is_held_at_the_layout_mode_it_has() {
     );
     assert!(held.contains("Godot holds 2"), "{held}");
 
-    // What the container does read.
     let sized = session.mutate("node.set_property", inside("size_flags_horizontal", 3));
     assert_eq!(sized["value"]["value"], json!(3));
 }
 
-/*
- * A scene path written where a node type belongs, on all three calls that take one.
- *
- * `ClassDB.instantiate("res://pickup.tscn")` answers null like any unknown class, and the refusal
- * said only "Could not instantiate res://pickup.tscn". A live turn asked for a scene inheritance
- * chain, wrote that, was told that, wrote it again at another path, reached for
- * `bash godot --headless --script` — refused by the workspace rule — and then asked the user to let
- * it enable an editor plugin. Four calls and a question, against a refusal that named nothing to do
- * next.
- *
- * The sentence is decided in `params.gd` and proven from source in a second by
- * `fixtures/godot-project/tests`. What this holds is that all three call sites carry it, on a real
- * editor, which source cannot say.
- */
 #[test]
 fn a_scene_path_written_as_a_node_type_is_told_what_a_type_is() {
     let mut session = Session::start();
@@ -2907,11 +2625,9 @@ fn a_scene_path_written_as_a_node_type_is_told_what_a_type_is() {
             refused.contains("class name") && refused.contains("node.instantiate"),
             "every call that takes a type must say what a type is: {refused}"
         );
-        // The third clause, and it is the one that stops the next call being the same call.
         assert!(refused.contains("inherit"), "{refused}");
     }
 
-    // A class name nobody has is still the short refusal, or every typo grows a paragraph.
     let typo = session.error(
         "node.create",
         json!({"scene": scene, "parent": "/typed", "name": "Oops", "type": "Contrl"}),
@@ -2921,20 +2637,6 @@ fn a_scene_path_written_as_a_node_type_is_told_what_a_type_is() {
     assert!(!typo.contains("node.instantiate"), "{typo}");
 }
 
-/*
- * A full-screen panel: the refusal names the four properties that do the job, and they do it.
- *
- * The commonest thing anyone asks a `Control` for, and `anchors_preset` is the property every model
- * reaches for to get one — four live UI turns. On a child at its default `layout_mode` the write
- * reads back 0 and the anchors under it do not move, in every shape measured: a `Panel` under a
- * `Control`, a `VBoxContainer`, a `Panel` inside one, and a preset out of range.
- *
- * *Why* it does not take is
- * `the_preset_a_child_refuses_is_one_its_layout_mode_has_not_allowed`, above, and it is not what
- * this test used to say in its name. What this one holds is the other way onward: the four anchors
- * the refusal names, working on their own, which is what a caller wanting one edge rather than a
- * preset needs anyway.
- */
 #[test]
 fn the_anchors_a_refused_preset_names_do_the_job_it_wanted() {
     let mut session = Session::start();
@@ -2976,7 +2678,6 @@ fn the_anchors_a_refused_preset_names_do_the_job_it_wanted() {
         );
     }
 
-    // And what it names works, which is the half that makes the sentence worth reading.
     let at = |name: &str, value: f64| {
         json!({
             "node": "/anchors/Target",
@@ -3013,7 +2714,6 @@ fn the_anchors_a_refused_preset_names_do_the_job_it_wanted() {
     assert_eq!(value_of("anchor_right"), json!(1.0));
     assert_eq!(value_of("anchor_bottom"), json!(1.0));
 
-    // An ordinary refusal is unchanged: only the property that cannot be written gains a sentence.
     let ordinary = session.error(
         "node.set_property",
         json!({
@@ -3067,7 +2767,6 @@ fn a_number_outside_an_enums_range_is_told_the_numbers_inside_it() {
         );
     }
 
-    // And the number it names takes, which is what makes the list worth reading.
     session.mutate(
         "node.set_property",
         json!({
@@ -3078,8 +2777,6 @@ fn a_number_outside_an_enums_range_is_told_the_numbers_inside_it() {
         }),
     );
 
-    // A flags property publishes its names the same way and is not an enum: any combination of the
-    // bits is legal, so nothing here lists them.
     session.mutate(
         "node.set_property",
         json!({
@@ -3124,7 +2821,6 @@ fn the_layout_mode_a_control_is_held_at_is_the_one_its_parent_gives_it() {
 
     let anchors = json!({"type": "int", "value": 1});
 
-    // The root: no Control parent, so the engine keeps it uncontrolled and drops the write.
     let refused = session.error(
         "node.set_property",
         json!({"scene": scene, "node": "/layout", "property": "layout_mode", "value": anchors}),
@@ -3135,7 +2831,6 @@ fn the_layout_mode_a_control_is_held_at_is_the_one_its_parent_gives_it() {
         "a root Control is held at 3 and the refusal must say what moves it: {refused}"
     );
 
-    // Inside a Container: the container places it, and the refusal names how to size one there.
     let placed = session.error(
         "node.set_property",
         json!({
@@ -3151,7 +2846,6 @@ fn the_layout_mode_a_control_is_held_at_is_the_one_its_parent_gives_it() {
         "a Control a container places is sized by flags, not by anchors: {placed}"
     );
 
-    // Under a plain Control: the one shape that takes the write the other two are refused.
     session.mutate(
         "node.set_property",
         json!({
@@ -3208,7 +2902,6 @@ fn a_path_that_stops_matching_names_what_it_reached_and_what_is_under_it() {
         );
     }
 
-    // A node with nothing under it says so, rather than listing nothing.
     let leaf = session.error(
         "node.inspect",
         json!({"scene": scene, "node": "/missing/PauseMenu/Title/Icon"}),
@@ -3219,8 +2912,6 @@ fn a_path_that_stops_matching_names_what_it_reached_and_what_is_under_it() {
         "a leaf is named as a leaf: {leaf}"
     );
 
-    // And a path under the wrong tree keeps the sentence that repairs it, with no list of children
-    // buried under it.
     let elsewhere = session.error(
         "node.inspect",
         json!({"scene": scene, "node": "/root"}),
@@ -3277,8 +2968,6 @@ fn an_instance_keeps_the_properties_set_on_it_over_the_scene_it_came_from() {
     );
     session.mutate("scene.save", json!({}));
 
-    // Reopened from disk: the override is the instancing scene's, and the scene it came from is
-    // untouched.
     session.call("scene.open", json!({"path": holder}));
     let held = session.call(
         "node.inspect",
@@ -3335,7 +3024,6 @@ fn a_value_under_the_wrong_tag_is_told_the_tag_the_property_takes() {
         );
     }
 
-    // And what it names takes, with the same text the caller already wrote.
     session.mutate(
         "node.set_property",
         json!({
@@ -3377,8 +3065,6 @@ fn a_node_named_outside_ascii_survives_the_round_trip() {
         assert_eq!(read["path"], format!("/Unicode/{named}"), "{read}");
     }
 
-    // Saved and reopened from disk, because a name that only survives in memory is one the next
-    // session reads back broken out of the `.tscn`.
     session.mutate("scene.save", json!({}));
     session.call("scene.open", json!({"path": scene}));
     for named in ["Münze", "Монета", "コイン", "Pièce"] {
@@ -3389,7 +3075,6 @@ fn a_node_named_outside_ascii_survives_the_round_trip() {
         assert_eq!(read["name"], named, "after a save and a reopen: {read}");
     }
 
-    // And the tree answers the same names, which is the path a caller copies back.
     let tree = session.call("scene.get_tree", json!({}));
     let listed = serde_json::to_string(&tree).expect("the tree as text");
     for named in ["Münze", "Монета", "コイン", "Pièce"] {
@@ -3437,7 +3122,6 @@ fn the_text_and_settings_outside_ascii_come_back_the_way_they_went_in() {
         "the text a player reads must survive the round trip: {read}"
     );
 
-    // A group is a name the caller invents, and it comes back in every tree.
     session.mutate(
         "node.add_to_group",
         json!({"node": "/Beschriftung/Titel", "group": "Münzanzeige"}),
@@ -3448,7 +3132,6 @@ fn the_text_and_settings_outside_ascii_come_back_the_way_they_went_in() {
     );
     assert_eq!(grouped["groups"][0], "Münzanzeige", "{grouped}");
 
-    // And the project's own title, which is what a window is called.
     session.call(
         "project.set_setting",
         json!({

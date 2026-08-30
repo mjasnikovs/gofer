@@ -51,10 +51,8 @@ import type {
 import {flattenAnnotations, loadImage, paintAnnotations} from '../../services/annotation-canvas'
 import type {DraftAttachment} from '../../models/chat'
 
-/** Picking a shape up is a fifth mode, not a fifth shape, so it lives beside the tools not in them. */
 type ScratchpadMode = 'select' | AnnotationTool | 'brush'
 
-/** The brush and the eraser are round and sized in pixels; every other tool takes the line widths. */
 const ROUND_MODES: readonly ScratchpadMode[] = ['brush', 'erase']
 
 type ImageScratchpadProps = Readonly<{
@@ -67,22 +65,14 @@ const CANVAS_STYLE = {
     maxWidth: '100%',
     height: 'auto',
     display: 'block',
-    // Centred rather than stretched: the column would blow a small picture up and blur it.
     alignSelf: 'center',
-    // Without this the webview claims a drag as a scroll and the stroke stops halfway.
     touchAction: 'none'
 } as const
 
-/** The canvas is the anchor for the label being typed, which floats over it in place. */
 const CANVAS_ANCHOR_STYLE = {position: 'relative', alignSelf: 'center', maxWidth: '100%'} as const
 
-/** Matches the halo `annotation-canvas` strokes under painted text, so typing looks like the result. */
 const LABEL_HALO = '0 0 3px rgba(0, 0, 0, 0.9), 0 0 3px rgba(0, 0, 0, 0.9)'
 
-/**
- * Puts the input where the text will land: `at` is the baseline the canvas paints from, so the box
- * starts one text height above it, and everything scales with the picture on screen.
- */
 function labelStyle(shape: TextShape, scale: number): CSSProperties {
     const size = textSize(shape.width) * scale
     return {
@@ -103,7 +93,6 @@ function labelStyle(shape: TextShape, scale: number): CSSProperties {
     }
 }
 
-/** The pointer says which tool is armed, so the toolbar is not the only place holding that answer. */
 const MODE_CURSOR: Record<ScratchpadMode, string> = {
     select: 'default',
     pen: 'crosshair',
@@ -114,15 +103,8 @@ const MODE_CURSOR: Record<ScratchpadMode, string> = {
     text: 'text'
 }
 
-/** A pointer bigger than this is refused by the browser and the tool silently loses its cursor. */
 const CURSOR_LIMIT = 120
 
-/**
- * A ring the size of the mark the tool is about to make, drawn at the pointer.
- *
- * A round tool with no ring is guesswork: the toolbar says 40 pixels, and only the first stroke
- * says what 40 pixels covers on this picture at this zoom.
- */
 function roundCursor(diameter: number, color: string): string {
     const size = Math.min(Math.max(diameter, 6), CURSOR_LIMIT)
     const edge = size + 4
@@ -197,7 +179,6 @@ const TOOL_HINT: Record<ScratchpadMode, string> = Object.fromEntries(
 
 const WIDTH_LABELS = ['Thin', 'Medium', 'Thick'] as const
 
-/** A filled dot in the ink it stands for. Astryx colours from tokens, and these are not tokens. */
 function swatchIcon(color: string): ComponentType<SVGProps<SVGSVGElement>> {
     return function Swatch(props: SVGProps<SVGSVGElement>) {
         return (
@@ -224,33 +205,21 @@ const SWATCHES = ANNOTATION_COLORS.map((color, index) => ({
     icon: swatchIcon(color)
 }))
 
-/**
- * Draws over one attached image before it is sent.
- *
- * A screenshot is attached to ask about something on it, and saying which part in words is the slow
- * way round. The strokes are kept with the attachment rather than burnt in: saving writes the flat
- * PNG the model reads, and reopening rebuilds from the original picture and the shapes, so an edit
- * can be undone the next day as easily as the same minute.
- */
 export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadProps) {
     const source = attachment.annotation?.src ?? attachment.previewUrl
     const [mode, setMode] = useState<ScratchpadMode>('pen')
     const [color, setColor] = useState<string>(ANNOTATION_COLORS[0])
     const [width, setWidth] = useState<number>(ANNOTATION_WIDTHS[1])
-    /** The round tools keep their own size: switching to the brush must not fatten the pen. */
     const [roundWidth, setRoundWidth] = useState<number>(ROUND_SIZES.initial)
     const [history, setHistory] = useState<AnnotationHistory>(() => ({
         ...EMPTY_HISTORY,
         shapes: attachment.annotation?.shapes ?? []
     }))
-    /** The shape being dragged out right now, and the list being dragged around right now. */
     const [drafting, setDrafting] = useState<AnnotationShape>()
     const [moving, setMoving] = useState<readonly AnnotationShape[]>()
     const [labelling, setLabelling] = useState<TextShape>()
     const [selectedId, setSelectedId] = useState<string>()
-    /** True while the pointer sits over a shape in select mode, so the cursor can say "grab me". */
     const [hovered, setHovered] = useState(false)
-    /** Displayed pixels per image pixel. The label floats in image coordinates, the input in CSS ones. */
     const [scale, setScale] = useState(1)
     const [image, setImage] = useState<HTMLImageElement>()
     const [isSaving, setIsSaving] = useState(false)
@@ -260,14 +229,11 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
 
     const isRound = ROUND_MODES.includes(mode)
     const drawWidth = isRound ? roundWidth : width
-    // The round cursor is an SVG built and URL-encoded per call. In the render return that was once
-    // per pointer frame, because a stroke in progress sets state on every move.
     const brushCursor = useMemo(
         () => (isRound ? roundCursor(drawWidth * scale, color) : undefined),
         [color, drawWidth, isRound, scale]
     )
     const shapes = moving ?? history.shapes
-    // Memoised because it is what the redraw watches: a fresh array per render repaints per render.
     const painted = useMemo(
         () =>
             [...shapes, drafting].filter((shape): shape is AnnotationShape => shape !== undefined),
@@ -314,7 +280,6 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
         setHistory(current => commitShapes(current, next))
     }
 
-    /** Ends the label being typed: an empty one is dropped rather than left as an invisible shape. */
     const finishLabel = () => {
         if (!labelling) return
         if (!isDegenerate(labelling)) commit([...shapes, labelling])
@@ -323,7 +288,6 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
 
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
-            // A label is typed into a real input, where every one of these keys means itself.
             if (event.target instanceof HTMLInputElement) return
             if ((event.key === 'Delete' || event.key === 'Backspace') && selectedId) {
                 event.preventDefault()
@@ -364,7 +328,6 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
             return
         }
         setSelectedId(undefined)
-        // The brush is a fat pen: same stroke, its own size, so nothing downstream has to know.
         const tool: AnnotationTool = mode === 'brush' ? 'pen' : mode
         const started = startShape(tool, crypto.randomUUID(), {color, width: drawWidth}, point)
         if (started.kind === 'text') setLabelling(started)
@@ -592,7 +555,6 @@ export function ImageScratchpad({attachment, onSave, onClose}: ImageScratchpadPr
                             height={image?.naturalHeight ?? 0}
                             aria-label={`Drawing surface for ${attachment.name}`}
                             role='img'
-                            // Focusable so the scrolling region it sits in can be reached by keyboard.
                             tabIndex={0}
                             style={{
                                 ...CANVAS_STYLE,

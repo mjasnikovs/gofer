@@ -11,7 +11,6 @@ import {createManualScheduler, setScheduler, timerScheduler} from '../../service
 
 const tauri = createDesktopFake()
 
-/** The report an empty folder produces: no repository, no project, and a fix for each. */
 const emptyFolder: HealthReport = {
     workspace: '/home/dev/game',
     workspaceSource: 'working-directory',
@@ -64,7 +63,6 @@ const readyWorkspace: HealthReport = {
     ]
 }
 
-/** The "this is taking a while" delay, held until a test says the check has been slow. */
 let clock = createManualScheduler()
 
 beforeEach(() => {
@@ -89,17 +87,10 @@ describe('HealthGate', () => {
         await flush()
 
         expect(onReady).toHaveBeenCalled()
-        // A healthy workspace must not flash a checklist on the way past.
         expect(container).toBeEmptyDOMElement()
     })
 
-    /*
-     * The delay is a real 400 ms in the application. Driven here rather than waited out: the
-     * assertion is about what a slow check shows, not about how long the machine took to notice.
-     */
     it('says the check is running once it has taken a while', async () => {
-        // Never answered: the assertion is about what a slow check shows, and this is the check
-        // still running.
         installBackend(tauri, {
             answers: {check_workspace_health: () => new Promise(() => undefined)}
         })
@@ -135,8 +126,6 @@ describe('HealthGate', () => {
     it('applies a fix and continues once the last blocker is gone', async () => {
         const user = userEvent.setup()
         const onReady = vi.fn()
-        // `git init` is what both blockers were waiting on, so the report the fix answers with is
-        // a project with nothing wrong left in it.
         const server = installBackend(tauri, {
             health: emptyFolder,
             answers: {
@@ -181,8 +170,6 @@ describe('HealthGate', () => {
             answers: {
                 'plugin:dialog|open': () => '/home/dev/other',
                 apply_health_remedy: ({request}) => {
-                    // The folder the picker answered with is the whole point of this remedy, so
-                    // the fake only opens the project when it was carried through.
                     if (request.path === '/home/dev/other') server.state.health = readyWorkspace
                     return server.state.health
                 }

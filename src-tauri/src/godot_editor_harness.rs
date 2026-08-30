@@ -473,18 +473,11 @@ impl<'a> Launch<'a> {
             ));
         }
 
-        // A debugger port of this editor's own, because the one Godot ships with is shared. The
-        // addon applies it, and the reason is written where it is read.
         environment.push((
             OsString::from("GOFER_DEBUG_PORT"),
             OsString::from(debug_port().to_string()),
         ));
 
-        // Every editor gets a throwaway config home, because `editor.set_setting` writes to the
-        // machine-wide EditorSettings the developer running this suite uses for their own work. A
-        // test that set one and did not put it back would silently change their editor. The
-        // engine has no flag for this; the XDG variables are what it reads on Linux, and on the
-        // other platforms this is a no-op the acceptance suites do not run on.
         let owned = self.config_home.is_none();
         let temporary = owned.then(|| TempDir::new().expect("temporary editor config home"));
         let home = self
@@ -505,8 +498,6 @@ impl<'a> Launch<'a> {
             godot_session::clear_logs();
         }
 
-        // Both of the editor's streams are pipes. An unread pipe fills and stalls the editor long
-        // before the addon loads, so they are drained into one buffer that a failure can quote.
         let output = Arc::new(Mutex::new(String::new()));
         for (stream, source) in [
             (child.take_stdout(), LogSource::Editor),
@@ -578,9 +569,6 @@ pub(crate) struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // The binding goes first. Anything still reaching this editor through `godot_session` —
-        // the language server, the debug adapter, the addon — would otherwise be pointed at
-        // transports that are being torn down underneath it.
         self.bound.take();
         self.rpc.stop();
         let _ = self.stager.unstage(&self.worktree);
@@ -658,8 +646,6 @@ impl Session {
             revision: 0,
         };
         session.await_ready();
-        // Bound after the addon answers as ready, so nothing can reach this editor through
-        // `godot_session` while it is still importing the project.
         if transports.bind_editor {
             session.bound = Some(BoundEditor::with_rpc(
                 transports.lsp_port.unwrap_or_default(),
@@ -704,8 +690,6 @@ impl Session {
     /// Polls until the addon answers as ready. The editor imports the project and enables plugins
     /// before the addon connects, so early probes are expected to fail and use a short timeout.
     fn await_ready(&self) {
-        // Asked twice as often as a transport that is still listening for a socket: this probe
-        // carries its own short timeout, so the wait is the sleep rather than the call.
         retry_until(
             "the addon never reported a ready session",
             || self.editor.output(),
@@ -819,9 +803,6 @@ impl Session {
         let revision = response
             .revision
             .unwrap_or_else(|| panic!("{command} answered without a revision"));
-        // A scene switch rebases rather than advances: the addon answers it with revision 0 and
-        // every mutation after it counts from there, because a different scene is a different
-        // baseline. Only work done *inside* one scene has to move forward.
         assert!(
             revision >= expected || SCENE_SWITCHES.contains(&command),
             "{command} moved the revision backwards: {expected} -> {revision}"
@@ -837,10 +818,6 @@ impl Session {
         let expected = self.revision;
         let response = self
             .rpc
-            // The id used to be `acceptance-try-{revision}-{command}`, which a sweep of failed
-            // mutations at one revision repeats — and a repeated id could hand one call's reply to
-            // a different waiter, because a timed-out call leaves its pending entry behind. The
-            // session mints it now, so the spelling is not this harness's to get wrong.
             .call(
                 CallRequest::new(command, params)
                     .expecting(Some(expected))

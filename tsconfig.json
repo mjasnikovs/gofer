@@ -10,11 +10,6 @@
         "resolveJsonModule": true,
         "isolatedModules": true,
         "noEmit": true,
-        // Three full type-checks of the same 195 files happen in one `npm run check`: `typecheck`
-        // runs one, `build:renderer` runs another, and eslint's project service builds the program
-        // a third time. Only the first of those has to be cold. The build info lives beside the
-        // other caches under `node_modules`, which is already ignored and already thrown away by
-        // the one command that should invalidate it.
         "incremental": true,
         "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
         "jsx": "react-jsx",

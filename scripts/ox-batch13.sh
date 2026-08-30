@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Verification batch for the two fixes in 3dc3245, plus one new-territory task.
-#
-#   y01  iteration 14 — a scene built from nothing, which is where `godot_scene create` lands in
-#        the turn's largest batch, and where `name`/`type` were written for `rootName`/`rootType`
-#   y02  iteration 13 — an AnimationPlayer's default library is keyed with the empty string, the
-#        dictionary shape whose refusal used to stop mid-sentence
-#   y03  new territory — a Camera2D that follows with limits, never asked before
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p logs/oxloop

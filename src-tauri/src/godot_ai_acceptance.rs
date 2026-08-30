@@ -73,9 +73,6 @@ fn worktree_with_probes(directory: &TempDir) -> PathBuf {
     std::fs::write(scripts.join("main_probe.gd"), PROBE_SCRIPT).expect("write the probe script");
     std::fs::write(scripts.join("broken.gd"), BROKEN_SCRIPT).expect("write the broken script");
     std::fs::write(worktree.join("main.tscn"), PROBE_SCENE).expect("write the probe scene");
-    // Written before the editor starts so its first import scan picks the texture up; the turn
-    // still asks for a rescan, because that is the operation a real agent has to reach for after
-    // it puts an asset in the worktree itself.
     std::fs::write(worktree.join("tiles.png"), ATLAS).expect("write the atlas");
     worktree
 }
@@ -166,11 +163,6 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             "godot_scene",
             json!({"op": "open", "params": {"path": SCENE_PATH}}),
         ),
-        // No `expectedRevision`, on purpose, and this is the mutation that proves it: the router
-        // holds the revision step 0's open answered with and supplies it. The parameter is hidden
-        // from the signature, so a model that copies numbers out of answers is a model doing work
-        // it was never meant to do — a measured turn spent a refusal and a whole second
-        // `scene.get_tree`, 28,067 tokens, reading one back.
         1 => tool(
             "godot_node",
             json!({"op": "create", "params": {
@@ -181,8 +173,6 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             }}),
         ),
         2 => tool("godot_scene", json!({"op": "get_tree", "params": {}})),
-        // This one passes its own, because a caller that holds a revision must still be obeyed
-        // rather than overruled by the record — the same contract `expectedHash` has.
         3 => tool(
             "godot_scene",
             json!({"op": "save", "params": {"expectedRevision": result(1)["revision"]}}),
@@ -195,9 +185,6 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             "godot_script",
             json!({"op": "diagnostics", "params": {"path": BROKEN_PATH, "timeoutMs": 30000}}),
         ),
-        // No `expectedHash`, on purpose. The router holds the hash step 4's open answered with and
-        // supplies it, so the model never copies sixty-four hex characters — the slip that cost a
-        // live run its script. A save over a file this turn has not read is still refused.
         6 => tool(
             "godot_script",
             json!({"op": "save", "params": {"path": BROKEN_PATH, "text": FIXED_SCRIPT}}),
@@ -228,30 +215,6 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
                 "variablesReference": result(11)["scopes"][0]["variablesReference"],
             }}),
         ),
-        // Disarming the breakpoint is part of finishing with the debugger, not tidiness. The
-        // editor holds breakpoints, not the session, so it hands them to the next game it plays —
-        // and the next game here is the one this turn wants a photograph of. Left armed, it stops
-        // on its first `_process` and renders nothing more, and the capture below waits out its
-        // whole twenty seconds against a game that is paused rather than slow. Measured: the
-        // second game's `breaked` arrived every run, and the capture beat it about two runs in
-        // three.
-        //
-        // Both halves run **before** the terminate, and on the halted game rather than after it.
-        // This used to terminate first and then ask for no breakpoints, and the second order is
-        // the one every nightly Windows run and most macOS runs died on: `run` answered with its
-        // launch frame, the `capture` after it spent all twenty seconds, and the turn failed on
-        // "a captured frame must be a PNG". Linux never saw it — with the disarm replaced by a
-        // no-op the turn still passed three times out of three there, so the clear was not what
-        // was keeping it green, the machine was. `godot_journey_acceptance` has always asked in
-        // this order, and its own windowed game captures twice on the same Windows runner that
-        // fails this one, which is what says the game is halted rather than the window unable to
-        // draw. Clearing a breakpoint is a live-session operation; a game that is going anyway
-        // still has to be let go of first.
-        //
-        // Three calls, not one list of three. `godot_debug.continue` is `Sharing::Exclusive`, so
-        // the router refuses the whole call the moment it appears beside anything else — which is
-        // how the first attempt at this reorder shipped a turn 13 that was a `must_be_alone`
-        // refusal and cleared nothing, invisibly, because Linux passes either way.
         13 => tool(
             "godot_debug",
             json!({"op": "set_breakpoints", "params": {"path": PROBE_PATH, "lines": []}}),
@@ -265,11 +228,6 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             "godot_logs",
             json!({"op": "read", "params": {"limit": 200}}),
         ),
-        // The three domains the turn used to skip. `godot_project` is not a pass-through — the
-        // router rewrites its three editor-settings operations into the addon's `editor.` domain —
-        // and `godot_resource`'s list, move and delete are answered by the desktop out of the
-        // workspace rather than by the addon at all. Both were only ever checked by a test that
-        // reads strings.
         20 => tool("godot_resource", json!({"op": "rescan", "params": {}})),
         21 => tool("godot_project", json!({"op": "get_settings", "params": {}})),
         22 => tool(
@@ -293,10 +251,6 @@ fn next_turn(index: usize, results: &[Value]) -> ModelTurn {
             "godot_resource",
             json!({"op": "describe_tileset", "params": {"path": TILESET_PATH}}),
         ),
-        // The list itself, against the real editor: two inspections of the scene this turn built,
-        // in one call rather than two. Everything above is one operation per call because each
-        // needs the answer before it; nothing above would catch a list that only works in a unit
-        // test.
         26 => tools(
             "godot_node",
             &[
@@ -455,17 +409,11 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     let transcript = Arc::new(Mutex::new(Transcript::default()));
     let base_url = start_model(Arc::clone(&transcript));
     let app = mock_app();
-    // `godot_resource`'s own operations are answered out of the workspace rather than by the
-    // addon, and the workspace comes from project storage. It lives outside the worktree so that
-    // listing the worktree lists the project and nothing of Gofer's.
     let data = TempDir::new().expect("temporary application data");
     let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
         .expect("open project storage");
     app.manage(crate::storage::StorageSlot::new(Ok(storage)));
 
-    // Every declared tool is probed before the turn starts, and the documentation tool's probe
-    // reads the machine: the sidecar script and the model cache. Both are pointed at fixtures, for
-    // the same reason the tool is otherwise absent from this suite.
     let docs_cache = data.path().join("rag-cache");
     crate::rag::stage_probe_cache(&docs_cache).expect("stage the documentation model cache");
     // SAFETY: the acceptance runner gives each test its own process.
@@ -481,19 +429,9 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         );
     }
 
-    // The turn's stream. Nothing reads it here — the assertions are about what the tools did, not
-    // what the renderer was told — but the worker writes to it, so it has to exist.
     let stream = tauri::ipc::Channel::new(|_| Ok(()));
-    // The real turn, not a re-enactment of one: it opens the approval gate the gated tools need
-    // and puts every one of the turn's process-wide values back when this function returns.
     let turn = crate::ai_turn::AiTurn::begin(1, stream).expect("no other AI turn is running");
 
-    // The context the application builds, from the same function. What the suite chooses for
-    // itself is where the model is, that none of this machine's credentials are sent, and which
-    // checkout its editor is bound to; the catalogue, the agent prompt Gofer ships and the session
-    // line are composed the way a turn in the application composes them. Built by hand here, this
-    // suite was the only caller that ever left the prompt unset — so the one path it exercised was
-    // a path nothing in the application took.
     let context = JobContext::for_suite(
         app.handle(),
         AiSettings::served_by(
@@ -547,8 +485,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("every tool call is answered")
     );
 
-    // The scene edit: created through the addon's undo stack, visible in the edited tree, and on
-    // disk only after the explicit save.
     assert_eq!(results[0]["scene"], SCENE_PATH);
     assert_eq!(
         results[1]["revision"],
@@ -568,8 +504,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     let saved = std::fs::read_to_string(session.worktree.join("main.tscn")).expect("read scene");
     assert!(saved.contains("AiMarker"), "{saved}");
 
-    // The diagnostic: reported for the broken text, gone once the agent wrote the fix through the
-    // workspace transaction. `published` separates a clean file from an unanswered question.
     assert_eq!(results[4]["text"], BROKEN_SCRIPT);
     assert_eq!(results[5]["published"], true, "{}", quote("diagnostics"));
     assert!(
@@ -591,11 +525,8 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         FIXED_SCRIPT
     );
 
-    // The debug loop: the breakpoint verified with the launch, the stop, the two-frame stack, and
-    // the `_tick` argument read out of the Locals scope.
     assert_eq!(results[8]["breakpoints"][0]["verified"], true);
     assert_eq!(results[8]["breakpoints"][0]["path"], PROBE_PATH);
-    // The declaration the turn asked for became the statement under it, and the answer says so.
     assert_eq!(
         results[8]["breakpoints"][0]["line"],
         BREAK_LINE,
@@ -629,11 +560,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         .unwrap_or_else(|| panic!("{}", quote("the _tick argument must be a local")));
     assert_eq!(amount["value"], "1");
 
-    // The disarm and the resume are read back rather than assumed, and this is the assertion the
-    // first attempt at this ordering did not have. Sent as one list of two, both were refused
-    // together as `must_be_alone` and the turn still went green here — Linux answers the capture
-    // before the break lands whether or not the breakpoint was ever cleared, so a refusal on the
-    // two calls that exist to clear it is invisible on the only platform that runs them by hand.
     assert_eq!(
         results[13]["breakpoints"].as_array().map(Vec::len),
         Some(0),
@@ -647,7 +573,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("the halted game must be let go before it is terminated")
     );
 
-    // The capture: a real PNG frame from the running game, both times.
     for position in [16, 17] {
         assert_eq!(
             results[position]["frame"]["encoding"],
@@ -660,11 +585,9 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
             "{}",
             quote("a captured frame must have pixels")
         );
-        // The base64 payload is deliberately absent from the text the model reads.
         assert!(results[position]["frame"]["data"].is_null());
     }
 
-    // The frame reaches the model as an image, not as a base64 blob in a tool result.
     let attached = transcript.bodies.iter().any(|body| {
         body.to_string()
             .contains(&format!("data:image/png;base64,{PNG_BASE64_PREFIX}"))
@@ -675,7 +598,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("the captured frame must reach the model as an image")
     );
 
-    // The logs domain: the editor's own output, captured by the session and paged with a cursor.
     let entries = results[19]["entries"]
         .as_array()
         .unwrap_or_else(|| panic!("{}", quote("the logs page must carry entries")));
@@ -697,8 +619,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         "{}",
         quote("the editor's own banner must be in the captured output")
     );
-    // And what the editor wrote for a terminal does not reach the model. A real import prints a
-    // progress bar in colour, which is a fifth of everything this domain has ever answered with.
     assert!(
         entries.iter().all(|entry| !entry["message"]
             .as_str()
@@ -710,8 +630,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     assert!(
         entries.iter().all(|entry| {
             let message = entry["message"].as_str().unwrap_or_default().trim_start();
-            // The editor writes its progress in a fixed six-character field: `[   0% ]`,
-            // `[ DONE ]`. Anything else that opens with a bracket is somebody's own print.
             !(message.starts_with("[ DONE ]") || message.get(..8).is_some_and(is_a_percentage))
         }),
         "{}",
@@ -723,9 +641,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("a real import writes a progress bar, and the count has to say so")
     );
 
-    // The project domain, and with it the router's own rewrite: `search_editor_settings` is not a
-    // `project.` command at all, it is the addon's `editor.search_settings`, and the mapping lives
-    // in `project_command` where nothing but a string comparison used to look at it.
     assert_eq!(
         results[21]["projectName"],
         "Gofer Protocol Fixture",
@@ -740,9 +655,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("the editor-settings search must reach the addon's editor domain")
     );
 
-    // The resource domain, which the desktop answers out of the workspace: the listing records the
-    // hash a delete of a non-script file is held to, and it is the file's real hash. It records it
-    // rather than reporting it — the ledger holds every hash now, so no answer carries one.
     let listed = results[23]["files"]
         .as_array()
         .unwrap_or_else(|| panic!("{}", quote("the listing must carry files")));
@@ -755,10 +667,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         "{}",
         quote("a listing must not put a hash in front of the model")
     );
-    // Gofer's own staged addon is not in the project, and Gofer says so itself by writing
-    // `addons/gofer/` into the checkout's Git exclude file. Ten of the sixteen entries a bare
-    // fixture used to list were it, and a turn stuck on a runtime call read `addons/gofer/
-    // runtime.gd` through four subagents rather than working on the game.
     assert!(
         listed.iter().all(|file| !file["path"]
             .as_str()
@@ -769,12 +677,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     );
     assert_eq!(
         crate::read_ledger::recall(
-            // The ledger is keyed by the workspace's own root, so the key has to be spelled the
-            // way `Workspace::open` spells it: `paths::canonical`, which is `dunce`, and not
-            // `std::fs::canonicalize`. The two differ only on Windows, where std returns the
-            // extended-length `\\?\C:\…` form and dunce returns the plain one — a different
-            // `PathBuf`, so a different key, so `recall` answered `None` about a hash that had
-            // been recorded. It surfaced the first night this test got far enough to reach it.
             &crate::paths::canonical(&session.worktree).expect("canonical worktree"),
             "main.tscn",
         )
@@ -789,7 +691,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("a recorded hash must be the hash of what is on disk")
     );
 
-    // The tileset pair, through the router this time rather than straight at the addon.
     assert_eq!(
         results[24]["grid"],
         json!([8, 2]),
@@ -816,10 +717,6 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
         quote("only the four named tiles collide")
     );
 
-    // The list, against the real editor: two inspections written as one call, answered as two
-    // entries in the order they were written. This is the whole point of the `ops` list — the
-    // model that wanted both used to spend a turn on each — so it is proven here rather than only
-    // where a fake backend answers.
     let batched = results[26]["ops"]
         .as_array()
         .unwrap_or_else(|| panic!("{}", quote("a list of two is answered as a list")));
@@ -903,9 +800,6 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         }]}),
     )
     .expect("the debugger launches the probe");
-    // The editor holds breakpoints, not this session, so Gofer keeps its own note of which files
-    // still have one. `godot_session::a_breakpoint_is_still_armed` is what reads it, and what it
-    // reads has to be filled in by a real `set_breakpoints` rather than only by a test's stand-in.
     assert_eq!(
         crate::debug::armed_breakpoints(),
         vec![PROBE_PATH.to_owned()],
@@ -938,11 +832,6 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         "{}",
         refused.message
     );
-    // And it says what those two really come back with. It used to say they "answer while it is
-    // halted", which reads as the data and is not what arrives: `loc-24-debug2` called
-    // `inspect_node` against a game the debugger held and was refused `runtime_broke`, six times
-    // across that turn. The refusal *is* the distinguishing answer, and the sentence has to say so
-    // or it promises a read that cannot happen.
     assert!(
         refused.message.contains("runtime_broke"),
         "the sentence must name what a frame-free call really answers here: {}",
@@ -958,12 +847,6 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         "the refusal is the point and it took {waited:?}"
     );
 
-    // The calls that need no frame are not refused *here* — they reach the addon and get its own
-    // answer, which is how a caller tells a halted game from a wedged one. Against a game the
-    // debugger is holding that answer is `runtime_broke`, naming the debugger; against a game that
-    // is merely not drawing it is the tree itself, which is
-    // `godot_runtime_acceptance::a_game_that_cannot_draw_answers_the_call_that_needs_no_frame`.
-    // Either way the distinguishing answer is what comes back, and never `game_halted`.
     if let Err(failure) = call("godot_runtime", json!({"ops": [{"op": "get_tree"}]})) {
         assert_ne!(
             failure.code, "game_halted",
@@ -971,10 +854,6 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
             failure.message
         );
         assert_eq!(failure.code, "runtime_broke", "{}", failure.message);
-        // And that answer names the call that gets the game moving. It used to say only "paused at
-        // an error … read the error in the session output", which is the wrong situation for a
-        // breakpoint — every break sets the same flag — and of the fifteen recorded callers that
-        // met it, eleven reached for the debugger and two did what the sentence asked.
         assert!(
             failure.message.contains("godot_debug continue")
                 && failure.message.contains("godot_debug stack_trace"),
@@ -990,13 +869,9 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         );
     }
 
-    // The thirteenth operation no live turn has ever called, and the one
-    // `every_operation_no_turn_has_ever_used_still_answers` cannot reach: `step_in` needs a
-    // debuggee stopped in a frame, and this is the only test that has one.
     call("godot_debug", json!({"ops": [{"op": "step_in"}]}))
         .expect("step_in answers on a stopped debuggee");
 
-    // And with the game running on, the same call is no longer this situation.
     call("godot_debug", json!({"ops": [{"op": "continue"}]})).expect("the game runs on");
     let after = call(
         "godot_runtime",
@@ -1014,8 +889,6 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
     }
 
     let _ = call("godot_debug", json!({"ops": [{"op": "terminate"}]}));
-    // Terminating does not take the breakpoint away — the editor still holds it, which is the whole
-    // reason that note exists — and asking for none in the file does.
     assert_eq!(
         crate::debug::armed_breakpoints(),
         vec![PROBE_PATH.to_owned()]
@@ -1028,25 +901,6 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
     assert!(crate::debug::armed_breakpoints().is_empty());
 }
 
-/*
- * The operations no live turn has ever reached for, driven once each through the real router.
- *
- * Counted over all 132 recorded traces: **13 of the catalogue's 110 operations have never been
- * called by any model**, and eight of the thirteen are `godot_script`'s language-server half —
- * `completion`, `signature_help`, `declaration`, `highlights`, `document_symbols`, `references`,
- * `format` and `update`. `godot_lsp_acceptance` drives some of them against the LSP client, and
- * nothing drives any of them through `ai_tools::dispatch`, which is the door a model knocks on:
- * the parameter contract, the read ledger, the session start, the answer shaping.
- *
- * So an operation Gofer advertises could be broken end to end and nothing here would know. This is
- * the smoke test that closes that: one call each, on a real editor, asserting only that the router
- * answers rather than refusing with a code. What each *means* is the language server's business and
- * is tested where the language server is.
- *
- * `step_in` is left out and it is the only one: it needs a debuggee stopped in a frame, which
- * `godot_dap_acceptance` already drives through `next`, and setting one up here would be a second
- * copy of that test rather than coverage of this door.
- */
 #[test]
 fn every_operation_no_turn_has_ever_used_still_answers() {
     let session = start_session();
@@ -1065,16 +919,12 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
             },
         )
     };
-    // The ledger wants the file read before anything is asked about it, which is the router's rule
-    // rather than the language server's.
     call(
         "godot_script",
         json!({"ops": [{"op": "open", "path": PROBE_PATH}]}),
     )
     .expect("open the probe script");
 
-    // `_tick(1)` on the eighth line, one tab in: a name with a declaration, a call site and a
-    // signature, so every position-taking operation below has something real under it.
     let inside_the_call = json!({"line": 7, "character": 3});
     let at = |op: &str| json!({"ops": [{"op": op, "path": PROBE_PATH, "position": inside_the_call.clone()}]});
 
@@ -1093,9 +943,6 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
         json!({"ops": [{"op": "document_symbols", "path": PROBE_PATH}]}),
     )
     .expect("document_symbols");
-    // `format` takes source rather than a path — it is the gdformat sidecar, not the language
-    // server. A machine without one refuses by name, which is an answer about the machine rather
-    // than about the call, so both endings are accepted and anything else is not.
     match call(
         "godot_script",
         json!({"ops": [{"op": "format", "source": "extends Node\n"}]}),
@@ -1114,8 +961,6 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
         json!({"ops": [{"op": "get_editor_setting", "name": "run/window_placement/game_embed_mode"}]}),
     )
     .expect("get_editor_setting");
-    // Nothing has set this action, and resetting one the project does not have is the case a
-    // caller reaches first.
     let missing = call(
         "godot_project",
         json!({"ops": [{"op": "reset_input_action", "name": "ui_accept"}]}),
@@ -1125,9 +970,6 @@ fn every_operation_no_turn_has_ever_used_still_answers() {
         assert_ne!(failure.code, "unknown_param", "{}", failure.message);
     }
 
-    // The editor's own history, which a turn has never touched and the window's buttons do. It
-    // needs something in it: `undo` on a session that has changed nothing answers
-    // `undo_unavailable: Nothing to undo`, which is right and is not what this is asking.
     call(
         "godot_scene",
         json!({"ops": [{"op": "open", "path": SCENE_PATH}]}),
@@ -1160,8 +1002,6 @@ fn the_first_mutation_of_a_session_needs_no_read_before_it() {
     let storage = crate::storage::ProjectStorage::open(data.path(), &session.worktree)
         .expect("open project storage");
     app.manage(crate::storage::StorageSlot::new(Ok(storage)));
-    // Whatever any earlier test in this process left behind. The point of the test is the empty
-    // ledger, so it is emptied rather than assumed.
     crate::read_ledger::forget_worktree(&session.worktree);
 
     let answer = ai_tools::dispatch(
@@ -1184,8 +1024,6 @@ fn the_first_mutation_of_a_session_needs_no_read_before_it() {
     });
     assert_eq!(answer["ops"][0]["result"]["node"], "/AiFixture/FirstMarker");
 
-    // And the number it settled on is now the router's, so the mutation after it needs no read
-    // either — the retry has to leave the ledger where a normal answer would.
     let again = ai_tools::dispatch(
         app.handle(),
         ai_tools::ToolRequest {
@@ -1253,7 +1091,6 @@ fn a_handler_the_editor_cannot_compile_says_so_rather_than_blaming_the_script() 
     )
     .expect("attach the script and add a timer");
 
-    // A method nobody wrote, while the script still compiles: the old sentence, which is true.
     let plain = call(
         "godot_node",
         json!({"ops": [{"op": "connect_signal", "node": "/AiFixture/Ticker", "signal": "timeout",
@@ -1366,7 +1203,6 @@ fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
     );
     assert!(complaints(&declared).is_empty(), "{declared}");
 
-    // The everyday next call: another script that names the class as a type.
     let user = call(
         "godot_script",
         json!({"ops": [{"op": "save", "path": "scripts/holder.gd",
@@ -1377,8 +1213,6 @@ fn a_class_name_written_this_session_is_a_type_the_next_script_can_use() {
         "a class declared a moment ago must be a type the next script can name: {user}"
     );
 
-    // And the language server agrees when it is asked again, rather than only at the moment of
-    // writing: this is the answer a later `diagnostics` gives the model.
     let asked = call(
         "godot_script",
         json!({"ops": [{"op": "diagnostics", "path": "scripts/holder.gd"}]}),

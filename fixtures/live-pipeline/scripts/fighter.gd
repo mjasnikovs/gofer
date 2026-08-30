@@ -1,9 +1,5 @@
 extends Node2D
 
-# A hit of 10 should leave the fighter on 96 after the first tick: 10 raw, halved by armour to 5,
-# a fifth off for resistance to 4, floored at 1. It lands on 20, and on -60 a second later.
-# Nothing on this page is wrong: the scene overrides `armour` to 10.0, so the first helper
-# multiplies where it should halve, and the number that does it is not in any script.
 
 @export var armour: float = 0.5
 @export var resistance: float = 0.2

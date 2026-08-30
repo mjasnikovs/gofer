@@ -276,8 +276,6 @@ mod tests {
         );
         assert_eq!(node_binary_from(None, None), OsString::from("node"));
 
-        // The override is taken as written, because the suites point it at a binary this lookup
-        // has no reason to know about.
         let mine = OsString::from("/nowhere/node");
         assert_eq!(node_binary_from(Some(mine.clone()), None), mine);
     }
@@ -289,8 +287,6 @@ mod tests {
         let worker = directory.path().join("rag-warmup.mjs");
         std::fs::write(&worker, b"worker").expect("write the worker");
 
-        // No table beside it is the source-tree build, where the import is not inlined and
-        // gofer-rag's own guess at its package root is the right one.
         assert!(database_env(&worker).is_empty());
 
         let database = directory.path().join(DATABASE_DIRECTORY);

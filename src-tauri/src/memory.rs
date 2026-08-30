@@ -49,7 +49,6 @@ fn embed(mode: &str, texts: &[String], cache_dir: &Path) -> Result<Vec<Vec<f32>>
     embed_with(mode, texts, cache_dir, &WORKER, &SystemProcessSpawner)
 }
 
-// coverage-critical-start: protocol
 fn embed_with(
     mode: &str,
     texts: &[String],
@@ -93,9 +92,6 @@ fn embed_with(
         };
         let response: WorkerResponse = serde_json::from_str(response)
             .map_err(|error| format!("The memory worker returned invalid JSON: {error}"))?;
-        // A response carrying a different id belongs to an earlier request, so skip it before
-        // reading its error. Only a line the worker could not correlate at all answers without
-        // an id, and that failure does belong to this request.
         if response.id.is_some_and(|received| received != id) {
             continue;
         }
@@ -107,7 +103,6 @@ fn embed_with(
             .ok_or_else(|| "The memory worker returned no vectors".to_owned());
     }
 }
-// coverage-critical-end: protocol
 
 fn start_worker(spawner: &impl ProcessSpawner) -> Result<MemoryWorker, String> {
     let node = crate::workers::node_binary();
@@ -314,7 +309,6 @@ mod tests {
         let _test = MEMORY_TEST_LOCK.lock().expect("memory test lock");
         let cache = Path::new("/tmp/cache");
 
-        // An error answering an earlier request must not fail the request in flight.
         let id = NEXT_REQUEST_ID.load(Ordering::Relaxed);
         let (fake, _) = worker(format!(
             "{RESPONSE_PREFIX}{{\"id\":{},\"error\":\"stale failure\"}}\n{RESPONSE_PREFIX}{{\"id\":{id},\"vectors\":[[4.0]]}}\n",
@@ -326,7 +320,6 @@ mod tests {
             vec![vec![4.0]]
         );
 
-        // A failure the worker could not correlate has no id and does belong to this request.
         let (fake, _) = worker(format!(
             "{RESPONSE_PREFIX}{{\"error\":\"unparseable request\"}}\n"
         ));

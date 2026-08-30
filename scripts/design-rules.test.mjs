@@ -30,7 +30,6 @@ test('lightness spans black to white', () => {
 })
 
 test('lightness uses the linear segment for colours near black', () => {
-    // Below the CIE break the curve is a straight line, so half the input is half the output.
     close(lightness('#010101'), lightness('#020202') / 2, 0.02)
 })
 
@@ -117,8 +116,6 @@ test('a surface that never rises above the one below it is reported per step', (
 })
 
 test('a popover below the panel it floats over fails, however far below', () => {
-    // The unsigned distance this replaced passed both of these: the ramp ran backwards by more
-    // than the three points a forwards ramp needs.
     const violations = findViolations(
         theme({
             '--color-background-body': ['#f1f1f1', '#1b1b1b'],
@@ -136,7 +133,6 @@ test('a popover below the panel it floats over fails, however far below', () => 
         ]
     )
     assert.match(dark[0].detail, /5\.4 L\* below --color-background-surface/)
-    // Equal is a failure too, and it is reported as the zero-rise case rather than a short one.
     assert.match(dark[1].detail, /0\.0 L\* below --color-background-card/)
 })
 

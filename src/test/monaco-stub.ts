@@ -1,13 +1,5 @@
 import type * as Monaco from 'monaco-editor'
 
-/**
- * A Monaco stand-in for component tests.
- *
- * The real editor measures fonts and lays out its own DOM, neither of which jsdom can do, so the
- * component tests drive this instead: it records what Gofer asked Monaco to do — models, markers,
- * decorations, actions — and lets a test fire the listeners the editor would have fired.
- */
-
 export type StubModel = Readonly<{
     uri: {path: string}
     getValue: () => string
@@ -28,19 +20,12 @@ export interface MonacoStubState {
     decorations: readonly Monaco.editor.IModelDeltaDecoration[]
     actions: string[]
     diffEditors: number
-    /** Lines another panel asked the editor to reveal, in the order it asked. */
     revealed: number[]
-    /** Text the editor holds for the active model, as the user would see it. */
     activeText: () => string
-    /** Simulates typing: the editor reports its model's new content. */
     type: (text: string) => void
-    /** Simulates a click on the breakpoint gutter. */
     clickGlyphMargin: (line: number) => void
-    /** Runs a registered editor action, such as the save keybinding. */
     runAction: (id: string) => void
-    /** Simulates the cursor coming to rest on a line, which is what gets remembered. */
     moveCursor: (line: number) => void
-    /** View states the editor was asked to restore, in the order it was asked. */
     restored: unknown[]
     reset: () => void
 }
@@ -131,8 +116,6 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
         revealLineInCenter: (line: number) => {
             state.revealed.push(line)
         },
-        // The real view state is opaque JSON; this stands in for it with the one part a test can
-        // recognize, so a restored cursor is visible as a value rather than only as a call.
         saveViewState: () => ({cursorLine}),
         restoreViewState: (view: unknown) => {
             state.restored.push(view)

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Four tasks the first two batches never ran. s23 is the one that reads properties before it
-# writes them, which is the path `refuseSiblingParameter` was added for.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/ox-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

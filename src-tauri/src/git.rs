@@ -147,7 +147,6 @@ pub struct PendingChange {
 
 /// Everything loose in the checkout, so the user can be told what a task switch is about to take.
 pub fn pending_changes(workspace_path: &Path) -> Result<Vec<PendingChange>, String> {
-    // `-uall`, or a folder of copied-in files collapses to one line naming the folder.
     let status = git_text(workspace_path, &["status", "--porcelain", "-uall"])?;
     Ok(status.lines().filter_map(parse_status_line).collect())
 }
@@ -157,7 +156,6 @@ fn parse_status_line(line: &str) -> Option<PendingChange> {
         return None;
     }
     let (code, rest) = line.split_at(2);
-    // A rename reads "R  old -> new"; only the name the file has now is worth showing.
     let path = rest.trim_start().rsplit(" -> ").next()?.trim_matches('"');
     (!path.is_empty()).then(|| PendingChange {
         path: path.to_owned(),
@@ -219,9 +217,6 @@ pub fn merge_task_branch(
             .to_owned()
             .into());
     }
-    // Told apart from every other refusal, because this is the one the user can be handed a way out
-    // of: a resolution that stopped half-way is undone by discarding the merge, and until something
-    // offers that, the message below is advice with no button under it.
     let unresolved = unresolved_paths(&repository_root);
     if !unresolved.is_empty() {
         return Err(MergeFailure::Unfinished {
@@ -234,8 +229,6 @@ pub fn merge_task_branch(
 
     checkout_branch(&repository_root, base_branch)?;
     let merged = merge_into_current(&repository_root, branch_name);
-    // However that went, the user is put back on the task they were looking at. A failure that
-    // stranded the checkout on the base branch would show them another task's files.
     let merged = match merged {
         Ok(merged) => merged,
         Err(error) => {
@@ -243,8 +236,6 @@ pub fn merge_task_branch(
             return Err(error);
         }
     };
-    // Fast-forwarded rather than merged again: the base branch now contains everything the task
-    // branch had, so the task branch can simply be moved onto it.
     let forward = git_output(
         &repository_root,
         &["branch", "-f", branch_name, base_branch],
@@ -287,9 +278,6 @@ pub fn resolve_task_conflicts(
     if branch_name == base_branch {
         return Err("A task branch cannot be the project's own branch".to_owned());
     }
-    // Whether a merge is open, not whether anything is still unresolved: a merge whose files have
-    // all been reconciled but not committed is still a merge, and Git refuses to start a second one
-    // on top of it with a message written for a terminal.
     if merge_in_progress(&repository_root) {
         return Err(
             "This task already has a merge waiting to be finished. Resolve the files it left \
@@ -305,7 +293,6 @@ pub fn resolve_task_conflicts(
     if !output.status.success() {
         let conflicts = conflicting_paths(&repository_root);
         if conflicts.is_empty() {
-            // Not a conflict — a merge that could not start at all. Nothing is left half-applied.
             let _ = git_output(&repository_root, &["merge", "--abort"]);
             return Err(git_failure(
                 "bring the project branch into the task",
@@ -314,9 +301,6 @@ pub fn resolve_task_conflicts(
         }
         return Ok(conflicts);
     }
-    // Nothing clashed. The merge is finished here rather than left open, so the task is not sitting
-    // on an in-progress merge with nothing for anyone to resolve. Git only opens one when there was
-    // something to bring over — "Already up to date" opens nothing, and there is nothing to close.
     if !merge_in_progress(&repository_root) {
         return Ok(Vec::new());
     }
@@ -504,10 +488,6 @@ fn merge_into_current(repository_root: &Path, branch_name: &str) -> Result<Strin
         }
         return Err(git_failure("merge the task branch", &output).into());
     }
-    // A task whose branch carries no commits of its own is not a failure to merge; it is nothing
-    // to merge. Git answers "Already up to date" and stages nothing, and `git commit` then refuses
-    // the empty commit — which reached the user as a bare "Git exited with exit status: 1",
-    // because that refusal goes to stdout and leaves stderr empty.
     if git_text(repository_root, &["status", "--porcelain"])?.is_empty() {
         return Ok(git_text(repository_root, &["rev-parse", "HEAD"])?);
     }
@@ -521,18 +501,10 @@ fn merge_into_current(repository_root: &Path, branch_name: &str) -> Result<Strin
 }
 
 fn commit_pending_task_changes(worktree_path: &Path) -> Result<bool, String> {
-    // `git add --all` below would stage a file with `<<<<<<<` still in it, and the commit after it
-    // would look like ordinary work. A scene or a script committed with conflict markers in it does
-    // not parse, so the task would be merged into the project broken — by the one step that was
-    // supposed to be safe.
     let unresolved = unresolved_paths(worktree_path);
     if !unresolved.is_empty() {
         return Err(unfinished_merge_message(&unresolved));
     }
-    // An open merge is always committed, however little the resolution changed. Both shortcuts
-    // below read the tree, and a resolution that kept the task's own version leaves the tree
-    // identical to where it started — so both would answer "nothing to do" and walk away from a
-    // half-open merge, which the next checkout carries into another branch.
     let merging = merge_in_progress(worktree_path);
     let is_clean = git_text(worktree_path, &["status", "--porcelain"])?.is_empty();
     if is_clean && !merging {
@@ -542,9 +514,6 @@ fn commit_pending_task_changes(worktree_path: &Path) -> Result<bool, String> {
     if !add.status.success() {
         return Err(git_failure("stage the task changes", &add));
     }
-    // Staging can leave the index identical to HEAD — a task that changed nothing but the addon's
-    // own two lines — and Git refuses an empty commit. It does not refuse one that closes a merge,
-    // which is why that case goes on.
     if !merging && git_text(worktree_path, &["diff", "--cached", "--name-only"])?.is_empty() {
         return Ok(false);
     }
@@ -585,19 +554,11 @@ pub fn base_branch_candidate(workspace_path: &Path) -> Option<String> {
     {
         return Some(branch);
     }
-    // The repository's own default, when it is a branch that exists. Ahead of the scan below
-    // because the scan answers with whichever non-task branch Git lists first — alphabetical, so a
-    // repository holding `bugfix` and `main` answers `bugfix`. That answer is then persisted as the
-    // project's base and kept, which matters now that a base Git has lost is re-derived here rather
-    // than only being chosen once, before any task existed.
     if let Some(default) = configured_default_branch(&repository_root)
         && branch_exists(&repository_root, &default)
     {
         return Some(default);
     }
-    // A branch that is actually in the repository beats a configured name that is not: the base is
-    // what a deleted task's checkout has to be moved onto, and moving onto a name Git does not know
-    // leaves the checkout on the branch being deleted, which Git then refuses to delete.
     if let Ok(listed) = git_text(&repository_root, &["branch", "--format=%(refname:short)"])
         && let Some(branch) = listed
             .lines()
@@ -611,8 +572,6 @@ pub fn base_branch_candidate(workspace_path: &Path) -> Option<String> {
 
 /// What this repository calls its default branch, when it says. Never a guess that it exists.
 fn configured_default_branch(repository_root: &Path) -> Option<String> {
-    // `origin/HEAD` is what the remote itself says, and it survives a local rename. `init
-    // .defaultBranch` is only what new repositories are started with, so it is the weaker answer.
     if let Ok(head) = git_text(
         repository_root,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -658,9 +617,6 @@ fn repository_root(path: &Path) -> Result<Option<PathBuf>, String> {
         return Ok(None);
     }
     let root = PathBuf::from(output_text(&output)?);
-    // A repository whose root is not the workspace itself is somebody else's repository — running
-    // Gofer from a folder inside a larger repo (a `tauri dev` workspace inside Gofer's own source
-    // tree) must not grow branches, worktrees, or merges in that outer repo. No repo root, no git.
     let same_root = match (root.canonicalize(), path.canonicalize()) {
         (Ok(canonical_root), Ok(canonical_path)) => canonical_root == canonical_path,
         _ => false,
@@ -812,8 +768,6 @@ pub fn ignore_editor_cache(workspace: &Path) -> Result<bool, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("Could not read {IGNORE_FILE}: {error}")),
     };
-    // Trimmed and rebuilt rather than appended to, so a file with no trailing newline does not end
-    // up with the rule welded onto its last line, where Git reads it as neither.
     let mut text = existing.trim_end().to_owned();
     text.push_str(EDITOR_CACHE_IGNORE);
     std::fs::write(&path, text.trim_start_matches('\n'))
@@ -992,11 +946,6 @@ fn git_failure(action: &str, output: &Output) -> String {
 
 #[cfg(test)]
 mod tests {
-    /*
-     * Every research worker prompt carries the whole listing, so it is spent three times over before
-     * any of them reads a line of code. Two real projects measure 7.4 KiB and 17 KiB; a repository
-     * with its dependencies or its art committed would crowd out the work it is meant to help with.
-     */
     #[test]
     fn a_listing_that_fits_is_left_exactly_as_it_is() {
         let listing = "src/main.gd\nsrc/player.tscn";
@@ -1021,8 +970,6 @@ mod tests {
             );
         }
 
-        // The count is what makes the truncation honest. Told the list is partial, a worker can
-        // still reach for `find`; handed a silently shortened one, it believes it has seen it all.
         assert!(
             bounded.contains("more files this list does not show"),
             "a shortened listing has to say so"
@@ -1061,7 +1008,6 @@ mod tests {
     #[test]
     fn the_cache_rule_is_added_once_and_leaves_the_rules_already_there() {
         let directory = repository();
-        // No trailing newline: appended raw, the rule welds onto this line and Git reads neither.
         fs::write(directory.path().join(IGNORE_FILE), "*.import").expect("write ignore file");
 
         assert!(
@@ -1198,7 +1144,6 @@ mod tests {
         assert_eq!(created.branch_name, TASK);
         assert_eq!(created.head_commit, created.base_commit);
         assert!(branch_exists(repository.path(), TASK));
-        // Nothing moved: a branch is made for a task that is not being opened yet.
         assert_eq!(current_branch(repository.path()).as_deref(), Some("master"));
 
         let again = create_task_branch(repository.path(), TASK, "master")
@@ -1221,7 +1166,6 @@ mod tests {
         commit_pending_changes(repository.path()).expect("bank the older task");
         let stale = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("stale head");
 
-        // Meanwhile the project moved on, exactly as a merge moves it.
         git(repository.path(), &["checkout", "master"]);
         fs::write(repository.path().join("merged.gd"), "extends Node\n").expect("merged change");
         git(repository.path(), &["add", "merged.gd"]);
@@ -1449,7 +1393,6 @@ mod tests {
 
         assert_eq!(failure.conflicts(), ["player.gd"]);
         assert!(failure.message().contains("player.gd"), "{failure}");
-        // Anything else carries no paths, so the window offers nothing it cannot do.
         assert!(
             merge_task_branch(repository.path(), "master", "master")
                 .expect_err("a task branch cannot be the project's own")
@@ -1485,7 +1428,6 @@ mod tests {
                 && contents.contains("# task"),
             "the file must hold both versions for the agent to reconcile: {contents}"
         );
-        // And a second attempt is refused rather than started on top of the first.
         assert!(
             resolve_task_conflicts(repository.path(), TASK, "master")
                 .expect_err("one merge at a time")
@@ -1509,15 +1451,9 @@ mod tests {
         assert!(refusal.contains("both versions"), "{refusal}");
         let refused = merge_task_branch(repository.path(), TASK, "master").expect_err("nor merged");
         assert!(refused.message().contains("both versions"), "{refused}");
-        // Told apart from a clash, and carrying the files, because the way out of this one is
-        // discarding the merge rather than handing it to the agent again.
         assert_eq!(refused.unfinished(), ["player.gd"]);
         assert!(refused.conflicts().is_empty());
 
-        // Resolved and the merge goes through, which is the whole point of the offer. Written and
-        // nothing else: the agent edits files, it does not stage them, and Git keeps calling a file
-        // unmerged until something does. Asked the cheap way, that reads as "still unresolved" and
-        // refuses the merge the resolution was for.
         fs::write(
             repository.path().join("player.gd"),
             "extends Node # reconciled\n",
@@ -1570,7 +1506,6 @@ mod tests {
         )
         .expect("write it");
         assert!(holds_conflict_markers(&clashed));
-        // A path the merge left nothing on disk for is not holding two versions of anything.
         assert!(!holds_conflict_markers(&directory.path().join("gone.gd")));
     }
 
@@ -1768,7 +1703,6 @@ mod tests {
             "the project itself still has to be committed"
         );
 
-        // And the point of all of it: Godot reopening leaves nothing for Gofer to commit.
         fs::write(
             directory.path().join(".godot/editor/filesystem_cache10"),
             "scan 2\n",
@@ -1829,7 +1763,6 @@ mod tests {
             "the repair leaves nothing loose: {}",
             status(repository.path())
         );
-        // The rewrite that used to become a commit now becomes nothing.
         fs::write(
             repository.path().join(".godot/editor/filesystem_cache10"),
             "scan 2\n",

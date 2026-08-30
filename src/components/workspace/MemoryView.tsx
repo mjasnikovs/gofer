@@ -42,10 +42,8 @@ import type {
 import type {CommandError} from '../../models/errors'
 import {PanelState} from './PanelState'
 
-/** How much of a memory the closed row shows. Two of these rows measured over 2,000 characters. */
 const PREVIEW_LENGTH = 110
 
-/** Which rows the list is showing. `review` and `broken` are the reason the screen exists. */
 type MemoryFilter = 'all' | 'review' | 'broken'
 
 const DOT: Readonly<Record<MemoryCheck, 'success' | 'warning' | 'neutral'>> = {
@@ -61,14 +59,12 @@ const VERDICT_COLOUR: Readonly<Record<MemoryVerdict, 'green' | 'red' | 'gray'>> 
     unclear: 'gray'
 }
 
-/** What one running judgement is doing, and the turn it runs as so Stop can reach it. */
 type Judging = Readonly<{
     memoryId: string
     requestId: number
     line: string
 }>
 
-/** A sweep in flight: the turn Stop reaches, and how far through the list it is. */
 type Sweeping = Readonly<{
     requestId: number
     done: number
@@ -80,13 +76,6 @@ function preview(content: string): string {
     return line.length > PREVIEW_LENGTH ? `${line.slice(0, PREVIEW_LENGTH)}…` : line
 }
 
-/**
- * A memory's own words, not the wrapper a finished turn put them in.
- *
- * Every row a turn deposits reads `User request: … Outcome: …`, so a list of them is a column of
- * the same two words. The label is dropped from the preview and kept in the editor, where the user
- * is reading the whole thing anyway.
- */
 function withoutTurnLabels(content: string): string {
     return content.replace(/^User request:\s*/u, '').replace(/\n+Outcome:\s*/u, ' → ')
 }
@@ -95,21 +84,6 @@ function draftOf(memory: ProjectMemory): MemoryEdit {
     return {id: memory.id, kind: memory.kind, state: memory.state, content: memory.content}
 }
 
-/**
- * What the project remembers, and what checking it against the workspace found.
- *
- * Six of these rows are read into the front of every turn's prompt. Until this screen there was no
- * way to see which six, and no way to correct one that had stopped being true — a memory written by
- * a turn a month ago was as authoritative as one written this morning, and it was invisible.
- *
- * There are two checks and they cost different things. The path check runs with the read rather
- * than behind a button, because it is a directory walk: it reports where files are and nothing
- * more, and a row is marked as naming a file the workspace does not have, never as being wrong,
- * because a memory whose whole subject is a deletion names a file that is correctly gone. The model
- * check is a minute a row and is asked for — one row from its own editor, or the whole list from
- * the sweep. What a sweep leaves behind is triage: `broken` rows to read, and one press to stop
- * retrieval reading them.
- */
 export function MemoryView() {
     const [memories, setMemories] = useState<readonly ProjectMemory[]>()
     const [error, setError] = useState<CommandError>()
@@ -120,19 +94,11 @@ export function MemoryView() {
     const [isSaving, setIsSaving] = useState(false)
     const [judging, setJudging] = useState<Judging>()
     const [sweeping, setSweeping] = useState<Sweeping>()
-    // The running sweep's own id, held where the event listener can read it. The listener is
-    // registered once, so the state it would otherwise close over is the state at registration.
     const sweepRequest = useRef<number>(undefined)
-    // Which memory the failure was about, not only what it said. One string for the whole panel
-    // was drawn for whichever row happened to be open, so a judgement that failed on one memory
-    // reported itself against another that was never judged at all.
     const [judgeFailure, setJudgeFailure] = useState<{memoryId: string; reason: string}>()
 
     const [reads, setReads] = useState(0)
 
-    // The read is the check: one listing walks the worktree and answers with every verdict. Nothing
-    // is set synchronously here — `isLoading` is already true on mount, and Recheck raises it again
-    // from the click, which is where a state change belongs.
     useEffect(() => {
         let cancelled = false
         void listProjectMemory()
@@ -159,9 +125,6 @@ export function MemoryView() {
         setReads(count => count + 1)
     }, [])
 
-    // The live line, and the two endings the panel has to hear about. A verdict is not read from
-    // here: the backend files it and answers the call with the stored row, so what is drawn is what
-    // survived rather than what was reported.
     useEffect(() => {
         let stop: (() => void) | undefined
         let cancelled = false
@@ -172,15 +135,7 @@ export function MemoryView() {
                         {...current, line: event.line ?? current.line}
                     :   current
                 )
-            // A verdict is filed on the Rust side before this event leaves it, so the list can be
-            // read again and the row will carry it. That is done rather than patching the row from
-            // the event for the reason nothing else here is drawn from one: the panel would be
-            // showing what was reported, not what was stored. It matters for a sweep, where the
-            // alternative is an hour of a list that does not move.
             if (event.type === 'judge-verdict') setReads(count => count + 1)
-            // Both endings clear the row, and only one of them has anything to say. The event is
-            // the first ending to arrive — the call behind it rejects afterwards — and the first
-            // ending is the one kept, because it is the one that names what actually happened.
             if (event.type === 'judge-failed' || event.type === 'judge-stopped') {
                 if (event.type === 'judge-failed')
                     setJudgeFailure(current =>
@@ -203,8 +158,6 @@ export function MemoryView() {
         }
     }, [])
 
-    // A sweep's own count, and which row it has reached. The per-row spinner is still the judge's
-    // event: this is what turns the header into "31 of 84" and hands the next row to the editor.
     useEffect(() => {
         let stop: (() => void) | undefined
         let cancelled = false
@@ -216,10 +169,6 @@ export function MemoryView() {
             const memoryId = event.memoryId
             if (memoryId === undefined) return
             setJudgeFailure(undefined)
-            // Armed from the sweep, not from whatever row was being drawn a moment ago. A failure
-            // clears `judging`, and this only ever moved a spinner that was already there — so the
-            // first `judge-failed` in an eighty-four row sweep took the spinner away for the rest
-            // of the hour, while the run went on and the header counted up.
             setJudging(current => {
                 const requestId = current?.requestId ?? sweepRequest.current
                 return requestId === undefined ? current : (
@@ -237,8 +186,6 @@ export function MemoryView() {
     }, [])
 
     const judge = useCallback((memory: ProjectMemory) => {
-        // The same id the brief uses. The backend cancels a turn by it, and a counter that restarts
-        // hands a later turn the id of a stopped one.
         const requestId = Date.now()
         setJudgeFailure(undefined)
         setJudging({memoryId: memory.id, requestId, line: 'starting the sub-agent…'})
@@ -259,8 +206,6 @@ export function MemoryView() {
     }, [])
 
     const stopJudging = useCallback(() => {
-        // One id whether a row or the whole list is running, because there is one turn either way.
-        // Stopping from an open row during a sweep ends the sweep, which is the truth of it.
         const requestId = judging?.requestId ?? sweeping?.requestId
         if (requestId !== undefined) void stopMemoryJudge(requestId)
     }, [judging, sweeping])
@@ -309,11 +254,6 @@ export function MemoryView() {
             })
     }, [])
 
-    /*
-     * Memoised because two callbacks below list them. Rebuilt in the render body they changed
-     * identity every render, so neither `useCallback` ever returned a cached function and the
-     * wrapper cost without buying anything.
-     */
     const all = useMemo(() => memories ?? [], [memories])
     const needingReview = useMemo(() => all.filter(memory => memory.check === 'stale'), [all])
     const broken = useMemo(() => all.filter(isBroken), [all])
@@ -345,15 +285,10 @@ export function MemoryView() {
                 sweepRequest.current = undefined
                 setSweeping(undefined)
                 setJudging(current => (current?.requestId === requestId ? undefined : current))
-                // The rows the sweep answers with are the same rows a read gives, and the read is
-                // the one path that also recomputes the path check. One way in, one shape out.
                 setReads(count => count + 1)
             })
     }, [unjudged])
 
-    // Held back, not forgotten. `candidate` stops retrieval reading the row and keeps every word of
-    // it, along with the verdict and the reason — which is what someone wondering later why the
-    // model stopped being told this will want, and what deleting would have thrown away.
     const holdBackBroken = useCallback(() => {
         const ids = broken.map(memory => memory.id)
         if (ids.length === 0) return
@@ -521,10 +456,6 @@ export function MemoryView() {
                                             gap={2}
                                             align='center'
                                         >
-                                            {/*
-                                             * The dot's label is its accessible name, so the same
-                                             * sentence beside it was read out twice per row.
-                                             */}
                                             <StatusDot
                                                 variant={DOT[memory.check]}
                                                 label={checkSummary(memory)}
@@ -599,9 +530,7 @@ type MemoryEditorProps = Readonly<{
     memory: ProjectMemory
     draft: MemoryEdit
     isSaving: boolean
-    /** Whether the whole list is being judged, which is one turn this row cannot start beside. */
     isSweeping: boolean
-    /** Present only while this memory is the one being judged. */
     judging?: Judging | undefined
     judgeFailure?: string | undefined
     onChange: (draft: MemoryEdit) => void
@@ -611,13 +540,6 @@ type MemoryEditorProps = Readonly<{
     onForget: () => void
 }>
 
-/**
- * One memory, open for correcting.
- *
- * `state` is offered beside the text because it is usually the answer. A memory that is merely
- * unhelpful does not need rewriting or deleting — moving it off `confirmed` stops retrieval reading
- * it, and keeps what it says for whoever wonders later why it was muted.
- */
 function MemoryEditor({
     memory,
     draft,

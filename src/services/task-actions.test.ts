@@ -5,14 +5,6 @@ import {createDesktopFake, installDesktopFake, removeDesktopFake} from '../test/
 import type {BackendAnswers} from '../test/backend'
 import type {TaskSummary} from '../models/app'
 
-/**
- * What the window does to a task, checked without a window.
- *
- * Each of these used to be a callback in the router's body, so the only way to reach the
- * delete-follows-the-replacement rule or the merge refusal was to mount the whole shell and press
- * a button. They are sequences and branches, so they are checked as sequences and branches.
- */
-
 function task(overrides: Partial<TaskSummary> = {}): TaskSummary {
     return {
         id: 'task-1',
@@ -77,8 +69,6 @@ describe('creating a task', () => {
         expect(navigate).toHaveBeenCalledWith('task-9')
     })
 
-    // The refusal is the caller's to show — the sidebar puts it on screen — so it is answered
-    // rather than swallowed. What must not happen is the window moving to a task that was refused.
     it('leaves the window where it is and says why the backend refused', async () => {
         const {tasks, navigate, refresh} = actions({
             create_chat_task: () => {

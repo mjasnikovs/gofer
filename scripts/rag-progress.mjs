@@ -2,13 +2,6 @@ export const EVENT_PREFIX = 'GOFER_RAG_EVENT:'
 
 export function createProgressReporter({emit, now = Date.now, emitIntervalMs = 250}) {
     const fileProgress = new Map()
-    /**
-     * The models the run has touched, whether or not any of them had to be downloaded.
-     *
-     * Nothing approves a download when the cache is already populated, so a warm start would
-     * otherwise report "0 models" against a total of zero while gigabytes were being read — a
-     * splash with no name for what it is doing and no percentage it can compute.
-     */
     const observedModels = new Set()
     let expectedBytes = 0
     let approvedModels = 0
@@ -19,7 +12,6 @@ export function createProgressReporter({emit, now = Date.now, emitIntervalMs = 2
         return `${String(count)} ${count === 1 ? 'model' : 'models'}`
     }
 
-    /** What the run is working through: the approved download, or the files it has seen. */
     const totalBytes = () =>
         expectedBytes > 0 ? expectedBytes : (
             [...fileProgress.values()].reduce((total, file) => total + file.total, 0)
@@ -80,12 +72,6 @@ export function createProgressReporter({emit, now = Date.now, emitIntervalMs = 2
     return {approveDownloads, reportProgress, reportReady}
 }
 
-/**
- * Drives one RAG warmup, reporting progress through `emit` and failures through `fail`.
- *
- * `warmup` is injected so tests exercise the reporting contract without downloading models.
- * Returns whether the warmup succeeded.
- */
 export async function runWarmup({warmup, emit, fail}) {
     const reporter = createProgressReporter({emit})
     try {

@@ -42,9 +42,6 @@ async fn prepare_models_request(
 ) -> Result<ModelsRequest, String> {
     let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
         let settings = validate_settings(request.settings)?;
-        // The driver decides which credential is sent, because each has its own keyring slot. The
-        // local driver's key must never reach openrouter.ai or api.cerebras.ai, and neither of
-        // theirs must ever reach a server on this machine.
         let api_key = match settings.ai.connection_type {
             AiConnectionType::Openrouter => resolve(
                 &request.openrouter_api_key,
@@ -60,8 +57,6 @@ async fn prepare_models_request(
     })
     .await
     .map_err(|error| format!("AI settings validation task failed: {error}"))??;
-    // Validated above, so the live driver has a connection: the address is read off it rather
-    // than off a second copy beside it.
     let base_url = format!("{}/", active_endpoint(&settings.ai).0.trim_end_matches('/'));
     let models_url = reqwest::Url::parse(&base_url)
         .and_then(|url| url.join(path))
@@ -108,16 +103,10 @@ pub(crate) async fn run_connection_test(
         .await
         .map_err(|error| format!("ChatGPT connection test failed: {error}"))?;
     }
-    // OpenRouter is asked `/key`, not `/models`. Its catalogue is public — it answers HTTP 200
-    // with no credential at all — so a test through `/models` reports a healthy connection for a
-    // key that does not exist. `/key` is the only cheap endpoint that refuses a bad one.
     let openrouter = matches!(
         request.settings.ai.connection_type,
         AiConnectionType::Openrouter
     );
-    // Cerebras is asked `/models` like the local driver, not `/key` like OpenRouter. Its catalogue
-    // is not public: a wrong key answers HTTP 401 `wrong_api_key`, so the ordinary endpoint already
-    // refuses a credential that does not exist and there is nothing a second one would add.
     let cerebras = matches!(
         request.settings.ai.connection_type,
         AiConnectionType::Cerebras
@@ -154,8 +143,6 @@ pub(crate) async fn run_connection_test(
         });
     }
 
-    // The key is good. Whether the chosen model is still in the catalogue is a second question,
-    // and a public endpoint answers it without spending the credential again.
     if openrouter {
         return Ok(openrouter_model_available(&active_endpoint(&settings.ai).1, timeout).await);
     }
@@ -164,9 +151,6 @@ pub(crate) async fn run_connection_test(
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
     let chosen = active_endpoint(&settings.ai).1;
-    // Narrowed the same way the picker is, and for the reason the picker is narrowed: a model
-    // Cerebras serves that the shipped table has never seen is one no screen will ever offer, so
-    // reporting a healthy connection to it would be reporting a connection nobody can select.
     if cerebras {
         return Ok(
             if cerebras_model_options(&models.data)
@@ -275,8 +259,6 @@ pub(crate) async fn list_ai_models_with(
     let models = response.json::<ModelsResponse>().await.map_err(|error| {
         format!("The server returned an invalid OpenAI models response: {error}")
     })?;
-    // The plain OpenAI shape, which is all Cerebras answers — ids and nothing else. What those ids
-    // can do is the shipped table's answer, so the live list is only ever used to narrow it.
     if cerebras {
         return Ok(cerebras_model_options(&models.data));
     }
@@ -322,8 +304,6 @@ pub(super) fn local_model_options(
                 .and_then(|meta| meta.n_ctx)
                 .or_else(|| known.map(|model| model.context_window))
                 .unwrap_or(connection.model.context_window);
-            // And the server outranks both, for the model it says it has loaded. It is the only
-            // one of the three that changes when the user swaps the file it was started with.
             let loaded = served.filter(|model| model.id == remote.id);
             AiModelOption {
                 id: remote.id.clone(),
@@ -331,10 +311,6 @@ pub(super) fn local_model_options(
                     .map(|model| model.name.clone())
                     .unwrap_or_else(|| remote.id.clone()),
                 context_window,
-                // Through the same clamp OpenRouter's rows take. A model Pi's catalogue does
-                // not know used to be given the whole window as its ceiling, which is the runaway
-                // `default_max_tokens` was written for — and that runaway was measured *here*, on
-                // the local Qwen3.6-27B, not on a billed endpoint.
                 max_tokens: ceiling_within(context_window, known.map(|model| model.max_tokens)),
                 reasoning: loaded.map_or_else(
                     || known.map_or(server_reasoning, |model| model.reasoning),
@@ -344,8 +320,6 @@ pub(super) fn local_model_options(
                     || known.map_or(server_reasoning, |model| model.supports_reasoning_effort),
                     |model| !model.efforts.is_empty(),
                 ),
-                // A local server is never one of these. `off` is how a chat template is told not
-                // to think, and a template that has a switch has both of its positions.
                 reasoning_mandatory: false,
                 thinking_levels: loaded
                     .map(|model| model.efforts.clone())
@@ -354,8 +328,6 @@ pub(super) fn local_model_options(
                     .and_then(|model| model.input.clone())
                     .or_else(|| known.map(|model| model.input.clone()))
                     .unwrap_or_else(|| connection.model.input.clone()),
-                // A chat template is told not to think by leaving the effort out, never by being
-                // handed a word for it. Only Cerebras' shipped table names one.
                 off_effort: None,
             }
         })
@@ -422,23 +394,17 @@ pub(super) fn openrouter_model_options(remote: Vec<OpenrouterModel>) -> Vec<AiMo
                         .and_then(|provider| provider.max_completion_tokens),
                 ),
                 reasoning: model.reasoning.is_some(),
-                // Named efforts are the only evidence that an effort field will be read. A model
-                // that reasons without naming any takes no effort, which is the `on`/`off` case.
                 supports_reasoning_effort: !thinking_levels.is_empty(),
                 reasoning_mandatory: model
                     .reasoning
                     .as_ref()
                     .is_some_and(|reasoning| reasoning.mandatory),
                 thinking_levels,
-                // Never empty: `validate_settings` refuses an empty input list, and every model in
-                // the catalogue takes text.
                 input: if input.is_empty() {
                     vec!["text".to_owned()]
                 } else {
                     input
                 },
-                // OpenRouter's catalogue names no such word, and `off` there is already a shape of
-                // its own — `reasoning: {enabled: false}` — rather than an effort.
                 off_effort: None,
             }
         })
@@ -486,12 +452,8 @@ pub(super) fn chatgpt_models() -> Result<Vec<AiModelOption>, String> {
                     reasoning: model.reasoning,
                     supports_reasoning_effort: !model.thinking_level_map.is_empty(),
                     reasoning_mandatory: false,
-                    // ChatGPT names no efforts of its own — the seven Gofer knows are what it
-                    // takes, which is what an empty list here means.
                     thinking_levels: Vec::new(),
                     input: model.input,
-                    // The Codex driver owns its own reasoning field; nothing here becomes an
-                    // effort word on the wire.
                     off_effort: None,
                 })
                 .collect()

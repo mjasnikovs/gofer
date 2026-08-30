@@ -1,34 +1,7 @@
-/**
- * An interleaved A/B of what the two documentation operations say they cost.
- *
- * The question. `godot_docs_search` is 24% of every character the model reads back from any tool,
- * and 91% of that is `search` rather than `ask`: **5,603 characters per `search` operation against
- * 458 for an `ask`**, measured across 31 recorded live runs, which chose `search` 24 times and
- * `ask` 18. Iteration 4 measured the two against each other over six questions and found them
- * equal on whether the fact came back — 5/6 each — with `ask` 1.5x slower and 7x smaller.
- *
- * So the model is choosing the expensive one about half the time, and nothing it reads says which
- * is expensive. This measures whether saying so moves the choice. It is a fact rather than a
- * persuasion: the two numbers are the ones the corpus recorded.
- *
- * What it cannot measure is the other half — whether the turns that switch to `ask` still finish
- * the task. That needs whole turns, not one call, and `ox-turn.sh` is what runs those.
- *
- *   GOFER_DUMP_CATALOG=/tmp/catalog.json GOFER_DUMP_PROMPT=/tmp/prompt.txt \
- *     cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance --lib \
- *     -- dump_catalog_and_prompt --test-threads=1
- *
- *   GOFER_BENCH_CATALOG=/tmp/catalog.json GOFER_BENCH_PROMPT=/tmp/prompt.txt \
- *     node scripts/bench-search-or-ask.mjs 20
- *
- * `GOFER_BENCH_ENDPOINT` names the completions endpoint; the default is the local llama.cpp.
- */
-
 import {readFile} from 'node:fs/promises'
 import {createGodotTools} from './godot-tools.mjs'
 
 const ENDPOINT = process.env.GOFER_BENCH_ENDPOINT ?? 'http://127.0.0.1:8080/v1/chat/completions'
-/** The model to ask, and the key it needs. Both default to the local server, which wants neither. */
 const MODEL = process.env.GOFER_BENCH_MODEL ?? 'local'
 const AUTHORIZATION =
     process.env.OPENROUTER_API_KEY ?
@@ -43,7 +16,6 @@ const named = variable => {
 const catalog = JSON.parse(await readFile(named('GOFER_BENCH_CATALOG'), 'utf8'))
 const prompt = await readFile(named('GOFER_BENCH_PROMPT'), 'utf8')
 
-/** The clause under test, appended to the domain's description. */
 const ARMS = {
     shipped: '',
     costed:
@@ -69,11 +41,6 @@ function toolsFor(clause) {
     return createGodotTools(extended, {call: async () => ({})}).map(asSchema)
 }
 
-/*
- * Four asks, each one a live run's own opening question, and each one a single fact rather than a
- * survey — which is the case the catalogue already says `ask` is for. `r11` and `s21` opened with
- * `search` on the first two; `t13` and `s34` on the last two.
- */
 const ASKS = [
     'Give the player real platformer movement: gravity, a jump on the Space key, and left/right'
         + ' movement with the arrow keys. Use CharacterBody2D.',
@@ -103,7 +70,6 @@ async function ask(clause, question, seed) {
     return body.choices?.[0]?.message ?? {}
 }
 
-/** Which documentation operations the model wrote, if any. */
 function score(message) {
     const ops = []
     for (const call of message.tool_calls ?? []) {

@@ -1,9 +1,3 @@
-/**
- * Moves Gofer's version in all three files that carry it.
- *
- * Run it with `npm run set-version -- 0.2.0`. `scripts/check-version.mjs` is what refuses a tree
- * where they have drifted apart again.
- */
 import {readVersions, writeVersion} from './version.mjs'
 
 const [version] = process.argv.slice(2)

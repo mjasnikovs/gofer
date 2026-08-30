@@ -11,22 +11,12 @@ import {PanelState} from './PanelState'
 
 const MAX_PASSAGES = 6
 
-/**
- * Documentation retrieval. `retrieve()` is used rather than `query()`, so answering a question here
- * costs no second model request, and it exposes no source link: a citation names the chapter a
- * passage came from and its position in that chapter, which is all the retriever knows.
- */
 export function DocsView() {
     const [question, setQuestion] = useState('')
     const [passages, setPassages] = useState<readonly DocsPassage[]>()
     const [error, setError] = useState<GodotError>()
     const [isLoading, setIsLoading] = useState(false)
 
-    /*
-     * Only the newest question gets to answer. Enter is not gated on the spinner the way the button
-     * is, so two searches can be in flight at once — and they resolve in arrival order, which let an
-     * older answer land on top of a newer one and clear the spinner that was still waiting for it.
-     */
     const latest = useRef(0)
 
     const search = useCallback(() => {
@@ -108,11 +98,6 @@ export function DocsView() {
                                     align='center'
                                 >
                                     <Text type='label'>{passage.chapter}</Text>
-                                    {/*
-                                     * Token, not Badge: which section of the chapter this passage
-                                     * came from is a label on the result, not a count and not one
-                                     * of a fixed set of states.
-                                     */}
                                     <Token label={`Section ${String(passage.order)}`} />
                                     <Text
                                         type='supporting'

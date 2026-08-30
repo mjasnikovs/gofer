@@ -8,20 +8,9 @@ type LogHistoryOptions = Readonly<{
     query: string
 }>
 
-/** How many archived events one search puts on screen. */
 const MAX_HITS = 100
 const NO_HITS: readonly GodotLogSearchHit[] = []
 
-/**
- * Searches the stored warning and error history of every recorded run.
- *
- * The session buffer belongs to the editor that is running now; this is the archive behind it, so
- * it answers with no session at all — which is exactly when a user goes looking for what the last
- * one printed. An empty query searches for nothing rather than for everything.
- *
- * Every answer carries the query that produced it, so what is on screen is always an answer to the
- * question the search box is asking rather than the previous one's hits waiting to be replaced.
- */
 export function useLogHistory({enabled, query}: LogHistoryOptions) {
     const [answered, setAnswered] = useState<{query: string; hits: readonly GodotLogSearchHit[]}>()
     const [failed, setFailed] = useState<{query: string; error: GodotError}>()
@@ -46,8 +35,6 @@ export function useLogHistory({enabled, query}: LogHistoryOptions) {
         }
     }, [isActive, needle])
 
-    // A search that found nothing has still answered, so emptiness is reported as an empty result
-    // rather than as a request still in flight.
     const isAnswered = isActive && answered?.query === needle
     const error = isActive && failed?.query === needle ? failed.error : undefined
     return {

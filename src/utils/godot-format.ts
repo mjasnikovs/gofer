@@ -1,11 +1,5 @@
 import type {GodotNode, GodotValue} from '../models/godot'
 
-/**
- * Presentation for the tagged values the addon encodes. Everything here is read-only text: a value
- * is written back through the typed command that owns it, never by parsing this string.
- */
-
-/** Primitives keep their text; anything else falls back, so nothing renders as `[object Object]`. */
 function asText(value: unknown, fallback = ''): string {
     if (typeof value === 'string') return value
     if (typeof value === 'number' || typeof value === 'boolean') return String(value)
@@ -61,7 +55,6 @@ export function formatGodotValue(value: GodotValue): string {
         case 'opaque':
             return asText(asRecord(inner)['text'], asText(asRecord(inner)['typeName']))
         default:
-            // Vectors, colors, transforms, and quaternions all arrive as flat number arrays.
             return Array.isArray(inner) ?
                     `${value.type}(${(inner as readonly unknown[]).map(entry => asText(entry)).join(', ')})`
                 :   asText(inner)
@@ -82,10 +75,6 @@ interface MutableTreeNode {
     children: MutableTreeNode[]
 }
 
-/**
- * Folds a flat worktree listing into the folder hierarchy the explorer shows. Directories sort
- * before files so a deep project reads top-down rather than as an alphabetical mix.
- */
 export function buildPathTree(paths: readonly string[]): readonly PathTreeNode[] {
     const roots: MutableTreeNode[] = []
     const directories = new Map<string, MutableTreeNode>()
@@ -120,13 +109,6 @@ export function buildPathTree(paths: readonly string[]): readonly PathTreeNode[]
     return sort(roots)
 }
 
-/**
- * Narrows a scene tree to what a filter names.
- *
- * A node matches on its name or its class, and a match keeps the branch that reaches it: a tree
- * pruned to bare matches would show `CollisionShape2D` with no clue which of five coins it belongs
- * to. Ancestors are kept for the path they draw, so what stays reads as the scene it came from.
- */
 export function filterSceneTree(node: GodotNode, filter: string): GodotNode | undefined {
     const query = filter.trim().toLowerCase()
     if (query === '') return node

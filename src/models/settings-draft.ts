@@ -29,11 +29,6 @@ import type {
     ThinkingLevel
 } from './settings'
 
-/**
- * The long-running things the settings page can be doing. They are named rather than counted
- * because two of them overlap: a model download and a project backup touch different subsystems
- * and the page lets both buttons spin at once.
- */
 export type SettingsTask =
     | 'testing'
     | 'saving'
@@ -46,17 +41,8 @@ export type SettingsTask =
 
 export type SettingsBusy = Readonly<Record<SettingsTask, boolean>>
 
-/**
- * The five tabs the dialog is divided into. Each one owns its own banner, and all but Godot own a
- * footer: Godot's two rules store the moment they are ticked, so it has nothing to put in one.
- */
 export type SettingsTab = 'ai' | 'prompt' | 'godot' | 'models' | 'storage'
 
-/**
- * Which tab a task belongs to, so a task's result lands next to the controls that started it
- * rather than above all four. Every task has exactly one home; that is what makes this a map
- * rather than a decision each call site has to make again.
- */
 export const TASK_TABS: Readonly<Record<SettingsTask, SettingsTab>> = {
     testing: 'ai',
     saving: 'ai',
@@ -68,45 +54,19 @@ export const TASK_TABS: Readonly<Record<SettingsTask, SettingsTab>> = {
     cleaningStorage: 'storage'
 }
 
-/** The banner each tab is showing, if any. Kept per tab because two tasks can run at once. */
 export type SettingsNotices = Readonly<Partial<Record<SettingsTab, Notice>>>
 
-/**
- * One secret, as the settings page holds it.
- *
- * The page never reads a stored secret back, which is what makes all three fields necessary: an
- * empty box cannot mean "remove it", so what is stored, what was typed, and what the save should do
- * are three separate answers.
- */
 export type KeyDraft = Readonly<{
-    /** Whether the credential store already holds it, as the backend last reported. */
     isStored: boolean
-    /** What the user has typed this session. Never the stored key. */
     typed: string
     intent: ApiKeyIntent
 }>
 
-/** Nothing typed and nothing stored, which is every slot before the backend has answered. */
 const NO_KEY: KeyDraft = {isStored: false, typed: '', intent: 'keep'}
 
-/**
- * Everything the settings dialog holds, as one value.
- *
- * Kept whole and kept out of React on purpose: the page's behaviour is then a pure function of
- * this and an action, so it can be read in one place and tested without mounting anything or
- * waiting for anything.
- */
 export type SettingsDraft = Readonly<{
-    /** Absent until the backend answers, and while it never does. */
     settings?: GoferSettings | undefined
-    /**
-     * Every secret, held the one way. Three of them used to be nine fields differing in a noun.
-     *
-     * ChatGPT is in here too even though nothing is ever typed into it: it is a secret the backend
-     * reports a flag for, and the flag is what the sign-in state is drawn from.
-     */
     keys: Readonly<Record<SecretName, KeyDraft>>
-    /** Which tab is on screen. Here rather than in React so the page stays one value. */
     tab: SettingsTab
     cache?: CacheStatus | undefined
     progress?: DownloadProgress | undefined
@@ -114,78 +74,50 @@ export type SettingsDraft = Readonly<{
     isLoading: boolean
     isDeleteOpen: boolean
     busy: SettingsBusy
-    /** Models the server reported on the last successful connection test. */
     availableModels: readonly AiModelOption[]
-    /**
-     * Models the sub-agent may be given, which is a second list because it can be a second driver.
-     * Empty while the child borrows the parent's connection, since there is then nothing to choose.
-     */
     subagentModels: readonly AiModelOption[]
-    /**
-     * The agent's system prompt, as three texts: what is in the box, what the backend last stored,
-     * and what Gofer ships. The middle one is what makes a save worth sending and the last one is
-     * what Restore puts back, so the page can answer both questions without asking the backend.
-     */
     agentPrompt: string
     savedAgentPrompt: string
     defaultAgentPrompt: string
 }>
 
-/**
- * The three steps of a task's lifecycle, which only [`runSettingsTask`] may take.
- *
- * They are apart from [`SettingsAction`] because they are not things the page decides — they are
- * one protocol, in a fixed order, and the page used to narrate it eight times. Nothing outside the
- * runner can construct one, because the page's `dispatch` is typed to the other union.
- */
 export type SettingsTaskAction =
     | Readonly<{type: 'began'; task: SettingsTask}>
     | Readonly<{type: 'ended'; task: SettingsTask}>
     | Readonly<{type: 'failed'; task: SettingsTask; notice: Notice}>
 
 export type SettingsAction =
-    /** The backend answered with settings and a cache reading. */
     | Readonly<{
           type: 'loaded'
           response: SettingsResponse
           cache: CacheStatus
           prompt: AgentPrompt
       }>
-    /** Loading finished without settings: no desktop backend, or the call threw. */
     | Readonly<{type: 'unavailable'; notice: Notice}>
     | Readonly<{type: 'tab-chosen'; tab: SettingsTab}>
-    /** The tuning that belongs to the whole file: the clock, the retries, the compaction line. */
     | Readonly<{type: 'ai-changed'; update: Partial<AiSettings>}>
-    /** The live connection's address half — where it is, and what it is called. */
     | Readonly<{type: 'connection-changed'; update: Partial<AiConnectionProfile>}>
-    /** Its model half, typed by hand rather than picked out of a catalogue. */
     | Readonly<{type: 'model-changed'; update: Partial<ModelChoice>}>
     | Readonly<{type: 'ai-driver-chosen'; connectionType: AiSettings['connectionType']}>
     | Readonly<{type: 'model-chosen'; model: AiModelOption}>
     | Readonly<{type: 'model-reconciled'; model: AiModelOption}>
     | Readonly<{type: 'models-listed'; models: readonly AiModelOption[]}>
-    /** Which connection answers a delegation. No type at all is "whatever the parent uses". */
     | Readonly<{type: 'subagent-driver-chosen'; connectionType?: AiConnectionType | undefined}>
     | Readonly<{type: 'subagent-model-chosen'; model: AiModelOption}>
     | Readonly<{type: 'subagent-model-reconciled'; model: AiModelOption}>
     | Readonly<{type: 'subagent-thinking-chosen'; thinkingLevel: ThinkingLevel}>
     | Readonly<{type: 'subagent-models-listed'; models: readonly AiModelOption[]}>
-    /** A key box was typed into. Which secret travels with the action rather than with its name. */
     | Readonly<{type: 'key-typed'; secret: SecretName; value: string}>
     | Readonly<{type: 'key-removal-toggled'; secret: SecretName}>
     | Readonly<{type: 'chatgpt-auth-changed'; isAuthenticated: boolean}>
     | Readonly<{type: 'saved'; response: SettingsResponse}>
     | Readonly<{type: 'prompt-typed'; value: string}>
-    /** The user asked for the shipped prompt back. It is theirs to save or to type over. */
     | Readonly<{type: 'prompt-restored'}>
     | Readonly<{type: 'prompt-saved'; prompt: AgentPrompt}>
-    /** A Godot rule was ticked. The page stores it straight away; this is only the optimism. */
     | Readonly<{type: 'godot-changed'; update: Partial<GodotSettings>}>
     | Readonly<{type: 'godot-saved'; response: SettingsResponse}>
-    /** Something finished with a result worth showing, and nothing else about the page changed. */
     | Readonly<{type: 'noticed'; tab: SettingsTab; notice: Notice}>
     | Readonly<{type: 'cache-read'; cache: CacheStatus}>
-    /** The download has started, so the cache is in flux before the backend says so. */
     | Readonly<{type: 'cache-downloading'}>
     | Readonly<{type: 'progress'; progress?: DownloadProgress | undefined}>
     | Readonly<{type: 'delete-dialog'; isOpen: boolean}>
@@ -226,12 +158,6 @@ function busyWith(busy: SettingsBusy, task: SettingsTask, isRunning: boolean): S
     return {...busy, [task]: isRunning}
 }
 
-/**
- * Writes the sub-agent's connection into the settings, leaving its six ceilings untouched.
- *
- * The connection sits inside the sub-agent section rather than beside it, so every update to it is
- * two levels of spread. Written once here because three actions need the same two.
- */
 function withSubagent(
     settings: GoferSettings,
     connection: SubagentConnection | undefined
@@ -242,13 +168,6 @@ function withSubagent(
     }
 }
 
-/**
- * Rewrites the live connection, leaving every other driver's alone.
- *
- * Every edit on the AI tab is one of these: the address half, the model half, or a model picked out
- * of a catalogue. Written once here because the reducer would otherwise spell out the same two
- * levels of spread at each of them.
- */
 function withLiveConnection(
     settings: GoferSettings,
     change: (connection: AiConnectionProfile) => AiConnectionProfile
@@ -256,17 +175,10 @@ function withLiveConnection(
     return {...settings, ai: withActiveConnection(settings.ai, change)}
 }
 
-/** Rewrites one secret's draft, leaving the other three alone. */
 function withKey(state: SettingsDraft, secret: SecretName, key: Partial<KeyDraft>): SettingsDraft {
     return {...state, keys: {...state.keys, [secret]: {...state.keys[secret], ...key}}}
 }
 
-/**
- * What the backend just said each slot holds, adopted whole.
- *
- * The typed text and the intent are left alone here, because a load has nothing to say about
- * either: they are what the user is in the middle of doing.
- */
 function withStoredKeys(state: SettingsDraft, response: SettingsResponse): SettingsDraft {
     return {
         ...state,
@@ -286,7 +198,6 @@ function withStoredKeys(state: SettingsDraft, response: SettingsResponse): Setti
     }
 }
 
-/** Every box emptied and every intent back to "leave it alone", which is what a save leaves. */
 function forgottenKeys(keys: SettingsDraft['keys']): SettingsDraft['keys'] {
     return {
         'ai-default': {...keys['ai-default'], typed: '', intent: 'keep'},
@@ -297,12 +208,10 @@ function forgottenKeys(keys: SettingsDraft['keys']): SettingsDraft['keys'] {
     }
 }
 
-/** Puts one tab's banner in place, or takes it away, leaving the other three tabs alone. */
 function noticedOn(notices: SettingsNotices, tab: SettingsTab, notice?: Notice): SettingsNotices {
     return {...notices, [tab]: notice}
 }
 
-/** What the page sends to the backend, or `undefined` while there is nothing loaded to send. */
 export function settingsRequest(state: SettingsDraft): SettingsRequest | undefined {
     if (!state.settings) return undefined
     const {'ai-default': ai, brave, openrouter, cerebras} = state.keys
@@ -315,10 +224,6 @@ export function settingsRequest(state: SettingsDraft): SettingsRequest | undefin
     }
 }
 
-/**
- * A save either stored the key or could not reach the credential store. Both wrote the settings,
- * so neither is an error, but only one of them is the whole of what the user asked for.
- */
 function savedNotice(response: SettingsResponse): Notice {
     if (response.credentialStoreError) {
         return {
@@ -334,17 +239,14 @@ function savedNotice(response: SettingsResponse): Notice {
     }
 }
 
-/** Whether the box holds something the backend has not been told about yet. */
 export function agentPromptIsUnsaved(state: SettingsDraft) {
     return state.agentPrompt !== state.savedAgentPrompt
 }
 
-/** Whether the box holds the prompt Gofer ships, so there is nothing to restore. */
 export function agentPromptIsDefault(state: SettingsDraft) {
     return state.agentPrompt.trim() === state.defaultAgentPrompt.trim()
 }
 
-/** Whether the model cache may not be touched: the backend says busy, or this page is downloading. */
 export function cacheIsBusy(state: SettingsDraft) {
     return state.cache?.state === 'busy' || state.busy.downloading
 }
@@ -380,16 +282,12 @@ export function reduce(
                     :   state.notices
             }
 
-        // A dialog that could not load at all is a connection problem, and the connection tab is
-        // the one it opens on. The other three say their own unavailable line in place.
         case 'unavailable':
             return {...state, isLoading: false, notices: {...state.notices, ai: action.notice}}
 
         case 'tab-chosen':
             return {...state, tab: action.tab}
 
-        // Starting work clears the last notice on that task's own tab: it described the previous
-        // attempt, not this one. A banner on another tab belongs to another task and stays.
         case 'began':
             return {
                 ...state,
@@ -460,12 +358,6 @@ export function reduce(
             }
         }
 
-        /*
-         * The catalogue answering about the model that is already chosen.
-         *
-         * Only what the model itself decides — see `adoptModelReasoning`. The limits are left as
-         * they are, because a context window the user typed is an answer, not a stale copy.
-         */
         case 'model-reconciled': {
             const connection = state.settings && activeConnection(state.settings.ai)
             if (!state.settings || !connection) return state
@@ -480,9 +372,6 @@ export function reduce(
         case 'models-listed':
             return {...state, availableModels: action.models}
 
-        // The list is emptied with the driver rather than left standing, because it describes the
-        // server that was chosen a moment ago. Offering it against the new one would let a model be
-        // picked that the new connection has never heard of.
         case 'subagent-driver-chosen': {
             if (!state.settings) return state
             return {
@@ -521,7 +410,6 @@ export function reduce(
             }
         }
 
-        /** The catalogue answering about the model the sub-agent already has. See the parent's. */
         case 'subagent-model-reconciled': {
             const chosen = state.settings?.ai.subagent.connection
             if (!state.settings || !chosen) return state
@@ -536,36 +424,24 @@ export function reduce(
         case 'subagent-models-listed':
             return {...state, subagentModels: action.models}
 
-        // Emptying the field means "leave the stored key alone", not "remove it": removing is the
-        // separate button, and it is the only thing that reaches 'clear'. One rule for all three
-        // boxes, because the page never reads a stored secret back for any of them.
         case 'key-typed':
             return withKey(state, action.secret, {
                 typed: action.value,
                 intent: action.value.trim() ? 'set' : 'keep'
             })
 
-        // A typed key is discarded when removal is chosen: the two are opposite answers, and a box
-        // still holding text under a "will be removed" line says the save will do both.
         case 'key-removal-toggled':
             return withKey(state, action.secret, {
                 typed: '',
                 intent: state.keys[action.secret].intent === 'clear' ? 'keep' : 'clear'
             })
 
-        // ChatGPT is the one secret with no box: signing in and out is what stores and removes it.
         case 'chatgpt-auth-changed':
             return withKey(state, 'chat-gpt', {isStored: action.isAuthenticated})
 
-        // Every box is emptied, not only the AI key's: the save has written all three, and text
-        // left in one would be sent a second time by the next save.
         case 'saved':
             return {
                 ...withStoredKeys({...state, keys: forgottenKeys(state.keys)}, action.response),
-                // Normalised like the load above, and for the same reason: what comes back is a
-                // settings object, not necessarily one carrying every field this build knows about.
-                // Stored raw, a response missing a field left the draft holding `undefined` for it,
-                // and the next screen to read it crashed rather than falling back.
                 settings: normalizeSettings(action.response.settings),
                 busy: busyWith(state.busy, 'saving', false),
                 notices: noticedOn(state.notices, 'ai', savedNotice(action.response))
@@ -577,8 +453,6 @@ export function reduce(
         case 'prompt-restored':
             return {...state, agentPrompt: state.defaultAgentPrompt}
 
-        // The backend answers with the prompt it will send, which is the shipped one whenever the
-        // stored text was the shipped one. Taking its word keeps the box and the agent in step.
         case 'prompt-saved':
             return {
                 ...state,
@@ -592,9 +466,6 @@ export function reduce(
                 })
             }
 
-        // Optimistic: the box moves before the backend answers, because a checkbox that waits for a
-        // file write reads as broken. The page dispatches this again with the previous value when
-        // the write fails, which is what makes the optimism honest rather than a lie.
         case 'godot-changed':
             if (!state.settings) return state
             return {
@@ -634,25 +505,6 @@ export function reduce(
     }
 }
 
-/**
- * Runs one settings task, in the one order the three steps have to happen in.
- *
- * Eight functions on the page used to write this out: dispatch `began`, `await` the work, dispatch
- * `failed` with a title in the `catch`, dispatch `ended` in the `finally`. That order was part of
- * this module's interface and it was stated nowhere but in comments, so the eight copies did not
- * agree — `saved`, `godot-saved` and `failed` each clear `busy` themselves, and then the `finally`
- * cleared it a third time. There was a reducer test called "keeps the failure notice when the
- * finally block also ends the task": a reducer test that has to know about a component's control
- * flow is the constraint escaping the module.
- *
- * `work` is a thunk, so the command name stays at the call site — ADR 0001 is about pass-throughs,
- * and this holds a protocol rather than a second name for a command. Work that has to put
- * something back on the way out catches, reverts, and rethrows: the failure is still the runner's
- * to report, and the order is still the runner's to keep.
- *
- * It never rejects. A caller that had to catch what this already reported would be writing the
- * eighth copy again.
- */
 export async function runSettingsTask(
     dispatch: (action: SettingsTaskAction) => void,
     task: SettingsTask,

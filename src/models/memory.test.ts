@@ -18,13 +18,6 @@ function memory(overrides: Partial<ProjectMemory>): ProjectMemory {
 }
 
 describe('what a check is worth saying', () => {
-    /**
-     * Every sentence names the measurement, because the measurement is all there is.
-     *
-     * The check opens the workspace and looks for the files a memory spells out. It cannot tell a
-     * memory that has gone out of date from one whose whole subject is a deletion, so it never says
-     * which — a wording that grows into a verdict is a wording that is sometimes lying.
-     */
     it('says where files are and never whether the memory is right', () => {
         expect(checkSummary(memory({check: 'stale', anchors: [{named: 'GRAYZONE.md'}]}))).toBe(
             'Names GRAYZONE.md, which is not in the workspace'
@@ -34,7 +27,6 @@ describe('what a check is worth saying', () => {
         ).toBe('Names 2 files that are not in the workspace')
     })
 
-    /** An intact memory says how much was checked, so "all there" cannot mean "nothing was". */
     it('counts what it found rather than only reporting success', () => {
         expect(
             checkSummary(
@@ -54,12 +46,6 @@ describe('what a check is worth saying', () => {
         ).toBe('Names 2 files, all there')
     })
 
-    /**
-     * Nothing checked and nothing to check are different states and read differently.
-     *
-     * There is no worktree before the first task exists. Drawing that as a memory that names no
-     * file would tell the user their memory is fine when nothing was compared against anything.
-     */
     it('tells nothing to check apart from nothing checked', () => {
         expect(checkSummary(memory({check: 'unanchored'}))).toBe('Names no file')
         expect(checkSummary(memory({check: 'unchecked', anchors: [{named: 'a.gd'}]}))).toBe(
@@ -67,7 +53,6 @@ describe('what a check is worth saying', () => {
         )
     })
 
-    /** Retrieval reads `confirmed` and nothing else, so the other two states are a mute. */
     it('knows which memories a turn is actually given', () => {
         expect(isRetrievable(memory({state: 'confirmed'}))).toBe(true)
         expect(isRetrievable(memory({state: 'candidate'}))).toBe(false)

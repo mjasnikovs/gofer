@@ -13,40 +13,22 @@ const USAGE: TokenUsage = {
     cost: {total: 0}
 }
 
-/** One scripted turn: what the backend emits, and how it ends. */
 type Script = Readonly<{
     events?: readonly AiStreamEvent[]
-    /** Thrown instead of settling, standing in for a command that rejected. */
     throws?: unknown
 }>
 
 type Harness = Readonly<{
     runner: TurnRunner
-    /** Every request the runner sent, in order. */
     sent: SendAiMessageRequest[]
-    /** Every request id the runner asked to cancel. */
     cancelled: number[]
-    /** Settles once every turn started so far has finished. */
     idle: () => Promise<void>
 }>
 
-/**
- * Lets the running turn finish.
- *
- * A macrotask, not a delay: yielding to the task queue once drains every microtask behind it,
- * however deep the promise chain. `start` and `retry` deliberately do not return one to await —
- * a turn is fired and then watched — so this is what a test waits on instead.
- */
 async function settled() {
     await new Promise(resolve => setTimeout(resolve, 0))
 }
 
-/**
- * A runner wired to a backend that emits exactly what the test says, in order, and then ends.
- *
- * `scripts` is consumed one per turn, so a test drives a failure followed by a retry by handing
- * over two. A turn beyond the end of the list emits nothing and ends cleanly.
- */
 function harness(...scripts: readonly Script[]): Harness {
     const sent: SendAiMessageRequest[] = []
     const cancelled: number[] = []
@@ -59,8 +41,6 @@ function harness(...scripts: readonly Script[]): Harness {
             for (const event of script.events ?? []) {
                 receive({requestId: request.requestId, event})
             }
-            // Rejecting with a value rather than throwing one, because that is what the backend
-            // does: a Tauri command rejects with the structured failure, not with an `Error`.
             // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/prefer-promise-reject-errors
             if (script.throws !== undefined) throw script.throws
         },
@@ -123,19 +103,11 @@ describe('createTurnRunner', () => {
 
         expect(sent[0]?.messages.map(message => message.text)).toEqual(['first'])
         expect(sent[1]?.messages.map(message => message.text)).toEqual(['first', '', 'second'])
-        // Consecutive and distinct, not 1 and 2: the counter is process-wide now, so what a
-        // turn is given depends on how many ran before it. See the remount test below.
         const [first, second] = sent.map(request => request.requestId)
         expect(second).toBe((first ?? 0) + 1)
         expect(sent.every(request => !request.isRetry)).toBe(true)
     })
 
-    /*
-     * The workspace is keyed on the task, so opening another task builds a second runner. The
-     * backend cancels a turn by id and holds that id for the life of the process, so a runner that
-     * restarted the count handed the next turn an id that was already stopped — and every backend
-     * tool answered its reachability probe with `cancelled`, refusing the turn before it started.
-     */
     it('never gives a second runner an id the first one already used', async () => {
         const first = harness({})
         const second = harness({})
@@ -174,8 +146,6 @@ describe('createTurnRunner', () => {
         runner.start('carry on')
         await idle()
 
-        // Empty here is the model being asked a question with no memory of the work it just did,
-        // which is what the rebuild from the screen exists to paper over.
         expect(sent[1]?.agentMessages).toEqual([{role: 'toolResult'}])
     })
 

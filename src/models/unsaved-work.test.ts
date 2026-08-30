@@ -13,7 +13,6 @@ describe('unsavedScenes', () => {
         ).toEqual(['res://a.tscn', 'res://b.tscn'])
     })
 
-    /** Only this code means unsaved work. Every other merge failure has its own way out. */
     it('is nothing for a failure about something else', () => {
         expect(
             unsavedScenes(
@@ -22,10 +21,6 @@ describe('unsavedScenes', () => {
         ).toEqual([])
     })
 
-    /**
-     * A dialog with no files in it says nothing a user can act on, so a reply that carries no list
-     * is left to the error line rather than turned into a question.
-     */
     it('is nothing when the refusal carries no list', () => {
         expect(unsavedScenes(failure({}))).toEqual([])
         expect(unsavedScenes(failure({details: {scenes: 'res://a.tscn'}}))).toEqual([])

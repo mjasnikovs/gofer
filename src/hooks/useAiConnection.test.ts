@@ -7,13 +7,10 @@ import type {AiModelOption, GoferSettings, ModelChoice, SettingsResponse} from '
 
 const tauri = createDesktopFake()
 
-/** What the fake backend answers, rebuilt per test. */
 let backend: (...call: unknown[]) => Promise<unknown>
 
-/** Every settings object the renderer asked the backend to store, oldest first. */
 let saved: GoferSettings[]
 
-/** A local connection whose stored model facts are the argument. */
 function storedSettings(model: Partial<ModelChoice>): GoferSettings {
     return {
         version: 1,
@@ -44,12 +41,10 @@ function storedSettings(model: Partial<ModelChoice>): GoferSettings {
     } as unknown as GoferSettings
 }
 
-/** The model the live connection is on, in whatever the hook is holding or last saved. */
 function chosen(settings?: GoferSettings): ModelChoice | undefined {
     return settings && activeConnection(settings.ai)?.model
 }
 
-/** One model as the server's catalogue describes it. */
 function catalogued(model: Partial<AiModelOption>): AiModelOption {
     return {
         id: 'qwen.gguf',
@@ -65,7 +60,6 @@ function catalogued(model: Partial<AiModelOption>): AiModelOption {
     }
 }
 
-/** Wires the fake backend to one stored file and one catalogue. */
 function connectedTo(settings: GoferSettings, models: readonly AiModelOption[]) {
     backend = (command, args) => {
         if (command === 'load_settings') {
@@ -94,24 +88,11 @@ describe('useAiConnection', () => {
         tauri.invoke.mockImplementation((command, arguments_) => backend(command, arguments_))
     })
 
-    /*
-     * Unmounted, not left standing. The hook defers its connection to after the render, so a hook
-     * still mounted when the environment is torn down runs `setConnectionState` against a `window`
-     * that no longer exists — an unhandled rejection, and one that reports against whichever test
-     * file happened to be running. The effect's cleanup cancels the deferral; nothing calls it
-     * unless the hook is unmounted.
-     */
     afterEach(() => {
         cleanup()
         removeDesktopFake()
     })
 
-    /*
-     * The regression: a local server names its model differently from the catalogue Gofer read the
-     * model's facts out of, so the file was written with `reasoning: false`, and the reasoning menu
-     * offered nothing but `off` forever. Nothing re-read those facts, because the configured model
-     * was in the list — only a model that was *not* was ever adopted.
-     */
     it('adopts a thinking level the configured model turns out to have', async () => {
         connectedTo(storedSettings({}), [catalogued({})])
         const {result} = connect()
@@ -122,7 +103,6 @@ describe('useAiConnection', () => {
         expect(chosen(saved.at(-1))?.reasoning).toBe(true)
     })
 
-    /** And the other direction: a model that cannot reason keeps no level to be asked at. */
     it('drops a thinking level the configured model turns out not to have', async () => {
         connectedTo(
             storedSettings({reasoning: true, supportsReasoningEffort: true, thinkingLevel: 'high'}),
@@ -136,7 +116,6 @@ describe('useAiConnection', () => {
         expect(chosen(saved.at(-1))?.thinkingLevel).toBe('off')
     })
 
-    /** A catalogue that agrees with the file is not a reason to write the file. */
     it('saves nothing when the catalogue tells it what it already knew', async () => {
         connectedTo(
             storedSettings({reasoning: true, supportsReasoningEffort: true, thinkingLevel: 'high'}),
@@ -150,7 +129,6 @@ describe('useAiConnection', () => {
         expect(chosen(result.current.settings)?.thinkingLevel).toBe('high')
     })
 
-    /** The rule that was already there, and has to survive: one model, and it is not the one. */
     it('adopts the only model a server has when it is not the configured one', async () => {
         connectedTo(storedSettings({}), [catalogued({id: 'other.gguf', name: 'Other'})])
         const {result} = connect()

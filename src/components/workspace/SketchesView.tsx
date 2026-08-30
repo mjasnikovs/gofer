@@ -21,13 +21,10 @@ import {SketchFrame} from './SketchFrame'
 import type {ProjectSketch, SketchHtml} from '../../models/sketch'
 import type {CommandError} from '../../models/errors'
 
-/** How much of the question the closed row shows. */
 const PREVIEW_LENGTH = 110
 
-/** How much of the window height everything above and below one sketch needs. */
 const SPARE = 300
 
-/** Which rows the list is showing. */
 type SketchFilter = 'all' | 'approved'
 
 function preview(question: string): string {
@@ -35,24 +32,6 @@ function preview(question: string): string {
     return line.length > PREVIEW_LENGTH ? `${line.slice(0, PREVIEW_LENGTH)}…` : line
 }
 
-/**
- * The layouts this project has agreed, so one can be looked at again.
- *
- * `ask_user` puts a sketch in front of the user inside a card, and the card closes the moment they
- * answer. That is right for the question and wrong for the layout: what they agreed is the thing the
- * whole design loop existed to produce, and until this screen it was gone the second it was decided.
- *
- * Only what was chosen is here. A round the user rejected is not a layout they agreed, and a list
- * that showed all of them would be asking somebody to remember which of five they picked — which is
- * the question this screen exists to stop them having to answer.
- *
- * The markup is fetched a row at a time rather than with the list. The copy drawn here has the
- * project's own artwork inlined into it, so it runs to tens of kilobytes; forty of them would be
- * carried across the seam so that one could be looked at.
- *
- * Send to chat pastes the model's own markup, never the inlined copy. They are the same layout to
- * look at and nothing alike to build from: one says `res://ui/panel.png` and the other is base64.
- */
 export function SketchesView() {
     const references = useChatReferences()
     const [sketches, setSketches] = useState<readonly ProjectSketch[]>()
@@ -60,13 +39,9 @@ export function SketchesView() {
     const [isLoading, setIsLoading] = useState(true)
     const [filter, setFilter] = useState<SketchFilter>('all')
     const [openId, setOpenId] = useState<string>()
-    // The markup of every sketch opened so far. Closing a row and opening it again is a gesture, not
-    // a request to fetch eighty kilobytes twice.
     const [html, setHtml] = useState<ReadonlyMap<string, SketchHtml>>(() => new Map())
     const [readFailure, setReadFailure] = useState<{id: string; reason: string}>()
     const [blocked, setBlocked] = useState<readonly string[]>([])
-    // Which sketch is open at full size, or none. A viewer over the panel, never a second copy of
-    // it: what is underneath is unchanged and comes back when this closes.
     const [zoomed, setZoomed] = useState<ProjectSketch>()
     const [reads, setReads] = useState(0)
 
@@ -91,15 +66,6 @@ export function SketchesView() {
         }
     }, [reads])
 
-    /*
-     * The read is an effect rather than part of the click, because Refresh has to be able to undo it.
-     *
-     * A sketch identifier is per question, not per round: every revision of one layout upserts the
-     * same row and rewrites both files where they are. So a cache that is only ever added to draws
-     * round one under round three's label for the rest of the session, and Send to chat pastes round
-     * one's markup — which is the one thing on this screen that has to be the layout that was agreed.
-     * Refresh empties the cache, and this reads whatever is open again on its own.
-     */
     useEffect(() => {
         if (openId === undefined || html.has(openId)) return
         let cancelled = false
@@ -211,14 +177,6 @@ export function SketchesView() {
                                 key={sketch.id}
                                 value={sketch.id}
                                 trigger={
-                                    /*
-                                     * Two lines, each with one thing that may grow.
-                                     *
-                                     * Three of them on one row is what shipped first, and in the
-                                     * 330 pixels this column actually has it truncated the badge
-                                     * to "agr…" — the one word on the row that has to be read
-                                     * exactly.
-                                     */
                                     <VStack gap={1}>
                                         <HStack
                                             gap={2}
@@ -258,12 +216,6 @@ export function SketchesView() {
                                     </VStack>
                                 }
                             >
-                                {/*
-                                 * Only the open row is built. `Collapsible` always renders its
-                                 * children and hides them with `display: none`, so every sketch
-                                 * opened once kept a live iframe and a ResizeObserver mounted for
-                                 * the rest of the session.
-                                 */}
                                 {openId === sketch.id && (
                                     <SketchBody
                                         sketch={sketch}
@@ -284,13 +236,6 @@ export function SketchesView() {
                     </CollapsibleGroup>
                 </PanelState>
             </StackItem>
-            {/*
-             * A layout is 1280 pixels wide and this column has about 330 of them.
-             *
-             * Shrunk to a quarter it is a picture of a layout rather than a layout, which is not
-             * enough to re-check anything — and re-checking is the whole reason this screen exists.
-             * The same magnifier the question card carries, over the same frame.
-             */}
             {zoomed !== undefined && (
                 <Dialog
                     isOpen
@@ -329,17 +274,9 @@ type SketchBodyProps = Readonly<{
     refused: readonly string[]
     onBlocked: (uri: string) => void
     onZoom: () => void
-    /** Absent when this panel is rendered with no conversation to paste into. */
     onSend?: ((text: string) => void) | undefined
 }>
 
-/**
- * One opened sketch: the drawing, and the one thing to do with it.
- *
- * A sketch with no source markup is one kept before the second copy existed. The button says so and
- * stays put rather than disappearing — a control that vanishes on some rows and not others reads as
- * a fault in the screen rather than as a fact about the row.
- */
 function SketchBody({sketch, html, failure, refused, onBlocked, onZoom, onSend}: SketchBodyProps) {
     if (failure !== undefined)
         return (

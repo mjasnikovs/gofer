@@ -20,14 +20,12 @@ function surface(state: GodotSessionState) {
     )
     const view = render(inSession(state))
     return Object.assign(call, {
-        /** The same panel, with the editor now in another state. */
         replay: (next: GodotSessionState) => {
             view.rerender(inSession(next))
         }
     })
 }
 
-/** A promise this test settles itself, so the order of an answer and a re-render is not a race. */
 function deferred<T>() {
     let settle!: (value: T) => void
     const promise = new Promise<T>(resolve => {
@@ -36,7 +34,6 @@ function deferred<T>() {
     return {promise, settle}
 }
 
-/** Astryx keeps a refusing button focusable, so it says so with ARIA rather than the attribute. */
 function isRefused(label: string) {
     const button = screen.getByRole('button', {name: label})
     return button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true'
@@ -48,8 +45,6 @@ describe('the game surface', () => {
         expect(isRefused('Run')).toBe(false)
         cleanup()
 
-        // A second run of a running game can only answer `already_running`, and a game stopped on
-        // a breakpoint is still a game the editor is running. Restart is what was wanted.
         for (const state of ['playing', 'debugPaused'] as const) {
             surface(state)
             expect(isRefused('Run')).toBe(true)
@@ -59,13 +54,6 @@ describe('the game surface', () => {
         }
     })
 
-    /**
-     * The picture is evidence of the game it came out of, and of no other.
-     *
-     * A frame stayed on screen through a restart, through a crash, and through a stop the panel
-     * did not issue itself — a picture of a game that no longer exists, beside controls describing
-     * one that does. The epoch moves whenever the game does, which is what retires it.
-     */
     it('stops showing a frame of the game once that game is gone', async () => {
         const user = userEvent.setup()
         const call = surface('playing')
@@ -81,21 +69,9 @@ describe('the game surface', () => {
         expect(screen.getByText('No frame captured')).toBeInTheDocument()
     })
 
-    /**
-     * The first frame of a run belongs to that run.
-     *
-     * The frame used to be tagged with a counter the workspace bumps whenever the game starts, read
-     * when the command was sent — so the bump that Run itself caused retired Run's own answer, and
-     * the panel said "No frame captured" over a game it had just started and drawn.
-     */
     it('shows the frame of the run it has just started', async () => {
         const user = userEvent.setup()
         const call = surface('ready')
-        // The answer is held rather than resolved, because the order is the whole subject: the
-        // editor moves into playing while Run's own call is still in flight, and the frame that
-        // call answers with belongs to the run that bump describes. Resolving it immediately left
-        // that order to a microtask, and under the load of a full gate it came out the other way —
-        // the panel said "No frame captured" over a game it had just started.
         const held = deferred<{frame: typeof FRAME}>()
         call.mockImplementation(() => held.promise)
         await user.click(screen.getByRole('button', {name: 'Run'}))
@@ -110,7 +86,6 @@ describe('the game surface', () => {
         expect(screen.getByText('Game · 320×180')).toBeInTheDocument()
     })
 
-    /** A restart takes the old game's picture down when it is asked for, not when it answers. */
     it('takes the picture down with the game a restart is ending', async () => {
         const user = userEvent.setup()
         const call = surface('playing')
@@ -120,8 +95,6 @@ describe('the game surface', () => {
             expect(screen.getByAltText(/the running game/i)).toBeInTheDocument()
         })
 
-        // A restart that never answers still ends the game it was pressed over. The panel refuses
-        // every control while a call is in flight, so the wait is for the capture to have let go.
         call.mockImplementation(() => new Promise(() => undefined))
         await waitFor(() => {
             expect(isRefused('Restart')).toBe(false)
@@ -133,7 +106,6 @@ describe('the game surface', () => {
         })
     })
 
-    /** The editor viewport is not a game, so no run of one takes it away. */
     it('keeps a capture of the editor across a game that came and went', async () => {
         const user = userEvent.setup()
         const call = surface('ready')

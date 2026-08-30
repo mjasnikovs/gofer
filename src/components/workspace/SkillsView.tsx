@@ -27,27 +27,14 @@ import type {Skill, SkillsResponse} from '../../models/skills'
 import {PanelState} from './PanelState'
 import {SkillEditor} from './SkillEditor'
 
-/** Which skill is open, and the text as the user has it. */
 type OpenSkill = Readonly<{name: string; text: string}>
 
-/**
- * The skills this project gives its agent.
- *
- * A skill is a Markdown file with a description. The description is the whole of what the model
- * sees until it decides the skill applies, so it is on the row rather than behind the editor: a
- * skill nobody can describe is a skill the model will never open.
- *
- * Every call that changes something answers with the whole list. An import can produce a warning
- * instead of a row, and a save can turn a warning back into a row, so patching one row locally
- * would draw a list the backend does not have.
- */
 export function SkillsView() {
     const [response, setResponse] = useState<SkillsResponse>()
     const [error, setError] = useState<CommandError>()
     const [isLoading, setIsLoading] = useState(true)
     const [open, setOpen] = useState<OpenSkill>()
     const [busy, setBusy] = useState<string>()
-    /** The skill the user pressed Delete on, held until they say so a second time. */
     const [deleting, setDeleting] = useState<Skill>()
 
     const run = useCallback(async (work: () => Promise<SkillsResponse>) => {
@@ -59,8 +46,6 @@ export function SkillsView() {
         }
     }, [])
 
-    // Inlined rather than run through `run` above: nothing is set synchronously here, because
-    // `isLoading` is already true on mount and every other state change happens in a `then`.
     useEffect(() => {
         let cancelled = false
         void listSkills()
@@ -80,13 +65,6 @@ export function SkillsView() {
         }
     }, [])
 
-    /**
-     * Two pickers rather than one, because the native dialog cannot offer both at once.
-     *
-     * A skill is often a folder: `SKILL.md` names the rest by relative path, and the agent opens
-     * those once the description matches. Picking only the Markdown file would copy in a skill
-     * whose every reference points at nothing, so the folder is the one offered first.
-     */
     const add = useCallback(
         async (folder: boolean) => {
             const chosen = await choosePath(
@@ -98,7 +76,6 @@ export function SkillsView() {
                         filters: [{name: 'Skill', extensions: ['md']}]
                     }
             )
-            // A cancelled picker is not a failure; the user simply changed their mind.
             if (chosen === undefined) return
             await run(() => importSkill(chosen))
         },
@@ -117,13 +94,6 @@ export function SkillsView() {
         }
     }, [])
 
-    /**
-     * Closes the editor only when the save worked.
-     *
-     * `run` turns a failure into a banner rather than a rejection, so closing on the way past threw
-     * away everything the user had typed — a body over the size cap came back refused and the
-     * editor was already gone with the text in it.
-     */
     const save = useCallback(async () => {
         if (!open) return
         setBusy(open.name)
@@ -229,8 +199,6 @@ export function SkillsView() {
                     isLoading={isLoading}
                     {...(error
                         && !response && {
-                            // Never retryable: a skills read fails because the worker is missing or
-                            // the directory cannot be read, and neither of those repairs itself.
                             error: {code: error.code, message: error.message, retryable: false}
                         })}
                     isEmpty={skills.length === 0 && warnings.length === 0}
@@ -271,13 +239,6 @@ export function SkillsView() {
                             <Banner
                                 container='section'
                                 status='warning'
-                                /*
-                                 * "has something wrong with it", not "is not a skill". pi warns
-                                 * about files that load perfectly well — a name that disagrees
-                                 * with its directory, a description over 1,024 characters — so
-                                 * the old wording put a row and a banner denying its existence on
-                                 * the same screen.
-                                 */
                                 title={
                                     warnings.length === 1 ?
                                         'One file needs attention'
@@ -314,14 +275,6 @@ type DeleteSkillDialogProps = Readonly<{
     onConfirm: () => void
 }>
 
-/**
- * The second press, because the first one cannot be taken back.
- *
- * Delete removes the skill's whole directory, and a skill is usually a folder — a `SKILL.md` and
- * the reference files it points at, all of them written by hand. `.gofer/.gitignore` is `*`, so
- * none of it is in Git and nothing brings it back. The memory rows this tab sits beside are
- * database rows; these are the user's files.
- */
 function DeleteSkillDialog({skill, onCancel, onConfirm}: DeleteSkillDialogProps) {
     return (
         <Dialog
@@ -387,21 +340,11 @@ type SkillRowProps = Readonly<{
     onToggle: (enabled: boolean) => Promise<void>
 }>
 
-/**
- * One skill. The row itself is not clickable: it holds a switch and two buttons, and an
- * interactive row around interactive controls is a click target inside a click target.
- */
 function SkillRow({skill, isBusy, onEdit, onDelete, onToggle}: SkillRowProps) {
     return (
         <Item
             as='div'
             align='start'
-            /*
-             * Three lines, not the one the row defaults to. The description is the only thing that
-             * decides whether the model ever opens this skill, so a tab that cuts it at forty
-             * characters cannot answer the question the user came here to ask — is this
-             * description good enough to be matched against?
-             */
             descriptionLines={3}
             label={
                 <HStack
@@ -409,10 +352,6 @@ function SkillRow({skill, isBusy, onEdit, onDelete, onToggle}: SkillRowProps) {
                     align='center'
                 >
                     <Text type='label'>{skill.name}</Text>
-                    {/*
-                     * A file that turned itself off is not a switch the user can win against, so
-                     * the row says which of the two reasons it is off for.
-                     */}
                     {skill.hidden && <Token label='Hidden by the file' />}
                 </HStack>
             }
@@ -433,11 +372,6 @@ function SkillRow({skill, isBusy, onEdit, onDelete, onToggle}: SkillRowProps) {
                         isDisabled={skill.hidden}
                         changeAction={onToggle}
                     />
-                    {/*
-                     * Icons, and the skill's own name in the label. A row of buttons all reading
-                     * "Edit" is one accessible name repeated down the list, so nothing spoken
-                     * says which skill is about to be edited.
-                     */}
                     <Button
                         label={`Edit ${skill.name}`}
                         size='sm'

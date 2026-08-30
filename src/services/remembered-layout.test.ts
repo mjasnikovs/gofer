@@ -5,19 +5,10 @@ import {EXPLORER_MAX, EXPLORER_MIN} from '../models/ui-state'
 
 type Store = LayoutStore
     & Readonly<{
-        /** Every write in order, so a test can assert what was recorded and what was not. */
         writes: (readonly [string, unknown])[]
-        /** How many reads each key has taken. */
         reads: Record<string, number>
     }>
 
-/**
- * The project's state held in a Map.
- *
- * `read` is a promise that has already settled rather than a value, because the real one is a call
- * into the database — and the gap between mounting and that call answering is the whole reason
- * this module exists.
- */
 function store(stored: Record<string, unknown> = {}): Store {
     const values = new Map(Object.entries(stored))
     const writes: (readonly [string, unknown])[] = []

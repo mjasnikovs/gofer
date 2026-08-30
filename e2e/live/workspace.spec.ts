@@ -48,109 +48,50 @@ import {
 } from './harness'
 import {seedLiveWorkspace} from './workspace-fixture'
 
-/**
- * The whole application, driven against a real Godot project on this machine.
- *
- * Nothing here is stubbed: the AI worker talks to the configured endpoint, retrieval uses the
- * models already in the user's cache, and the editor is a real windowed Godot 4.7 running the
- * project in a task worktree. Only the application data directory is redirected, so a sweep cannot
- * touch the user's own projects.
- *
- * The suite is ordered rather than independent, because the application is: a scene tree needs an
- * editor, a debugger needs a game, and starting a fresh editor for each assertion would spend
- * minutes proving something the previous test already established.
- */
 const workspace = process.env.GOFER_WORKSPACE_DIR ?? seedLiveWorkspace()
-/** A line inside `_on_tick`, which the fixture's timer reaches about once a second. */
 const BREAK_LINE = 19
-/** The fixture's `@export var tick_interval`, which is used again further down the same file. */
 const EXPORT_LINE = 5
 const RENAMED_SYMBOL = 'tick_interval_renamed'
-/** A line no GDScript parser accepts, typed at the top of the file where the caret is put. */
 const BROKEN_EDIT = '~\n'
-/** A port nothing on this machine listens on, so the connection fails rather than hanging. */
 const UNREACHABLE_URL = 'http://127.0.0.1:9/v1'
-/** The scene the agent is asked to build, named as the worktree holds it and as Godot names it. */
 const LEVEL_SCENE = 'scenes/level_1.tscn'
 const LEVEL_SCENE_RESOURCE = `res://${LEVEL_SCENE}`
-/** The art the fixture project ships: an 8x2 atlas of 16x16 tiles, described to the agent below. */
 const ATLAS = 'res://assets/tiles.png'
-/** Where the agent is asked to put the tileset it cuts from that atlas. */
 const TILESET = 'res://tiles/world.tres'
-/** The level's root node, named in the prompt so the editor can be held to having it open. */
 const LEVEL_ROOT = 'Level1'
-/** The layer the level is painted on, named in the prompt so its cells can be read back. */
 const TERRAIN = `/${LEVEL_ROOT}/Terrain`
-/**
- * What each tile in the atlas is, in the words the prompt uses.
- *
- * The agent cannot see the image — no tool reads a PNG — so the layout is told to it the way a
- * person handing over an asset would. Which tiles collide is left to the agent.
- */
 const ATLAS_LEGEND =
     '(0,0) ground, (1,0) brick, (2,0) question block, (3,0) spent block, (4,0) and (5,0) the '
     + 'left and right halves of a pipe’s mouth, (6,0) and (7,0) the left and right halves of its '
     + 'shaft, (0,1) flag pole, (1,1) the ball on top of it, (2,1) the flag, (3,1) castle brick, '
     + '(4,1) and (5,1) the halves of a bush, (6,1) and (7,1) the halves of a cloud'
-/**
- * How long one agent turn may take.
- *
- * A local 27B model authoring a scene runs a dozen tool calls per turn, and every one of them is a
- * command in flight — so the idle detector still ends a turn that has actually stopped working;
- * this is only the outer bound on one that has not.
- */
 const AGENT_LIMIT_MS = 900_000
-/** The retrieval tool the model is given, named as the worker records its calls. */
 const DOCS_TOOL = 'godot_docs_search'
-/**
- * The context window the connection is given to make this conversation outgrow it.
- *
- * Two bounds, and the scenario proves nothing outside them. Compaction starts at the percentage of
- * the window the settings name, so this has to be under what the task already sends or nothing is
- * summarised. And what compaction leaves — 20,000 tokens of recent conversation, the summary, the
- * system prompt and the tool catalogue — has to still fit: at 28,000 the turn after the summary
- * filled 34,934 tokens of it and stopped after one word.
- */
 const COMPACTION_WINDOW = 48_000
-/** The window the sweep's own settings scenario configured, put back afterwards. */
 const CONFIGURED_WINDOW = '120064'
-/** The refusal a workspace without a project file has to produce, quoted from the backend. */
 const REFUSAL = [
     'could not be started',
     'contains no project.godot',
     'is not a Godot project'
 ] as const
 
-/** The worktree the editor bound to, remembered for the assertions that outlive the session. */
 let bound = ''
-/** The endpoint the machine is actually configured for, put back after the offline scenario. */
 let baseUrl = ''
-/** The last frame the Game tab captured, reused as the image the chat sends to the model. */
 let capturedFrame = ''
-/** Where the session output had got to when the agent's level was launched. */
 let beforeTheRun = 0
-/** The commit the workspace started on, so a sweep that merges a task can undo it afterwards. */
 const seedCommit = execFileSync('git', ['-C', workspace, 'rev-parse', 'HEAD'], {
     encoding: 'utf8'
 }).trim()
-/**
- * The fixture script as the workspace holds it.
- *
- * The sweep edits, formats, renames and overwrites the worktree's copy; the debugger further down
- * breaks on a line number, so the file has to be this again before it runs.
- */
 const seedScript = readFileSync(join(workspace, 'scripts/main.gd'), 'utf8')
 
 function git(...arguments_: string[]) {
     return execFileSync('git', ['-C', workspace, ...arguments_], {encoding: 'utf8'}).trim()
 }
 
-/** The branch the project is checked out on, which is the task the window is working in. */
 function currentBranch() {
     return git('branch', '--show-current')
 }
 
-/** The branches Gofer created for its tasks. */
 function taskBranches() {
     return git('branch', '--list', 'gofer/task-*')
         .split('\n')
@@ -158,12 +99,6 @@ function taskBranches() {
         .filter(Boolean)
 }
 
-/**
- * The directory the running editor is bound to, as the backend reports it.
- *
- * Every task shares the project's one checkout, so this is the project itself. It is still asked of
- * the backend rather than assumed: whether an editor is bound at all is the fact under test.
- */
 async function sessionWorktree() {
     const session = await invokeCommand<{worktree?: string} | null>('get_godot_session')
     const worktree = session?.worktree
@@ -171,15 +106,8 @@ async function sessionWorktree() {
     return worktree
 }
 
-/** The project database the application is writing, which lives in the data directory it was given. */
 const projectDatabase = join(process.env.GOFER_APP_DATA_DIR ?? '', 'project.sqlite')
 
-/**
- * One question put to the rows on disk, answered by SQLite rather than by the application.
- *
- * The application is writing the same file while this reads it — the chat is saved on a debounce —
- * so the reader waits its turn rather than answering "database is locked" as a test failure.
- */
 function databaseRows(sql: string): readonly string[] {
     return execFileSync('sqlite3', ['-cmd', '.timeout 10000', projectDatabase, sql], {
         encoding: 'utf8'
@@ -188,7 +116,6 @@ function databaseRows(sql: string): readonly string[] {
         .filter(Boolean)
 }
 
-/** One tool call, as the stored message payload records it. */
 type StoredToolCall = Readonly<{
     name: string
     target?: string
@@ -196,14 +123,6 @@ type StoredToolCall = Readonly<{
     output?: string
 }>
 
-/**
- * Every tool call the agent recorded after a moment, read from the messages table.
- *
- * The row is the named source for what the agent *did*. The conversation is not: an answer saying
- * "I searched the documentation" holds the same words as one that searched it, and an assertion
- * over the transcript is satisfied by either. Nothing in a payload row is written by the model —
- * the name, the target and the status are the worker's record of a call it made.
- */
 function toolCallsSince(mark: number): readonly StoredToolCall[] {
     return databaseRows(
         `select payload_json from messages where sender = 'assistant' `
@@ -211,22 +130,12 @@ function toolCallsSince(mark: number): readonly StoredToolCall[] {
     ).flatMap(row => (JSON.parse(row) as {tools?: readonly StoredToolCall[]}).tools ?? [])
 }
 
-/** One stored assistant turn, as the row holds it. */
 type StoredTurn = Readonly<{
     status?: string
     text?: string
     tools?: readonly StoredToolCall[]
 }>
 
-/**
- * Blocks until the turn asked for after a moment has finished, and answers with the row.
- *
- * Not "until the composer is free": the composer says `Ask anything` for the beat between the
- * message being sent and the turn declaring itself, so a wait on the placeholder can come back
- * before the turn has started. A test that then walked away took the turn with it — the reply was
- * stored half-written and settled as `aborted`, and the sweep blamed the application for work it
- * had interrupted itself.
- */
 async function untilTurnSettled(mark: number, limitMs = AGENT_LIMIT_MS): Promise<StoredTurn> {
     const deadline = Date.now() + limitMs
     for (;;) {
@@ -245,12 +154,6 @@ async function untilTurnSettled(mark: number, limitMs = AGENT_LIMIT_MS): Promise
     }
 }
 
-/**
- * The calls of one tool the rows have recorded since a moment.
- *
- * Polled, because the conversation is written back on a debounce: a read taken the instant the
- * composer came free can be a turn ahead of the row it is asking about.
- */
 async function toolCallsFor(name: string, mark: number, limitMs = 30_000) {
     const deadline = Date.now() + limitMs
     for (;;) {
@@ -260,7 +163,6 @@ async function toolCallsFor(name: string, mark: number, limitMs = 30_000) {
     }
 }
 
-/** The task the window is showing, as the route names it — which is the row's own id. */
 async function currentTaskId() {
     const route = await currentRoute()
     const id = /#\/tasks\/([^/?]+)/u.exec(route)?.[1]
@@ -268,10 +170,8 @@ async function currentTaskId() {
     return id
 }
 
-/** One entry of the model's memory of a task: a message, or the summary that replaced a run of them. */
 type AgentMessage = Readonly<{role?: string; summary?: string; tokensBefore?: number}>
 
-/** What the model is being asked to remember of this task, as the task row holds it. */
 function agentMessages(taskId: string): readonly AgentMessage[] {
     const [row] = databaseRows(
         `select agent_messages_json from tasks where id = '${taskId.replace(/'/gu, "''")}'`
@@ -279,13 +179,6 @@ function agentMessages(taskId: string): readonly AgentMessage[] {
     return JSON.parse(row ?? '[]') as readonly AgentMessage[]
 }
 
-/**
- * How much of the window this task's conversation fills, as the application counts it.
- *
- * `totalTokens` rather than `input`: against a server that caches prompts, `input` is only the
- * part of the request that was new — 119 tokens of an 84,566-token conversation — and a window
- * chosen from that number would be one nothing could be summarised out of.
- */
 function lastContextTokens(taskId: string): number {
     const rows = databaseRows(
         `select payload_json from messages where sender = 'assistant' `
@@ -298,21 +191,16 @@ function lastContextTokens(taskId: string): number {
     return 0
 }
 
-/** The external resources a scene file points at, by the id its nodes refer to. */
 function externalResources(scene: string) {
     const resources = new Map<string, string>()
     for (const [line] of scene.matchAll(/^\[ext_resource [^\]]*\]/gmu)) {
         const path = /path="([^"]+)"/u.exec(line)?.[1]
-        // The id, not the uid: `uid="uid://…"` holds `id="` inside it, and a pattern that took the
-        // first match mapped every resource that carries one under its uid — so the nodes' own
-        // `ExtResource("6_fcfvj")` resolved to nothing and a level full of enemies read as empty.
         const id = /(?:^|\s)id="([^"]+)"/u.exec(line)?.[1]
         if (path !== undefined && id !== undefined) resources.set(id, path)
     }
     return resources
 }
 
-/** Every scene the worktree holds under `scenes/`, which is where the agent is asked to put them. */
 function sceneFiles() {
     const directory = join(bound, 'scenes')
     if (!existsSync(directory)) return []
@@ -321,7 +209,6 @@ function sceneFiles() {
         .map(name => join(directory, name))
 }
 
-/** Every node a scene file declares: the header it is introduced by, and the body under it. */
 function sceneNodes(scene: string) {
     return scene
         .split(/^\[node /mu)
@@ -332,7 +219,6 @@ function sceneNodes(scene: string) {
         })
 }
 
-/** The nodes of a scene file that carry one script, named by the resource the file points at. */
 function nodesCarrying(scene: string, script: string) {
     const resources = externalResources(scene)
     return sceneNodes(scene)
@@ -343,7 +229,6 @@ function nodesCarrying(scene: string, script: string) {
         .map(node => /name="([^"]+)"/u.exec(node.header)?.[1] ?? '(unnamed)')
 }
 
-/** The nodes of a scene file that are instances of one other scene, rather than copies of it. */
 function nodesInstancing(scene: string, instanced: string) {
     const resources = externalResources(scene)
     return sceneNodes(scene)
@@ -354,7 +239,6 @@ function nodesInstancing(scene: string, instanced: string) {
         .map(node => /name="([^"]+)"/u.exec(node.header)?.[1] ?? '(unnamed)')
 }
 
-/** What the language server last published about one file. */
 type ScriptDiagnosticsAnswer = Readonly<{
     op: 'diagnostics'
     path: string
@@ -362,7 +246,6 @@ type ScriptDiagnosticsAnswer = Readonly<{
     diagnostics: readonly Readonly<{message: string; severity?: number | undefined}>[]
 }>
 
-/** One tagged value, as every Godot value crosses the wire. */
 type TaggedValue = Readonly<{type: string; value: unknown}>
 
 type RuntimeInspection = Readonly<{
@@ -391,7 +274,6 @@ type InputAction = Readonly<{
 
 type InputActions = Readonly<{actions: readonly InputAction[]}>
 
-/** What one node is wired to, as `node.inspect` reports it. */
 type InspectedNode = Readonly<{
     name: string
     type: string
@@ -401,14 +283,12 @@ type InspectedNode = Readonly<{
     connections: readonly Readonly<{signal: string; method: string; target?: string | undefined}>[]
 }>
 
-/** One page of the live session's own output, as `read_godot_logs` answers it. */
 type GodotLogPage = Readonly<{
     entries: readonly Readonly<{sequence: number; severity: string; message: string}>[]
     cursor: number
     dropped: number
 }>
 
-/** What one TileMapLayer holds, as `node.get_cells` reports it. */
 type PaintedCells = Readonly<{
     node: string
     cells: number
@@ -417,7 +297,6 @@ type PaintedCells = Readonly<{
     tiles: readonly Readonly<{atlas: readonly number[]; count: number}>[]
 }>
 
-/** What a saved TileSet holds, as `resource.describe_tileset` reports it. */
 type DescribedTileset = Readonly<{
     tileSize: readonly number[]
     sources: readonly Readonly<{
@@ -427,15 +306,8 @@ type DescribedTileset = Readonly<{
     }>[]
 }>
 
-/** Correlates the sweep's own editor requests, which share the session the panels use. */
 let nextRequestId = 0
 
-/**
- * Sends one command to the editor session the way the renderer's own panels do.
- *
- * Used only where the question cannot be asked of the interface: the running game's node positions
- * are behind no control, and the sweep has to read them itself to say whether the level plays.
- */
 async function godotCall<Answer>(command: string, params: Readonly<Record<string, unknown>>) {
     nextRequestId += 1
     const response = await invokeCommand<{result: Answer}>('call_godot', {
@@ -449,7 +321,6 @@ async function godotCall<Answer>(command: string, params: Readonly<Record<string
     return response.result
 }
 
-/** Where the running game keeps a node, which is not where the edited scene keeps it. */
 async function runningNodePath(name: string) {
     const tree = await godotCall<RuntimeTree>('runtime.get_tree', {})
     const search = (node: RuntimeTreeNode | null | undefined): string => {
@@ -466,7 +337,6 @@ async function runningNodePath(name: string) {
     return path
 }
 
-/** Every node of a tree that answers a question, in the order the tree holds them. */
 function nodesMatching(
     node: RuntimeTreeNode | null | undefined,
     wanted: (candidate: RuntimeTreeNode) => boolean
@@ -478,18 +348,11 @@ function nodesMatching(
     ]
 }
 
-/**
- * The scene the editor is editing, asked of the editor.
- *
- * A node's *type* is the fact worth asserting — a Label named Camera2D is not a camera — and the
- * scene file says it only for nodes it wrote itself, never for one that came in on an instance.
- */
 async function editedNodes(wanted: (candidate: RuntimeTreeNode) => boolean) {
     const tree = await godotCall<RuntimeTree>('scene.get_tree', {})
     return nodesMatching(tree.root, wanted)
 }
 
-/** The key an action is bound to, read back from the Input Map rather than assumed. */
 async function boundKey(action: string) {
     const {actions} = await godotCall<InputActions>('project.list_input_actions', {})
     const found = actions.find(entry => entry.name === action)
@@ -499,18 +362,10 @@ async function boundKey(action: string) {
 }
 
 interface StoppedFrame {
-    /** The words on the row, which is what a person clicks. */
     label: string
-    /** The script part of them, which is what the editor has to open. */
     path: string
 }
 
-/**
- * The script the debugger's stack is stopped in, read from the panel rather than assumed.
- *
- * The row writes the file and the line as one text node — `scripts/player.gd:9` — so the node is
- * asked for its own text rather than an ancestor's, which would carry the frame's name as well.
- */
 async function stoppedFrameScript(): Promise<StoppedFrame> {
     const label = await browser.execute(() => {
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)
@@ -527,24 +382,11 @@ async function stoppedFrameScript(): Promise<StoppedFrame> {
     return {label, path: label.slice(0, label.lastIndexOf(':'))}
 }
 
-/**
- * Blocks until the answer now being written holds this, rather than the part of it on screen.
- *
- * An answer of any length scrolls its own beginning out of the window, and the window's text is
- * only what can be seen — so what the model said has to be read from the transcript.
- *
- * Only what the transcript grows by is searched. The question is in it too, and a question that
- * names the word a wrong answer would use — "reply SEEN, or BLIND if you received no image" — would
- * otherwise fail the moment it was asked, blaming the model for the sweep's own wording.
- */
 async function expectInConversation(
     wanted: readonly string[],
     limitMs: number,
     forbidden: readonly string[] = []
 ) {
-    // What the transcript holds *more* of than it did when the question was asked. Counting rather
-    // than slicing at the length it had: a message that finishes gains a usage footer, so the text
-    // before the question grows too and a fixed offset ends up in the middle of a word.
     const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1
     const asked = await conversationText()
     const deadline = Date.now() + limitMs
@@ -566,12 +408,6 @@ async function expectInConversation(
     )
 }
 
-/**
- * Whether the explorer comes to show all of these, without failing if it does not.
- *
- * The scene tree is fetched when the tab is switched to, so reading it the moment the click returns
- * reads the tree the panel had before. A check that answers "no" to that costs an agent turn.
- */
 async function explorerShows(wanted: readonly string[], limitMs = 30_000) {
     const deadline = Date.now() + limitMs
     for (;;) {
@@ -582,7 +418,6 @@ async function explorerShows(wanted: readonly string[], limitMs = 30_000) {
     }
 }
 
-/** Blocks until the explorer column itself shows this, rather than anywhere in the window. */
 async function expectInExplorer(wanted: readonly string[], limitMs = 60_000) {
     const deadline = Date.now() + limitMs
     let shown = ''
@@ -594,16 +429,6 @@ async function expectInExplorer(wanted: readonly string[], limitMs = 60_000) {
     throw new Error(`the explorer never showed ${JSON.stringify(wanted)}; it reads: ${shown}`)
 }
 
-/**
- * Blocks until the Game panel names the size of the frame it is showing, and answers with it.
- *
- * Not an exact size: the game is a real window on a real desktop, and the tiling window manager
- * that owns this machine's geometry hands it whatever slot is free — a level launched with the
- * editor and Gofer already on screen came up 451 wide against a project that asks for 640. Godot
- * resizes the viewport with the window, so the captured frame is that size and nothing in Gofer
- * decided it. What the panel owes the user is the size of the picture it is showing, so that is
- * what is asked for.
- */
 async function frameSize(limitMs = 60_000) {
     const deadline = Date.now() + limitMs
     for (;;) {
@@ -618,7 +443,6 @@ async function frameSize(limitMs = 60_000) {
     }
 }
 
-/** The base64 of whatever picture the Game tab is showing, which is a real PNG of this project. */
 async function shownFrame() {
     return browser.execute(() => {
         const image = document.querySelector<HTMLImageElement>(
@@ -630,7 +454,6 @@ async function shownFrame() {
     })
 }
 
-/** What one script tab reads, badge and all. */
 async function tabText(value: string) {
     return browser.execute(
         (attribute: string) =>
@@ -641,12 +464,10 @@ async function tabText(value: string) {
     )
 }
 
-/** Which task the route is showing. */
 async function currentRoute() {
     return browser.execute(() => window.location.hash)
 }
 
-/** Every task the sidebar is offering, by the route each one opens. */
 async function taskLinks(): Promise<readonly string[]> {
     return browser.execute(() =>
         Array.from(document.querySelectorAll('a[href^="#/tasks/"]')).map(
@@ -655,13 +476,6 @@ async function taskLinks(): Promise<readonly string[]> {
     )
 }
 
-/**
- * Brings the inspector into view.
- *
- * Under 1024px — which is what a tiling window manager hands this application — the frame moves the
- * inspector into a dialog opened from the toolbar. Both layouts are real, so the sweep asks which
- * one it is in rather than assuming the roomy one.
- */
 async function openInspector() {
     if (await isNarrowLayout()) await clickButton('Inspector')
 }
@@ -670,18 +484,10 @@ async function closeInspector() {
     if (await isNarrowLayout()) await browser.keys('Escape')
 }
 
-/** What the inspector reads — its own column, or the dialog the narrow layout puts it in. */
 async function inspectorText() {
     return (await isNarrowLayout()) ? dialogText() : regionText('Inspector')
 }
 
-/**
- * Blocks until the inspector itself shows this, rather than anywhere in the window.
- *
- * The window holds the chat beside it, and the chat holds twenty minutes of the agent naming every
- * setting and signal it touched — so `application/run/main_scene` is on screen whether the
- * inspector read it or not. This is the assertion that was passing on the transcript.
- */
 async function expectInInspector(wanted: readonly string[], limitMs = 60_000) {
     const deadline = Date.now() + limitMs
     let shown = ''
@@ -694,20 +500,9 @@ async function expectInInspector(wanted: readonly string[], limitMs = 60_000) {
     throw new Error(`the inspector never showed ${JSON.stringify(wanted)}; it reads: ${shown}`)
 }
 
-/**
- * Asks the agent for something and holds it to the result.
- *
- * A local model does not always finish what one message asked for, and a person in front of this
- * window would say so and let it carry on — so the sweep does too, up to a point. What it never
- * does is do the work itself: every node, script and setting below is the agent's, and the check is
- * made against the worktree and the editor rather than against the answer.
- */
 async function askUntil(prompt: string, isDone: () => Promise<boolean>, missing: string) {
     await sendChat(prompt, AGENT_LIMIT_MS)
     for (let attempt = 0; attempt < 3; attempt++) {
-        // The answer has to be finished before it can be judged. Asking the worktree the moment
-        // the message was sent judged an agent that had not started yet: every step then spent one
-        // whole turn being told it had not done work it was still doing.
         await untilComposerIsFree(AGENT_LIMIT_MS)
         if (await isDone()) return
         if (attempt === 2) break
@@ -721,12 +516,6 @@ async function askUntil(prompt: string, isDone: () => Promise<boolean>, missing:
     )
 }
 
-/**
- * Opens the level the agent is building in the managed editor.
- *
- * The editor owns the edited scene, so the tree, the inspector and Run all follow whatever it has
- * open — which is not necessarily what the agent touched last.
- */
 async function openLevelInEditor() {
     await clickTab('Files')
     await clickSelector(
@@ -734,10 +523,6 @@ async function openLevelInEditor() {
         'the level in the file tree'
     )
     await clickTab('Scene')
-    // The switch belongs to the editor, so this waits for the editor to say it has made one.
-    // Reading the tree the instant the click returned read the scene that was open before it —
-    // and the fixture's main scene has a Player in it too, so the answer looked like a level
-    // built wrong rather than a level not yet open.
     const deadline = Date.now() + 60_000
     for (;;) {
         const tree = await godotCall<RuntimeTree>('scene.get_tree', {}).catch(() => null)
@@ -751,13 +536,6 @@ async function openLevelInEditor() {
     }
 }
 
-/**
- * Opens the settings page and waits for the form rather than for the click.
- *
- * The navigation item is present before the router can act on it — a window that has just reloaded
- * renders its shell first — so a single click can be swallowed. What says the page is open is the
- * form itself.
- */
 async function openSettings() {
     for (let attempt = 0; attempt < 5; attempt++) {
         await clickText('Settings')
@@ -767,13 +545,11 @@ async function openSettings() {
     throw new Error(`the settings page never opened; the window shows: ${await pageText()}`)
 }
 
-/** Puts the caret inside a line, at a column, which is where a rename reads its symbol from. */
 async function placeCaretOn(line: number, column: number) {
     await placeCaretAtLineStart(line)
     for (let step = 1; step < column; step++) await browser.keys(KEYS.arrowRight)
 }
 
-/** Presses the breakpoint gutter beside the line the fixture's timer runs through. */
 async function pressBreakpointGutter() {
     await revealLine(BREAK_LINE)
     const refused = await pressGlyphMargin(BREAK_LINE)
@@ -784,23 +560,6 @@ async function pressBreakpointGutter() {
         )
 }
 
-/**
- * Sends one chat message.
- *
- * The composer is typed into rather than assigned to, and what it holds is read back before Enter:
- * a composer that silently took nothing would otherwise send an empty message and leave the wait
- * below blaming the model for a keystroke that never landed.
- */
-/**
- * Blocks until the composer will take another message, which is how a turn says it is over.
- *
- * An answer still streaming makes the composer refuse the next message outright, and the refusal is
- * silent: the placeholder is the only thing that says which state it is in.
- *
- * A panel reading nothing is allowed here: the agent may stop and restart the editor session during
- * its own turn, and while it is down every panel says so. That is a state of the workspace, not a
- * fault in the composer this wait is about.
- */
 async function untilComposerIsFree(limitMs: number) {
     await expectText(['Ask anything'], {allow: ['could not be read'], limitMs})
 }
@@ -808,8 +567,6 @@ async function untilComposerIsFree(limitMs: number) {
 async function sendChat(prompt: string, limitMs = 240_000) {
     await releaseModifiers()
     await untilComposerIsFree(limitMs)
-    // Astryx spreads `role="combobox"` over the editable once the composer has triggers, so the
-    // selector accepts either rather than tracking which one is in force.
     const composer = browser.$('[role="combobox"], [role="textbox"]')
     await composer.waitForDisplayed({timeout: 15_000})
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -817,9 +574,6 @@ async function sendChat(prompt: string, limitMs = 240_000) {
         await composer.setValue(prompt)
         if ((await composer.getText()).includes(prompt.slice(0, 20))) {
             await browser.keys('Enter')
-            // A sent message empties the composer; a refused one leaves the text sitting there.
-            // What the conversation shows is no help — WebKit's `innerText` omits whatever the
-            // message list has scrolled past.
             await browser.waitUntil(
                 async () => !(await composer.getText()).includes(prompt.slice(0, 20)),
                 {
@@ -857,7 +611,6 @@ describe('the live workspace', () => {
         it('creates a task backed by its own branch, checked out in the project', async () => {
             const before = taskBranches()
             await clickText('New task')
-            // The branch is a fact in Git rather than a rendering, so Git is what is asked.
             await browser.waitUntil(() => taskBranches().length > before.length, {
                 timeout: 30_000,
                 interval: 100,
@@ -865,7 +618,6 @@ describe('the live workspace', () => {
             })
             const created = taskBranches().filter(name => !before.includes(name))
             expect(created).toHaveLength(1)
-            // Creating a task opens it, which means the checkout moved onto it.
             expect(currentBranch()).toBe(created[0])
             expect(existsSync(join(workspace, 'project.godot'))).toBe(true)
         })
@@ -877,7 +629,6 @@ describe('the live workspace', () => {
                 interval: 100,
                 timeoutMsg: 'the second task never received a branch'
             })
-            // Every task Gofer has is reachable from the sidebar, or the user cannot return to it.
             await browser.waitUntil(async () => (await count('a[href^="#/tasks/"]')) >= 2, {
                 timeout: 30_000,
                 interval: 200,
@@ -887,7 +638,6 @@ describe('the live workspace', () => {
 
         it('switches to the task the sidebar names', async () => {
             const before = await currentRoute()
-            // The newest task is already open, so switching means the entry that is not it.
             const others = (await taskLinks()).filter(href => !before.endsWith(href.slice(1)))
             expect(others.length).toBeGreaterThan(0)
             await clickSelector(`a[href="${String(others[0])}"]`, 'the other task in the sidebar')
@@ -900,25 +650,20 @@ describe('the live workspace', () => {
         })
 
         it('shows the header controls for the task it is displaying', async () => {
-            // A task whose branch has never been merged is one the header offers to merge.
             await expectText(['Godot 4.7', 'Merge task'])
         })
 
         it('deletes a task from the sidebar with its branch', async () => {
             const route = await currentRoute()
             const links = await taskLinks()
-            // The task being shown is left alone: this is the sidebar deleting one in the
-            // background, which is how a user clears a task they are not looking at.
             const doomed = links.findIndex(href => !route.endsWith(href.slice(1)))
             expect(doomed).toBeGreaterThanOrEqual(0)
             const branchesBefore = taskBranches()
 
-            // The delete buttons follow the same order as the links they sit beside.
             await clickSelector(
                 `(//button[starts-with(@aria-label, "Delete task")])[${String(doomed + 1)}]`,
                 'the delete button of the task in the sidebar'
             )
-            // Nothing is destroyed until the warning is confirmed.
             await expectText(['Delete this task?', 'cannot be undone'])
             await clickButton('Delete task')
 
@@ -930,11 +675,8 @@ describe('the live workspace', () => {
                     timeoutMsg: `the sidebar kept the deleted task; it shows: ${await pageText()}`
                 }
             )
-            // Git is what is asked about the branch, not the rendering.
             expect(taskBranches().length).toBe(branchesBefore.length - 1)
-            // Deleting a task the user is not looking at must not move them off their own branch.
             expect(taskBranches()).toContain(currentBranch())
-            // The task that was on screen is still the one on screen, and still usable.
             expect(await currentRoute()).toBe(route)
             await expectText(['Merge task'])
         })
@@ -949,8 +691,6 @@ describe('the live workspace', () => {
         })
 
         it('fixes the connection type and the API dialect it cannot change', async () => {
-            // Two fields the form shows and refuses: they say what Gofer speaks, and offering them
-            // as editable would promise a choice the backend does not have.
             expect(await labelledInputIsDisabled('Connection type')).toBe(true)
             expect(await labelledInputIsDisabled('API dialect')).toBe(true)
         })
@@ -969,18 +709,11 @@ describe('the live workspace', () => {
             const [item] = await browser.$$('[role="menuitem"]').getElements()
             const offered = (await item?.getText()) ?? ''
             await clickSelector('[role="menuitem"]', 'the first server model')
-            // Choosing a model rewrites the identity fields the request is built from.
             const chosen = await labelledInputValue('Model ID')
             expect(offered).toContain(chosen)
         })
 
         it('offers the thinking levels the configured model supports', async () => {
-            /*
-             * A labelled field, not a menu. It used to be a `DropdownMenu` whose button read
-             * "Reasoning: off", so the level was reachable only through the button's own text — and
-             * an XPath on that text also matched the composer's identical control, which is still
-             * mounted behind this dialog.
-             */
             await clickControl('Reasoning')
             await expectSelector('[role="option"]')
             await browser.keys('Escape')
@@ -992,11 +725,6 @@ describe('the live workspace', () => {
             await fillLabelledInput('Maximum output tokens', '120064')
             await fillLabelledInput('Request timeout', '600000')
             await fillLabelledInput('Automatic retries', '2')
-            // The agent's system prompt is not one of these. It belongs to the project rather than
-            // to the connection, it has its own section and its own Restore default, and emptying
-            // it here would run the rest of this sweep against an agent that was told nothing.
-            // The key field is optional against a local server, and typing into it is what makes
-            // the form offer to store or drop one.
             await fillLabelledInput('API key', 'not-a-real-key')
             expect(await labelledInputValue('API key')).toBe('not-a-real-key')
             await fillLabelledInput('API key', '')
@@ -1011,7 +739,6 @@ describe('the live workspace', () => {
         it('reports a server it cannot reach', async () => {
             await fillLabelledInput('Base URL', UNREACHABLE_URL)
             await clickButton('Test connection')
-            // The refusal is the subject here, so its own words are the assertion.
             await expectText(['AI server is unreachable'], {
                 failures: ['AI connection works'],
                 limitMs: 120_000
@@ -1024,14 +751,6 @@ describe('the live workspace', () => {
             await browser.keys('Escape')
         })
 
-        /**
-         * The connection is probed once, when the window opens.
-         *
-         * That is the only moment the header can learn the endpoint is gone — and it is exactly
-         * what a user sees after starting Gofer with their model server down. Reloading the
-         * renderer reproduces it against the backend that is already running, which is also the
-         * only way this sweep can reach the Reconnect control at all.
-         */
         it('shows the connection as offline when the window is reopened without it', async () => {
             await browser.refresh()
             await installActivityProbe()
@@ -1041,7 +760,6 @@ describe('the live workspace', () => {
 
         it('retries from the header and stays offline while the server is gone', async () => {
             await clickButton('Reconnect')
-            // The retry is real: it reaches the same unreachable endpoint and says so again.
             await expectSelector('[aria-label="Local AI offline"]', 120_000)
             await expectText(['Reconnect'])
         })
@@ -1065,8 +783,6 @@ describe('the live workspace', () => {
         it('asks before deleting the retrieval cache, and takes no for an answer', async () => {
             await clickButton('Delete model cache')
             await expectText(['Delete documentation model cache?', '1.68 GiB'])
-            // Answering yes would delete the models this machine actually uses; the sweep proves
-            // the gate exists rather than that a 1.68 GiB download can be provoked.
             await clickButton('Cancel')
             await expectGone(['Delete documentation model cache?'])
         })
@@ -1109,7 +825,6 @@ describe('the live workspace', () => {
         })
 
         it('resizes the inspector column, where the layout has one', async () => {
-            // Under 1024px the inspector is a dialog, and a dialog has no handle to drag.
             if (await isNarrowLayout()) return
             const before = await handleSize('Resize the inspector')
             expect(Number.isNaN(before)).toBe(false)
@@ -1140,12 +855,9 @@ describe('the live workspace', () => {
         it('starts the managed Godot editor from the explorer’s own control', async () => {
             await forgetSessionStates()
             await clickTab('Scene')
-            // The explorer offers the session to a user who is looking at the empty tree, which is
-            // where they find out there is none; the toolbar's button is exercised further down.
             await clickButton('Start Godot')
             await expectSessionState('ready', 180_000)
             await expectText(['4.7.2', 'Stop Godot'])
-            // The lifecycle the toolbar's status dot reflects, in the order it happened.
             expect(await sessionStates()).toContain('importing')
             bound = await sessionWorktree()
         })
@@ -1171,7 +883,6 @@ describe('the live workspace', () => {
         it('inspects the identity of a selected node', async () => {
             await clickText('Player')
             await openInspector()
-            // The node panel reports identity — name, type, path, groups — never properties.
             await expectText(['Node2D', '/Main/Player', 'Groups', 'Edited'], {limitMs: 30_000})
         })
 
@@ -1202,7 +913,6 @@ describe('the live workspace', () => {
 
         it('reports no running game in the runtime tree', async () => {
             await clickTab('Runtime')
-            // "No game is running" is a state of this panel, not a failure it reports.
             await expectText(['The game is not running'], {limitMs: 30_000})
         })
 
@@ -1227,8 +937,6 @@ describe('the live workspace', () => {
                 '//*[@aria-label="Explorer"]//*[normalize-space(text())="main.tscn"]',
                 'the scene in the file tree'
             )
-            // The editor owns the edited scene, so opening one shows the tree the editor now
-            // edits — never the scene's text, which is its serialization and not a document.
             await expectText(['Edited scene', 'Main', 'Ticker'], {
                 absent: ['gd_scene load_steps'],
                 limitMs: 30_000
@@ -1258,16 +966,12 @@ describe('the live workspace', () => {
         })
 
         it('surfaces the language server’s diagnostic for the broken script', async () => {
-            // Reopening is what a person does after saving something the editor should complain
-            // about, and it is the point at which the language server is handed the text.
             await clickButton('Close')
             await clickTab('Files')
             await clickText('main.gd')
             await expectText(['TICK_MESSAGE'], {limitMs: 30_000})
             await clickTab('Problems')
             await expectText(['scripts/main.gd:'], {limitMs: 60_000})
-            // The script tab carries the count too, so a buffer that is not on screen still says
-            // how much is wrong with it.
             await browser.waitUntil(async () => /\d/u.test(await tabText('scripts/main.gd')), {
                 timeout: 30_000,
                 interval: 200,
@@ -1287,7 +991,6 @@ describe('the live workspace', () => {
         it('repairs the script and leaves the worktree as it found it', async () => {
             await clickTab('Scripts')
             await placeCaretAtStart()
-            // Two presses: the character and the line it sits on.
             await browser.keys(KEYS.delete)
             await browser.keys(KEYS.delete)
             await expectText(['main.gd •'], {limitMs: 30_000})
@@ -1300,8 +1003,6 @@ describe('the live workspace', () => {
         })
 
         it('throws an unsaved edit away when the buffer is reloaded', async () => {
-            // Reload is the way back from an edit that was never wanted, and it reads the file the
-            // *worktree* holds rather than anything the editor is keeping in memory.
             await placeCaretAtStart()
             await typeInEditor('# discarded by reload\n')
             await expectText(['main.gd •'], {limitMs: 30_000})
@@ -1313,8 +1014,6 @@ describe('the live workspace', () => {
         })
 
         it('offers to rename the symbol under the caret', async () => {
-            // The caret has to sit inside the identifier, not beside it: line 5 reads
-            // `@export var tick_interval: float = 1.0`, and column 15 is inside its name.
             await placeCaretOn(EXPORT_LINE, 15)
             await browser.keys(KEYS.f2)
             await expectText(['Rename symbol', 'New name'], {limitMs: 30_000})
@@ -1345,23 +1044,18 @@ describe('the live workspace', () => {
                     timeoutMsg: `the rename was never written to the worktree; ${join(bound, 'scripts/main.gd')} holds ${readFileSync(join(bound, 'scripts/main.gd'), 'utf8').slice(0, 400)}`
                 }
             )
-            // A rename is one transaction over every use, not a search and replace over one line.
             const written = readFileSync(join(bound, 'scripts/main.gd'), 'utf8')
             expect(written.match(new RegExp(RENAMED_SYMBOL, 'gu'))?.length ?? 0).toBeGreaterThan(1)
         })
 
         it('formats the open script through the bundled sidecar', async () => {
             await clickButton('Format')
-            // The dialog reports what gdformat would write; an already-formatted buffer says so.
             await expectText(['Formatted with gdformat'], {limitMs: 30_000})
             await clickButton('Cancel')
             await expectGone(['Formatted with gdformat'])
         })
 
         it('applies what the formatter would write to the buffer', async () => {
-            // gdformat has nothing to fix in a formatted file, so the buffer is given something it
-            // can: an assignment padded out of shape, typed on the blank line under `extends`
-            // where GDScript actually accepts one.
             await placeCaretAtLineStart(2)
             await typeInEditor('var    live_sweep     :=    1\n')
             await clickButton('Format')
@@ -1381,12 +1075,9 @@ describe('the live workspace', () => {
             await placeCaretAtStart()
             await typeInEditor('# edited in the buffer\n')
             await expectText(['main.gd •'], {limitMs: 30_000})
-            // Something else writing the file is exactly the case the conflict exists for: another
-            // editor, a Git checkout, or the agent's own tools.
             writeFileSync(path, `# changed on disk\n${onDisk}`, 'utf8')
             await clickButton('Save')
             await expectText(['This buffer is out of date', 'Reload from disk', 'Overwrite'], {
-                // The refusal is the outcome under test, so it must not end the wait early.
                 allow: ['could not be saved'],
                 limitMs: 60_000
             })
@@ -1416,8 +1107,6 @@ describe('the live workspace', () => {
         })
 
         it('puts the script back the way the sweep found it', async () => {
-            // Everything above was written into a real worktree; the debugger below breaks on a
-            // line number, so the file has to be the fixture again before it runs.
             writeFileSync(join(bound, 'scripts/main.gd'), seedScript, 'utf8')
             await clickButton('Reload')
             await expectText(['TICK_MESSAGE'], {absent: ['main.gd •'], limitMs: 30_000})
@@ -1441,7 +1130,6 @@ describe('the live workspace', () => {
             await forgetSessionStates()
             await clickButton('Run Game')
             await expectSessionState('playing', 120_000)
-            // Run switches the bottom panel to the debugger, which is where the stop shows up.
             await expectText(['Stopped: breakpoint', '_on_tick'], {limitMs: 90_000})
         })
 
@@ -1465,13 +1153,7 @@ describe('the live workspace', () => {
         })
 
         it('opens the script the stopped frame names', async () => {
-            // Which script the stack is in is the debuggee's business — a step-over walks into
-            // whatever runs next, and in this fixture that is as often the player's `_process` as
-            // the timer's own handler. So the frame on screen is read first, and the editor is
-            // held to that file rather than to the one the sweep set the breakpoint in.
             const named = await stoppedFrameScript()
-            // Clicking a frame is how a person gets from the stack to the line, so it selects the
-            // frame and reveals its source in the editor at once.
             await clickText(named.label)
             await expectText([named.path], {limitMs: 30_000})
             await clickTab('Debugger')
@@ -1493,9 +1175,6 @@ describe('the live workspace', () => {
 
         it('clears the breakpoint from the gutter', async () => {
             await clickTab('Scripts')
-            // The frame the debugger stopped in decided which buffer is in front, and the
-            // breakpoint is in the other one — a step-over walks into whatever runs next, which in
-            // this fixture is as often the player's `_process`.
             await clickTab('main.gd')
             await expectText(['scripts/main.gd'], {limitMs: 30_000})
             await pressBreakpointGutter()
@@ -1514,9 +1193,6 @@ describe('the live workspace', () => {
 
         it('reports the running game’s output in the session log', async () => {
             await clickTab('Output')
-            // The fixture prints every second and warns once it has printed five times. Both are
-            // the game's own output arriving through the editor, and the warning is what the
-            // recorded history is searched for further down.
             await expectText(['Gofer live test scene ready', 'Live test reached five ticks'], {
                 limitMs: 60_000
             })
@@ -1534,10 +1210,6 @@ describe('the live workspace', () => {
         })
 
         it('launches again from the debugger’s own control', async () => {
-            // The toolbar's Run is one action over two systems — ensure the editor, then launch.
-            // The debugger's own Launch is the second half of it, and it has a session already.
-            // What it produces is a game: whether that game is running or has already stopped on
-            // something is the fixture's business, and this fixture warns itself into a stop.
             await forgetSessionStates()
             await clickButton('Launch')
             await expectSessionState('playing', 120_000)
@@ -1555,7 +1227,6 @@ describe('the live workspace', () => {
             await clickTab('Game')
             await expectText(['No frame captured'])
             await clickButton('Run')
-            // The run answers with the frame the game has already drawn, which is the proof.
             await expectSelector('img[alt*="running game"]', 120_000)
             const frame = await frameSize(30_000)
             expect(frame.width).toBeGreaterThan(0)
@@ -1564,8 +1235,6 @@ describe('the live workspace', () => {
 
         it('captures a frame of the running game on demand', async () => {
             await clickControl('Capture game')
-            // A capture that fails replaces the picture with the reason it failed; one that
-            // answers leaves a frame of the game's own size on screen.
             await expectGone(['The game frame could not be read'])
             expect((await frameSize()).height).toBeGreaterThan(0)
             await expectSelector('img[alt*="running game"]', 10_000)
@@ -1575,7 +1244,6 @@ describe('the live workspace', () => {
             await clickControl('Restart')
             await expectGone(['The game frame could not be read'], {limitMs: 120_000})
             expect((await frameSize(120_000)).height).toBeGreaterThan(0)
-            // The controls come back the moment the restart has finished with the editor.
             await expectEnabled('Stop', 120_000)
         })
 
@@ -1588,7 +1256,6 @@ describe('the live workspace', () => {
             await clickControl('Capture editor')
             await expectSelector('img[alt*="editor viewport"]', 60_000)
             await expectText(['Editor · '], {limitMs: 30_000})
-            // Kept for the chat further down, which sends this very picture to the model.
             capturedFrame = await shownFrame()
         })
     })
@@ -1601,8 +1268,6 @@ describe('the live workspace', () => {
 
         it('filters the output down to errors and back', async () => {
             await clickControl('Errors')
-            // The engine's startup banner is an informational line, so a filter that keeps only
-            // errors has to drop it.
             await expectGone(['Godot Engine v4.7.2'], {limitMs: 30_000})
             await clickControl('All')
             await expectText(['Godot Engine v4.7.2'], {limitMs: 30_000})
@@ -1610,9 +1275,6 @@ describe('the live workspace', () => {
 
         it('drops the informational lines when only warnings are wanted', async () => {
             await clickControl('Warnings')
-            // The engine's startup banner is informational, so a filter that keeps warnings and
-            // worse has to drop it — which line survives is the session's business, not the
-            // filter's.
             await expectGone(['Godot Engine v4.7.2'], {limitMs: 30_000})
             await clickControl('All')
             await expectText(['Godot Engine v4.7.2'], {limitMs: 30_000})
@@ -1626,11 +1288,8 @@ describe('the live workspace', () => {
 
         it('searches the recorded output of every session', async () => {
             await clickControl('History')
-            // The archive keeps the warnings and errors of every session, so the sweep searches it
-            // for one it caused itself: the parse error the broken script produced further up.
             await fillLabelledInput('Search recorded output', 'Parse Error')
             await expectText(['Parse Error'], {limitMs: 60_000})
-            // Back to the running session's own output. The control is named for what it shows.
             await clickControl('This run')
         })
 
@@ -1642,7 +1301,6 @@ describe('the live workspace', () => {
         })
 
         it('collapses and restores itself', async () => {
-            // Collapsing keeps the tab strip: it is the only affordance that brings the panel back.
             await clickControl('Hide panel')
             await expectText(['Problems', 'Import'], {absent: ['Rescan project'], limitMs: 30_000})
             await clickControl('Show panel')
@@ -1658,7 +1316,6 @@ describe('the live workspace', () => {
                 'How do I move a CharacterBody2D?'
             )
             await clickButton('Search')
-            // The first query loads the reranker; it answers the moment the passages land.
             await expectText(['CharacterBody2D', 'Section'], {limitMs: 180_000})
         })
 
@@ -1668,23 +1325,12 @@ describe('the live workspace', () => {
                 'What does an AnimationPlayer node do?'
             )
             await clickButton('Search')
-            // A subject the first answer had no reason to mention, so the passages are new ones.
             await expectText(['AnimationPlayer'], {limitMs: 120_000})
         })
     })
 
-    /**
-     * The documentation tool, used by the agent rather than by the Docs panel.
-     *
-     * The panel above proves retrieval works. It says nothing about whether the *model* can reach
-     * it: `godot_docs_search` retrieves through a sidecar script and a model cache that live
-     * outside the binary, so it can be declared to the model with nothing behind it and fail every
-     * call while the turn carries on. What proves it is a call the worker recorded.
-     */
     describe('the documentation tool', () => {
         before(async () => {
-            // Run on its own for the sabotage proof, so it assumes nothing about the tab an
-            // earlier scenario left in front, or that the shell has finished booting.
             await clickTab('Chat', 300_000)
             await untilComposerIsFree(300_000)
         })
@@ -1694,16 +1340,12 @@ describe('the live workspace', () => {
             const question =
                 'Use your godot_docs_search tool to look up what CharacterBody2D.move_and_slide '
                 + 'does, and answer from the documentation you find.'
-            // Each attempt waits for its own turn: the mark moves, the tally does not.
             let turn = asked
             await sendChat(question, AGENT_LIMIT_MS)
             for (let attempt = 0; attempt < 3; attempt++) {
                 await untilTurnSettled(turn)
                 const calls = await toolCallsFor(DOCS_TOOL, asked)
                 if (calls.length > 0) {
-                    // A tool that was declared with nothing behind it answers every call
-                    // `docs_unavailable` while the turn carries on, so a call is not enough: what
-                    // it answered is the other half.
                     const failed = calls.filter(call => call.status === 'error')
                     expect(failed.map(call => call.output ?? '')).toEqual([])
                     return
@@ -1743,8 +1385,6 @@ describe('the live workspace', () => {
                 'the reasoning menu'
             )
             await expectSelector('[role="menuitem"]')
-            // Choosing a level writes the settings the next request is built from, so the menu is
-            // used rather than dismissed.
             await clickMenuItem('off')
             await expectText(['Reasoning: off'], {limitMs: 30_000})
         })
@@ -1757,9 +1397,6 @@ describe('the live workspace', () => {
             const mark = Date.now()
             await sendChat('List every node in the main scene using your Godot tools.')
             await untilTurnSettled(mark)
-            // The row, not the answer. An answer that names `godot_scene` in prose reads exactly
-            // like one that called it, and the node names it reports are in the explorer too — so
-            // neither says the tool ran. The stored call does.
             const calls = await toolCallsFor('godot_scene', mark)
             if (calls.length === 0)
                 throw new Error(
@@ -1773,8 +1410,6 @@ describe('the live workspace', () => {
             await sendChat('Explain the Godot scene tree in exhaustive detail, step by step.')
             await expectText(['Gofer is working…'], {limitMs: 60_000})
             await clickControl('Stop')
-            // The Retry sits under the answer it belongs to, which the conversation may already
-            // have scrolled past; the document still holds it even when the window does not.
             await expectElement(buttonSelector('Retry'), 'Retry button', 60_000)
         })
 
@@ -1786,12 +1421,8 @@ describe('the live workspace', () => {
         })
 
         it('carries an attached image into the conversation', async () => {
-            // The picture is the frame the editor captured a few tests ago: a real PNG of this
-            // very project, rather than something the sweep invented for the occasion.
             expect(capturedFrame.length).toBeGreaterThan(1_000)
             await attachImage('editor-viewport.png', 'image/png', capturedFrame)
-            // The composer shows an attachment as a picture with an accessible name, and nothing
-            // the window renders as text — so the document is what is asked, not `innerText`.
             await expectElement(
                 'img[alt="Attached image: editor-viewport.png"]',
                 'attached image thumbnail',
@@ -1826,18 +1457,10 @@ describe('the live workspace', () => {
                     + 'received an image, and the single word BLIND if you received none. Use no '
                     + 'tools.'
             )
-            // The word is the proof the bytes reached the model, which nothing on the Gofer side
-            // of the request can fake.
             await expectInConversation(['SEEN'], 300_000, ['BLIND'])
         })
     })
 
-    /**
-     * The gate in front of the operations Git and the editor's undo stack cannot take back.
-     *
-     * The agent is asked to run one of them by name, twice: the first answer is no, which has to
-     * leave the worktree exactly as it was, and the second is yes, which has to actually happen.
-     */
     describe('the tool approvals', () => {
         it('lets the agent write a file it did not have to ask about', async () => {
             await sendChat(
@@ -1857,8 +1480,6 @@ describe('the live workspace', () => {
                     + 'delete operation.'
             )
             await expectText(['Approve godot_resource delete?'], {limitMs: 300_000})
-            // What the dialog names, read from the dialog. The message that asked for the delete
-            // is on screen behind it and names the same file.
             expect(await dialogText()).toContain('scripts/scratch.gd')
             await clickButton('Reject')
             await expectGone(['Approve godot_resource delete?'], {limitMs: 60_000})
@@ -1880,13 +1501,6 @@ describe('the live workspace', () => {
         })
     })
 
-    /**
-     * The application doing the thing it exists for: an agent building a game in a real editor.
-     *
-     * Nothing here is written by the sweep. Every node, script, input action and project setting
-     * below is the model's own work, done through Gofer's tools, and what is asserted is what
-     * survived into the worktree and into the running game — not what the answer claimed.
-     */
     describe('building the first level of Mario', () => {
         it('cuts the project’s atlas into a tileset and paints the ground with it', async () => {
             await askUntil(
@@ -1905,22 +1519,14 @@ describe('the live workspace', () => {
                 async () => {
                     if (!existsSync(join(bound, LEVEL_SCENE))) return false
                     const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
-                    // Cells live in a packed blob and the tileset is an external resource, so
-                    // these two lines are what a painted level looks like on disk. A layer with a
-                    // tileset and no cells is an empty level that opens perfectly well.
                     if (!scene.includes('tile_map_data = PackedByteArray(')) return false
                     if (!scene.includes('tile_set = ExtResource(')) return false
-                    // A tileset whose tiles carry no collision is a picture of ground: the player
-                    // falls straight through it, and nothing about the scene file says so.
                     const described = await godotCall<DescribedTileset>(
                         'resource.describe_tileset',
                         {path: TILESET}
                     ).catch(() => null)
                     if (!described?.sources.some(source => source.tiles.some(tile => tile.solid)))
                         return false
-                    // Whether the agent left the level open in the editor or not, opening it is
-                    // what a person does next — and it is the only way the tree read below is the
-                    // level's own.
                     await openLevelInEditor()
                     return explorerShows(['Level1', 'Terrain'])
                 },
@@ -1931,13 +1537,6 @@ describe('the live workspace', () => {
             )
         })
 
-        /**
-         * The tileset read back through the command that reports it, rather than off the disk.
-         *
-         * A `.tres` is a text file with a texture path in it, which says nothing about whether the
-         * editor could cut it into tiles: what matters is the tile size, the atlas it points at,
-         * and which tiles carry collision.
-         */
         it('reports the tileset it built from the project’s own art', async () => {
             const described = await godotCall<DescribedTileset>('resource.describe_tileset', {
                 path: TILESET
@@ -1961,10 +1560,6 @@ describe('the live workspace', () => {
                     + 'Map so the script has keys to read. Save the scene.',
                 async () => {
                     if (!existsSync(join(bound, 'scripts/mario.gd'))) return false
-                    // The actions themselves, asked of the Input Map. A substring search over
-                    // `project.godot` said yes to the words appearing anywhere in the file — in a
-                    // comment, in an unrelated setting, in a half-written key — and the level then
-                    // could not be played with the actions it was supposed to have registered.
                     const registered = await godotCall<InputActions>(
                         'project.list_input_actions',
                         {}
@@ -1973,14 +1568,10 @@ describe('the live workspace', () => {
                     if (!['move_left', 'move_right', 'jump'].every(action => names.has(action)))
                         return false
                     await openLevelInEditor()
-                    // The type is the fact: a Node2D named Player is not a body that falls.
                     const players = await editedNodes(
                         node => node.name === 'Player' && node.type === 'CharacterBody2D'
                     ).catch(() => [])
                     if (players.length === 0) return false
-                    // Which file keeps the script is not asserted — an agent that builds the
-                    // player as its own scene and instances it has done the better thing — but
-                    // some scene in the project has to actually carry it.
                     const scenes = [join(bound, LEVEL_SCENE), ...sceneFiles()]
                     return scenes.some(
                         path =>
@@ -2008,16 +1599,11 @@ describe('the live workspace', () => {
                         node: TERRAIN
                     }).catch(() => null)
                     if (!painted) return false
-                    // Asked of the layer rather than of the file: cells are a packed blob, so the
-                    // scene text can say nothing about which tiles a level is made of. The tally
-                    // is per tile, so it says whether the pipes and the flag are actually there.
                     const used = new Set(painted.tiles.map(tile => tile.atlas.join(',')))
                     const has = (...tiles: string[]) => tiles.some(tile => used.has(tile))
                     if (!has('4,0', '5,0', '6,0', '7,0')) return false
                     if (!has('1,0', '2,0')) return false
                     if (!has('0,1', '1,1', '2,1')) return false
-                    // A level is longer than a screen: World 1-1 is a couple of hundred tiles
-                    // wide, and a dozen cells is a test pattern rather than a level.
                     return painted.cells >= 120 && (painted.usedRect[2] ?? 0) >= 40
                 },
                 'the Terrain layer still needs pipe tiles, brick or question blocks, and the flag '
@@ -2027,20 +1613,6 @@ describe('the live workspace', () => {
             )
         })
 
-        /**
-         * The half of a game that is not scenery.
-         *
-         * Everything above is nodes and shapes. A coin the player can pick up is wired: a signal
-         * connected to a method, and a group the running game can ask for every coin at once. Both
-         * live in the scene rather than in a script, and both are dropped on save unless the addon
-         * writes them the way the editor does — so the assertion is made against what the editor
-         * reports, not against the answer or the script.
-         *
-         * Which file keeps the connection is deliberately not asserted. An agent that builds the
-         * coin once as its own scene, connects it there and instances it three times has done the
-         * better thing, and a check that greps the level for `[connection …]` calls that a failure:
-         * it happened, and cost three turns of being told to redo work that was already right.
-         */
         it('gives the level coins the player can collect', async () => {
             await askUntil(
                 'Add coins to that level: at least three Area2D nodes named Coin, floating above '
@@ -2055,10 +1627,6 @@ describe('the live workspace', () => {
                     if (!existsSync(join(bound, 'scripts/coin.gd'))) return false
                     await openLevelInEditor()
                     if (!(await explorerShows(['Coin']))) return false
-                    // Asked of the editor, which is the only thing that can see a connection made
-                    // in an instanced scene as well as one made in this one. A connection the save
-                    // did not keep is the failure this step exists to catch: the editor shows it
-                    // while it is in memory, and the game never fires it.
                     const coin = await godotCall<InspectedNode>('node.inspect', {
                         node: `/Level1/Coin`
                     }).catch(() => null)
@@ -2073,12 +1641,6 @@ describe('the live workspace', () => {
             )
         })
 
-        /**
-         * The wiring read back through the window a person uses, rather than off the disk.
-         *
-         * `node.inspect` is the only place the desktop reports what is connected to what, and it
-         * reported nothing at all until the addon learned these commands.
-         */
         it('shows the coin’s wiring in the inspector', async () => {
             await openLevelInEditor()
             await clickSelector(
@@ -2087,8 +1649,6 @@ describe('the live workspace', () => {
             )
             await openInspector()
             await clickTab('Node')
-            // Read from the inspector itself. The chat beside it has been saying "coins" and
-            // "body_entered" for twenty minutes, so the window as a whole answers yes either way.
             await expectInInspector(['coins', 'body_entered →'])
             await closeInspector()
         })
@@ -2101,9 +1661,6 @@ describe('the live workspace', () => {
                     + 'update that Label. Save the scene.',
                 async () => {
                     await openLevelInEditor()
-                    // The nodes, asked of the editor by type. The scene *file* says "Camera2D" in
-                    // a node name, in a script path, in a comment — and said it here while the
-                    // level had no camera in it at all.
                     const cameras = await editedNodes(
                         node => node.type === 'Camera2D' && node.path.includes('/Player')
                     ).catch(() => [])
@@ -2119,14 +1676,6 @@ describe('the live workspace', () => {
             )
         })
 
-        /**
-         * The way a game is actually built: one scene, placed more than once.
-         *
-         * Everything above this is a level made of one-off nodes, which is the only kind Gofer
-         * could author while `node.create` reached `ClassDB` and nothing else. What is asserted is
-         * that the placements are *instances* — a copy writes the enemy's own children into the
-         * level, and then an edit to the enemy reaches none of them.
-         */
         it('builds an enemy once and places instances of it', async () => {
             await askUntil(
                 'Now the part a real project does: build the enemy once as its own scene, and '
@@ -2139,9 +1688,6 @@ describe('the live workspace', () => {
                 async () => {
                     if (!existsSync(join(bound, 'scenes/goomba.tscn'))) return false
                     if (!existsSync(join(bound, 'scripts/goomba.gd'))) return false
-                    // Instances *of the enemy*, resolved through the file's own resource ids.
-                    // Counting `instance=ExtResource(` counted the coins as well, and three coins
-                    // and no enemy passed this step.
                     const scene = readFileSync(join(bound, LEVEL_SCENE), 'utf8')
                     if (nodesInstancing(scene, 'res://scenes/goomba.tscn').length < 3) return false
                     await openLevelInEditor()
@@ -2156,10 +1702,6 @@ describe('the live workspace', () => {
             await askUntil(
                 `Make ${LEVEL_SCENE_RESOURCE} the project’s main scene, so running the project `
                     + 'starts the level.',
-                // The setting, not the string. `project.godot` mentions the level in several
-                // places, so a substring search passed while the setting the project actually runs
-                // from was untouched — the agent had written `application.run.main_scene`, with
-                // dots, and every check agreed with it right up until the wrong game started.
                 async () =>
                     (
                         await godotCall<{value?: {value?: unknown}}>('project.get_setting', {
@@ -2169,34 +1711,16 @@ describe('the live workspace', () => {
                 `application/run/main_scene must be ${LEVEL_SCENE_RESOURCE} — the setting itself, `
                     + 'spelled with slashes the way Godot names it, not a similar name.'
             )
-            // The inspector reads the setting from the running editor, not from the file. Both
-            // halves are required — the setting's real name, spelled with the slashes Godot uses,
-            // and the level it names — because the name alone is what a near miss gets wrong.
-            //
-            // Closed in a `finally`: under 1024px the inspector is a dialog, and one left open sits
-            // over the sidebar, so a failure here would take the next steps down with it.
             await openInspector()
             try {
                 await clickTab('Project')
                 await fillLabelledInput('Search project settings', 'main_scene')
-                // Read from the inspector rather than from the window: this is the assertion the
-                // agent's own transcript was answering, and it named the setting and the scene
-                // often enough to pass while the inspector showed neither.
                 await expectInInspector(['application/run/main_scene', LEVEL_SCENE_RESOURCE])
             } finally {
                 await closeInspector()
             }
         })
 
-        /**
-         * Every script the agent wrote, as the language server reads it.
-         *
-         * A GDScript that does not parse stops the scene using it from loading, and the game then
-         * never starts — which arrives as `runtime_timeout` three steps later, saying nothing about
-         * the script. That is how a `PoolVector2Array()` — the Godot 3 name — reached a level and
-         * cost a whole sweep. The server has the answer the moment the file is written, so it is
-         * asked before anything is run.
-         */
         it('has no script the language server cannot parse', async () => {
             const scripts = readdirSync(join(bound, 'scripts'))
                 .filter(name => name.endsWith('.gd'))
@@ -2209,8 +1733,6 @@ describe('the live workspace', () => {
             expect(scripts.length).toBeGreaterThan(0)
             const broken: string[] = []
             for (const path of scripts) {
-                // Opening is what makes the server read the file; a path it never saw publishes
-                // nothing and would pass by saying nothing at all.
                 await invokeCommand('open_script_document', {request: {path}})
                 const answer = await invokeCommand<ScriptDiagnosticsAnswer>(
                     'call_script_language',
@@ -2218,8 +1740,6 @@ describe('the live workspace', () => {
                         request: {op: 'diagnostics', path, timeoutMs: 20_000}
                     }
                 )
-                // 1 is Error in the language-server protocol; a warning is the model's style, not
-                // a level that will not load.
                 for (const diagnostic of answer.diagnostics)
                     if (diagnostic.severity === 1) broken.push(`${path}: ${diagnostic.message}`)
             }
@@ -2227,10 +1747,6 @@ describe('the live workspace', () => {
         })
 
         it('runs the level the agent built and draws a frame of it', async () => {
-            // Where the session output has got to before the game starts. Everything the agent
-            // printed while it was building — including the parse errors of a script it wrote
-            // wrong and then fixed — is behind this cursor, and the question worth asking is what
-            // the level prints while it plays.
             beforeTheRun = (
                 await invokeCommand<GodotLogPage>('read_godot_logs', {
                     query: {minSeverity: 'error', limit: 1000}
@@ -2247,20 +1763,8 @@ describe('the live workspace', () => {
             await expectInExplorer(['Level1', 'Player'], 120_000)
         })
 
-        /**
-         * The level is a game, not a picture of one.
-         *
-         * Every assertion above this reads a file or a tree: the nodes exist, the shapes are real,
-         * the wiring is saved. None of them says the thing can be *played*. This one holds the
-         * agent's own movement key down and watches the player the agent wrote move under the
-         * script the agent wrote, driven by the Input Map the agent registered — the whole chain,
-         * end to end, with the harness reading the position rather than the model reporting it.
-         */
         it('plays the level: the player moves when its own key is held', async () => {
             const player = await runningNodePath('Player')
-            // The key is read back from the Input Map the agent wrote rather than assumed: which
-            // key it chose is its business, and reading it also says `list_input_actions` reports
-            // what `set_input_action` stored.
             const moveRight = await boundKey('move_right')
             const positionOf = async () => {
                 const inspected = await godotCall<RuntimeInspection>('runtime.inspect_node', {
@@ -2273,23 +1777,16 @@ describe('the live workspace', () => {
                 return {x: Number(value[0]), y: Number(value[1])}
             }
 
-            // The ground is tiles now, and a tile carries collision only if the tileset gave it
-            // some. A player standing on a tileset built without it falls out of the world under
-            // gravity, and every other assertion — the cells, the scene, the frame — still passes.
             const landed = await positionOf()
             await browser.pause(2_000)
             const settled = await positionOf()
             expect(settled.y).toBeLessThan(landed.y + 64)
 
             const before = (await positionOf()).x
-            // No `device`: a marked event reaches _input and matches no action at all, because an
-            // Input Map binding carries the keyboard's own device. Unmarked is how a player plays.
             await godotCall('runtime.input', {
                 events: [{kind: 'key', key: moveRight, pressed: true}]
             })
             try {
-                // The key stays down between calls, so the game keeps moving while this waits on
-                // the only thing that can end it: the player's own position.
                 const deadline = Date.now() + 30_000
                 for (;;) {
                     const now = (await positionOf()).x
@@ -2308,16 +1805,6 @@ describe('the live workspace', () => {
             }
         })
 
-        /**
-         * The level plays without a script failing in it.
-         *
-         * Asked of the whole session, this is not that question: the log holds the broken script
-         * the sweep saved on purpose much earlier, and it holds whatever the agent got wrong on
-         * its way to a level that works — a parse error it was told about and fixed a minute
-         * later is not a defect, and demanding the log never mention the file is demanding the
-         * agent write it right first time. So it is asked of the run: nothing after the cursor
-         * taken when the game started may name a script the agent wrote.
-         */
         it('reports no error from the script the agent wrote', async () => {
             const page = await invokeCommand<GodotLogPage>('read_godot_logs', {
                 query: {after: beforeTheRun, minSeverity: 'error', limit: 1000}
@@ -2337,20 +1824,9 @@ describe('the live workspace', () => {
         })
     })
 
-    /**
-     * A conversation that no longer fits in the window it is sent in.
-     *
-     * Everything above happened in one task, so by now the model is being sent a transcript of a
-     * whole build. Narrowing the window is what a user does by pointing Gofer at a smaller model,
-     * and it is the only honest way to reach the line without spending another twenty minutes
-     * talking. What is asserted is the summary the task now remembers instead of the conversation,
-     * and an answer written after it — a summary that ends the session is not compaction working.
-     */
     describe('a conversation that outgrows the context window', () => {
         it('summarises what came before and keeps answering', async () => {
             const taskId = await currentTaskId()
-            // A second compaction updates the summary the first one left rather than adding
-            // another, so what says this one ran is a summary that is not the one already there.
             const summarised = agentMessages(taskId).find(
                 entry => entry.role === 'compactionSummary'
             )
@@ -2388,11 +1864,9 @@ describe('the live workspace', () => {
                         'the conversation was not summarised again: the task remembers the '
                             + 'summary it already had before this turn'
                     )
-                // The summary carries what it replaced, so a summary of nothing is not one.
                 expect((summary.summary ?? '').length).toBeGreaterThan(0)
                 expect(summary.tokensBefore ?? 0).toBeGreaterThan(0)
 
-                // And the session continued: the question asked after the line was answered.
                 expect(answer.status).toBe('complete')
                 expect((answer.text ?? '').trim()).not.toBe('')
             } finally {
@@ -2408,7 +1882,6 @@ describe('the live workspace', () => {
     describe('merging the task back', () => {
         it('merges the branch the agent worked on into the project', async () => {
             await clickButton('Merge task')
-            // The button is the state: a task whose branch has landed is not offered again.
             await expectGone(['Merge task'], {limitMs: 120_000})
         })
 
@@ -2418,9 +1891,6 @@ describe('the live workspace', () => {
         })
 
         it('keeps Gofer’s own scaffolding out of the project it merged into', () => {
-            // The addon is staged into the project while a session runs — its files are kept out
-            // of Git by an exclude entry, and the two lines it adds to `project.godot` come back out
-            // when the merge stops the session. They belong to Gofer, not to the user's game.
             const project = readFileSync(join(workspace, 'project.godot'), 'utf8')
             expect(project).not.toContain('addons/gofer')
             expect(project).not.toContain('GoferRuntime')
@@ -2428,23 +1898,7 @@ describe('the live workspace', () => {
         })
     })
 
-    /**
-     * One window, two tasks, one checkout.
-     *
-     * Opening another task moves the working tree, so the editor cannot survive it: Godot holds
-     * every open scene in memory, never rereads one a checkout changed underneath it, and saves that
-     * stale copy back over the branch the user switched to. Gofer stops the session before the
-     * checkout for exactly that reason, and this is where a regression would show as the previous
-     * task's scene answering from the new one.
-     */
     describe('opening another task while the editor runs', () => {
-        /**
-         * The route the level was built on, returned to before the story continues.
-         *
-         * This scenario sits after the merge on purpose: it makes a second task, and a sweep that
-         * changes which task is current in the middle of the level's own story leaves the steps
-         * after it merging something else. It cost two failures before it was moved here.
-         */
         let builtOn = ''
 
         it('stops the editor before the checkout moves', async () => {
@@ -2457,14 +1911,9 @@ describe('the live workspace', () => {
                 timeoutMsg: 'the window never moved to the new task'
             })
 
-            // The checkout is on the new task's branch, which is the whole point of the switch.
             expect(currentBranch()).not.toBe(branchBefore)
-            // And no editor survived it. The window says so on its own; nothing is clicked.
             await expectText(['Start Godot'], {limitMs: 60_000})
 
-            // Asked of the backend rather than the screen, because the failure this guards is not a
-            // rendering: an editor left running would answer for the branch that is no longer
-            // checked out. Refusing is the correct answer; naming Level1 is not.
             const answered = await godotCall<RuntimeTree>('scene.get_tree', {})
                 .then(tree => tree.root?.name ?? '(no scene)')
                 .catch((error: unknown) => `refused: ${String(error)}`)
@@ -2472,9 +1921,6 @@ describe('the live workspace', () => {
         })
 
         after(async () => {
-            // The story continues on the task the level was built in. A hook that throws is
-            // reported as a second failure and takes the rest of the file with it, so this one
-            // reports what it could not do and lets the steps that follow say what that cost.
             if (builtOn === '') return
             try {
                 await clickSelector(`a[href="${builtOn}"]`, 'the task the level was built in')
@@ -2489,18 +1935,8 @@ describe('the live workspace', () => {
         })
     })
 
-    /**
-     * The editor going away without being asked.
-     *
-     * A person closes the Godot window, or it crashes. Nothing in Gofer used to notice: the badge
-     * went on reading ready, the panels went on offering Run, every call behind them failed with a
-     * transport error that named nothing, and the stored run row stayed `running` for a process
-     * that was gone. Only the child process knows, so only killing a real one can prove it.
-     */
     describe('an editor that exits on its own', () => {
         it('stops presenting a session whose editor is gone', async () => {
-            // The editor bound to this project, found the way `pgrep -af '^godot --editor'` finds
-            // it: by the directory it was launched with.
             const running = execFileSync('pgrep', ['-f', `godot --editor.*${bound}`], {
                 encoding: 'utf8'
             })
@@ -2509,16 +1945,10 @@ describe('the live workspace', () => {
             expect(running.length).toBeGreaterThan(0)
             for (const pid of running) execFileSync('kill', ['-9', pid])
 
-            // The window has to say so on its own, without the sweep clicking anything: what it
-            // polls is the session, and the session is what has to notice.
             await expectText(['No editor running'], {limitMs: 60_000})
         })
 
         it('closes the run it was recording rather than leaving it open', async () => {
-            // A run still saying `running` for an editor that is gone is the half of this the user
-            // never sees on screen and finds in their history later. The row is closed by the
-            // backend when it notices the exit, which is its own moment rather than the one the
-            // badge flips in — so it is waited for, not read once.
             const open = () =>
                 databaseRows('select status from godot_runs order by rowid').filter(
                     status => status === 'running'
@@ -2529,7 +1959,6 @@ describe('the live workspace', () => {
         })
 
         it('starts a fresh editor over the dead one', async () => {
-            // The session the dead editor left behind must not stand in the way of the next one.
             await forgetSessionStates()
             await clickTab('Scene')
             await clickButton('Start Godot')
@@ -2541,7 +1970,6 @@ describe('the live workspace', () => {
     describe('shutting the session down', () => {
         it('stops the editor and removes the staged addon', async () => {
             await clickButton('Stop Godot')
-            // The words the toolbar actually uses for a workspace with no editor in it.
             await expectText(['Editor stopped', 'Start Godot'], {limitMs: 60_000})
             expect(existsSync(join(bound, 'addons/gofer'))).toBe(false)
         })
@@ -2553,25 +1981,16 @@ describe('the live workspace', () => {
     })
 
     describe('a workspace that is not a Godot project', () => {
-        /**
-         * Godot opens any directory as a project, inventing an empty one where there is none, so a
-         * workspace that is not one would otherwise fail much later as a scene that will not load.
-         * Gofer takes its workspace from the directory it was started in, which is not always the
-         * one the user meant, so the refusal has to name the directory.
-         */
         it('refuses the session by naming the directory and what to do about it', async () => {
             renameSync(join(bound, 'project.godot'), join(bound, 'project.godot.hidden'))
             try {
                 await clickButton('Start Godot')
                 await expectText(
-                    // The refusal names the project folder, because that is the directory the
-                    // session would have started in and the one the user can fix.
                     [
                         'contains no project.godot',
                         'Commit your project files in your project folder',
                         bound
                     ],
-                    // The refusal is the outcome under test, so it must not end the wait early.
                     {allow: REFUSAL, limitMs: 60_000}
                 )
             } finally {
@@ -2588,12 +2007,6 @@ describe('the live workspace', () => {
         it('reported no unexpected errors along the way', async () => {
             const errors = await pageErrors()
             const unexpected = errors.filter(
-                // A cancelled answer rejects its own request by design; that is the feature the
-                // Stop control exists for, not a fault. So is the refusal above. A stale element
-                // reference is this sweep clicking something the application has just remounted,
-                // which is the driver talking about itself.
-                // `NotAllowedError` is WebKit refusing the automation a permission the
-                // application never asked a person for.
                 entry => !/cancel|abort|project\.godot|stale element|NotAllowedError/i.test(entry)
             )
             expect(unexpected).toEqual([])
@@ -2608,7 +2021,5 @@ describe('the live workspace', () => {
         console.log(git('status', '--short') || '(clean)')
         if (existsSync(join(workspace, 'addons')))
             console.log(`addons/: ${readdirSync(join(workspace, 'addons')).join(', ')}`)
-        // The workspace itself is put back by the runner's `onComplete`, which is the first moment
-        // the application is no longer holding the checkout.
     })
 })

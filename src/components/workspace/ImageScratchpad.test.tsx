@@ -5,11 +5,6 @@ import {ImageScratchpad} from './ImageScratchpad'
 import type {AnnotationShape} from '../../models/annotation'
 import type {DraftAttachment} from '../../models/chat'
 
-/*
- * The canvas is mocked away, not stood in for. jsdom has no 2D context, so a real one here would be
- * a second implementation of the painter to keep correct; what this file is for is the half the
- * visual suite cannot reach cheaply — which control changes what, and what the save is handed.
- */
 const painter = vi.hoisted(() => ({
     flatten: vi.fn(),
     load: vi.fn()
@@ -36,11 +31,9 @@ const surface = () => screen.getByRole('img', {name: 'Drawing surface for shot.p
 
 const button = (name: string) => screen.getByRole('button', {name})
 
-/** Astryx spells a disabled control two ways: `disabled` on plain ones, `aria-disabled` with a tooltip. */
 const isOff = (element: HTMLElement) =>
     element.hasAttribute('disabled') || element.getAttribute('aria-disabled') === 'true'
 
-/** A press, a drag and a release over the surface, in image coordinates. */
 function drawStroke(from: readonly [number, number], to: readonly [number, number]) {
     const canvas = surface()
     fireEvent.pointerDown(canvas, {clientX: from[0], clientY: from[1], pointerId: 1})
@@ -64,7 +57,6 @@ async function open(attachment: DraftAttachment = ATTACHMENT) {
     return {onSave, onClose}
 }
 
-/** What `flattenAnnotations` was handed on the last save, which is what the model would be sent. */
 function flattened() {
     const request = painter.flatten.mock.calls.at(-1)?.[0] as
         {shapes: readonly AnnotationShape[]; src: string; name: string} | undefined
@@ -75,7 +67,6 @@ function flattened() {
 beforeEach(() => {
     painter.load.mockResolvedValue({naturalWidth: 200, naturalHeight: 100})
     painter.flatten.mockResolvedValue(SAVED)
-    // Neither exists in jsdom, and both are what turn a pointer position into an image position.
     HTMLCanvasElement.prototype.setPointerCapture = vi.fn()
     vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue({
         x: 0,
@@ -120,7 +111,6 @@ describe('drawing on an attachment', () => {
         expect(flattened().shapes).toHaveLength(1)
     })
 
-    /* Reopening an edit draws the strokes again over the picture as it was before any of them. */
     it('starts from the strokes an earlier edit left', async () => {
         const shapes: readonly AnnotationShape[] = [
             {
@@ -202,10 +192,6 @@ describe('the tools', () => {
         expect(flattened().shapes.map(shape => shape.kind)).toEqual(['box', 'arrow'])
     })
 
-    /*
-     * The brush keeps its own size, and the eraser is a shape rather than a delete: both are what
-     * lets a rub-out reopen and undo like every other stroke.
-     */
     it('paints with the brush at its own size, and rubs out with the eraser', async () => {
         const user = userEvent.setup()
         await open()
@@ -226,7 +212,6 @@ describe('the tools', () => {
         expect(erase).toMatchObject({kind: 'erase', width: 24})
     })
 
-    /* A label is typed, not dragged, so the press only says where it goes. */
     it('takes a label from the field the press opens, and drops an empty one', async () => {
         const user = userEvent.setup()
         await open()
@@ -238,7 +223,6 @@ describe('the tools', () => {
         await user.type(field, 'the boss{Enter}')
         expect(screen.queryByRole('textbox', {name: 'Label'})).not.toBeInTheDocument()
 
-        // A second label, abandoned empty: pressing elsewhere ends it and leaves nothing behind.
         fireEvent.pointerDown(surface(), {clientX: 60, clientY: 40, pointerId: 1})
         fireEvent.pointerUp(surface(), {clientX: 60, clientY: 40, pointerId: 1})
         fireEvent.pointerDown(surface(), {clientX: 90, clientY: 40, pointerId: 1})
@@ -285,7 +269,6 @@ describe('changing a stroke that is already there', () => {
         expect(isOff(button('Clear'))).toBe(true)
     })
 
-    /* Undo has to reach a move and a clear, not only the last shape added. */
     it('undoes and redoes with the keyboard as well as the buttons', async () => {
         const user = userEvent.setup()
         await open()
@@ -297,10 +280,6 @@ describe('changing a stroke that is already there', () => {
         fireEvent.keyDown(window, {key: 'Z', ctrlKey: true, shiftKey: true})
         expect(isOff(button('Clear'))).toBe(false)
 
-        /*
-         * Retried rather than read once: `clickAction` runs the update in a transition, so the
-         * button it disables settles a tick after the click resolves.
-         */
         const clearIs = async (off: boolean) => {
             await waitFor(() => {
                 expect(isOff(button('Clear'))).toBe(off)

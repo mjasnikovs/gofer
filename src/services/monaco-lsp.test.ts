@@ -25,10 +25,6 @@ function range(line: number, character = 0) {
     }
 }
 
-/**
- * A stand-in for the Monaco namespace. The providers are pure functions over the bridge, so the
- * registrations are captured and invoked directly instead of loading the real editor into jsdom.
- */
 function monacoStub() {
     const uris: Record<string, {path: string}> = {}
     const providers = new Map<string, ProviderRecord>()
@@ -43,7 +39,6 @@ function monacoStub() {
     }
     const monaco = {
         Uri: {
-            // One object per path, so a URI compares equal to the one a second call produces.
             from: ({path}: {scheme: string; path: string}) => (uris[path] ??= {path})
         },
         languages: {
@@ -134,7 +129,6 @@ describe('LSP to Monaco conversion', () => {
         )
 
         expect(list.incomplete).toBe(true)
-        // LSP Variable (6) is Monaco Variable (4); LSP Function (3) is Monaco Function (1).
         expect(list.suggestions[0]).toMatchObject({
             kind: 4,
             insertText: 'speed',
@@ -186,7 +180,6 @@ describe('LSP to Monaco conversion', () => {
                 children: [{name: 'speed', kind: 13, range: range(1), selectionRange: range(1)}]
             }
         ])
-        // Monaco's SymbolKind is the LSP kind minus one: Class 5 becomes 4, Variable 13 becomes 12.
         expect(nested[0]).toMatchObject({name: 'Player', kind: 4})
         expect(nested[0]?.children?.[0]).toMatchObject({name: 'speed', kind: 12})
 

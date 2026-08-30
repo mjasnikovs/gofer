@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# The verifications owed to Ox Alpha, once its free daily tier resets.
-#
-# Each task is the one that produced the evidence for the fix it checks, re-run unchanged:
-#   x08  iteration 23 — a refused list used to be read as having applied its first entry
-#   x12  iteration 23 again, on the shape that costs the most: a `save` batched onto godot_node
-#   x23  iteration 25 — the 15,885-character inspect
-#   x11  iterations 24 and 30 — the floor wider than the window, and the Input Map
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/ox-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

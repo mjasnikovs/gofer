@@ -16,9 +16,6 @@ export const config: WebdriverIO.Config = {
             browserName: 'tauri',
             'goog:chromeOptions': {
                 binary: process.env.GOFER_CHROME_BINARY ?? '/usr/bin/chromium',
-                // The application ships a 1280x800 window with a 960x640 minimum. Headless
-                // Chrome defaults to 800x600, which is a layout Gofer never runs at — the frame
-                // squeezes its centre column to nothing and the journey reads an empty page.
                 args: ['--headless=new', '--no-sandbox', '--window-size=1280,800']
             },
             'wdio:chromedriverOptions': {

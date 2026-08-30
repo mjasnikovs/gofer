@@ -50,11 +50,6 @@ afterEach(() => {
 })
 
 describe('the skills panel', () => {
-    /**
-     * The description is the whole of what the model sees until it decides the skill applies, so
-     * it is on the row rather than behind the editor. A skill nobody can describe is a skill the
-     * agent will never open.
-     */
     it('names every skill with the description the agent matches against', async () => {
         backend()
         await open()
@@ -88,11 +83,6 @@ describe('the skills panel', () => {
         )
     })
 
-    /**
-     * A file that turned itself off with `disable-model-invocation` is not a switch the user can
-     * win against: the block the model is sent leaves it out whatever the project says. The row
-     * says which of the two reasons it is off for.
-     */
     it('shows a skill its own file hides, and does not offer to turn it on', async () => {
         backend([skill({hidden: true, enabled: false})])
         await open()
@@ -101,11 +91,6 @@ describe('the skills panel', () => {
         expect(screen.getByRole('switch', {name: 'Send tile-levels to the agent'})).toBeDisabled()
     })
 
-    /**
-     * A `SKILL.md` with no description loads as no skill at all, so without this the row would
-     * simply never appear and the user would have no way to find out what was wrong with a file
-     * they had just added.
-     */
     it('explains a file under the skills directory the loader complained about', async () => {
         installBackend(tauri, {
             skills: [{skill: skill(), text: 'x'}],
@@ -139,7 +124,6 @@ describe('the skills panel', () => {
         await user.click(screen.getByRole('button', {name: 'Add file…'}))
         await flush()
 
-        // The picker is told what a skill is, so the user is not offered every file on the disk.
         const opened = tauri.invoke.mock.calls.find(call => call[0] === 'plugin:dialog|open')
         expect(opened?.[1]).toMatchObject({
             options: {filters: [{name: 'Skill', extensions: ['md']}]}
@@ -150,11 +134,6 @@ describe('the skills panel', () => {
         )
     })
 
-    /**
-     * The native dialog picks files or directories, never both, so a skill that is a folder needs
-     * its own button. Without it the reference files a SKILL.md points at are left behind and the
-     * skill lands with every relative path in it naming nothing.
-     */
     it('offers to add a whole skill folder through a directory picker', async () => {
         installBackend(tauri, {
             skills: [{skill: skill(), text: 'x'}],
@@ -174,7 +153,6 @@ describe('the skills panel', () => {
         )
     })
 
-    /** A cancelled picker is not a failure; the user simply changed their mind. */
     it('adds nothing when the picker is dismissed', async () => {
         installBackend(tauri, {
             skills: [{skill: skill(), text: 'x'}],
@@ -204,10 +182,6 @@ describe('the skills panel', () => {
         expect(screen.getByRole('button', {name: 'Save'})).toBeInTheDocument()
     })
 
-    /**
-     * Delete removes the skill's whole folder, and `.gofer/.gitignore` is `*`, so nothing in Git
-     * brings it back. One press on a trash icon is not enough to ask for that.
-     */
     it('asks before deleting, and deletes only on the second press', async () => {
         backend()
         await open()
@@ -251,5 +225,4 @@ describe('the skills panel', () => {
     })
 })
 
-/** Monaco is several megabytes and answers nothing in jsdom; the editor is proved by the app. */
 vi.mock('./SkillEditor', () => ({SkillEditor: () => null}))

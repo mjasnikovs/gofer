@@ -3,7 +3,6 @@ import {INITIAL_SESSION_VIEW, reduceSession} from './godot-session-state'
 import type {SessionAction, SessionView} from './godot-session-state'
 import type {GodotSessionSummary} from './godot'
 
-/** Applies a run of actions in order, which is the only way the session ever reaches a state. */
 function apply(...actions: readonly SessionAction[]): SessionView {
     return actions.reduce(reduceSession, INITIAL_SESSION_VIEW)
 }
@@ -43,11 +42,6 @@ describe('starting and stopping', () => {
         expect(failed.isBusy).toBe(false)
     })
 
-    /*
-     * An editor that has stopped is editing nothing. A scene path left behind has the inspector
-     * reading the old scene against an editor that no longer exists, which the addon answers —
-     * correctly — with "not found in the edited scene".
-     */
     it('forgets the edited scene along with the session', () => {
         const stopped = apply(
             {type: 'started', session: SESSION},
@@ -60,7 +54,6 @@ describe('starting and stopping', () => {
         expect(stopped.scene).toBeUndefined()
     })
 
-    /** Saying a session is offline when it is still running is worse than saying nothing. */
     it('leaves the session alone when the stop would not go through', () => {
         const refused = apply(
             {type: 'started', session: SESSION},
@@ -87,7 +80,6 @@ describe('the epochs the panels depend on', () => {
         )
         expect(edited.sceneEpoch).toBe(2)
         expect(edited.scene?.path).toBe('res://level.tscn')
-        // Starting a game is not a scene change, and a scene panel must not refetch for it.
         expect(edited.runtimeEpoch).toBe(0)
     })
 
@@ -97,11 +89,6 @@ describe('the epochs the panels depend on', () => {
         expect(played.sceneEpoch).toBe(0)
     })
 
-    /*
-     * Bumped on arriving at a running state, not on changing into one. A restart passes through
-     * the same state again, and a runtime panel still holding the previous game's readings has to
-     * be told to go and ask.
-     */
     it('moves the runtime epoch every time the session reaches a running state', () => {
         const restarted = apply(
             {type: 'state-changed', state: 'playing'},
@@ -122,7 +109,6 @@ describe('the epochs the panels depend on', () => {
         expect(settling.state).toBe('stopping')
     })
 
-    /** The lifecycle event carries no summary, so the session it describes must survive it. */
     it('keeps the session summary across a state change', () => {
         const moved = apply(
             {type: 'started', session: SESSION},

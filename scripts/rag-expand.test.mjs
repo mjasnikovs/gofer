@@ -17,7 +17,6 @@ const CONNECTION = {
     maxRetries: 1
 }
 
-/** A provider that answers once with the content parts it is given. */
 function fakeModels(content, {stopReason = 'stop', errorMessage} = {}) {
     const calls = []
     return {
@@ -26,7 +25,6 @@ function fakeModels(content, {stopReason = 'stop', errorMessage} = {}) {
             calls.push({model, context, options})
             const stream = createAssistantMessageEventStream()
             const message = {role: 'assistant', content, stopReason, errorMessage}
-            // The two shapes pi-ai really emits: a failure carries the message as `error`.
             stream.push(
                 stopReason === 'error' ?
                     {type: 'error', reason: 'error', error: message}
@@ -76,7 +74,6 @@ test('the reasoning level, the ceilings and the prompt are the ones supplied', a
     assert.equal(call.options.reasoning, 'low')
     assert.equal(call.options.timeoutMs, 30_000)
     assert.equal(call.options.maxRetries, 1)
-    // Per request, not per connection: expansion wants a hundred tokens, an answer wants the window.
     assert.equal(call.model.maxTokens, 100)
     assert.equal(call.model.id, 'small.gguf')
     assert.equal(call.model.baseUrl, CONNECTION.baseUrl)
@@ -90,13 +87,10 @@ test('a chat-template server is sent the argument that turns thinking on', async
 
     await complete({system: 'EXPAND', user: 'animate a value', maxTokens: 100})
 
-    // The same switch the agent worker sends. This is the second copy of that builder, in a process
-    // that cannot import the first without dragging the whole agent into a search.
     const [call] = models.calls
     assert.equal(call.model.compat.thinkingFormat, 'chat-template')
     assert.equal(call.model.compat.chatTemplateKwargs.enable_thinking.$var, 'thinking.enabled')
 
-    // And a connection that never heard from a `/props` is left exactly as it was.
     const plain = fakeModels([{type: 'text', text: 'Tween'}])
     await createCompletion(CONNECTION, {models: plain})({
         system: 'EXPAND',
@@ -139,13 +133,6 @@ test('textOf keeps only text parts', () => {
     )
 })
 
-/**
- * The level the search asks at has to be one pi-ai's own scale contains.
- *
- * `on` is not on it. Handed one it does not know, `clampThinkingLevel` drops to the lowest level
- * the model offers — `off` — and the chat-template switch then resolves to `enable_thinking: false`.
- * A search expansion that was supposed to think went out with thinking explicitly disabled.
- */
 test('the on level survives the clamp pi-ai puts every request through', async () => {
     const models = fakeModels([{type: 'text', text: 'Tween'}])
     const connection = {
@@ -160,17 +147,9 @@ test('the on level survives the clamp pi-ai puts every request through', async (
     const [call] = models.calls
     const clamped = clampThinkingLevel(call.model, call.options.reasoning)
     assert.notEqual(clamped, 'off', 'the level reached the request as off')
-    // Which is what makes the template argument true, since that is read off the surviving effort.
     assert.equal(call.model.compat.chatTemplateKwargs.enable_thinking.$var, 'thinking.enabled')
 })
 
-/**
- * The search asks at the level the server named, under the name the server used.
- *
- * The second copy of the worker's model builder, and it had the second copy of the same clamp.
- * pi-ai only believes a model has `xhigh` or `max` if the model says so; unsaid, `xhigh` is clamped
- * to `high`, and the chat template these levels were read out of raises on a word it does not know.
- */
 test('a named effort is not clamped onto one the template never offered', async () => {
     const models = fakeModels([{type: 'text', text: 'Tween'}])
     const connection = {

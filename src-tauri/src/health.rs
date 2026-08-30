@@ -232,8 +232,6 @@ fn workspace_check(input: &HealthInput) -> HealthCheck {
     let origin = match input.workspace_source {
         WorkspaceSource::Environment => "named by GOFER_WORKSPACE_DIR",
         WorkspaceSource::Configured => "chosen in Gofer",
-        // Launched from a desktop icon this is the home directory, or `/`, and nothing in the
-        // interface used to say so.
         WorkspaceSource::WorkingDirectory => "the folder Gofer was started in",
     };
     HealthCheck::new(
@@ -286,8 +284,6 @@ fn git_checks(workspace: &Path, repository: &git::RepositoryStatus) -> Vec<Healt
         return checks;
     };
 
-    // A folder inside someone else's repository is still a repository, and task branches would be
-    // cut from that outer project rather than from the game.
     let is_own_root = crate::paths::canonical(root).ok() == crate::paths::canonical(workspace).ok();
     checks.push(if is_own_root {
         HealthCheck::new(
@@ -364,9 +360,6 @@ fn git_checks(workspace: &Path, repository: &git::RepositoryStatus) -> Vec<Healt
         .with_remedy(commit_remedy())
     });
 
-    // A commit that does not carry the project is a branch point and nothing more: every task
-    // worktree is checked out from it, so the editor session opens a directory with no
-    // project.godot in it and stops there, long after this report said the workspace was ready.
     if repository.has_commit
         && !repository.tracks_project_file
         && workspace.join(crate::addon::PROJECT_FILE).is_file()
@@ -387,11 +380,6 @@ fn git_checks(workspace: &Path, repository: &git::RepositoryStatus) -> Vec<Healt
         );
     }
 
-    // Reported even though tasks run perfectly well, because the damage is not visible while it is
-    // happening: Godot rewrites its cache on every open, Gofer commits the checkout on every task
-    // switch, and the branch grows a commit that holds nothing anyone typed. That commit is enough
-    // to move the branch past its own merge, which is what puts Merge back on a task that is
-    // already merged.
     if repository.has_commit && repository.tracks_editor_cache {
         checks.push(
             HealthCheck::new(
@@ -530,8 +518,6 @@ fn ai_check(ai: &AiHealth) -> HealthCheck {
             HealthStatus::Ok,
             format!("Connected to {endpoint}."),
         ),
-        // An unreachable server is the ordinary state of a local model that has not been started
-        // yet, so it never blocks the workspace — the rest of Gofer still works without it.
         AiReachability::Unreachable | AiReachability::ServerError => HealthCheck::new(
             "ai-connection",
             "AI model",
@@ -693,7 +679,6 @@ mod tests {
             project.remedy.as_ref().map(|remedy| remedy.action),
             Some(RemedyAction::CreateGodotProject)
         );
-        // Every blocked check has to be answerable from the report itself.
         for blocked in report
             .checks
             .iter()
@@ -752,7 +737,6 @@ mod tests {
         let report = report(&input(directory.path()));
 
         assert!(!report.is_ready);
-        // On disk, so the Godot project check is satisfied and says nothing about the history.
         assert_eq!(check(&report, "godot-project").status, HealthStatus::Ok);
         let tracked = check(&report, "git-project-tracked");
         assert_eq!(tracked.status, HealthStatus::Blocked);
@@ -778,8 +762,6 @@ mod tests {
     fn the_identity_fix_makes_the_first_commit_possible() {
         let directory = TempDir::new().expect("temporary directory");
         git(directory.path(), &["init", "-b", "main"]);
-        // Global identity is whatever the machine running the suite has, so the check is only
-        // meaningful once this repository is known to have none of its own.
         git(
             directory.path(),
             &["config", "--local", "user.useConfigOnly", "true"],
@@ -905,7 +887,6 @@ mod tests {
             Some(RemedyAction::StopTrackingEditorCache)
         );
 
-        // And it is not offered to a project that does not have the problem.
         let clean = git_checks(
             &root,
             &git::RepositoryStatus {

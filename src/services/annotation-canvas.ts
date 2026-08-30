@@ -1,14 +1,6 @@
-/**
- * Painting the shapes of `models/annotation` onto a canvas, and flattening them into a PNG.
- *
- * Everything here needs a 2D context, which jsdom does not have. The visual suite covers it; keep
- * decisions out of this file and in the model, where a unit test can reach them.
- */
-
 import {arrowBarbs, shapeBounds, textSize} from '../models/annotation'
 import type {AnnotationShape, ImageSize} from '../models/annotation'
 
-/** Every stroke is laid down twice, dark underneath, so a colour survives being drawn on art of the same colour. */
 const HALO = 'rgba(0, 0, 0, 0.65)'
 const HALO_WIDTH = 3
 const ARROW_HEAD_RATIO = 4
@@ -27,13 +19,11 @@ function trace(ctx: CanvasRenderingContext2D, shape: AnnotationShape, path: () =
 
 function paintShape(ctx: CanvasRenderingContext2D, shape: AnnotationShape) {
     if (shape.kind === 'erase') {
-        // Cutting, not painting: this only reaches the layer the strokes live on.
         ctx.save()
         ctx.globalCompositeOperation = 'destination-out'
         ctx.lineCap = 'round'
         ctx.lineJoin = 'round'
         ctx.strokeStyle = '#000000'
-        // Wide enough to take the halo with it, or a rubbed-out stroke leaves a dark ghost behind.
         ctx.lineWidth = shape.width + HALO_WIDTH * 2
         ctx.beginPath()
         for (const [index, point] of shape.points.entries()) {
@@ -81,7 +71,6 @@ function paintShape(ctx: CanvasRenderingContext2D, shape: AnnotationShape) {
     ctx.fillText(shape.text, shape.at.x, shape.at.y)
 }
 
-/** The marching ants around the picked shape. On screen only — `flattenAnnotations` never asks for it. */
 function paintSelection(ctx: CanvasRenderingContext2D, shape: AnnotationShape) {
     const bounds = shapeBounds(shape)
     const padding = shape.width
@@ -98,14 +87,6 @@ function paintSelection(ctx: CanvasRenderingContext2D, shape: AnnotationShape) {
     ctx.restore()
 }
 
-/**
- * The strokes, over whatever is already on the context.
- *
- * With an eraser in the list they are painted on a layer of their own first, because
- * `destination-out` cuts whatever it is drawn on: straight onto the picture it would punch a hole
- * through the photograph instead of rubbing out ink. Without one there is nothing to cut, so the
- * layer is skipped and the strokes land directly.
- */
 export function paintAnnotations(
     ctx: CanvasRenderingContext2D,
     shapes: readonly AnnotationShape[],
@@ -114,8 +95,6 @@ export function paintAnnotations(
     const layer = shapes.some(shape => shape.kind === 'erase') ? inkLayer(ctx) : undefined
     const target = layer?.ctx ?? ctx
     for (const shape of shapes) {
-        // No layer means nothing safe to cut into, so a rub-out is left out rather than taken out
-        // of the photograph underneath.
         if (shape.kind === 'erase' && !layer) continue
         paintShape(target, shape)
     }
@@ -124,7 +103,6 @@ export function paintAnnotations(
     if (selected) paintSelection(ctx, selected)
 }
 
-/** A transparent canvas the size of the one being painted, for the strokes an eraser cuts into. */
 function inkLayer(
     ctx: CanvasRenderingContext2D
 ): {canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D} | undefined {
@@ -148,7 +126,6 @@ export function loadImage(src: string): Promise<HTMLImageElement> {
     })
 }
 
-/** A PNG whatever went in: an edited JPEG re-encoded as JPEG would lose a little more every save. */
 export function annotatedName(name: string): string {
     const cut = name.lastIndexOf('.')
     return `${cut > 0 ? name.slice(0, cut) : name}.png`

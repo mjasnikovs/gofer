@@ -135,17 +135,6 @@ pub const CATALOG: &[ToolDomain] = &[
                       read the tree to fetch it.",
         operations: tool_params::GODOT_SCENE_OPERATIONS,
     },
-    // The last clause is the corpus's most common surviving mistake, answered where the call is
-    // written. `{"op": "save"}` batched onto `godot_node` is **seven of the nine recorded refusals
-    // that still reach one before the router**, across six runs, and each one takes a whole batch
-    // of good work down with it because a list is refused as one. The description said how a
-    // mutation is revisioned and what a path looks like, and never that none of them writes the
-    // file.
-    //
-    // **Unmeasured.** `scripts/bench-where-save-lives.mjs` is the interleaved A/B for it, primed to
-    // the call before the mistake. The local model cannot answer it — three seeds an arm and it
-    // never wrote `connect_signal` or a `save` on any tool, because it wires buttons in `_ready`
-    // instead — and OpenRouter's free tier for the model that does write it was spent for the day.
     ToolDomain {
         name: "godot_node",
         description: "Node authoring inside the edited scene. Every mutation is undoable and every \
@@ -253,11 +242,6 @@ pub(crate) fn probe(domain: &str) -> Result<Value, ToolFailure> {
                 .map_err(|error| ToolFailure::new("docs_unavailable", error))?;
             Ok(json!({"tool": domain, "reachable": true, "worker": worker}))
         }
-        // Answered without looking for a window, and that is the deliberate part. The probe runs
-        // once before the turn; whether a window is open is a thing that changes during one, and a
-        // turn refused at the start because the user had the window minimised would be refusing
-        // work over a state that no longer holds by the time the tool is called. Asking with no
-        // window is refused at the call, by name, which is where the answer is still true.
         crate::ask::ASK_USER_TOOL => Ok(json!({"tool": domain, "reachable": true})),
         other => Err(ToolFailure::new(
             "unprobed_tool",
@@ -274,8 +258,6 @@ pub fn dispatch<R: Runtime>(
     app: &AppHandle<R>,
     request: ToolRequest,
 ) -> Result<Value, ToolFailure> {
-    // A settings file that cannot be read falls back to the rules being on, which is what a machine
-    // that never chose gets. Failing open would make an unreadable settings file the way past them.
     let rules = crate::settings::read_godot_settings(app).unwrap_or_default();
     dispatch_under(app, request, &rules)
 }
@@ -320,9 +302,6 @@ fn said_that_none_of_it_ran(listed: usize, failure: ToolFailure) -> ToolFailure 
         return failure;
     }
     let mut failure = failure;
-    // A full stop first when the sentence it is joining did not end in one. `node_not_found: No
-    // running node at '/root/Main/@Area2D@19'` ends on the path, and the clause ran straight into
-    // it — measured on a live turn, four times in one run.
     let stop = if failure.message.trim_end().ends_with(['.', '!', '?']) {
         ""
     } else {
@@ -342,18 +321,12 @@ fn route<R: Runtime>(
     request: ToolRequest,
     rules: &crate::settings::GodotSettings,
 ) -> Result<Value, ToolFailure> {
-    // The agent dispatches its calls in parallel, so a stopped turn usually leaves several queued
-    // behind the one that was running. None of them has an agent left to answer.
     if crate::cancel::is_cancelled() {
         return Err(ToolFailure::new(
             "cancelled",
             "The turn was stopped before this tool call ran",
         ));
     }
-    // Asked before the catalogue, because it is not a catalogue entry and must not become one. The
-    // catalogue is the Godot domains — ten of them, asserted — and a question to the user is not a
-    // Godot operation, has no addon handler and takes no `ops` list. It is routed here for the same
-    // reason `web_search` is built in Node: this is simply where the thing that answers it lives.
     if request.tool == crate::ask::ASK_USER_TOOL {
         return crate::ask::ask_user(app, &request.params);
     }
@@ -366,50 +339,28 @@ fn route<R: Runtime>(
                 format!("There is no '{}' tool", request.tool),
             )
         })?;
-    // Answered before the operation is read — a probe names none — and before approvals, because
-    // proving that a tool can answer must never open a dialog for the user to click.
     if request.params.get(PROBE_KEY).and_then(Value::as_bool) == Some(true) {
         return probe(domain.name);
     }
     let mut entries = requested_operations(domain, &request.params)?;
 
-    // The shapes a model writes that mean exactly one thing, put into the shape the protocol takes,
-    // before anything is held to it. See `Operation::repair` for why this is a repair and not a
-    // refusal: the refusal was tried, and it printed the right answer into a call that was made
-    // again unchanged four times.
     for entry in &mut entries {
         entry.operation.repair(&mut entry.params);
-        // And the other half of "the shape a model wrote, put into the shape the protocol takes":
-        // the two spellings of a path. Here rather than in an arm, because an arm that has to
-        // remember it is an arm that can forget it — and `resource_domain` did, silently. See
-        // `as_the_worktree_names_them`.
         as_the_worktree_names_them(entry.operation, &mut entry.params);
     }
 
-    // Everything that can refuse the call is answered before any of it runs. A list applied half
-    // way and then refused is the worst of both: the model cannot tell what landed, and the
-    // parameter mistake behind it is usually in an entry it has not looked at yet.
     for (index, entry) in entries.iter().enumerate() {
-        // The parameter contract, checked here rather than in GDScript. Four domains are forwarded
-        // to the addon as raw JSON, so before this the first thing to examine a value's shape was
-        // `Protocol.decode`, in the editor, across a socket — and its answer reached the model as
-        // one flattened sentence with no example in it. See `tool_params`.
         entry
             .operation
             .check(&entry.params)
             .map_err(|failure| the_whole_file(domain.name, entry.op(), failure))
             .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
 
-        // A game the debugger started is not one the editor is playing, so `runtime.run`'s own
-        // guard cannot see it. Answered here, where both are known.
         if domain.name == "godot_runtime" {
             refuse_a_second_game(entry.op(), crate::debug::holds_a_game())
                 .map_err(|failure| entry.blamed(index, entries.len(), failure))?;
         }
 
-        // The user's rules are answered before the user's approvals, because a rule they already
-        // answered is not a question to ask them again: `game_embed_mode` is gated below, and a
-        // prompt offering to undo a ticked box is a worse outcome than a refusal.
         if let Some(refusal) =
             crate::godot_policy::enforcement_refusal(rules, entry.operation.writes(), &entry.params)
         {
@@ -422,9 +373,6 @@ fn route<R: Runtime>(
     }
     refuse_a_list_that_holds_a_lone_operation(domain, &entries)?;
 
-    // The safety model sits between validation and the operation. A call the router would refuse
-    // anyway is never worth a prompt, and a path outside the worktree is rejected here rather than
-    // offered for approval, so no dialog can ever propose writing outside the task's own tree.
     let mut gated: Vec<approvals::GatedCall> = Vec::new();
     for entry in &entries {
         let Some(reason) = entry.operation.gate() else {
@@ -437,8 +385,6 @@ fn route<R: Runtime>(
             params: entry.params.clone(),
         });
     }
-    // One prompt for the whole call. Asked per entry, a list of ten deletions would reach the user
-    // as ten dialogs, of which they could only refuse the ones they had already been shown.
     approvals::require(app, domain.name, &gated)?;
 
     let step = |operation: &'static Operation, params: Value| {
@@ -643,10 +589,6 @@ fn requested_operation(
             format!("{} has no '{op}' operation", domain.name),
         ));
     };
-    // `op` names the entry; it is not one of the operation's parameters. It is taken out here
-    // rather than tolerated downstream, because four domains are forwarded to the addon as raw
-    // JSON and the addon refuses a parameter no handler reads — which is what a real editor
-    // answered to `session.get_state has no `op` parameter`.
     let mut params = entry.clone();
     if let Some(object) = params.as_object_mut() {
         object.remove("op");
@@ -694,8 +636,6 @@ fn refuse_a_list_that_holds_a_lone_operation(
                     details: json!({"op": entry.op(), "opIndex": index}),
                 });
             }
-            // Only a later twin is named. The first entry of a pair is the one the caller keeps,
-            // so pointing at it would ask for the wrong edit.
             Sharing::Repeat => {
                 if let Some(again) = entries
                     .iter()
@@ -742,9 +682,6 @@ fn run_in_order(
     let mut answered: Vec<Value> = Vec::with_capacity(entries.len());
     let mut stopped: Option<ToolFailure> = None;
     let mut worked = false;
-    // The revision the last answer reported, threaded into the next entry that takes one. No caller
-    // can supply it: the revision an entry has to expect is the one the entry before it produced,
-    // and that number does not exist yet when the call is written.
     let mut revision: Option<i64> = None;
     for entry in entries {
         if let Some(failure) = &stopped {
@@ -769,8 +706,6 @@ fn run_in_order(
         }
     }
     match stopped {
-        // Nothing landed, so the list carries nothing the failure does not already say. This is the
-        // whole of a one-entry call that failed, which is exactly what every caller had before.
         Some(failure) if !worked => Err(failure),
         _ => Ok(json!({"ops": answered})),
     }
@@ -811,36 +746,19 @@ fn run_one<R: Runtime>(
     params: Value,
 ) -> Result<Value, ToolFailure> {
     let op = operation.op;
-    // What answers this operation is a fact about the operation, so it is read off the operation
-    // rather than rebuilt from its name. The router used to spell the addon command with
-    // `format!("scene.{op}")` and keep a hand-written exception list wherever a domain was only
-    // partly the addon's — `session.start|stop|status` and `resource.list|move|delete` — and two
-    // drift tests in this file re-derived the same arithmetic and the same exceptions a second and
-    // a third time. `params.json` had carried the mapping as data the whole time.
     match operation.route() {
         tool_params::Answers::Addon(command) => {
             a_path_that_climbs_out(&params)?;
-            // Before the call rather than after its deadline. A game halted in the debugger cannot
-            // draw, and three of this domain's operations wait for a frame — so the addon can only
-            // answer them by running out of time, twenty seconds later, with a sentence that reads
-            // as a slow game. See `godot_session::a_game_the_debugger_has_halted`.
             if domain.name == "godot_runtime" {
                 godot_session::a_game_the_debugger_has_halted(op)?;
             }
             let answered = rpc(app, command, params);
-            // An autoload is a global name, and every script the language server already has open
-            // was parsed without it. Nothing about those documents changed, so the server never
-            // revisits them and their diagnostics keep naming a global that now exists. Done here
-            // rather than in the addon because the language server is this process's connection,
-            // and only after the command was accepted — a refused autoload changed nothing.
             if answered.is_ok()
                 && matches!(command, "project.set_autoload" | "project.remove_autoload")
             {
                 crate::script::reparse_open_documents();
             }
             if domain.name == "godot_runtime" {
-                // A game that broke does not die, so a runtime call that failed has to carry the
-                // error that ended it rather than the transport's own.
                 return answered.map_err(|error| {
                     godot_session::carrying_the_error_that_ended_the_game(error.into())
                 });
@@ -855,8 +773,6 @@ fn run_one<R: Runtime>(
                 "godot_debug" => debug_domain(op, params),
                 "godot_logs" => logs_domain(params),
                 "godot_docs_search" => docs_domain(app, op, params),
-                // Every Rust-answered domain is handled above; a new one without a handler is a
-                // build-time oversight, not something a caller can reach.
                 other => Err(ToolFailure::new(
                     "unrouted_tool",
                     format!("The {other} tool has no route"),
@@ -925,15 +841,6 @@ fn the_editor_once_it_can_answer<R: Runtime>(
             | godot_session::SessionState::DebugPaused => {
                 return Ok(godot_session_api::get_session(app)?);
             }
-            // An editor that died on the way up is not something to keep waiting for, and the
-            // caller has to be told rather than handed a session object with `error` inside it.
-            //
-            // `Error` alone is not that editor. `derive_state` answers `Error` for two different
-            // things: a child that has exited, and a live editor whose addon is not answering —
-            // which is every `session.unavailable` the addon announces, and it announces one on a
-            // plugin reload and on a connection dropped during the startup import scan. Both are
-            // ordinary on the way up. Asking the process directly is what tells the two apart, so
-            // a healthy editor that blinks keeps being waited for and only a dead one ends this.
             godot_session::SessionState::Offline => return Err(the_editor_never_came_up()),
             godot_session::SessionState::Error if godot_session::editor_has_exited() => {
                 return Err(the_editor_never_came_up());
@@ -1081,8 +988,6 @@ fn forget_a_vanished_file<R: Runtime>(app: &AppHandle<R>, path: &str, failure: &
     if failure.code != "file_conflict" {
         return;
     }
-    // A `file_conflict` always carries both hashes, and a null `actualHash` is the one case that
-    // means "there is no file there" rather than "the file holds something else".
     if !failure.details["actualHash"].is_null() {
         return;
     }
@@ -1145,14 +1050,6 @@ fn resource_domain<R: Runtime>(
 ) -> Result<Value, ToolFailure> {
     match op {
         "list" => {
-            // Hashing is asked for rather than always done: a worktree holds game assets, and
-            // hashing every texture and every sound to answer "what files are there" would read
-            // the whole project on a call the agent makes to orient itself.
-            //
-            // One directory, the way `godot_script list` takes one. A live turn asked for
-            // `{"op": "list", "path": "assets"}` — the wrong key, and there was no right one — and
-            // fell back to `bash find`. The whole-project answer averages fourteen thousand
-            // characters and has been truncated, which is a lot to pay to see one folder.
             let request: files::ListPathsRequest = from_params(params)?;
             let workspace = crate::active_workspace(app)?;
             let under = request.under.as_deref().and_then(named_directory);
@@ -1169,15 +1066,8 @@ fn resource_domain<R: Runtime>(
                     json!({"path": path, "bytes": stamp.bytes, "hash": hash})
                 })
                 .collect();
-            // Reconciled like every other answer that carries stamps — by the router, on the way
-            // out. The hashes go into the ledger and out of the answer: the hash is the router's to
-            // hold and the caller's never to carry, so printing it is noise the model pays for and
-            // cannot spend on anything.
             Ok(json!({"files": files}))
         }
-        // The typed destructive pair. Both reach the same `Workspace` the renderer's own
-        // `move_workspace_path` and `delete_workspace_path` commands use, so canonical-path
-        // validation and the hash check are the workspace's, not a second copy of them.
         "move" => {
             let request: files::MovePathRequest = from_params(params)?;
             let workspace = crate::active_workspace(app)?;
@@ -1192,8 +1082,6 @@ fn resource_domain<R: Runtime>(
             tell_the_editor_the_worktree_moved(app);
             Ok(json!({"path": request.path, "deleted": true}))
         }
-        // Everything else in the domain is the editor's, and the router sent it there rather than
-        // here. This arm is the build-time oversight, not a name a caller can reach.
         other => Err(ToolFailure::new(
             "unrouted_operation",
             format!("godot_resource.{other} has no desktop handler"),
@@ -1281,17 +1169,12 @@ fn as_the_worktree_names_them(operation: &Operation, params: &mut Value) {
 /// One declared parameter, and everything the table says lives inside it.
 fn worktree_relative(param: &tool_params::Param, value: &mut Value) {
     if names_a_path(param.name) {
-        // `path` is one name or a list of them wherever a batch is accepted, so both shapes are
-        // rewritten. A list of anything else is left alone: only a string carrying the scheme is
-        // touched.
         match value.as_array_mut() {
             Some(entries) => entries.iter_mut().for_each(strip_the_scheme),
             None => strip_the_scheme(value),
         }
     }
     match param.entry {
-        // The inside is written down, so it is walked as a parameter list of its own: `files` on
-        // `godot_script edit` and `breakpoints` on `godot_debug launch` each carry a `path`.
         [_, ..] => {
             for entry in entries_of(value) {
                 let Some(fields) = entry.as_object_mut() else {
@@ -1304,8 +1187,6 @@ fn worktree_relative(param: &tool_params::Param, value: &mut Value) {
                 }
             }
         }
-        // The inside is not written down — `apply_rename` takes back the list `rename` answered
-        // with — so the keys that name a path are honoured wherever they appear in it.
         [] if value.is_array() || value.is_object() => wherever_a_key_names_a_path(value),
         [] => (),
     }
@@ -1529,7 +1410,6 @@ fn one_or_many(mut answers: Vec<Value>, batched: bool) -> Value {
     if batched {
         return json!({"files": answers});
     }
-    // A single path always produced exactly one answer: `named_scripts` refuses an empty call.
     answers.pop().unwrap_or(Value::Null)
 }
 
@@ -1573,12 +1453,7 @@ fn script_domain<R: Runtime>(
     params: Value,
 ) -> Result<Value, ToolFailure> {
     match op {
-        // Answered from the worktree walk rather than the language server, which knows only the
-        // documents something opened. A model that cannot see the scripts reaches for `bash find`,
-        // and the workspace refuses the absolute path it writes.
         "list" => {
-            // Matched as a prefix of the relative path rather than resolved: a path that resolves
-            // is a path that can leave the worktree.
             let request: script::ListScriptsRequest = from_params(params)?;
             let workspace = crate::active_workspace(app)?;
             let under = request.under.as_deref().and_then(named_directory);
@@ -1596,11 +1471,6 @@ fn script_domain<R: Runtime>(
             let mut answers = Vec::with_capacity(paths.len());
             let mut spent = 0usize;
             for path in paths {
-                // Opening a script that has not been written yet is the commonest thing an agent
-                // does wrong here, because the catalog tells it to open a script before querying
-                // one. The workspace's own answer — "scripts/mario.gd does not exist" — is true and
-                // leaves it nowhere; every live sweep watched the same turn spent on it, followed
-                // by an `update` against the document the failed open never created.
                 let document = script::open_document(from_params(json!({"path": path}))?).map_err(
                     |error| {
                         if error.code == "not_found" {
@@ -1618,15 +1488,8 @@ fn script_domain<R: Runtime>(
                         }
                     },
                 )?;
-                // Every file is opened, because opening is what tells the language server the
-                // document exists — the text is what the budget withholds, never the open itself.
                 let text_bytes = document.text.len();
                 let answered = if withholds_the_text(spent, text_bytes, answers.is_empty()) {
-                    // No `hash`. It is what `reconciled` records in the read ledger, and the
-                    // ledger is the hash a later `save` is given as its `expectedHash` — so
-                    // answering with one here would let the model replace a whole file out of text
-                    // it was never shown. Without it the save is refused as a conflict, which is
-                    // the true answer: read the file, then write it.
                     json!({
                         "path": document.path,
                         "bytes": document.bytes,
@@ -1646,9 +1509,6 @@ fn script_domain<R: Runtime>(
             require_script_path(&params)?;
             Ok(to_value(script::update_document(from_params(params)?)?))
         }
-        // The hash the agent's own last read answered with is supplied by the router, not copied
-        // by the model, and a record that outlived its file is dropped there too. See
-        // `through_the_read_ledger` and `crate::read_ledger`.
         "save" => {
             require_script_path(&params)?;
             let path = params
@@ -1692,23 +1552,14 @@ fn script_domain<R: Runtime>(
         }
         "apply_rename" => {
             let request: script::ApplyRenameRequest = from_params(params)?;
-            // The same guard `save` and `edit` carry, and for the same reason: this writes whole
-            // files, and a plan written by hand can name any path at all. A rename planned by the
-            // language server only ever names GDScript.
             for file in &request.files {
                 require_script_path(&json!({"path": file.path}))?;
             }
-            // Through the ledger like every other file-touching arm — the router's, on the way
-            // out. Renaming rewrites the files it names, so the hashes recorded for them are claims
-            // about text that is gone: the next save over one was refused `file_conflict`, and the
-            // model cannot clear a hash it is never shown.
             let written: Vec<String> = request.files.iter().map(|file| file.path.clone()).collect();
             let renamed = json!({"files": to_value(script::apply_rename(request)?)});
             told_the_editor_about(app, written);
             Ok(renamed)
         }
-        // A list here shares one wait for the whole batch; a single path keeps the answer it has
-        // always had, and both read the diagnostics through the same function.
         "diagnostics" if params.get("path").map(Value::is_array) == Some(true) => {
             let (paths, _) = named_scripts(&params)?;
             let timeout_ms = params.get("timeoutMs").and_then(Value::as_u64);
@@ -1749,7 +1600,6 @@ fn refuse_a_second_game(op: &str, debugger_holds_a_game: bool) -> Result<(), Too
 }
 
 fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
-    // A breakpoint names a script, so it meets the same two conventions the script domain does.
     let request: DebugRequest = from_tagged_params(op, params)?;
     Ok(to_value(debug::call(request)?))
 }
@@ -1765,15 +1615,10 @@ fn debug_domain(op: &str, params: Value) -> Result<Value, ToolFailure> {
 /// from a line read past it: `after` takes a sequence, and every entry carries its own.
 fn logs_domain(params: Value) -> Result<Value, ToolFailure> {
     let mut query: LogQuery = from_params(params)?;
-    // The buffer's own defaults, applied here as well: without them a call naming no limit would
-    // read the whole buffer rather than a page of it.
     let wanted = query
         .limit
         .unwrap_or(godot_session::DEFAULT_LOG_PAGE)
         .clamp(1, godot_session::MAX_LOG_PAGE);
-    // Read in whole pages whatever the caller asked for, and take `wanted` readable lines out of
-    // them. A `limit: 5` over a stretch of import output would otherwise take a lock per five
-    // lines walked; the buffer is scanned in memory, so a page costs the same as five.
     query.limit = Some(godot_session::MAX_LOG_PAGE);
     let mut kept: Vec<Value> = Vec::new();
     let mut omitted = 0;
@@ -1821,8 +1666,6 @@ fn without_terminal_colour(line: &str) -> String {
             plain.push(character);
             continue;
         }
-        // `ESC [` then the parameters, then the letter that ends it. An `ESC` that begins nothing
-        // is dropped on its own, which is what a terminal does with it.
         if rest.next() != Some('[') {
             continue;
         }
@@ -1849,9 +1692,6 @@ fn is_the_editors_progress_bar(line: &str) -> bool {
     let Some((inside, _)) = bracketed.split_once(']') else {
         return false;
     };
-    // Godot right-aligns the number in a fixed field, so the brackets always hold exactly six
-    // characters: `[   0% ]`, `[  16% ]`, `[ 100% ]`, `[ DONE ]`. Held to that width so a game
-    // printing `[ 50% ] loading` of its own is not read as the editor's.
     if inside.chars().count() != 6 {
         return false;
     }
@@ -1911,7 +1751,6 @@ fn docs_domain<R: Runtime>(
     params: Value,
 ) -> Result<Value, ToolFailure> {
     let query: rag::GodotDocsQuery = from_params(params)?;
-    // The question as it will be keyed, so "How do I tween?" and "how do I tween?" are one entry.
     let asked = query.question.trim().to_lowercase();
     let corpus = rag::known_corpus_version();
     let project = crate::workspace::project_storage(app).ok();
@@ -1932,8 +1771,6 @@ fn docs_domain<R: Runtime>(
     .map_err(|error| ToolFailure::new("docs_unavailable", error))?;
 
     let answer = to_value(&response);
-    // Written after the answer is built, and only when it is one. A cache that also holds dead ends
-    // hands the same dead end to every later task and stops anything ever asking again.
     if response.is_worth_remembering()
         && let Some(corpus) = response.corpus_version.as_deref().or(corpus.as_deref())
         && let Some(storage) = project.as_ref()
@@ -1955,9 +1792,6 @@ fn rpc<R: Runtime>(
     mut params: Value,
 ) -> Result<Value, crate::godot_rpc::RpcError> {
     let held = remembered_revision(app);
-    // Both halves or neither. A revision the router supplied is only meaningful beside the scene it
-    // was counted in, and a revision the caller supplied is theirs to be held to — the renderer
-    // names its own scene in `params` when it cares which.
     let (expected_revision, expected_scene) = match take_u64(&mut params, "expectedRevision") {
         Some(revision) => (Some(revision), None),
         None => (
@@ -2039,8 +1873,6 @@ fn record_revision<R: Runtime>(app: &AppHandle<R>, answer: &Value) {
     let Some(revision) = answer.get("revision").and_then(Value::as_u64) else {
         return;
     };
-    // The scene the number counts, when the answer says. A read of the tree names it; a mutation
-    // reports only the revision, and the ledger keeps the scene it already had.
     let scene = answer
         .get("scene")
         .and_then(Value::as_str)
@@ -2154,14 +1986,6 @@ mod tests {
         }
     }
 
-    /*
-     * The four rules a batch follows, with nothing behind them.
-     *
-     * All four were provable only by driving a real editor through a whole `ops` list, because the
-     * fold called the router directly. What the fold decides is not about the editor at all: which
-     * entry runs next, what a failure does to the rest, when the call itself fails, and which entry
-     * gets told what the one before it produced.
-     */
     #[test]
     fn a_batch_stops_at_the_first_failure_and_says_what_it_did_not_run() {
         let ran = std::cell::RefCell::new(Vec::new());
@@ -2184,7 +2008,6 @@ mod tests {
         )
         .expect("a batch where something worked answers rather than fails");
 
-        // The entry after a failed one usually depends on it, so it is not attempted at all.
         assert_eq!(*ran.borrow(), vec!["save", "reload"]);
         let ops = answer["ops"].as_array().expect("the entries");
         assert_eq!(ops.len(), 3, "every entry is accounted for: {answer}");
@@ -2193,11 +2016,6 @@ mod tests {
         assert!(ops[2]["skipped"].is_string(), "{answer}");
     }
 
-    /*
-     * A failure crossing the channel keeps its code and its message and loses its details, so a
-     * part-applied list answered as one failure would tell the model that eleven nodes it had just
-     * created do not exist. Only a list where nothing landed carries nothing the failure does not.
-     */
     #[test]
     fn a_batch_fails_only_when_nothing_in_it_worked() {
         let refused = run_in_order(
@@ -2233,12 +2051,6 @@ mod tests {
         assert_eq!(seen[2].1, json!(9), "and it follows the chain: {seen:?}");
     }
 
-    /*
-     * Entry 0's own revision is left exactly as written.
-     *
-     * That one is the guard against the scene having changed under the whole call, and it is the
-     * only revision a caller can know. Overwriting it would throw the guard away on every batch.
-     */
     #[test]
     fn the_first_entrys_own_revision_is_never_overwritten() {
         let seen = std::cell::RefCell::new(Vec::new());
@@ -2256,8 +2068,6 @@ mod tests {
 
         let seen = seen.borrow();
         assert_eq!(seen[0], json!(2), "what the caller wrote: {seen:?}");
-        // And a later entry's own number IS replaced: anything the caller wrote there is a guess
-        // about a revision that did not exist yet.
         assert_eq!(seen[1], json!(40), "{seen:?}");
     }
 
@@ -2450,9 +2260,6 @@ mod tests {
         let mut checked = 0;
         for domain in CATALOG {
             for operation in domain.operations {
-                // Everything the addon answers is forwarded verbatim, and the addon names a file
-                // the way Godot does — `_as_resource_path` puts the scheme back on a
-                // worktree-relative path, and `project.set_autoload` refuses one without it.
                 let worktree = operation.route() == crate::tool_params::Answers::Rust;
                 let expected = |named: &str| {
                     if worktree {
@@ -2481,7 +2288,6 @@ mod tests {
                             operation.op,
                             param.name
                         );
-                        // A worktree-relative path is left exactly as it is, either way round.
                         let untouched = normalised(
                             domain.name,
                             operation.op,
@@ -2494,8 +2300,6 @@ mod tests {
                         );
                         checked += 1;
                     }
-                    // The nested paths a list of files carries: `godot_script edit`'s `files` and
-                    // `godot_debug launch`'s `breakpoints` both name one per entry.
                     for inner in param.entry {
                         if !names_a_path(inner.name) {
                             continue;
@@ -2524,8 +2328,6 @@ mod tests {
             "the catalogue declares more paths than this walked: {checked}"
         );
 
-        // A batched call names its scripts as a list, and each one still meets the editor's
-        // convention or the worktree's.
         let batched = normalised(
             "godot_script",
             "open",
@@ -2534,9 +2336,6 @@ mod tests {
         assert_eq!(batched["path"][0], "scripts/a.gd");
         assert_eq!(batched["path"][1], "scripts/b.gd");
 
-        // `apply_rename` takes back the list `rename` answered with, and the catalogue does not
-        // write down what one entry holds — so the keys that name a path are honoured wherever they
-        // appear in it.
         let renamed = normalised(
             "godot_script",
             "apply_rename",
@@ -2545,15 +2344,11 @@ mod tests {
         assert_eq!(renamed["files"][0]["path"], "scripts/a.gd");
         assert_eq!(renamed["files"][0]["updatedText"], "extends Node\n");
 
-        // A directory a listing narrows to is a path spelled the same way, and it reaches
-        // `named_directory` already stripped.
         assert_eq!(
             normalised("godot_resource", "list", json!({"under": "res://assets"}))["under"],
             "assets"
         );
 
-        // Stripping the prefix must not become a way out of the worktree: what is left is still a
-        // relative path, and a relative path that climbs is refused where every other one is.
         assert_eq!(
             normalised(
                 "godot_script",
@@ -2562,11 +2357,6 @@ mod tests {
             )["path"],
             "../secrets.gd"
         );
-        // An operation the addon answers never meets that confinement — it is forwarded verbatim.
-        // Measured against the pinned editor: `Image.save_png("res://../escaped.png")` and
-        // `ResourceSaver.save(shape, "res://../escaped.tres")` both wrote one directory above the
-        // project and both answered OK, under a catalogue that says nothing outside the task
-        // worktree can be named at all.
         for climbing in [
             json!({"path": "res://../escaped.png"}),
             json!({"path": "../escaped.png"}),
@@ -2578,9 +2368,6 @@ mod tests {
             let refused = a_path_that_climbs_out(&climbing).expect_err("a climbing path");
             assert_eq!(refused.code, "outside_workspace", "{climbing}");
         }
-        // And a `..` that is not a path is a value like any other. A node's `text` may say
-        // anything, `../docs/readme` included, and refusing that would be this gate inventing a
-        // rule nobody has — so a bare string is only read as a path under a key that names a file.
         for ordinary in [
             json!({"path": "res://assets/tiles.png"}),
             json!({"value": {"type": "string", "value": "Loading.."}}),
@@ -2590,7 +2377,6 @@ mod tests {
         ] {
             assert!(a_path_that_climbs_out(&ordinary).is_ok(), "{ordinary}");
         }
-        // The scheme makes it a path wherever it sits, key or no key.
         assert!(
             a_path_that_climbs_out(&json!({
                 "properties": [{"value": {"type": "string", "value": "res://../secrets"}}]
@@ -2634,8 +2420,6 @@ mod tests {
                 ]),
                 "godot_script {op} must take one script or a list of them"
             );
-            // A list is what the check has to let through: the handler never sees a call the
-            // parameter contract rejected.
             crate::tool_repair::check(
                 "godot_script",
                 op,
@@ -2658,14 +2442,12 @@ mod tests {
             "the refusal must name the entry that is wrong: {}",
             failure.message
         );
-        // An empty list asks for nothing, and is a clearer failure than an answer with no files.
         assert_eq!(
             named_scripts(&json!({"path": []}))
                 .expect_err("an empty list must be refused")
                 .code,
             "invalid_params"
         );
-        // One path keeps the single answer; a list is the batch answer.
         assert_eq!(
             named_scripts(&json!({"path": "scripts/a.gd"})).expect("one script"),
             (vec!["scripts/a.gd".to_owned()], false)
@@ -2723,8 +2505,6 @@ mod tests {
     fn every_catalog_domain_answers_a_reachability_probe() {
         for domain in CATALOG {
             if domain.name == "godot_docs_search" {
-                // The one probe that reads the machine: it is asserted to be probed, not to pass,
-                // because whether the models are downloaded is not this test's subject.
                 assert!(
                     probe(domain.name)
                         .map_err(|failure| failure.code)
@@ -2889,8 +2669,6 @@ mod tests {
         assert_eq!(failure.code, "approval_unavailable");
         assert!(failure.retryable);
 
-        // The same domain's auto-allowed operations reach the handler, which reports the missing
-        // session rather than a missing approval.
         let failure = dispatch(
             app.handle(),
             call("godot_project", "get_settings", json!({})),
@@ -2927,8 +2705,6 @@ mod tests {
             .expect_err("this call cannot be run")
         };
 
-        // No list at all. The message shows the shape rather than naming it, because a model that
-        // wrote the wrong one cannot act on the word "list".
         let failure = refusal(json!({"op": "inspect", "node": "/Level1"}));
         assert_eq!(failure.code, "missing_ops");
         assert!(failure.message.contains("\"ops\""), "{}", failure.message);
@@ -2979,20 +2755,16 @@ mod tests {
                 &format!("{escape}[1mSCRIPT ERROR:{escape}[0m Parse Error: Identifier not found"),
             ),
             line(6, "[player] hit right window edge after 580.1 px"),
-            // A game printing its own progress in the same shape, but not in the editor's fixed
-            // six-character field. Kept.
             line(7, "[ 50% ] loading the level"),
         ]);
 
         assert_eq!(omitted, 4, "{kept:?}");
         assert_eq!(kept.len(), 3, "{kept:?}");
         assert_eq!(kept[2]["message"], "[ 50% ] loading the level");
-        // The colour is gone and the sentence is whole.
         assert_eq!(
             kept[0]["message"],
             "SCRIPT ERROR: Parse Error: Identifier not found"
         );
-        // A game's own print that merely opens with a bracket is not a progress bar.
         assert_eq!(
             kept[1]["message"],
             "[player] hit right window edge after 580.1 px"
@@ -3012,8 +2784,6 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         godot_session::clear_logs();
         let escape = char::from(27);
-        // Nine lines the model cannot read for every one it can, which is the shape of a real
-        // import: the corpus's own ratio is closer to one in three.
         for index in 0..30 {
             for step in 0..9 {
                 godot_session::append_log(
@@ -3037,7 +2807,6 @@ mod tests {
             "{answered}"
         );
 
-        // And the cursor continues from the last line handed over, not from one read past it.
         let next = logs_domain(json!({"limit": 3, "after": answered["cursor"].clone()}))
             .expect("the next page");
         assert_eq!(next["entries"][0]["message"], "[player] line 12", "{next}");
@@ -3078,9 +2847,6 @@ mod tests {
         );
         assert_eq!(failure.details["opIndex"], json!(2));
 
-        // And it has to say that the two entries before it did not run. A live turn read a refusal
-        // of this shape as having applied the entry before the mistake, and spent four calls
-        // finding out otherwise.
         assert!(
             failure
                 .message
@@ -3089,7 +2855,6 @@ mod tests {
             failure.message
         );
 
-        // A call of one says nothing about a list, because there is no list to point into.
         let failure = dispatch(
             app.handle(),
             call("godot_node", "create", json!({"parent": "/L", "name": "C"})),
@@ -3111,20 +2876,14 @@ mod tests {
     /// the model had been shown half of then failed with `anchor_not_found`.
     #[test]
     fn a_batched_open_stops_carrying_text_before_the_worker_cuts_it() {
-        // One file is answered whatever it weighs: there is no smaller call to be sent instead.
         assert!(!withholds_the_text(0, OPEN_TEXT_BUDGET * 4, true));
 
-        // Files keep coming while the budget holds, and stop at the one that would overrun it.
         assert!(!withholds_the_text(OPEN_TEXT_BUDGET - 1, 1, false));
         assert!(withholds_the_text(OPEN_TEXT_BUDGET - 1, 2, false));
 
-        // The two files a live project opened together, at the sizes it opened them: 22,752 and
-        // 6,671 bytes, which the worker answered as one 24,031-character slice.
         assert!(!withholds_the_text(0, 22_752, true));
         assert!(withholds_the_text(22_752, 6_671, false));
 
-        // And the budget leaves the answer inside the worker's cap once the JSON around it is
-        // counted — path, hash and version ride along with every file.
         const { assert!(OPEN_TEXT_BUDGET < 24_000) };
     }
 
@@ -3154,26 +2913,20 @@ mod tests {
     /// merely two steps long.
     #[test]
     fn a_repeated_operation_is_refused_and_a_two_step_list_is_not() {
-        // `Repeat`: the same operation twice. The later twin is the one named, because the first is
-        // the one the caller keeps.
         let failure = gate("godot_scene", &["open", "open"]).expect_err("one scene is open");
         assert_eq!(failure.code, "op_repeated");
         assert_eq!(failure.details["opIndex"], json!(1));
         assert_eq!(failure.details["firstIndex"], json!(0));
-        // The sentence is the operation's own, so the refusal says which narrowing it is.
         assert!(
             failure.message.contains("One scene is open at a time"),
             "{}",
             failure.message
         );
 
-        // The same operation beside a different one is an ordinary two-step request, and the whole
-        // point of `ops`.
         gate("godot_scene", &["open", "get_tree"]).expect("open then read the tree");
         gate("godot_runtime", &["capture", "get_state"]).expect("a frame and the state");
         gate("godot_debug", &["status", "threads"]).expect("two reads of the debuggee");
 
-        // `Exclusive`: the debugger refuses to share a call at all, whatever the other entry is.
         let failure = gate("godot_debug", &["continue", "threads"]).expect_err("one debuggee");
         assert_eq!(failure.code, "must_be_alone");
         assert_eq!(failure.details["opIndex"], json!(0));
@@ -3183,8 +2936,6 @@ mod tests {
             failure.message
         );
 
-        // Narrowed is not refused. A list of one passes the gate whatever its scope, and reaching
-        // the handler is what proves the gate is wired into `dispatch` at all.
         let app = unattended_app();
         let failure = dispatch(
             app.handle(),
@@ -3226,8 +2977,6 @@ mod tests {
             narrowed.len()
         );
         for (domain, entry, scope, reason) in narrowed {
-            // An operation of the same domain to stand beside it. Any one will do: what the gate
-            // reads is the scope, not the neighbour.
             let neighbour = domain
                 .operations
                 .iter()
@@ -3235,9 +2984,6 @@ mod tests {
                 .find(|op| *op != entry.op)
                 .expect("a domain offers more than one operation");
 
-            // Twice is refused whatever the scope. An exclusive operation is answered in its own
-            // words rather than as a repeat: sharing at all is what it cannot do, and a caller told
-            // to drop the second entry would send the first one beside something else next.
             let twice = gate(domain.name, &[entry.op, entry.op])
                 .expect_err("a narrowed operation is never allowed twice");
             assert_eq!(
@@ -3293,15 +3039,10 @@ mod tests {
     /// the defect, not the call. Only the pair that repeats one is still refused.
     #[test]
     fn the_session_pairs_a_model_wrote_run_unless_they_repeat_an_operation() {
-        // "Start the Godot editor session, then report its status."
         gate("godot_session", &["start", "status"]).expect("start then report");
-        // "The editor is blocked on a dialog. Read the session state, then press Discard."
         gate("godot_session", &["get_state", "answer_dialog"]).expect("read then press");
-        // "Restart the editor session: stop it and start it again."
         gate("godot_session", &["stop", "start"]).expect("stop then start");
 
-        // "Undo the last two editor operations." One undo stack, walked in order: the second entry
-        // undoes whatever the first one left, which is not what the caller asked for.
         let failure = gate("godot_session", &["undo", "undo"]).expect_err("one undo stack");
         assert_eq!(failure.code, "op_repeated");
         assert_eq!(failure.details["op"], json!("undo"));
@@ -3334,7 +3075,6 @@ mod tests {
             );
             assert!(super::refuse_a_second_game(op, false).is_ok());
         }
-        // Everything else the runtime tool does is about the game that is already there.
         for op in ["stop", "get_state", "get_tree", "capture", "input", "wait"] {
             assert!(super::refuse_a_second_game(op, true).is_ok(), "{op}");
         }
@@ -3361,12 +3101,10 @@ mod tests {
                 !super::is_under("scripts/main.gd", under.as_deref()),
                 "{spelling}"
             );
-            // A sibling whose name merely starts the same way is not inside it.
             assert!(
                 !super::is_under("assetsold/tiles.png", under.as_deref()),
                 "{spelling}"
             );
-            // The directory itself is not one of the files in it.
             assert!(!super::is_under("assets", under.as_deref()), "{spelling}");
         }
         assert!(
@@ -3442,12 +3180,6 @@ mod tests {
             gate(tool, &ops).unwrap_or_else(|failure| {
                 panic!("{tool} {ops:?} was refused: {}", failure.message)
             });
-            // And every parameter beside those names, down the path the router really takes:
-            // repair, then check. The gate above reads only the operation names, so a recorded call
-            // could carry a value the router refuses and this fixture would still pass — which is
-            // the half the shapes that cost live turns actually live in. Running the repair too is
-            // what makes this a net under it: a rename that reached a key it should not have would
-            // show up here as a call that used to be accepted and is not any more.
             for entry in case["ops"].as_array().expect("case ops") {
                 let mut params = entry.clone();
                 if let Some(object) = params.as_object_mut() {
@@ -3491,8 +3223,6 @@ mod tests {
         assert_eq!(failure.code, "policy_enforced");
         assert!(!failure.retryable, "retrying writes the same setting again");
 
-        // With the rule off it is an ordinary setting again, and reaches the handler that reports
-        // the missing session — which is what proves the refusal is the rule and not the name.
         assert_eq!(
             dispatch_under(
                 app.handle(),
@@ -3504,8 +3234,6 @@ mod tests {
             "session_not_active"
         );
 
-        // The embed rule is approval-gated as well, so this also fixes the order: the refusal comes
-        // first, and the user is never shown a prompt offering to undo their own answer.
         assert_eq!(
             dispatch_under(
                 app.handle(),
@@ -3556,8 +3284,6 @@ mod tests {
         .expect_err("a destination outside the worktree is refused");
         assert_eq!(failure.code, "invalid_path");
 
-        // Inside the worktree the same call is a decision the user gets to make, so it reaches the
-        // prompt — which this unattended backend cannot show.
         let failure = dispatch(
             app.handle(),
             call("godot_resource", "delete", json!({"path": "main.gd"})),
@@ -3647,7 +3373,6 @@ mod tests {
             .write("levels/level.tscn", scene, None)
             .expect("write the scene");
 
-        // Looking around is the cheap call it has always been: no hash unless one is asked for.
         let listed = dispatch(app.handle(), call("godot_resource", "list", json!({})))
             .expect("list the worktree");
         let plain = &only_answer(&listed)["files"][0];
@@ -3674,8 +3399,6 @@ mod tests {
             "the recorded hash must be the one the delete is checked against"
         );
 
-        // And it is: the same token refuses the delete once the file has moved on, and lets it
-        // through while the file is what was listed.
         workspace
             .write(
                 "levels/level.tscn",
@@ -3768,7 +3491,6 @@ mod tests {
             .write("levels/level.tscn", scene, None)
             .expect("write the scene");
 
-        // The listing is the read that fills the ledger, and it records the worktree spelling.
         dispatch(
             app.handle(),
             call("godot_resource", "list", json!({"hashes": true})),
@@ -3779,8 +3501,6 @@ mod tests {
             Some(stamp.hash.as_str())
         );
 
-        // The file moves on behind the agent's back. A delete named the way the editor names it has
-        // to meet the same refusal a worktree-relative one does — before, it met none at all.
         workspace
             .write(
                 "levels/level.tscn",
@@ -3803,7 +3523,6 @@ mod tests {
             "the refused delete must have left the file where it is"
         );
 
-        // Read it again, and the same call goes through — and takes the record with it.
         dispatch(
             app.handle(),
             call("godot_resource", "list", json!({"hashes": true})),
@@ -3827,7 +3546,6 @@ mod tests {
             "a record for a file that is gone is a claim about nothing"
         );
 
-        // And a move carries the record to where the file went, named either way.
         let stamp = workspace
             .write("levels/level.tscn", scene, None)
             .expect("write the scene again");
@@ -3881,8 +3599,6 @@ mod tests {
             .expect("write the script");
         crate::read_ledger::remember(workspace.root(), "hud.gd", &stamp.hash);
 
-        // A real change on disk is not a vanished file, and its record has to survive: re-reading
-        // is what fixes that one, and forgetting would silently license an overwrite.
         workspace
             .write("hud.gd", "extends Node2D\n", Some(&stamp.hash))
             .expect("someone edits the script");
@@ -3915,7 +3631,6 @@ mod tests {
             "a record for a file that is gone is a claim about nothing"
         );
 
-        // Which is the whole point: the next save carries no record and creates the file.
         let params = with_remembered_hash(app.handle(), json!({"path": "hud.gd"}));
         assert!(
             params.get("expectedHash").is_none(),
@@ -4048,14 +3763,6 @@ mod tests {
         assert_eq!(params, json!({"path": "res://main.tscn"}));
     }
 
-    /*
-     * An input event with no kind is refused here, with the five it could be.
-     *
-     * `events` had no entry contract, so an event crossed the socket unchecked and the game
-     * answered `Input event kind '' is not supported` — true, and naming nothing to send instead.
-     * One live turn building a playable game wrote it **twenty-two times running**, the largest
-     * single loop in any recorded turn.
-     */
     #[test]
     fn an_input_event_with_no_kind_is_told_what_the_kinds_are() {
         let app = unattended_app();
@@ -4080,8 +3787,6 @@ mod tests {
             );
         }
 
-        // A kind that is not one of the five is refused by the same contract rather than by the
-        // game, so this never reaches an editor either.
         let wrong = dispatch_under(
             app.handle(),
             call(
@@ -4094,8 +3799,6 @@ mod tests {
         .expect_err("a kind outside the five is refused");
         assert!(wrong.message.contains("mouse_motion"), "{}", wrong.message);
 
-        // And every key the decoder reads is still accepted: a contract that refused one of these
-        // would break the calls that work. Refused for having no session, which is past the shape.
         let complete = dispatch_under(
             app.handle(),
             call(
@@ -4118,15 +3821,6 @@ mod tests {
         assert_ne!(complete.code, "invalid_param", "{}", complete.message);
     }
 
-    /*
-     * A torn edit is told about the operation that needs no anchors.
-     *
-     * `godot_script edit` carries the largest nested payload of any operation and is where this
-     * model's JSON tears most often — `files[0] requires path` is the second commonest refusal in
-     * every recorded live turn, nine across five of them. The turn that met it three times worked
-     * it out itself, four calls later: "The JSON structure is getting mangled. Let me just save the
-     * whole file". That sentence is now in the refusal.
-     */
     #[test]
     fn a_torn_edit_is_told_about_the_call_that_needs_no_anchors() {
         let torn = the_whole_file(
@@ -4145,8 +3839,6 @@ mod tests {
             torn.message
         );
 
-        // Only a shape refusal. A file that is not there, or a hash that moved, is a fact about the
-        // worktree rather than about the call, and `save` is no answer to either.
         for code in ["file_conflict", "not_found", "connect_failed"] {
             let other = the_whole_file(
                 "godot_script",
@@ -4160,8 +3852,6 @@ mod tests {
             );
         }
 
-        // And no other operation. `godot_node create` has a shape of its own and `save` is not a
-        // word about it.
         let elsewhere = the_whole_file(
             "godot_node",
             "create",
@@ -4183,9 +3873,6 @@ mod tests {
             other_op.message
         );
 
-        // And through the router, on the shape three separate turns actually wrote: the edits in
-        // place and no path anywhere. The parameter contract is checked before any domain runs, so
-        // this is the only place the sentence can be attached and the only place to prove it is.
         let app = unattended_app();
         let refused = dispatch_under(
             app.handle(),

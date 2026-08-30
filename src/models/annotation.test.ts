@@ -71,20 +71,14 @@ describe('drawing a shape', () => {
         expect(arrow).toMatchObject({kind: 'arrow', from: at(0, 0), to: at(9, 9)})
     })
 
-    /* Text is placed, not dragged: a pointer moving after the press must not move the anchor. */
     it('leaves a text anchor where it was placed', () => {
         const text = startShape('text', 'c', STYLE, at(5, 5))
         expect(dragShape(text, at(80, 80))).toEqual(text)
     })
 
-    /*
-     * A press with no drag is how a tool gets picked up and put down again. Kept, each one leaves a
-     * dot or an empty label behind that the user then has to hunt for and delete.
-     */
     it('calls a press with no drag degenerate, and an empty label too', () => {
         expect(isDegenerate(startShape('arrow', 'a', STYLE, at(4, 4)))).toBe(true)
         expect(isDegenerate(startShape('pen', 'b', STYLE, at(4, 4)))).toBe(true)
-        // A click sends a move before its release, so the dot arrives as two points, not one.
         expect(isDegenerate(dragShape(startShape('pen', 'b2', STYLE, at(4, 4)), at(4, 4)))).toBe(
             true
         )
@@ -137,7 +131,6 @@ describe('undo across every kind of edit', () => {
         expect(clearShapes(EMPTY_HISTORY)).toEqual(EMPTY_HISTORY)
     })
 
-    /* Every state is a copy of the shape list, so an unbounded stack grows with the drawing. */
     it('forgets the oldest state past the limit', () => {
         let history = EMPTY_HISTORY
         for (let step = 0; step < HISTORY_LIMIT + 10; step += 1) {
@@ -158,14 +151,12 @@ describe('finding the shape under the pointer', () => {
         expect(distanceToSegment(at(200, 0), at(0, 0), at(100, 0))).toBe(100)
     })
 
-    /* A box frames what is under it. Pressing the middle has to reach that, not pick the frame up. */
     it('presses a box by its edge and not by its middle', () => {
         const shapes = [boxShape('frame', [0, 0], [100, 100])]
         expect(shapeAt(shapes, at(0, 50))?.id).toBe('frame')
         expect(shapeAt(shapes, at(50, 50))).toBeUndefined()
     })
 
-    /* An eraser shows nothing, so a selection on one would be a handle the user cannot see. */
     it('never picks up an eraser stroke', () => {
         const rub = startShape('erase', 'rub', STYLE, at(0, 0))
         const shapes = [pen('under', [0, 0], [100, 0]), dragShape(rub, at(100, 0))]
@@ -202,10 +193,6 @@ describe('geometry the painter and the tests share', () => {
 })
 
 describe('mapping a pointer onto the image', () => {
-    /*
-     * The canvas is shown at whatever size fits the dialog. A stroke recorded at display scale lands
-     * somewhere else in the saved PNG, which is the bug this function exists to stop.
-     */
     it('scales a display position up to the image its pixels belong to', () => {
         const rect = {x: 20, y: 10, width: 400, height: 200}
         const image = {width: 800, height: 400}

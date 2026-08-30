@@ -136,8 +136,6 @@ pub(crate) fn remember_completed_turn(
             superseded_by: None,
         })
         .map_err(|failure| failure.message)?;
-    // A failure here must not fail the AI turn, but it must not vanish either: the memory stays
-    // lexical-only until maintenance re-embeds it, so say so instead of silently degrading.
     match embed_memory(storage, &record.id, &content) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -548,9 +546,6 @@ fn is_path_character(character: char) -> bool {
 
 /// One token read as a path, or nothing when it is only prose that looked like one.
 fn anchor_path(token: &str) -> Option<String> {
-    // `res://` is the project root and is the same file as the relative path under it. Every other
-    // scheme is not a workspace file at all: `user://` is the player's save directory, and `http://`
-    // is not on this machine.
     let path = match token.split_once("://") {
         Some(("res", rest)) => rest,
         Some(_) => return None,
@@ -960,14 +955,6 @@ mod tests {
         );
     }
 
-    /*
-     * Triage moves the state and touches nothing else.
-     *
-     * A verdict changes nothing on its own — a row the model called broken is still `confirmed`,
-     * and still one of the six a turn is given. What the press has to do is stop retrieval reading
-     * it while keeping every reason someone would later want: the words, the verdict, and what the
-     * model said about it. Deleting would have thrown all three away.
-     */
     #[test]
     fn holding_memories_back_keeps_their_words_and_their_verdict() {
         let directory = TempDir::new().expect("temporary directory");
@@ -1010,22 +997,12 @@ mod tests {
         );
         let verdict = held.judgement.as_ref().expect("the verdict survived");
         assert_eq!(verdict.reason, "it is a settings screen now");
-        // The row came out of a turn and still says so. The upsert overwrites provenance with
-        // whatever it is handed, so carrying it across is the difference between a held-back memory
-        // and one cut loose from the work that wrote it.
         assert_eq!(
             held.memory.provenance.get("source"),
             Some(&serde_json::json!("completed-ai-turn"))
         );
     }
 
-    /*
-     * A row that went away between the list being drawn and the button being pressed.
-     *
-     * The panel is showing what it read a minute ago, and a sweep of eighty memories is an hour in
-     * which one of them can be forgotten from its own editor. Failing the batch on it would leave
-     * the other seventy-nine confirmed, which is the opposite of what was asked for.
-     */
     #[test]
     fn holding_back_skips_a_memory_that_is_no_longer_stored() {
         let directory = TempDir::new().expect("temporary directory");

@@ -24,12 +24,6 @@ export function attachmentData(file: File) {
     })
 }
 
-/**
- * A base64 PNG as a `File`, so an image the backend read can join the ones the picker chose.
- *
- * The name is invented here because the clipboard has none to give. The drawer labels a thumbnail
- * by its name, and a blank one reads as a failed attachment.
- */
 export function pngFile(base64: string, name: string): File {
     const binary = atob(base64)
     const bytes = new Uint8Array(binary.length)

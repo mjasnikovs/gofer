@@ -18,10 +18,6 @@ export type WorkspaceFileChange = Readonly<{
     kind: WorkspaceChangeKind
 }>
 
-/**
- * Every write states the hash it expects to replace. `expectedHash` is absent only when the caller
- * claims the file does not exist yet; a mismatch fails with `file_conflict` instead of overwriting.
- */
 export type WriteWorkspaceFileRequest = Readonly<{
     path: string
     text: string
@@ -45,7 +41,6 @@ export type MoveWorkspacePathRequest = Readonly<{
     to: string
 }>
 
-/** The structured failure every workspace file command rejects with. */
 export type WorkspaceFileError = Readonly<{
     code: string
     message: string

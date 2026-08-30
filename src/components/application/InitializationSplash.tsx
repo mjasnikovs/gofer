@@ -13,14 +13,6 @@ import {commandErrorMessage} from '../../utils/command-error'
 import type {InitializationState} from '../../models/chat'
 import {progressLabel, progressValue} from '../../models/settings'
 
-/**
- * Whether the models are on disk already, and so whether the warmup has anything to do.
- *
- * A question that cannot be answered is answered `false`: the point of asking is to skip work that
- * is already done, and a status read that fails says nothing about whether it is. Initializing
- * anyway is what this did before the question was asked at all, so the worst case is the old
- * behaviour rather than a splash that gives up.
- */
 async function isAlreadyInstalled() {
     try {
         return (await invoke('get_rag_cache_status')).state === 'installed'
@@ -50,15 +42,6 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
             unlisten = await listen('rag-download-progress', event => {
                 setState({status: 'initializing', progress: event.payload})
             })
-            // Asked before it is done. `initialize_rag` spawns a sidecar that loads 1.8 GB of
-            // models into a process which then exits, so on a machine that already has them it is
-            // five seconds of splash for a result that is already on disk — measured at 5,088ms
-            // with every file present. `installed` is exactly the state that says so, and it is
-            // the state the Models tab already shows the user.
-            //
-            // A file that is present but corrupt now fails at the first search rather than here.
-            // That trade is deliberate: this check is presence, which is what the warmup's own
-            // status check tests too, and the Models tab can delete and reinstall the cache.
             if (!(await isAlreadyInstalled())) await invoke('initialize_rag')
             setState({status: 'ready'})
             onReady()
@@ -94,11 +77,6 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                             hAlign='stretch'
                             vAlign='center'
                         >
-                            {/*
-                             * One axis for the screen. Centred, the title and subtitle sat over a
-                             * left-aligned banner, paragraph and progress label in the same 592 px
-                             * column, so the block read as two screens stacked.
-                             */}
                             <VStack
                                 gap={3}
                                 hAlign='start'
@@ -132,12 +110,6 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                         title='Preparing documentation models'
                                         description='Missing models download automatically. Existing models are reused from the local cache.'
                                     />
-                                    {/*
-                                     * One indicator for one download. The bar carries its own
-                                     * label and its indeterminate state covers the phase before a
-                                     * byte count exists, which is what the spinner above it was
-                                     * for — two of them side by side read as two things happening.
-                                     */}
                                     <ProgressBar
                                         label={progressLabel(progress)}
                                         value={value ?? 0}
@@ -154,11 +126,6 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                         title='Models could not be initialized'
                                         description={state.message}
                                     />
-                                    {/*
-                                     * A half-written cache fails the same way on every retry, so
-                                     * the second button is the one that actually gets the user
-                                     * moving: it clears what was downloaded and starts over.
-                                     */}
                                     <Text
                                         type='supporting'
                                         color='secondary'
@@ -167,12 +134,6 @@ export function InitializationSplash({onReady}: {onReady: () => void}) {
                                         failing, delete the cache — Settings › Documentation models
                                         › Delete cache — and prepare it again.
                                     </Text>
-                                    {/*
-                                     * Stretched to the column this was a 592 px slab, four times
-                                     * the width of any other button in the application; a button
-                                     * that wide stops reading as a button. It sizes to its label
-                                     * and sits at the end of the block it belongs to.
-                                     */}
                                     <HStack hAlign='end'>
                                         <Button
                                             label='Try again'

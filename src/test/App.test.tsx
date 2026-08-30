@@ -22,10 +22,8 @@ interface AiStream {
 
 const tauri = createDesktopFake()
 
-/** The shared in-memory backend, with this test's own answers over the top. */
 const backend = (answers: BackendAnswers = {}) => installBackend(tauri, {answers})
 
-/** The channel `send_ai_message` now streams its deltas down, as the fixture receives it. */
 const emptyUsage: TokenUsage = {
     input: 0,
     output: 0,
@@ -35,14 +33,6 @@ const emptyUsage: TokenUsage = {
     cost: {total: 0}
 }
 
-/**
- * The stream channel for one `send_ai_message`, with the turn's own request id stamped on
- * everything sent down it.
- *
- * Stamped rather than written by the test, because the id is process-wide: a test is not the first
- * turn this file runs, and a hard-coded one is an event the runner drops as belonging to somebody
- * else's turn. See `nextRequestId` in `services/turn.ts` for why the counter is not per runner.
- */
 function streamOf(args: unknown): AiStream {
     const stream = (args as {stream?: AiStream} | undefined)?.stream
     if (!stream) throw new Error('send_ai_message was invoked without its stream channel')
@@ -85,12 +75,6 @@ const incompleteCache = {
 } as const
 
 beforeEach(() => {
-    /*
-     * Interface state is written through a 250 ms debounce. It coalesces a drag or a burst of
-     * typing into one write; it does not decide what is written. Running it on the spot here keeps
-     * that out of the test's budget, so an assertion about a stored layout is never also a race
-     * against the clock on a loaded machine.
-     */
     setScheduler(immediateScheduler)
     window.localStorage.clear()
     installDesktopFake(tauri)
@@ -151,13 +135,6 @@ describe('InitializationSplash', () => {
         expect(unlisten).toHaveBeenCalledOnce()
     })
 
-    /**
-     * The failure this pins is five seconds of splash on every launch, doing work already done.
-     * `initialize_rag` spawns a sidecar that loads 1.8 GB of models into a process which then
-     * exits: measured at 5,088ms with every model file already present, and the memory it loads
-     * is thrown away when the process goes. The splash gates the whole application, so the user
-     * waits it out each time.
-     */
     it('does not reinstall models that are already installed', async () => {
         const calls: string[] = []
         const onReady = vi.fn()
@@ -237,15 +214,7 @@ describe('SettingsPage', () => {
         const keepRequest = tauri.invoke.mock.calls.find(call => call[0] === 'test_ai_connection')
         expect(keepRequest?.[1]).toMatchObject({request: {apiKey: {action: 'keep'}}})
 
-        // Each click below sends the intent the *previous* interaction set, and React commits that
-        // state on its own schedule rather than by the time the interaction's promise resolves. On
-        // a loaded machine an unwaited click reads the state before it lands and tests the previous
-        // intent twice, so every interaction here waits for the render that proves it took effect.
-        // By label: a stored key no longer puts a sentence in the placeholder, because a
-        // placeholder reads as a typed value.
         await user.type(screen.getByLabelText(/^API key/), ' new-secret ')
-        // `toHaveValue` rather than `findByDisplayValue`: the surrounding spaces are the point of
-        // this key, and the display-value query normalizes them away before it compares.
         await flush()
 
         expect(screen.getByLabelText(/^API key/)).toHaveValue(' new-secret ')
@@ -258,8 +227,6 @@ describe('SettingsPage', () => {
         })
 
         await user.click(screen.getByRole('button', {name: 'Remove stored API key'}))
-        // The button renames itself once the stored key is marked for removal: that render is the
-        // proof the intent is `clear` before the connection test reads it.
         await flush()
         expect(screen.getByRole('button', {name: 'Keep stored API key'})).toBeInTheDocument()
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
@@ -437,10 +404,6 @@ describe('Workspace', () => {
         })
     })
 
-    /*
-     * The unsent message is part of the conversation, so it is kept with the task and comes back
-     * with it. Losing a half-written prompt to a window close is losing work.
-     */
     it('keeps an unsent message with its task and restores it', async () => {
         const drafts: Record<string, string | undefined> = {
             'ui.draft.0198f4c0-02ef-7000-8000-000000000001': 'Half a thought about the'
@@ -463,7 +426,6 @@ describe('Workspace', () => {
 
         render(<Workspace />)
 
-        // What was being written when the project was last closed is in the composer.
         await flush()
         const composer = screen.getByRole('combobox', {name: 'Message input'})
         await flush()
@@ -472,7 +434,6 @@ describe('Workspace', () => {
 
         await userEvent.type(composer, ' level')
 
-        // Typing again records the new text against the same task.
         await flush()
 
         expect(drafts['ui.draft.0198f4c0-02ef-7000-8000-000000000001']).toContain('level')
@@ -485,8 +446,6 @@ describe('Workspace', () => {
                 const saveCount = tauri.invoke.mock.calls.filter(
                     call => call[0] === 'save_chat'
                 ).length
-                // The first save is held open, which is the state a second save has to coalesce
-                // into rather than queue behind.
                 if (saveCount === 1) {
                     return new Promise<void>(resolve => {
                         resolveFirstSave = resolve
@@ -589,9 +548,6 @@ describe('Workspace', () => {
                     requestId: 1,
                     event: {type: 'text-delta', delta: 'Hello from local AI'}
                 })
-                // Ends with no text of its own, so what is on screen can only be the delta. The
-                // backend's `done` carries the turn's last step, not the turn, and a bubble that
-                // took its text from there would be one that dropped everything said earlier.
                 stream.onmessage({
                     requestId: 1,
                     event: {
@@ -629,11 +585,6 @@ describe('Workspace', () => {
         })
     })
 
-    /**
-     * Summarising runs before the answer exists, and on a local model it is a wait long enough to
-     * read as a hung app. The spinner is the only thing on screen at that point, so it has to say
-     * what the wait is for — and stop saying it the moment the work moves on.
-     */
     it('names the summarising step while it waits, and stops naming it after', async () => {
         let stream: AiStream | undefined
         let endTurn: (() => void) | undefined
@@ -644,8 +595,6 @@ describe('Workspace', () => {
                     requestId: 1,
                     event: {type: 'compaction-start', tokens: 105_000, contextWindow: 120_064}
                 })
-                // The turn is held open, because that is the state being tested: the summary is a
-                // wait inside a turn, and a turn that returns cannot be waiting on anything.
                 await new Promise<void>(resolve => {
                     endTurn = resolve
                 })
@@ -674,13 +623,6 @@ describe('Workspace', () => {
         expect(screen.queryByText(/Summarising the conversation/)).not.toBeInTheDocument()
     })
 
-    /**
-     * A turn goes quiet between its steps: it finishes a sentence, then spends a long time deciding
-     * what to call next. On screen that looked exactly like a turn that had ended — the last thing
-     * drawn was a finished paragraph, under a finished tool call, over a token count. The only sign
-     * of life was a placeholder in the composer, at the far edge of the screen from where the eye
-     * is. Whatever else the conversation shows, a running turn shows that it is running.
-     */
     it('shows the turn is still working after it stops writing', async () => {
         let stream: AiStream | undefined
         let endTurn: (() => void) | undefined
@@ -703,13 +645,10 @@ describe('Workspace', () => {
                         endedAt: 131
                     },
                     {type: 'text-delta', delta: 'Let me create the tileset art first.'},
-                    // Usage arrives once per step, not once per turn: the backend emits it on every
-                    // `turn_end`, and a turn that calls tools has one of those per call.
                     {type: 'usage', usage: emptyUsage, model: 'local'}
                 ]) {
                     stream.onmessage({requestId: 1, event})
                 }
-                // Held open, because a turn that has returned is not one that is still working.
                 await new Promise<void>(resolve => {
                     endTurn = resolve
                 })
@@ -724,8 +663,6 @@ describe('Workspace', () => {
             'Build the level{enter}'
         )
 
-        // The tool row rather than the sentence: streaming Markdown holds its last chunk back until
-        // the next delta settles it, so the newest sentence is deliberately not on screen yet.
         await flush()
         expect(screen.getByText('godot_session')).toBeInTheDocument()
         expect(
@@ -733,11 +670,6 @@ describe('Workspace', () => {
             'a turn between steps looks finished'
         ).toBeInTheDocument()
 
-        /*
-         * Delivering the end of the turn inside `act` settles every effect it starts, so the
-         * indicator's absence is read once, at a known moment. Inside `waitFor` the same assertion
-         * would pass on its first poll — before these events were even processed.
-         */
         await act(async () => {
             stream?.onmessage({
                 requestId: 1,
@@ -757,11 +689,6 @@ describe('Workspace', () => {
         expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
     })
 
-    /**
-     * A running call already spins, on its own row, next to the name of the thing it is doing. A
-     * second indicator under it says the same thing twice and puts the vaguer of the two ("Working")
-     * closest to the eye. One turn shows one indicator, and while a call is running it is the call's.
-     */
     it('lets a running call be its own indicator', async () => {
         backend({
             send_ai_message: async args => {
@@ -795,10 +722,6 @@ describe('Workspace', () => {
         ).not.toBeInTheDocument()
     })
 
-    /**
-     * `done` is not guaranteed: the backend can return from a turn without emitting it. The
-     * indicator has to come down when the stream is over, or it stays up for the session.
-     */
     it('stops indicating work when the stream ends without saying it is done', async () => {
         backend({
             send_ai_message: async args => {
@@ -817,19 +740,12 @@ describe('Workspace', () => {
             'Build the level{enter}'
         )
 
-        // The call's own row appearing is the turn having been processed end to end: the stream
-        // closes in the same microtask that starts it. The indicator is then read at that moment.
         await flush()
         expect(screen.getByText('bash')).toBeInTheDocument()
         await act(async () => undefined)
         expect(screen.queryByRole('status', {name: 'Working'})).not.toBeInTheDocument()
     })
 
-    /**
-     * The token footer is the turn's closing line, and a closing line under a turn that has not
-     * closed says the wrong thing twice: it reports a total that is still climbing, and it tells
-     * the reader the message is over.
-     */
     it('holds the token footer back until the turn is over', async () => {
         let stream: AiStream | undefined
         let endTurn: (() => void) | undefined
@@ -859,11 +775,6 @@ describe('Workspace', () => {
             'Build the level{enter}'
         )
 
-        /*
-         * One of the few real waits left. `Markdown` parses a growing stretch incrementally and
-         * schedules that work itself, so the first delta appearing is an external library's doing
-         * rather than an effect this test can flush.
-         */
         await waitFor(() => {
             expect(screen.getByText('Starting.')).toBeInTheDocument()
         })
@@ -967,7 +878,6 @@ describe('Workspace', () => {
 
     it('settles the running tool calls when the user stops the turn', async () => {
         let finishRequest: (() => void) | undefined
-        // The turn's own stream: the abort the backend sends on cancellation rides it too.
         let stream: AiStream | undefined
         const emit = (event: unknown) => {
             stream?.onmessage({requestId: 1, event})
@@ -983,7 +893,6 @@ describe('Workspace', () => {
                     target: 'godot --headless',
                     startedAt: 10
                 })
-                // The turn stays open until the backend answers the cancellation.
                 return new Promise<undefined>(resolve => {
                     finishRequest = () => {
                         resolve(undefined)
@@ -1005,8 +914,6 @@ describe('Workspace', () => {
             'Build a scene{enter}'
         )
         await flush()
-        // A running call carries its own age beside the target — `godot --headless · 4s` — so the
-        // row is matched by what it is about rather than by the whole string, which now moves.
         expect(screen.getByText(/godot --headless/u)).toBeInTheDocument()
 
         await userEvent.click(screen.getByRole('button', {name: 'Stop'}))
@@ -1014,8 +921,6 @@ describe('Workspace', () => {
             requestId: expect.any(Number) as number
         })
 
-        // The backend has both emitted the abort and resolved the request by now; flushing settles
-        // what they schedule. A `waitFor` here would pass before either had been handled.
         await act(async () => undefined)
         expect(screen.queryByRole('status', {name: 'Loading'})).not.toBeInTheDocument()
     })
@@ -1045,7 +950,6 @@ describe('Workspace', () => {
         }
 
         raise('approval-1', {op: 'delete', params: {path: 'scenes/main.tscn'}})
-        // A second prompt queues behind the first rather than stacking a second dialog.
         raise('approval-2', {op: 'move', params: {from: 'a.gd', to: 'b.gd'}})
         await flush()
         expect(
@@ -1066,7 +970,6 @@ describe('Workspace', () => {
             request: {approvalId: 'approval-2', approved: true}
         })
 
-        // A prompt the backend settles on its own — a timeout, or a cancelled turn — closes too.
         raise('approval-3', {op: 'delete', params: {path: 'scenes/other.tscn'}})
         await flush()
         expect(screen.getByText(/scenes\/other.tscn/)).toBeInTheDocument()
@@ -1075,8 +978,6 @@ describe('Workspace', () => {
                 payload: {approvalId: 'approval-3', approved: false} as never
             })
         })
-        // Read once, after the event has been delivered: inside `waitFor` this would pass on the
-        // poll before the event arrived, and a prompt that never closed would still score green.
         expect(screen.queryByText(/scenes\/other.tscn/)).not.toBeInTheDocument()
     })
 })
@@ -1131,8 +1032,6 @@ describe('Navigation', () => {
         expect(onNewTask).toHaveBeenCalledOnce()
     })
 
-    /// Deleting a task destroys its branch, so the button asks first — and the
-    /// delete button must not double as the link that opens the task.
     it('deletes a task only after the warning is confirmed', async () => {
         const onDeleteTask = vi.fn()
         const onOpenTask = vi.fn()

@@ -23,7 +23,6 @@ const paths = (query: string, limit?: number) =>
     )
 
 describe('the entries an @ can offer', () => {
-    /* The Rust scan reports files only, so a folder exists here or it exists nowhere. */
     it('derives a folder from every path above a file', () => {
         const folders = ENTRIES.filter(entry => entry.isDirectory).map(entry => entry.path)
         expect(folders).toEqual(
@@ -38,14 +37,7 @@ describe('the entries an @ can offer', () => {
 })
 
 describe('ranking the entries an @ offers', () => {
-    /*
-     * The tiers, in the order `pi` applies them. Each row is a way of naming the same file, and the
-     * point of the tiers is that the typist can tell which one they used.
-     */
     it('takes the query as typed, not as a fuzzy subsequence', () => {
-        // `game` names two files equally well, so nothing but the alphabet separates them; typing
-        // the extension is what picks one. The old subsequence ranking answered both from `gmgd`,
-        // and answered a dozen other things besides.
         expect(paths('game')).toContain('scenes/Game.tscn')
         expect(paths('game')).toContain('scripts/game.gd')
         expect(paths('game.gd')).not.toContain('scenes/Game.tscn')
@@ -60,7 +52,6 @@ describe('ranking the entries an @ offers', () => {
         expect(paths('debug')).toEqual(['debug/', 'debug/debug_overlay.gd'])
     })
 
-    /* A hit that is only in the folders above the file is the weakest tier there is. */
     it('ranks a hit found only in the path last', () => {
         const ranked = paths('vendor')
         expect(ranked.indexOf('addons/vendor/')).toBeLessThan(
@@ -68,7 +59,6 @@ describe('ranking the entries an @ offers', () => {
         )
     })
 
-    /* Two files of the same name: the shallower one is the project's, the deeper one is vendored. */
     it('breaks a tie towards the shallower path', () => {
         const ranked = paths('game.gd')
         expect(ranked.indexOf('scripts/game.gd')).toBeLessThan(
@@ -76,10 +66,6 @@ describe('ranking the entries an @ offers', () => {
         )
     })
 
-    /*
-     * `@.png` in a sprites folder answered with five files and five `.import` sidecars, which is
-     * half the menu spent on files Godot writes for itself and nobody ever names.
-     */
     it('never offers a sidecar Godot generated', () => {
         expect(paths('enemy_base.gd')).toEqual(['scripts/enemy_base.gd'])
         expect(paths('uid')).toEqual([])
@@ -90,11 +76,6 @@ describe('ranking the entries an @ offers', () => {
         expect(paths('docs')[0]).toBe('docs/')
     })
 
-    /*
-     * What `pi`'s flat +10 folder bonus gets wrong. A project with enough packages under `addons/`
-     * fills every row with folders from deep in the tree, and the file the user opens every day
-     * never appears. Depth has to outrank the folder preference for the menu to stay useful.
-     */
     it('does not let deep folders push the nearby files off the list', () => {
         const packages = Array.from(
             {length: 30},
@@ -110,7 +91,6 @@ describe('ranking the entries an @ offers', () => {
         expect(paths('zzz')).toEqual([])
     })
 
-    /* The menu the moment `@` is typed: somewhere to start browsing, not the deepest file found. */
     it('offers the top-level folders first for an empty query', () => {
         expect(paths('').slice(0, 5)).toEqual(['addons/', 'debug/', 'docs/', 'scenes/', 'scripts/'])
     })
@@ -121,7 +101,6 @@ describe('ranking the entries an @ offers', () => {
         expect(FILE_MENTION_LIMIT).toBeGreaterThan(0)
     })
 
-    /* The row shows the directory under the name, and has nothing to show at the top level. */
     it('splits a path into the name and the directory holding it', () => {
         expect(ENTRIES.find(entry => entry.path === 'docs/TASK_CHECKLIST.md')).toEqual({
             path: 'docs/TASK_CHECKLIST.md',
@@ -139,7 +118,6 @@ describe('ranking the entries an @ offers', () => {
 })
 
 describe('a query that names a folder', () => {
-    /* This is the listing the menu shows the instant a folder is stepped into. */
     it('lists what is inside, nearest first', () => {
         expect(paths('scripts/')).toEqual([
             'scripts/ui/',
@@ -159,17 +137,12 @@ describe('a query that names a folder', () => {
         expect(paths('SCRIPTS/game')).toEqual(['scripts/game.gd'])
     })
 
-    /*
-     * A path typed straight through from memory names no folder to scope to at its last `/`, so it
-     * falls back to matching whole paths — which is the only tier a query holding a `/` can reach.
-     */
     it('falls back to whole paths when the folder is not there', () => {
         expect(paths('nope/game')).toEqual([])
         expect(paths('vendor/pack')).toEqual(['addons/vendor/pack/', 'addons/vendor/pack/game.gd'])
     })
 })
 
-/* Both the composer's menu and the Files tree's own `@` button write a path through this. */
 describe('how a path reads inside a message', () => {
     it('quotes only a path the agent would otherwise read as two arguments', () => {
         expect(mentionValue('scripts/game.gd')).toBe('@scripts/game.gd')

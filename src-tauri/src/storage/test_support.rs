@@ -119,8 +119,6 @@ pub(super) fn committed_repository_in_place(workspace: &Path) -> String {
 }
 
 pub(super) fn kept(sketch_id: &str, label: &str, shown: &str, source: &str) -> KeptSketch<'static> {
-    // Leaked deliberately and only here: a test fixture that outlives the borrow is cheaper to
-    // read than threading four owned strings through every call.
     KeptSketch {
         sketch_id: Box::leak(sketch_id.to_owned().into_boxed_str()),
         question_id: "question-1",

@@ -54,25 +54,8 @@ import type {TypedSecret} from './StoredKeyField'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {SettingsTabView, SettingsView} from './settings-view'
 
-/**
- * What the sub-agent's connection reads as when it has none of its own.
- *
- * A value the selector can hold, because "no connection" is a real answer here rather than an unset
- * field: the child borrows the parent's model, its connection and its reasoning level, which is what
- * every Gofer before this did and still the right answer for one model on one machine.
- */
 const SUBAGENT_INHERITS = 'inherit'
 
-/**
- * The drivers whose whole configuration is a key and a model chosen off a catalogue.
- *
- * One row rather than one branch each. The two of them differ in five sentences and nothing else,
- * and a fourth driver written as a fourth arm of a ternary chain is four copies of eight fields
- * that can drift apart in any of them. A driver is added here once.
- *
- * The local driver is not one of these — its address, its window and its ceiling are all typed —
- * and neither is ChatGPT, which is a sign-in rather than a key.
- */
 const HOSTED_DRIVERS: Partial<
     Record<
         AiConnectionType,
@@ -97,62 +80,30 @@ const HOSTED_DRIVERS: Partial<
     cerebras: {
         secret: 'cerebras',
         awaiting: 'Cerebras has not answered with its model list yet.',
-        // The narrowing said out loud. Cerebras answers ids and nothing else, so what a model can
-        // do is a table Gofer ships — and a user who sees a model on the Cerebras dashboard and not
-        // here is owed the sentence rather than left to guess the list is broken.
         listed: 'Only models Gofer holds measured capabilities for are listed, because Cerebras publishes none.',
         answered: 'Measured against the live endpoint, so there is nothing to type.',
-        // Not the same sentence as the window's. Cerebras declares no output ceiling at all — a
-        // request may name the whole window and is answered — so this number is Gofer's, not theirs.
         ceiling: 'Output shares the context window here, so this is the room Gofer leaves for it.',
         accepts: 'What this model takes as input, measured against the live endpoint.'
     }
 }
 
-/** The AI tab, plus the sign-in it may have left half-finished when the dialog is closed. */
 type AiTabView = SettingsTabView & Readonly<{cancelPendingLogin: () => void}>
 
-/**
- * Where the model comes from: the driver, its address, the model it serves, and the sub-agent's own.
- *
- * The connection fields and the sub-agent ceilings are one stored object and one backend call, which
- * is why they share a tab. Splitting them across two tabs would have given the second one a Save
- * that silently wrote the first one's edits.
- */
 export function useAiTab(view: SettingsView): AiTabView {
     const {state, dispatch, run} = view
     const {availableModels, busy, keys} = state
     const draft = state.settings
-    /** The connection the live driver runs on, which is what this tab's fields are about. */
     const connection = draft && activeConnection(draft.ai)
-    /** The prose this driver's key-and-catalogue fields carry, or nothing when it has none. */
     const hosted = draft && HOSTED_DRIVERS[draft.ai.connectionType]
-    // The key field appears only for the engine that needs one, so a keyless setup is never shown a
-    // credential box it has no use for.
     const needsSearchKey = SEARCH_PROVIDERS_NEEDING_KEY.includes(
         draft?.ai.web.searchProvider ?? 'exa'
     )
     const subagentConnection = draft?.ai.subagent.connection
-    /*
-     * The two drivers, named on their own, because they are the whole of what may send a catalogue
-     * request. Pulled out of the draft here so the effects below can list what they really watch
-     * instead of reaching through an object they must not re-run for.
-     */
     const driver = draft?.ai.connectionType
     const subagentDriver = subagentConnection?.connectionType
 
     const modelsFor = useRef<string | undefined>(undefined)
-    /** Which connection the sub-agent's model list came from, so it is fetched once per driver. */
     const subagentModelsFor = useRef<string | undefined>(undefined)
-    /*
-     * Which request is the newest, for each of the two lists.
-     *
-     * A monotonic count rather than the driver's name. Naming the driver cannot tell two requests
-     * for the *same* driver apart, and that pair is reachable: a local server that hangs on connect,
-     * then a switch away and back, issues a second request while the first is still open. The first
-     * one's failure would pass a name-keyed guard, clear the "already asked" ref, and make the
-     * second one's success look stale — leaving an empty model picker that nothing re-fills.
-     */
     const modelsRequest = useRef(0)
     const subagentModelsRequest = useRef(0)
 
@@ -161,26 +112,9 @@ export function useAiTab(view: SettingsView): AiTabView {
     const [manualCode, setManualCode] = useState('')
     const [needsManualCode, setNeedsManualCode] = useState(false)
 
-    /*
-     * The driver's own catalogue, asked for once per driver.
-     *
-     * Both drivers, not only ChatGPT. The local one used to list nothing until the user pressed
-     * Test connection, which meant the page opened with no model picker and a reasoning menu drawn
-     * from whatever the file happened to say — including a `false` written before any catalogue had
-     * been read. Keyed on the driver rather than the address, because the address is a field the
-     * user is still typing.
-     *
-     * An effect event, because the two halves of this pull in opposite directions: the request is
-     * built from the whole draft, and only a change of driver may send one. As a plain effect the
-     * draft, the state and the dispatch were closed over and left off the list. Here they are read
-     * when the event fires, which is the same instant, and the list below is the truth.
-     */
     const loadModels = useEffectEvent((asked: AiConnectionType) => {
         if (!draft) return
         if (modelsFor.current === asked) return
-        // Which request this is. Switching driver while one is in flight used to let the late answer
-        // dispatch anyway — writing one driver's catalogue, and on ChatGPT its first model, into
-        // whichever connection is live by the time it lands.
         const asking = modelsRequest.current + 1
         modelsRequest.current = asking
         modelsFor.current = asked
@@ -194,18 +128,12 @@ export function useAiTab(view: SettingsView): AiTabView {
                 const configured = models.find(
                     model => model.id === activeConnection(draft.ai)?.model.id
                 )
-                // A model the server serves has its facts re-read, so the reasoning menu offers what
-                // this model can actually be asked. A model it does not serve is replaced only on
-                // ChatGPT, whose catalogue is the whole truth; a local Model ID is typed by hand and
-                // is not the page's to overwrite while a server is between models.
                 if (configured) dispatch({type: 'model-reconciled', model: configured})
                 else if (isChatGpt && models[0]) dispatch({type: 'model-chosen', model: models[0]})
             })
             .catch((error: unknown) => {
                 if (modelsRequest.current !== asking) return
                 modelsFor.current = undefined
-                // A local server that is simply not running is not a settings failure, and saying so
-                // on every open would put a red banner in front of anyone who opens the page first.
                 if (!isChatGpt) return
                 dispatch({
                     type: 'noticed',
@@ -224,19 +152,9 @@ export function useAiTab(view: SettingsView): AiTabView {
         loadModels(driver)
     }, [driver])
 
-    /*
-     * The sub-agent's own list, asked for from the connection it names rather than the one the page
-     * is showing. `selectAiDriver` is what turns the settings into that connection — the same
-     * function the driver control above uses — so the backend resolves the address and the
-     * credential exactly as it would if the user had switched to it.
-     *
-     * An effect event for the same reason as the one above.
-     */
     const loadSubagentModels = useEffectEvent((asked: AiConnectionType) => {
         if (!draft || !subagentConnection) return
         if (subagentModelsFor.current === asked) return
-        // Same guard as the parent's: two switches in quick succession left the sub-agent showing
-        // the other connection's catalogue.
         const asking = subagentModelsRequest.current + 1
         subagentModelsRequest.current = asking
         subagentModelsFor.current = asked
@@ -247,7 +165,6 @@ export function useAiTab(view: SettingsView): AiTabView {
             .then(models => {
                 if (subagentModelsRequest.current !== asking) return
                 dispatch({type: 'subagent-models-listed', models})
-                // The same re-read the parent gets: what the chosen model can actually be asked.
                 const chosen = models.find(model => model.id === subagentConnection.model.id)
                 if (chosen) dispatch({type: 'subagent-model-reconciled', model: chosen})
             })
@@ -301,11 +218,6 @@ export function useAiTab(view: SettingsView): AiTabView {
         })
     }
 
-    /*
-     * The connection fields and the sub-agent ceilings are one stored object and one backend call,
-     * which is why they share a tab. Splitting them across two tabs would have given the second one
-     * a Save that silently wrote the first one's edits.
-     */
     const saveAiSettings = async () => {
         const nextRequest = settingsRequest(state)
         if (!nextRequest) return
@@ -396,12 +308,6 @@ export function useAiTab(view: SettingsView): AiTabView {
             })
         }
     }
-
-    /*
-     * One banner slot per tab, so a failure sits above the controls it is about. A download that
-     * failed on the models tab does not push the connection form down, and neither one hides the
-     * other: both tabs can be carrying a banner at once, because both tasks can run at once.
-     */
 
     return {
         body: (
@@ -535,12 +441,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                                                 if (model) selectModel(model)
                                             }}
                                         />
-                                        {/*
-                                         * Read-only, not disabled. These three are true values the
-                                         * catalogue answered; disabling dims a real value and puts
-                                         * its explanation behind a tooltip, so a fact the user came
-                                         * to read looked like a broken field.
-                                         */}
                                         <TextInput
                                             label='Context window'
                                             value={connection.model.contextWindow.toLocaleString()}
@@ -690,12 +590,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         updateAi({maxRetries: Number(maxRetries)})
                                     }}
                                 />
-                                {/*
-                                 * A field, not a menu. The level is one of a fixed set, and drawn as
-                                 * a dropdown it was the only control in this form with no label and
-                                 * no description — its value readable only inside the button's own
-                                 * text.
-                                 */}
                                 <Selector
                                     label='Reasoning'
                                     value={connection.model.thinkingLevel}
@@ -705,9 +599,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         label: level
                                     }))}
                                     onChange={chosen => {
-                                        // Selector answers with a plain string; the level is a union.
-                                        // Found in the list rather than cast, so a value the model
-                                        // does not accept can never reach the request.
                                         const thinkingLevel = thinkingLevelsFor(
                                             connection.model
                                         ).find(level => level === chosen)
@@ -739,11 +630,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                     }
                 </Grid>
 
-                {/*
-                 * Hidden outright when there is nothing to show, rather than repeating the "settings
-                 * are unavailable" line the section above already says. Two copies of one message
-                 * reads as two problems.
-                 */}
                 {draft && <Divider />}
 
                 {draft && (
@@ -1031,13 +917,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                     </HStack>
                 </LayoutFooter>
             :   undefined,
-        /**
-         * A sign-in the user walked away from.
-         *
-         * Closing the dialog mid-flow leaves a browser tab and a listening callback behind, and the
-         * page is the only thing that knows the dialog closed. It is returned rather than kept here
-         * because nothing inside this tab ever learns that it stopped being drawn.
-         */
         cancelPendingLogin: () => {
             if (isAuthenticating) void cancelChatGptLogin()
         }

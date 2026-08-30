@@ -88,8 +88,6 @@ pub(crate) fn write_environment<R: Runtime>(
 pub(crate) fn resolve_workspace<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<WorkspaceBinding, String> {
-    // `GOFER_WORKSPACE_DIR` wins so a test harness can point a launched application at a prepared
-    // repository regardless of what the user last chose.
     if let Some(configured) = std::env::var_os("GOFER_WORKSPACE_DIR") {
         return Ok(WorkspaceBinding {
             path: validate_configured_directory(
@@ -101,8 +99,6 @@ pub(crate) fn resolve_workspace<R: Runtime>(
     }
     if let Some(chosen) = read_environment(app).workspace {
         let path = PathBuf::from(chosen);
-        // A folder that has since been deleted or moved falls back rather than blocking startup;
-        // the health check then reports the working directory it landed on.
         if path.is_dir() {
             return Ok(WorkspaceBinding {
                 path,
@@ -128,7 +124,6 @@ pub(crate) fn configured_app_data_path() -> Result<Option<PathBuf>, String> {
     validate_app_data_path(PathBuf::from(configured)).map(Some)
 }
 
-// coverage-critical-start: path
 fn validate_app_data_path(path: PathBuf) -> Result<PathBuf, String> {
     validate_configured_directory(
         path,
@@ -147,7 +142,6 @@ fn validate_configured_directory(path: PathBuf, message: &str) -> Result<PathBuf
     }
     Ok(path)
 }
-// coverage-critical-end: path
 
 pub(crate) fn app_data_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = configured_app_data_path()? {
@@ -273,7 +267,6 @@ pub(crate) fn apply_remedy(
         action => {
             let workspace = resolve_workspace(app)?.path;
             health::apply(&workspace, action)?;
-            // Git repairs are exactly what a failed open was waiting for.
             let _ = reopen_storage(app);
             Ok(())
         }

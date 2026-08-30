@@ -8,30 +8,10 @@ import type {
     GodotSettingsPage
 } from './godot'
 
-/**
- * What the addon can be asked, and what it answers.
- *
- * The desktop seam has had `DesktopCommandMap` since it was written: a command name is a key, not a
- * string, and its reply is a type rather than something the call site asserts. The editor seam had
- * neither. `callGodot` took a `string` and answered `Record<string, unknown>`, so a mistyped command
- * compiled and every reader cast the result back to what it hoped it was — five surfaces reconciled
- * by a script, and the one the user actually clicks through was not among them.
- */
-
-/** The parameters of a command nobody has had to name yet, which is what every call site sent. */
 export type GodotParams = Readonly<Record<string, unknown>>
-/** The result of a command nobody has had to read yet, which is what every call site received. */
 export type GodotResult = Readonly<Record<string, unknown>>
-/** A command that takes nothing. Callers may still omit the argument entirely. */
 export type NoGodotParams = Readonly<Record<string, never>>
 
-/**
- * How much of a scene tree one read asks for.
- *
- * All three are optional, and a call that names none is answered with the agent's default of 150
- * nodes — small enough to survive the character cap on a tool result. The panels want the whole
- * tree instead, so they name their own bound, the way the Docs panel names its own passage count.
- */
 export type GodotTreeBounds = Readonly<{
     root?: string | undefined
     depth?: number | undefined
@@ -115,28 +95,14 @@ export type GodotCommandName =
     | 'runtime.resume'
 // GENERATED-END command-names
 
-/**
- * Whether the game is playing, whether its helper autoload has announced itself, and whether the
- * debugger has it paused. A paused game is `running` and answers nothing, so `broke` is the only
- * field here that tells those two apart.
- */
 export type GodotRuntimeState = Readonly<{
     running: boolean
     runtimeReady?: boolean | undefined
     broke?: boolean | undefined
 }>
 
-/** A launch or a capture, which answer with the frame that already shows what they did. */
 export type GodotCapture = Readonly<{running?: boolean | undefined; frame?: GodotFrame | undefined}>
 
-/**
- * The commands whose shape somebody has had to know.
- *
- * Every name here is checked against the catalogue by `scripts/check-command-surface.mjs`, the same
- * way the mutating list is — a typo would otherwise sit in this type meaning nothing, because a key
- * the map never looks up cannot be wrong. What is *not* here is not untyped by accident: it is a
- * command the renderer has never called, and it keeps the generic shape until it has.
- */
 interface KnownGodotCommands {
     'session.get_state': GodotCommandSpec<NoGodotParams, GodotSessionStatus>
     'project.get_settings': GodotCommandSpec<NoGodotParams, GodotProjectSettings>
@@ -165,13 +131,6 @@ interface KnownGodotCommands {
     >
 }
 
-/**
- * The map itself, one entry per catalogued command.
- *
- * It is written as a mapped type over the generated union rather than as a list, so its keys are
- * the catalogue's keys by construction. A command added to `commands.json` needs nothing here to
- * become callable, and a command removed from it stops compiling wherever the renderer names it.
- */
 export type GodotCommandMap = {
     readonly [Name in GodotCommandName]: Name extends keyof KnownGodotCommands ?
         KnownGodotCommands[Name]

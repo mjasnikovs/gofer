@@ -22,50 +22,37 @@ mod debug;
 mod files;
 mod gdformat;
 mod git;
-mod godot_dap;
-mod godot_lsp;
-mod godot_policy;
-mod godot_rpc;
-mod godot_session;
-mod godot_session_api;
-mod health;
-// How every acceptance suite below starts a real editor: the pinned binary, the fixture worktree,
-// the launch, and the staged addon behind one `Session`.
-#[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_editor_harness;
-// Drives the staged addon inside a real editor. Gated so the default gate needs no Godot binary.
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_addon_acceptance;
-// Sweeps the whole 2D/UI node catalogue through that same editor, same gate.
 #[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_nodes_acceptance;
-// Holds every mutating command to its read-back: what it answered has to be what Godot holds.
-#[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_readback_acceptance;
-// Holds what the tool catalog claims about the *engine* to the engine. Its own gate, outside the
-// acceptance run: it can only break when the pinned Godot version moves.
+mod godot_ai_acceptance;
 #[cfg(all(test, feature = "godot-api-drift"))]
 mod godot_api_drift;
-// Drives the native language server inside a real editor, under the same gate.
-#[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_lsp_acceptance;
-// Drives the script commands Monaco calls against that same editor.
-#[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_script_acceptance;
-// Drives the native debug adapter inside a real editor running the fixture game, same gate.
+mod godot_dap;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_dap_acceptance;
 #[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_runtime_acceptance;
-// Drives one AI turn through the router into that same editor: the step 14 done-criteria.
-#[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_ai_acceptance;
-#[cfg(all(test, feature = "godot-acceptance"))]
-mod godot_live_agent;
-// Drives the final journey: one task worktree from connect to task switch, through the supervisor
-// the renderer starts and the router the agent calls, with no transport bound by the test itself.
+mod godot_editor_harness;
 #[cfg(all(test, feature = "godot-acceptance"))]
 mod godot_journey_acceptance;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_live_agent;
+mod godot_lsp;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_lsp_acceptance;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_nodes_acceptance;
+mod godot_policy;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_readback_acceptance;
+mod godot_rpc;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_runtime_acceptance;
+#[cfg(all(test, feature = "godot-acceptance"))]
+mod godot_script_acceptance;
+mod godot_session;
+mod godot_session_api;
+mod health;
 mod memory;
 mod model_server;
 mod off_thread;
@@ -125,14 +112,8 @@ async fn save_settings(
     request: SettingsRequest,
 ) -> Result<SettingsResponse, CommandError> {
     off_thread_coded("save_settings", "settings_unwritable", move || {
-        // Taken rather than moved, because the three key updates beside it are still needed: what
-        // is left behind is a default nobody reads.
         let mut request = request;
         let settings = validate_settings(std::mem::take(&mut request.settings))?;
-        // The keyring first, the file second, and every slot the keyring wrote inside one rollback
-        // window: a settings file that will not write must leave the machine as it found it. The
-        // window used to hold the AI key alone, because the restore was the AI key's own and could
-        // not name another slot; `restore_saved_secrets` names the slots that were written.
         let written = apply_saved_secrets(&request)?;
         if let Err(error) = write_settings(&app, &settings) {
             restore_saved_secrets(&written)?;
@@ -150,8 +131,6 @@ async fn save_settings(
 /// Without this, whoever did not do the saving keeps rendering the settings it read at mount — the
 /// composer would still offer the old model after the settings page changed it.
 fn announce_settings(app: &AppHandle, response: SettingsResponse) -> SettingsResponse {
-    // A screen that is not listening is not a failed save: the file is already written, and the
-    // command's own answer still carries the same response to whoever asked for it.
     let _ = app.emit("settings-saved", &response);
     response
 }
@@ -178,8 +157,6 @@ async fn test_ai_connection(
 ) -> Result<ConnectionTestResult, CommandError> {
     run_connection_test(request, AI_REQUEST_TIMEOUT)
         .await
-        // Retryable: an AI server that is not up yet is the ordinary case here, and the user has
-        // nothing to change before pressing the button again.
         .map_err(|message| CommandError::new("ai_unreachable", message).retryable())
 }
 
@@ -341,8 +318,6 @@ fn refuse_during_turn() -> Result<ai_turn::AiProviderOperation, CommandError> {
 #[tauri::command(async)]
 fn delete_chat_task(app: AppHandle, task_id: String) -> Result<StoredChat, CommandError> {
     let storage = project_storage(&app)?;
-    // Deleting the task the editor is editing stops that editor first: the checkout moves off the
-    // deleted branch onto the task that takes over, and the staged addon comes out on the way.
     let release = switch_for(&app);
     storage.tasks().delete(&task_id, &storage.switch(&release)?)
 }
@@ -486,16 +461,9 @@ fn merge_task_branch(
     task_id: String,
     unsaved_work: Option<UnsavedWork>,
 ) -> Result<MergeTaskResult, CommandError> {
-    // Merging visits the base branch and comes back, so the files under the editor move twice. The
-    // session is stopped first, which also takes Gofer's own two lines back out of `project.godot`
-    // before anything is committed.
     let storage = project_storage(&app)?;
     let release = switch_for(&app);
-    // Built before the work below rather than beside the move, because the Switch is the provider
-    // operation: a turn must not begin while the editor is being asked to settle either.
     let switch = storage.switch(&release)?;
-    // Before any of that: the stop is `get_tree().quit()`, which writes nothing. Work the editor is
-    // holding is settled here or the merge does not start. Absent means nobody has been asked yet.
     unsaved_work::settle(unsaved_work.unwrap_or_default())?;
     storage.tasks().merge(&task_id, &switch)
 }
@@ -992,8 +960,6 @@ async fn initialize_rag(app: AppHandle) -> Result<(), CommandError> {
         rag::run_initialization(|| rag::run_warmup(&app))
     })
     .await
-    // A half-written cache and a download that timed out both come back here. Retrying is
-    // worth offering for either: the splash already does, and the code is what lets it.
     .map_err(CommandError::retryable)
 }
 
@@ -1057,7 +1023,6 @@ async fn query_godot_docs(
     app: AppHandle,
     request: rag::GodotDocsQuery,
 ) -> Result<rag::GodotDocsResponse, CommandError> {
-    // Resolved on this thread, where the app handle lives, and carried into the worker thread.
     let connection = rag::expansion_connection(&app);
     off_thread_coded("query_godot_docs", "docs_unavailable", move || {
         rag::retrieve_query(request, connection)
@@ -1186,16 +1151,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
 
-    // A workspace Gofer cannot open is the health check's problem, not a reason to refuse to
-    // start: failing here fails `build`, which panics, and the user is left with no window and no
-    // way to point Gofer at a folder that would have worked.
     let builder = builder.setup(|app| {
-        // Read once here because the workers are spawned from places that hold no handle, and
-        // because a process cannot move its own resources while it runs.
         workers::remember_resource_dir(app.path().resource_dir().ok());
-        // The editor's guard reads the project through this. Two of the three doors to the editor
-        // — the language server and the debug adapter — are reached from call paths that carry no
-        // handle at all. See `godot_session_api::remember_app`.
         godot_session_api::remember_app(app.handle().clone());
         app.manage(StorageSlot::new(open_project_storage(app.handle())));
         Ok(())
@@ -1290,9 +1247,6 @@ pub fn run() {
         .build(app_context())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // The editor is Gofer's own child, and the addon it staged lives in the user's
-            // worktree. Closing the window without this leaves both behind: a Godot process the
-            // user did not start, editing files Gofer promised to clean up.
             if matches!(event, tauri::RunEvent::Exit) {
                 let _ = godot_session_api::stop_session(app);
             }
@@ -1335,8 +1289,6 @@ mod tests {
      */
     #[test]
     fn refusing_during_a_turn_holds_the_operation_until_the_caller_lets_go() {
-        // The provider operation is process-wide, and every `ai_turn` test that begins a turn takes
-        // this lock — so this waits behind them rather than refusing one of them by holding it.
         let _gate = crate::approvals::serialize_gate_tests();
 
         let Ok(abandoning) = refuse_during_turn() else {
@@ -1437,9 +1389,6 @@ mod tests {
         use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder};
         use tauri::webview::InvokeRequest;
 
-        // Every command below is answered by the process-wide session state, and three of the four
-        // assertions are about there being no session. That is only this test's to say while
-        // nothing else has an editor bound.
         let _no_editor = crate::godot_session::no_editor_bound();
 
         let directory = TempDir::new().expect("temporary application data");
@@ -1534,8 +1483,6 @@ mod tests {
             },
         )
         .unwrap_err();
-        // Nothing is waiting: an answer to a prompt that no longer exists must not silently pass
-        // for approval of the next one.
         assert!(approval_error.to_string().contains("unknown_approval"));
     }
 
@@ -1565,15 +1512,12 @@ mod tests {
         let workspace = crate::paths::canonical(&workspace).expect("canonical workspace");
         let app = mock_app();
 
-        // An editor running in exactly the workspace the task is about to move out from under.
         bind(Some(Arc::new(ExternalEditor::at(6105, 6106, &workspace))));
         assert!(
             crate::godot_session::current_info().is_some(),
             "this fixture starts with an editor running"
         );
 
-        // What `leave_task` is, minus the read ledger. `leave_task` itself is not generic over the
-        // runtime, so the mock cannot reach it.
         godot_session_api::release_worktree(app.handle(), &workspace).expect(
             "the editor is stopped, and a failure to stop it is answered rather than hidden",
         );

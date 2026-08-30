@@ -12,7 +12,6 @@ export type ConnectionState = 'connecting' | 'connected' | 'offline'
 type WorkspaceHeaderProps = Readonly<{
     activeTask?: TaskSummary
     connectionState: ConnectionState
-    /** Whether a task operation is running. See `Navigation`'s own flag for what that costs. */
     isTaskBusy?: boolean
     onConnect: () => void
     onMergeTask: () => void

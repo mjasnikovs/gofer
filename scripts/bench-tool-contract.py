@@ -173,7 +173,6 @@ def main():
     tools_after = [tool_for(after["godot_node"], params["godot_node"])]
     tools_before = [tool_for(before["godot_node"], {})]
 
-    # The new failure is the router's own words, produced by the code under test.
     new_error = subprocess.run(
         ["cargo", "test", "--quiet", "--manifest-path", f"{ROOT}/src-tauri/Cargo.toml",
          "tool_params::tests::a_resource_written_as_a_string", "--", "--nocapture"],

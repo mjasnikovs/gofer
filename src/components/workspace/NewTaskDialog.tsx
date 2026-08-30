@@ -12,22 +12,12 @@ import type {PendingChange} from '../../models/app'
 type NewTaskDialogProps = Readonly<{
     isOpen: boolean
     onOpenChange: (isOpen: boolean) => void
-    /** The files loose in the checkout. Never empty — with none, nothing opens this dialog. */
     changes: readonly PendingChange[]
-    /** Makes the task and opens its empty chat. */
     onCreate: (bringChanges: boolean) => void
 }>
 
-/** How many loose files are named before the rest are counted. */
 const NAMED_CHANGES = 5
 
-/**
- * What each answer does to the files loose in the checkout.
- *
- * The question exists because the answer is destructive-looking either way, and the user is the only
- * one who knows which. Files an agent left are the task being closed. Files the user copied in by
- * hand belong to whatever they are about to ask for, and used to vanish off disk without a word.
- */
 const CHANGE_CHOICES: readonly {
     bring: boolean
     title: string
@@ -45,20 +35,7 @@ const CHANGE_CHOICES: readonly {
     }
 ]
 
-/**
- * Asks the one question making a task cannot answer for itself.
- *
- * It does not ask what the task is. There is exactly one place in Gofer to write what you want, and
- * it is the composer — the task opens on it, and planning is a control beside its Send button rather
- * than a mode chosen before the chat exists. A second box here was a second box to wonder about, and
- * it could hold neither an image nor a file mention.
- *
- * So this is only the loose-files question, and it is only shown when there are loose files. With a
- * clean checkout there is nothing to ask and New task makes one on the spot.
- */
 export function NewTaskDialog({isOpen, onOpenChange, changes, onCreate}: NewTaskDialogProps) {
-    // Files Git has never seen are the user's own copy-in, and the answer is always to keep them.
-    // Anything modified could be the closing task's work, so that one is asked cold.
     const [bring, setBring] = useState(() => changes.every(change => change.isNew))
 
     const close = () => {
@@ -74,11 +51,6 @@ export function NewTaskDialog({isOpen, onOpenChange, changes, onCreate}: NewTask
                 if (!next) close()
             }}
         >
-            {/*
-             * The same frame `UnsavedWorkDialog` uses: header, content, footer. Flat, the actions
-             * sat in the body with none of the footer's treatment, and the header drew no close
-             * button at all because it was never given the handler that makes one.
-             */}
             <Layout
                 header={
                     <DialogHeader

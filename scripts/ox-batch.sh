@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Runs the named live turns two at a time. Each gets its own display, worktree and editor.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/ox-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

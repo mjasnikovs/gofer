@@ -28,7 +28,6 @@ import {
 } from './settings'
 import type {AiConnectionProfile, AiModelOption, GoferSettings, ThinkingLevel} from './settings'
 
-/** What a ChatGPT connection is, as the backend sends it. Never invented in the renderer. */
 const chatgptConnection: AiConnectionProfile = {
     name: 'ChatGPT subscription',
     baseUrl: 'https://chatgpt.com/backend-api',
@@ -67,7 +66,6 @@ const localConnection: AiConnectionProfile = {
     }
 }
 
-/** A settings file written before the sections below it existed: the connections, and nothing else. */
 const stored = {
     version: 1,
     ai: {
@@ -79,7 +77,6 @@ const stored = {
     }
 } as unknown as GoferSettings
 
-/** One catalogue entry, with whichever facts a test is about. */
 function option(facts: Partial<AiModelOption> = {}): AiModelOption {
     return {
         id: 'local-model',
@@ -101,7 +98,6 @@ describe('normalizeSettings', () => {
 
         expect(normalized.subagent).toEqual(DEFAULT_SUBAGENT_SETTINGS)
         expect(normalized.web).toEqual(DEFAULT_WEB_SETTINGS)
-        // And it invents no connection: what one is belongs to the backend, which sends it.
         expect(normalized.connections).toEqual({
             'openai-compatible': localConnection,
             'openai-codex': chatgptConnection
@@ -119,9 +115,6 @@ describe('normalizeSettings', () => {
     })
 
     it('fills in one missing sub-agent bound without losing the ones beside it', () => {
-        // The sub-agent section is nested, and the merge above is shallow. A section stored with
-        // one bound missing used to arrive with that bound undefined, and an undefined ceiling is
-        // no ceiling: the sub-agent would have run with no answer limit at all.
         const normalized = normalizeSettings({
             ...stored,
             ai: {...stored.ai, subagent: {maxTurns: 3}}
@@ -182,18 +175,11 @@ describe('the sub-agent connection', () => {
         expect(smaller.id).toBe('gpt-5.4-mini')
         expect(smaller.maxTokens).toBe(128_000)
         expect(smaller.thinkingLevel).toBe('off')
-        // And the connection it is served by is the child's own, untouched by the model.
         expect(connection.connectionType).toBe('openai-codex')
     })
 })
 
 describe('adoptSubagentReasoning', () => {
-    /*
-     * The sub-agent is stored beside the connections rather than inside one, so the re-read that
-     * keeps the parent's facts current never reached it. It is what `godot_docs_search ask` and
-     * every delegation run on, and one left at `off` against a mandatory-reasoning model answers
-     * HTTP 400 to every call it makes — which is what a live turn did, all run long.
-     */
     const listed = {
         id: 'stealth/ox-alpha',
         name: 'Ox Alpha',
@@ -258,11 +244,6 @@ describe('adoptSubagentReasoning', () => {
 })
 
 describe('thinkingLevelsFor', () => {
-    /*
-     * All four cases are real, and all four were measured against one machine running two Qwen
-     * builds in turn. The Q3.6 template preserves reasoning and names no efforts. The Q3.8 one
-     * names three — and answers HTTP 500 to the four Gofer knows that it does not.
-     */
     it('offers exactly what the server named, and off', () => {
         expect(
             thinkingLevelsFor({
@@ -274,13 +255,6 @@ describe('thinkingLevelsFor', () => {
         ).toEqual(['off', 'low', 'medium', 'xhigh'])
     })
 
-    /*
-     * OpenRouter's `reasoning.mandatory`, which 90 of the 287 reasoning models it listed on
-     * 2026-08-25 set — GPT-5, Gemini 3.x, Grok 4.x, Claude Fable 5, DeepSeek R1, gpt-oss. `off`
-     * resolves to `reasoning: {enabled: false}`, and every one of them answers that with HTTP 400
-     * `Reasoning is mandatory for this endpoint and cannot be disabled`. Measured against
-     * `stealth/ox-alpha`, where it took out `godot_docs_search ask` for a whole live turn.
-     */
     it('does not offer off to a model that refuses to stop thinking', () => {
         expect(
             thinkingLevelsFor({
@@ -303,10 +277,6 @@ describe('thinkingLevelsFor', () => {
         ).not.toContain('off')
     })
 
-    /*
-     * Switching to one of those models is how the broken value used to be reached: nothing was
-     * typed, the fallback was `off`, and every request the connection then made failed.
-     */
     it('falls back to a level the model has, not to off', () => {
         const mandatory = {
             reasoning: true,
@@ -314,8 +284,6 @@ describe('thinkingLevelsFor', () => {
             reasoningMandatory: true,
             thinkingLevels: ['max' as const, 'high' as const, 'low' as const]
         }
-        // The cheapest it offers, by Gofer's scale — not `thinkingLevels[0]`, which is the
-        // provider's own order and puts the most expensive effort first.
         expect(keepThinkingLevel(mandatory, 'off')).toBe('low')
         expect(keepThinkingLevel(mandatory, 'medium')).toBe('low')
         expect(keepThinkingLevel(mandatory, 'low')).toBe('low')
@@ -370,16 +338,6 @@ describe('thinkingLevelsFor', () => {
 })
 
 describe('adoptModelReasoning', () => {
-    /*
-     * The regression. A local server names its model after the file it was started with, which is
-     * not the id Pi's catalogue names the same model by, so `reasoning: false` was written to the
-     * settings file and the reasoning menu offered `off` and nothing else — forever, because
-     * nothing ever re-read the model's facts once it was the chosen one.
-     *
-     * One function now, for the parent's model and the sub-agent's alike: both are a `ModelChoice`,
-     * and the second copy of this rule is what let the sub-agent go on saying `false` after the
-     * parent's had been corrected.
-     */
     it('turns a level on for a model that turns out to reason', () => {
         const chosen = localConnection.model
         expect(chosen.reasoning).toBe(false)
@@ -391,7 +349,6 @@ describe('adoptModelReasoning', () => {
 
         expect(adopted.reasoning).toBe(true)
         expect(adopted.supportsReasoningEffort).toBe(true)
-        // What the user typed is theirs. Only what the model decides is re-read.
         expect(adopted.contextWindow).toBe(chosen.contextWindow)
         expect(adopted.id).toBe('local-model')
     })
@@ -405,11 +362,6 @@ describe('adoptModelReasoning', () => {
         expect(adopted.thinkingLevel).toBe('off')
     })
 
-    /*
-     * The second half of the same regression. A chat template can have a place for thinking and no
-     * levels to be asked at — llama.cpp reports exactly that pair for a Qwen build. Keeping a level
-     * because the model reasons left `Reasoning: medium` on screen for a model that has no medium.
-     */
     it('keeps on for a model that thinks but cannot be told how hard', () => {
         const chosen = {
             ...localConnection.model,
@@ -420,13 +372,11 @@ describe('adoptModelReasoning', () => {
         } as const
         const model = option({reasoning: true, supportsReasoningEffort: false})
 
-        // `high` is not one of the two it offers, so it goes.
         const dropped = adoptModelReasoning(chosen, model)
         expect(dropped.reasoning).toBe(true)
         expect(dropped.supportsReasoningEffort).toBe(false)
         expect(dropped.thinkingLevel).toBe('off')
 
-        // `on` is, so it stays. Thinking is not taken away from a model that thinks.
         const kept = adoptModelReasoning({...chosen, thinkingLevel: 'on'}, model)
         expect(kept.thinkingLevel).toBe('on')
     })
@@ -437,7 +387,6 @@ describe('adoptModelReasoning', () => {
         expect(adoptModelReasoning(chosen, option())).toBe(chosen)
     })
 
-    /** The sub-agent's model, held to the same rule by the same function. */
     it("corrects the sub-agent's model with no second copy of the rule", () => {
         const connection = startSubagentConnection(normalizeSettings(stored).ai, 'openai-codex')
         if (!connection) throw new Error('the ChatGPT connection')
@@ -508,7 +457,6 @@ describe('selectAiDriver across three drivers', () => {
         expect(activeConnection(backToOpenrouter)?.model.id).toBe(
             'nvidia/nemotron-3.5-lightning:free'
         )
-        // The two it passed through on the way are still there to go back to.
         expect(backToOpenrouter.connections['openai-compatible']).toEqual(localConnection)
         expect(backToOpenrouter.connections['openai-codex']).toEqual(chatgptConnection)
     })
@@ -548,9 +496,6 @@ describe('driverOptions', () => {
         ])
     })
 
-    // The order is the picker's, and it is the one place a driver can be added everywhere else and
-    // still never be offered. Every one of them must also carry a label: a `Record` keyed on the
-    // union catches a missing one at build time, but not a label added under a name nobody offers.
     it('names every driver this build knows, in the order the picker offers them', () => {
         expect(AI_CONNECTION_TYPES).toEqual([
             'openai-compatible',

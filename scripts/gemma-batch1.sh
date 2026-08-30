@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Four Cerebras Gemma turns, varied, to count the shapes this model tears its tool calls into.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p logs/oxloop

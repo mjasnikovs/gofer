@@ -11,14 +11,6 @@ import {
 const answered = text => ({kind: 'ok', text, usage: {input: 1, output: 1}, turns: 2})
 const failed = (cause, reason = 'because') => ({kind: 'failed', cause, reason, attempts: 1})
 
-/*
- * The distinction the whole table exists for.
- *
- * A worker that ran and had nothing to say and a worker that crashed before it could say anything
- * both come back with no text. Read as one event, a trivial task — one that genuinely touches no
- * existing file and needs no external symbol — kills the whole run at its first research phase,
- * because three of the four workers correctly reported nothing.
- */
 test('a worker that ran and said nothing is an answer, not a failure', () => {
     assert.equal(classifyWorkerOutcome(failed('no-answer')).kind, 'empty')
 })
@@ -29,10 +21,6 @@ test('a worker that said nothing WITH a reported cause is fatal', () => {
     assert.equal(verdict.reason, 'the endpoint refused')
 })
 
-/*
- * Order, not membership. A stop sets the same flags a failure does, so a table that asked "did it
- * fail?" before "did the user stop it?" would degrade past the stop and keep spending the machine.
- */
 test('a stop is answered before anything else and is never a failure', () => {
     const verdict = classifyWorkerOutcome({kind: 'stopped', reason: 'the turn was stopped'})
     assert.equal(verdict.kind, 'stopped')
@@ -61,11 +49,6 @@ test('an answer carries its text and what it cost', () => {
     assert.equal(verdict.turns, 2)
 })
 
-/*
- * A model with nothing to say writes `(none)` about as often as it writes nothing at all. Both mean
- * the same thing, so both are recorded the same way rather than one of them reaching the spec as a
- * finding that reads like a real one.
- */
 test('an answer that is only the word nothing is recorded as empty', () => {
     for (const text of ['(none)', 'N/A', '- none', '  (no entries) ', 'Nothing.'])
         assert.equal(classifyWorkerOutcome(answered(text)).kind, 'empty', text)
@@ -93,10 +76,6 @@ test('every kind the table can answer is declared', () => {
     assert.deepEqual([...new Set(answers)].sort(), [...WORKER_KINDS].sort())
 })
 
-/*
- * Three states have to stay tellable apart by anyone reading a section, so each carries its own
- * marker and an empty degrade is never read as a real finding.
- */
 test('a degraded section says so even when it saved nothing', () => {
     assert.equal(
         degradedSection('CONTEXT', 'ran out of steps'),

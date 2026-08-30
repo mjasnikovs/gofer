@@ -245,8 +245,6 @@ impl AddonStager {
             git_exclude: plan_exclude(workspace.root(), &ledger),
             project_trailing_blanks: Some(trailing_blanks),
         };
-        // The ledger is written before the worktree changes: an entry describing work that never
-        // happened cleans up to a no-op, while unrecorded work would be stranded forever.
         ledger.entries.push(entry.clone());
         self.save(&ledger)?;
         match install(workspace, &entry, &join_lines(&lines), &project.hash) {
@@ -270,7 +268,6 @@ impl AddonStager {
             return Ok(false);
         };
         let entry = ledger.entries.remove(position);
-        // The ledger is saved only once removal succeeded, so a failure leaves the entry to retry.
         revert(&entry, &ledger.entries)?;
         self.save(&ledger)?;
         Ok(true)
@@ -309,16 +306,9 @@ pub fn managed_state(workspace: &Workspace) -> Result<Managed, FileError> {
     if !directory.exists() {
         return Ok(Managed::Absent);
     }
-    // An empty `addons/gofer` is nobody's addon. It is the husk a session that died left behind,
-    // and it is what a live turn actually met: `ls addons/gofer/` printed nothing, and
-    // `godot_session start` still answered `addons/gofer exists but was not installed by Gofer`
-    // until the agent guessed at `rm -rf addons/gofer`. Absent is the truth about it, and staging
-    // then proceeds the way it does into a worktree that never had one.
     if std::fs::read_dir(&directory).is_ok_and(|mut entries| entries.next().is_none()) {
         return Ok(Managed::Absent);
     }
-    // A manifest that parses answers outright, either way. Somebody else saying they own this is
-    // the case the refusal is for, and no amount of familiar-looking filenames overrules it.
     if let Ok(contents) = workspace.read(MANIFEST_PATH)
         && let Ok(manifest) = serde_json::from_str::<AddonManifest>(&contents.text)
     {
@@ -329,8 +319,6 @@ pub fn managed_state(workspace: &Workspace) -> Result<Managed, FileError> {
         });
     }
     if holds_only_gofers_own_files(workspace) {
-        // The manifest is gone or unreadable and everything beside it is ours. Answering with the
-        // manifest this build would write lets `stage` replace the lot, which is the repair.
         return Ok(Managed::Gofer(manifest()));
     }
     Ok(Managed::Foreign)
@@ -502,18 +490,12 @@ fn ignore_missing(result: Result<(), FileError>) -> Result<(), FileError> {
 }
 
 fn revert(entry: &LedgerEntry, remaining: &[LedgerEntry]) -> Result<(), FileError> {
-    // A worktree that no longer exists needs no file cleanup, but its shared exclude entry does.
     if let Ok(workspace) = Workspace::open(Path::new(&entry.worktree)) {
         restore_project_file(&workspace, entry)?;
         for path in &entry.files {
-            // Godot 4.4+ writes a `<file>.uid` sidecar next to every script it imports, and it
-            // leaves with the file — otherwise the addon directory survives unstage as what looks
-            // like a foreign leftover. `Workspace::delete` takes it, so there is no second call
-            // here any more.
             ignore_missing(workspace.delete(path, None))?;
         }
         for directory in &entry.directories {
-            // A directory the user filled with their own files stays.
             let _ = workspace.delete(directory, None);
         }
     }
@@ -543,15 +525,9 @@ fn plan_exclude(worktree: &Path, ledger: &Ledger) -> Option<GitExcludeRecord> {
         .join("info")
         .join("exclude");
     let path = file.display().to_string();
-    // A file that cannot be read is not a file without the pattern. `unwrap_or_default` said it
-    // was, which recorded the pattern as Gofer's — and the last session to stop then deletes that
-    // line, and the marker beside it, out of a file the user wrote. A missing file genuinely has
-    // no pattern in it; anything else is a question that was not answered.
     let present = match fs::read_to_string(&file) {
         Ok(contents) => contents.lines().any(|line| line.trim() == EXCLUDE_PATTERN),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        // Claimed by nobody: Gofer will not write the pattern it cannot see, and will not delete a
-        // line it cannot prove it wrote.
         Err(_) => return None,
     };
     let owned = ledger.entries.iter().any(|entry| {
@@ -638,9 +614,6 @@ fn now_millis() -> u64 {
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or_default()
 }
-
-// `project.godot` is a Godot-owned configuration file, so Gofer edits the two lines it owns and
-// leaves every other byte — comments, ordering, and unrelated settings — exactly as it found them.
 
 fn split_lines(text: &str) -> Vec<String> {
     text.split('\n').map(str::to_owned).collect()
@@ -788,8 +761,6 @@ fn enable_plugin(lines: &mut Vec<String>) -> PluginRecord {
         };
     };
     let mut entries = parse_packed_string_array(&lines[index]);
-    // Gofer's own entry, left behind by a session that was committed before it could clean up.
-    // Claiming it is what takes it back out again.
     if entries.iter().any(|entry| entry == PLUGIN_ENTRY) {
         return PluginRecord {
             entry_added: true,
@@ -845,7 +816,6 @@ fn add_autoload(lines: &mut Vec<String>) -> AutoloadRecord {
         };
     };
     let previous_line = lines[index].clone();
-    // Gofer's own line, left behind the same way. There is nothing underneath it to put back.
     if previous_line == line {
         return AutoloadRecord {
             added: true,
@@ -950,15 +920,6 @@ mod tests {
         }
     }
 
-    /*
-     * The autoload going missing under a live session is something Gofer can see.
-     *
-     * A live turn spent seventeen calls on this: a branch switch after staging took the two lines
-     * out of `project.godot`, so every game launched afterwards booted with no runtime helper.
-     * `godot_runtime run` answered `runtime_slow_start`, `get_state` answered
-     * `running: true, runtimeReady: false`, `wait` answered `runtime_not_running`, round and round,
-     * about a game that was on screen the whole time. Nothing anywhere named the cause.
-     */
     #[test]
     fn a_project_that_lost_the_staged_autoload_says_so() {
         let fixture = fixture();
@@ -973,16 +934,12 @@ mod tests {
             "a staged project registers the helper"
         );
 
-        // What a checkout of a branch cut before staging leaves behind: the addon's files are Git
-        // ignored and survive, and the one file Git tracks goes back to what it was.
         fs::write(fixture.workspace.root().join(PROJECT_FILE), PROJECT).expect("rewrite");
         assert!(
             runtime_helper_missing(fixture.workspace.root()),
             "the entry is gone from the file the game reads"
         );
 
-        // An `[autoload]` section holding somebody else's autoload is not Gofer's helper either,
-        // and neither is the name pointed at another script.
         fs::write(
             fixture.workspace.root().join(PROJECT_FILE),
             format!("{PROJECT}\n[autoload]\n\nGoferRuntime=\"*res://mine.gd\"\n"),
@@ -993,8 +950,6 @@ mod tests {
             "the name alone is not the helper; it has to be Gofer's script"
         );
 
-        // A worktree with no project file at all answers `false`. Nothing was read, so there is
-        // nothing to claim.
         let empty = TempDir::new().expect("empty directory");
         assert!(!runtime_helper_missing(empty.path()));
     }
@@ -1027,9 +982,6 @@ mod tests {
             "a directory holding only Gofer's own files is Gofer's, manifest or no manifest"
         );
 
-        // And the shape a live turn actually met: the directory survives with nothing in it. That
-        // is not somebody's addon, it is a husk, and `ls addons/gofer/` printing nothing is what
-        // the agent saw before it resorted to `rm -rf`.
         for path in staged_files() {
             ignore_missing(fixture.workspace.delete(&path, None)).expect("empty it out");
             ignore_missing(fixture.workspace.delete(&format!("{path}.uid"), None)).expect("uid");
@@ -1044,14 +996,11 @@ mod tests {
             .stage(&fixture.workspace)
             .expect("staging into the husk is the repair");
 
-        // And the ledger of the session that staged it is gone too, which is what a second process
-        // sees. Staging has to succeed anyway: that is the repair.
         let orphaned = AddonStager::new(fixture._home.path().join("another-ledger.json"));
         orphaned
             .stage(&fixture.workspace)
             .expect("a leftover Gofer addon is restaged rather than refused");
 
-        // One file Gofer never writes, over a manifest that is broken again: somebody else's.
         let restaged = fixture.workspace.read(MANIFEST_PATH).expect("the manifest");
         fixture
             .workspace
@@ -1190,7 +1139,6 @@ mod tests {
         let fixture = fixture();
         fixture.stager.stage(&fixture.workspace).expect("stage");
 
-        // The editor imports the staged scripts and records a UID cache file next to each one.
         for sidecar in [
             "addons/gofer/plugin.gd.uid",
             "addons/gofer/params.gd.uid",
@@ -1222,7 +1170,6 @@ mod tests {
         fixture.stager.stage(&fixture.workspace).expect("stage");
         let staged = project_text(&fixture);
 
-        // A crash leaves the ledger entry and the worktree exactly as the first staging left them.
         let entry = fixture.stager.stage(&fixture.workspace).expect("restage");
 
         assert_eq!(
@@ -1317,7 +1264,6 @@ mod tests {
             "enabled=PackedStringArray(\"res://addons/other/plugin.cfg\", \"{PLUGIN_ENTRY}\")"
         )));
 
-        // Godot enables another plugin and the user adds an autoload while the session runs.
         let contents = fixture.workspace.read(PROJECT_FILE).expect("project file");
         let concurrent = contents
             .text
@@ -1438,7 +1384,6 @@ mod tests {
             repository_directory.path(),
             &["commit", "--allow-empty", "-m", "Initial"],
         );
-        // The project is on disk but was never committed, so the worktree is checked out empty.
         fs::write(repository_directory.path().join(PROJECT_FILE), PROJECT).expect("project file");
         let worktree_root = TempDir::new().expect("temporary worktrees");
         let worktree = worktree_root.path().join("task");

@@ -1,13 +1,3 @@
-; Engine configuration file.
-; The workspace for a bug one breakpoint cannot find.
-;
-; Damage runs through three helpers and comes out too large. Every one of the three reads correct
-; on the page: the wrong number comes from an exported multiplier the scene overrides, so the value
-; that breaks the sum is not in any script. Stopping at the top of the chain shows a right input and
-; a wrong result with three candidates between them, and only stepping over them one at a time says
-; which. `step_over`, `step_in` and `step_out` are the operations no live run had ever reached.
-;
-; Everything else is `fixtures/live-project`'s, for the reasons its own comments give.
 config_version=5
 
 [application]

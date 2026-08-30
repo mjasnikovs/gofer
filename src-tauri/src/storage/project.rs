@@ -341,9 +341,6 @@ impl Project<'_> {
     }
 
     fn maintain_database(&self) -> Result<MaintenanceResult, CommandError> {
-        // Not `?`. This is one view's preparation, and a memory table that cannot be read is not a
-        // reason to leave the attachments, the run directories, the stale manual answers and the old
-        // backups where they are. Its own view reports the zero it collected.
         let pending = self
             .storage
             .memory()
@@ -352,10 +349,6 @@ impl Project<'_> {
         let _write_guard = self.storage.write_lock()?;
         let cutoffs = Cutoffs::current()?;
         let mut collected = MaintenanceResult::default();
-        // Every view is asked, whatever the one before it answered. A view's upkeep is its own —
-        // one unremovable file under `sketches` has nothing to do with the memory backfill or the
-        // backups — and stopping at the first failure meant one such file permanently disabled the
-        // other five. The pass still fails, with the first reason, once all six have run.
         let mut failure = None;
         for view in Upkeep::every() {
             match view.collect(self.storage, &cutoffs, &pending) {
@@ -519,7 +512,6 @@ mod tests {
             Some("remembered".to_owned())
         );
 
-        // A second open has nothing left to carry, and must not reach back into the old directory.
         carried
             .project()
             .write_ui_state("ui.workspace", Some("since moved"))
@@ -622,8 +614,6 @@ mod tests {
             vec!["sound-design".to_owned(), "tile-levels".to_owned()]
         );
 
-        // Turning everything back on forgets the row rather than storing an empty list, so the
-        // project is indistinguishable from one that never turned anything off.
         storage
             .project()
             .write_disabled_skills(&[])
@@ -693,7 +683,6 @@ mod tests {
 
         storage.project().write_agent_prompt(None).expect("forget");
         assert_eq!(storage.project().read_agent_prompt().expect("read"), None);
-        // It shares `project_state` with the interface keys, and forgetting it left them alone.
         storage
             .project()
             .write_ui_state("ui.workspace", Some("kept"))
@@ -783,7 +772,6 @@ mod tests {
             Some("{\"text\":\"use Tween\"}".to_owned())
         );
 
-        // A different manual, the other operation, and a different question are all misses.
         assert_eq!(
             project.cached_docs_answer("0.1.4", "ask", "how do i tween"),
             None

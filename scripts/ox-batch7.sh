@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# The two tasks batch6 never reached: particles and save/load.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 run() { GOFER_LIVE_FIXTURE=fixtures/live-project ./scripts/ox-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

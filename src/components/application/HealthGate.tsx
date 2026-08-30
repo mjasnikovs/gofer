@@ -17,13 +17,10 @@ import type {HealthCheck, HealthRemedy, HealthReport} from '../../models/health'
 import {blockingSummary, statusLabel, statusVariant} from '../../models/health'
 
 type HealthGateProps = Readonly<{
-    /** Called once nothing is blocking, which is the ordinary case and shows no interface at all. */
     onReady: () => void
 }>
 
-/** The width the checklist reads at: long paths and instructions, one column. */
 const GATE_WIDTH = 720
-/** How long the first check may take before it is worth telling the user it is running. */
 const SLOW_CHECK_MS = 400
 
 export function HealthGate({onReady}: HealthGateProps) {
@@ -42,8 +39,6 @@ export function HealthGate({onReady}: HealthGateProps) {
     )
 
     const check = useCallback(async () => {
-        // Outside the desktop shell there is no workspace to check, and the browser-driven suites
-        // must not sit behind a gate that can never pass.
         if (!isTauri()) {
             onReady()
             return
@@ -85,7 +80,6 @@ export function HealthGate({onReady}: HealthGateProps) {
                                 defaultPath: report.workspace
                             })
                     })
-                    // A cancelled picker is not a failure; the user simply changed their mind.
                     if (path === undefined) return
                 }
                 accept(
@@ -102,10 +96,6 @@ export function HealthGate({onReady}: HealthGateProps) {
         [accept, report]
     )
 
-    // Nothing renders while the first check runs, so a healthy workspace opens straight into the
-    // workspace rather than flashing a checklist that immediately disappears. A check that outlasts
-    // the delay is one the user is waiting on — almost always the AI server being asked whether it
-    // is there — and an empty window would read as a hang.
     if (!report && !error) {
         return isSlow ?
                 <AppShell
@@ -149,7 +139,6 @@ export function HealthGate({onReady}: HealthGateProps) {
                             gap={6}
                             hAlign='stretch'
                         >
-                            {/* One axis, the same one the splash uses. */}
                             <VStack
                                 gap={3}
                                 hAlign='start'
@@ -258,8 +247,6 @@ function CheckRow({check, busyAction, onApply}: CheckRowProps) {
                 endContent: (
                     <Button
                         label={remedy.label}
-                        // The fix for what is stopping the user leads; a fix offered next to a
-                        // check that already passes is an option, not an instruction.
                         variant={check.status === 'blocked' ? 'primary' : 'secondary'}
                         size='sm'
                         isDisabled={busyAction !== undefined && busyAction !== remedy.action}

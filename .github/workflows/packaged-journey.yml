@@ -1,14 +1,5 @@
 name: Packaged journey
 
-# One definition of the packaged desktop journey for every platform it runs on.
-#
-# The Linux leg runs on each push and the Windows and macOS legs run nightly, but they are the same
-# job: a second copy is how the Linux leg drifted ahead of the other two while the matrix that was
-# meant to prove them stayed configured and unrun. Each leg installs the pinned Godot artifact for
-# its own platform from `protocol/godot-artifacts.json`, builds the release-mode WebDriver
-# application, and drives the real binary through the embedded driver provider, which needs no
-# external WebDriver on any of the three.
-
 on:
     workflow_call:
         inputs:
@@ -24,9 +15,6 @@ on:
 jobs:
     journey:
         runs-on: ${{ inputs.os }}
-        # A cold Rust release build of the Tauri application, the real-editor suites, and a journey
-        # that imports a Godot project twice do not fit in the 60 minutes the Linux leg used to
-        # need on its own.
         timeout-minutes: 90
         steps:
             - uses: actions/checkout@v4
@@ -37,8 +25,6 @@ jobs:
             - uses: dtolnay/rust-toolchain@stable
               with:
                   toolchain: 1.97.1
-            # Every run before this one rebuilt the whole dependency tree from source, inside a
-            # thirty-minute cap. Nothing in that tree changes between commits.
             - name: Reuse the compiled dependency tree between runs
               uses: Swatinem/rust-cache@v2
               with:
@@ -57,33 +43,19 @@ jobs:
               env:
                   GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
               run: node scripts/install-godot.mjs
-            # Freezing the sidecar is the only per-platform packaging step Gofer performs itself,
-            # and it has to happen before the application is built: the Tauri build is what copies
-            # `src-tauri/sidecar` beside the executable, which is where the journey's formatting
-            # assertion reads it from. The build proves the artifact before handing it over.
             - name: Build the pinned gdformat sidecar
               run: npm run build:gdformat
-            # The build comes before the suites, not after. It used to be the other way round, and
-            # a red Godot suite skipped it — so five nightly Windows runs in a row ended without
-            # anything having said whether the application builds on Windows at all.
             - name: Build the release-mode WebDriver application
               run: npm run build:desktop:test
-            # Three acceptance tests run the fixture as a real windowed game, because a screenshot
-            # needs a rendered frame. Linux runners have no display, so the suite claims one through
-            # `xvfb-run` itself; Windows and macOS runners have one already.
             - name: Run real Godot protocol and acceptance tests
               if: inputs.godot-suite
               run: npm run test:godot
-            # Linux runners have no display; Windows and macOS runners do, and the managed editor
-            # the journey starts is headless on all three.
             - name: Run the packaged application with zero retries
               if: runner.os == 'Linux'
               run: xvfb-run -a npm run test:desktop:packaged
             - name: Run the packaged application with zero retries
               if: runner.os != 'Linux'
               run: npm run test:desktop:packaged
-            # The first run of a platform is the one that most needs evidence, and the WebDriver
-            # log holds the application's own backend and frontend output.
             - name: Collect the journey logs
               if: failure()
               uses: actions/upload-artifact@v4

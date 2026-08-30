@@ -21,8 +21,6 @@ use crate::model_server::ServedModel;
 
 mod catalogue;
 mod legacy;
-// Only `mod tests` reads the rest of it: the catalogue's per-driver decisions are the parent's
-// tests, and moving 2,800 lines of them was not part of the split.
 #[cfg(test)]
 use catalogue::*;
 pub(crate) use catalogue::{
@@ -30,9 +28,6 @@ pub(crate) use catalogue::{
 };
 mod secrets;
 use legacy::*;
-// Imported rather than re-exported: `mod tests` reads these through `use super::*`, and a private
-// `use` is visible to a module's descendants. The names the rest of the crate calls are re-exported
-// below, by name, so the crate's view of this module does not change with the split.
 use secrets::*;
 pub(crate) use secrets::{
     Secret, Secrets, SystemSecrets, apply_saved_secrets, clear_chatgpt_credential,
@@ -248,8 +243,6 @@ impl AiSettings {
             if let Some(base_url) = base_url {
                 connection.base_url = base_url;
             }
-            // Named before the level is applied, because naming a model replaces the whole row and
-            // the level is the one fact on it a run chose.
             connection.model.name.clone_from(&model);
             if let Some(facts) = shipped_model_facts(driver, &model) {
                 connection.model.name = facts.name;
@@ -264,27 +257,9 @@ impl AiSettings {
             }
             connection.model.id = model;
             if let Some(level) = thinking_level {
-                // A named level has to reach the wire, and for a llama.cpp host it only reaches it
-                // as a chat-template argument: the server takes `chat_template_kwargs`, ignores
-                // `reasoning_effort` without a word, and `default_local_profile` starts every flag
-                // that carries one at `false` because the application derives them from `/props`
-                // and a suite has no `/props` read to derive them from.
-                //
-                // Measured through a logging proxy on 2026-08-27: a live turn started with
-                // `GOFER_LIVE_THINKING=medium` sent a request body carrying `model`, `messages`,
-                // `stream`, `stream_options`, `store`, `max_completion_tokens` and `tools`, and no
-                // thinking field of any kind. It thought at whatever the server was started with,
-                // which made the knob look like it worked and made any A/B across levels a
-                // comparison of one level with itself.
                 connection.chat_template_thinking = driver == AiConnectionType::OpenaiCompatible;
                 connection.model.reasoning = true;
                 connection.model.supports_reasoning_effort = true;
-                // The level a run named is the only one it offers, so pi-ai's own clamp cannot
-                // move it: `piThinkingLevelMap` maps a named effort to itself and everything else
-                // to null, and an unmapped level is silently rewritten — `xhigh` went out as
-                // `high` against a template that raises on anything but its own three words. A
-                // level that is not one of the six is left unlisted, because listing a word pi-ai
-                // has no effort for clamps every request to `off`.
                 if NAMED_EFFORTS.contains(&level.as_str()) {
                     connection.model.thinking_levels = vec![level.clone()];
                 }
@@ -719,12 +694,6 @@ fn default_max_tokens() -> u64 {
 /// never past a quarter of the window, and never zero, which [`validate_settings`] refuses.
 fn ceiling_within(context_window: u64, declared: Option<u64>) -> u64 {
     let reserve = context_window - (context_window * u64::from(default_compaction_percent())) / 100;
-    // The reserve is 14% of the window, and below about 117,000 that is less than one whole
-    // GDScript file — a `godot_script save` cut off mid-file for want of a ceiling nobody chose.
-    // So the cap is raised to what [`default_max_tokens`] holds, as far as a quarter of the window
-    // allows: past that the ceiling stops being a ceiling, which is the failure this exists for.
-    // The floor lifts the *cap*, never a declared ceiling: a model that really stops at 4,096 is
-    // one whose 4,096 has to survive, or every answer from it is an HTTP 400.
     let cap = reserve
         .min(context_window / 4)
         .max(default_max_tokens().min(context_window / 4));
@@ -843,8 +812,6 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
         name: "ChatGPT subscription".to_owned(),
         base_url: "https://chatgpt.com/backend-api".to_owned(),
         api: ApiDialect::OpenaiCodexResponses,
-        // ChatGPT takes a reasoning effort like any OpenAI endpoint. Nothing about a chat template
-        // reaches it, and there is no `/props` behind that address to say otherwise.
         chat_template_thinking: false,
         model: ModelChoice {
             id: "gpt-5.6-terra".to_owned(),
@@ -853,8 +820,6 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
             max_tokens: 128_000,
             reasoning: true,
             supports_reasoning_effort: true,
-            // The Codex driver owns its own reasoning field; nothing here resolves to
-            // `reasoning: {enabled: false}` on the wire.
             reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: vec!["text".to_owned(), "image".to_owned()],
@@ -902,20 +867,14 @@ fn default_openrouter_profile() -> AiConnectionProfile {
         name: "OpenRouter".to_owned(),
         base_url: OPENROUTER_BASE_URL.to_owned(),
         api: ApiDialect::OpenaiCompletions,
-        // A chat template is a llama.cpp mechanism. There is no `/props` behind this address.
         chat_template_thinking: false,
         model: ModelChoice {
             id: "nvidia/nemotron-3.5-lightning:free".to_owned(),
             name: "NVIDIA: Nemotron 3.5 Lightning".to_owned(),
             context_window: 1_000_000,
-            // A seed the first catalogue read replaces, so it is the safe one rather than the
-            // model's own: this connection is billed, and OpenRouter reserves credit for the
-            // ceiling before it generates a token. See `ceiling_within`.
             max_tokens: default_max_tokens(),
             reasoning: false,
             supports_reasoning_effort: false,
-            // A seed, replaced by the first catalogue read. The model it names does not reason at
-            // all, so it cannot be one that refuses to stop.
             reasoning_mandatory: false,
             thinking_levels: Vec::new(),
             input: vec!["text".to_owned()],
@@ -936,7 +895,6 @@ fn default_cerebras_profile() -> AiConnectionProfile {
         name: "Cerebras".to_owned(),
         base_url: CEREBRAS_BASE_URL.to_owned(),
         api: ApiDialect::OpenaiCompletions,
-        // A chat template is a llama.cpp mechanism. There is no `/props` behind this address.
         chat_template_thinking: false,
         model: ModelChoice {
             id: seed.id.to_owned(),
@@ -949,9 +907,6 @@ fn default_cerebras_profile() -> AiConnectionProfile {
             thinking_levels: seed.thinking_levels.iter().map(|&s| s.to_owned()).collect(),
             input: seed.input.iter().map(|&s| s.to_owned()).collect(),
             off_effort: seed.off_effort.map(str::to_owned),
-            // Never `off` for a seed that cannot stop thinking: that is the one value which makes
-            // its every request fail, reached by nothing more than opening a settings file that
-            // had never named a level here. See `thinking_levels_for`.
             thinking_level: if seed.reasoning_mandatory {
                 "medium"
             } else {
@@ -1031,12 +986,8 @@ fn cerebras_model_option(model: &CerebrasModel) -> AiModelOption {
         id: model.id.to_owned(),
         name: model.name.to_owned(),
         context_window: model.context_window,
-        // Cerebras has no output ceiling of its own — a request may name the whole window and is
-        // answered — so the table repeats the window and this is what actually bounds it.
         max_tokens: ceiling_within(model.context_window, Some(model.max_tokens)),
         reasoning: true,
-        // Named efforts are the only evidence an effort field will be read, and both shipped models
-        // name three. Same rule as `openrouter_model_options`.
         supports_reasoning_effort: !model.thinking_levels.is_empty(),
         reasoning_mandatory: model.reasoning_mandatory,
         thinking_levels: model
@@ -1116,9 +1067,6 @@ pub(crate) fn docs_expansion_connection(
 ) -> Option<crate::rag::RetrieveConnection> {
     let chosen = settings.subagent.connection.as_ref();
     let driver = chosen.map_or(settings.connection_type, |c| c.connection_type);
-    // The address, the dialect and the credential are the connection's; the model and the level it
-    // is asked at are the child's own. Two typed halves merged, which is what the child *is*, and
-    // exactly how `subagentModelFor` splits them in the worker.
     let connection = settings.connection_for(driver)?;
     let model = chosen.map_or(&connection.model, |c| &c.model);
     let codex = driver == AiConnectionType::OpenaiCodex;
@@ -1140,8 +1088,6 @@ pub(crate) fn docs_expansion_connection(
         reasoning_mandatory: model.reasoning_mandatory,
         thinking_levels: model.thinking_levels.clone(),
         off_effort: model.off_effort.clone(),
-        // The connection's, never the child's: the child borrows an address, and how thinking is
-        // turned on is a fact about the server at that address.
         chat_template_thinking: connection.chat_template_thinking,
         timeout_ms: settings.timeout_ms,
         max_retries: settings.max_retries,
@@ -1175,9 +1121,6 @@ pub(crate) struct ModelFacts {
 /// keeps what it had rather than being told the model cannot think.
 fn model_facts(catalog: &PiCatalog, base_url: &str, model_id: &str) -> Option<ModelFacts> {
     let server = catalog.servers.get(&server_key(base_url))?;
-    // A named model answers for itself. One the catalogue does not name — the file a llama.cpp host
-    // was started with, under that file's own path — gets its server's answer, which is the most
-    // that can honestly be said about it.
     let known = catalog.models.iter().find(|model| model.id == model_id);
     Some(ModelFacts {
         model_name: known.map(|model| model.name.clone()),
@@ -1202,14 +1145,9 @@ fn thinking_levels(
     mandatory: bool,
     levels: &[String],
 ) -> Vec<String> {
-    // Reasoning first, and it is not redundant: a model can be marked as taking an effort and as
-    // not thinking at all, and a model that does not think has nothing to spend an effort on.
     if !reasoning {
         return vec!["off".to_owned()];
     }
-    // And then whether it may be turned off at all. `off` resolves to `reasoning: {enabled: false}`
-    // on the wire, which a model whose reasoning is mandatory answers with HTTP 400. The same rule
-    // as `thinkingLevelsFor` in `src/models/settings.ts`; the two are one rule in two languages.
     let off: &[String] = if mandatory {
         &[]
     } else {
@@ -1283,9 +1221,6 @@ fn resolve_model_facts(
     catalog: &PiCatalog,
     served: &HashMap<String, ServedModel>,
 ) {
-    // The sub-agent has no address of its own — it borrows the connection it names. So the server
-    // its model is resolved against is that connection's, not the parent's. Read before the
-    // connections are borrowed, because after that it cannot be.
     let local_base_url = settings
         .connection_for(AiConnectionType::OpenaiCompatible)
         .map(|local| local.base_url.clone());
@@ -1343,12 +1278,6 @@ fn resolve_model(
         }
     }
     if let Some(model) = served.get(&server_key(base_url)) {
-        // The id too, not only the facts about it — but only where there is one model to be. A
-        // host serving one file answers to its path, and a stored id naming the file before it was
-        // swapped names nothing at all. A router serving a directory of them is the other case:
-        // there the id is the user's choice among several, `/props` describes only one of those,
-        // and adopting it would move them onto a model they did not pick. So a router's answer is
-        // taken only for the model it is actually about.
         if !model.sole && choice.id != model.id {
             return;
         }
@@ -1358,17 +1287,11 @@ fn resolve_model(
         }
         if let Some(window) = model.context_window {
             choice.context_window = window;
-            // The output ceiling cannot outlive the window it is spent inside, and it may not be
-            // the whole of it either — a server that answers `/props` with a window smaller than
-            // the stored ceiling used to turn that ceiling into the window exactly. Clamped rather
-            // than replaced, so a user who chose a smaller one keeps it.
             choice.max_tokens = ceiling_within(window, Some(choice.max_tokens));
         }
         choice.reasoning = model.reasoning;
         choice.supports_reasoning_effort = !model.efforts.is_empty();
         choice.thinking_levels = model.efforts.clone();
-        // A server that answered `/props` is a llama.cpp host, and thinking is turned on there by
-        // a chat-template argument. The effort field it also accepts does nothing.
         if let Some(chat_template_thinking) = chat_template_thinking {
             *chat_template_thinking = model.reasoning;
         }
@@ -1376,9 +1299,6 @@ fn resolve_model(
             choice.input = input;
         }
     }
-    // The level, re-applied against what the model turned out to offer. Resolution can take
-    // reasoning away entirely, and it can take the levels away while leaving the thinking — a
-    // stored `medium` means nothing to a template whose only answers are on and off.
     choice.thinking_level = keep_level(
         &choice.thinking_level,
         choice.reasoning,
@@ -1484,10 +1404,6 @@ fn read_settings_from_paths(path: &Path, pi: Option<&Path>) -> Result<GoferSetti
     let settings = serde_json::from_str(&contents)
         .map_err(|error| format!("Gofer settings in {} are invalid: {error}", path.display()))?;
     let mut settings = validate_settings(settings)?;
-    // After validation rather than inside it, because the catalogue is a file on this machine and
-    // `validate_settings` is the pure half — the half a test can drive without one. This is the
-    // funnel every read passes through, so what is on disk is never the authority on what a model
-    // can do. It is a copy, and this is where the copy is replaced.
     resolve_model_facts(
         &mut settings.ai,
         &pi.and_then(|path| pi_catalog_from_path(path).ok())
@@ -1553,12 +1469,9 @@ fn pi_model_option(provider: &PiProvider, model: &PiModel) -> AiModelOption {
         max_tokens: model.max_tokens,
         reasoning,
         supports_reasoning_effort: reasoning && provider.compat.supports_reasoning_effort,
-        // The catalogue is a file, and no file has ever carried this. Only a live catalogue says.
         reasoning_mandatory: false,
-        // The catalogue is a file. Only the server that has the model loaded can name its efforts.
         thinking_levels: Vec::new(),
         input: model.input.clone(),
-        // The catalogue is a file, and no file has ever carried this either.
         off_effort: None,
     }
 }
@@ -1652,10 +1565,6 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
             settings.version
         ));
     }
-    // A hosted driver's address and dialect are not the user's to set, so they are corrected rather
-    // than validated. A settings file hand-edited to point one of these somewhere else would send
-    // that driver's key to that address, and the catalogue parser to a server that answers a
-    // different shape.
     for (driver, address) in [
         (AiConnectionType::Openrouter, OPENROUTER_BASE_URL),
         (AiConnectionType::Cerebras, CEREBRAS_BASE_URL),
@@ -1666,9 +1575,6 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
             pinned.chat_template_thinking = false;
         }
     }
-    // Every connection, not only the live one. They are all the user's to save and any of them can
-    // be the one a sub-agent runs on, so a rule that held for whichever was switched on was a rule
-    // the other two were exempt from.
     for connection in settings.ai.connections.values_mut() {
         validate_connection(connection)?;
     }
@@ -1678,8 +1584,6 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     if settings.ai.max_retries > 10 {
         return Err("Maximum retries cannot exceed 10".to_owned());
     }
-    // The floor is not taste: what is left above the line is the room the summary request and the
-    // answer after it both have to fit in, and a line drawn too high leaves neither enough to work.
     if !(50..=100).contains(&settings.ai.compaction_percent) {
         return Err("Compaction threshold must be between 50 and 100 percent".to_owned());
     }
@@ -1695,8 +1599,6 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
         settings.ai.subagent.connection =
             Some(validate_subagent_connection(connection, has_local)?);
     }
-    // Corrected rather than refused. An engine name nobody recognises is one field of one tool, and
-    // failing the whole load over it would take the user's model, worktree and prompt down with it.
     if !SEARCH_PROVIDERS.contains(&settings.ai.web.search_provider.as_str()) {
         settings.ai.web.search_provider = default_search_provider();
     }
@@ -1734,16 +1636,6 @@ fn validate_connection(connection: &mut AiConnectionProfile) -> Result<(), Strin
 /// written against the flat settings and the sub-agent's against its own shape — and the only thing
 /// they differed in is what a missing model id is called on screen, which is the argument.
 fn validate_model_choice(choice: &mut ModelChoice, id_name: &str) -> Result<(), String> {
-    // A ceiling that is the whole window is not a ceiling, and it is not a choice either: no field
-    // in the app offers one, and the only way a settings file holds one is that a shipped default
-    // put it there. `default_openrouter_profile` did, `max_tokens: 1_000_000` against a
-    // `context_window: 1_000_000`, and every file written while it did still holds it — OpenRouter
-    // reserves credit for the ceiling before it generates anything, so those users go on being
-    // answered HTTP 402 whatever this build ships.
-    //
-    // Repaired rather than refused, and only in this one shape. A stored ceiling that is a ceiling
-    // is the user's and is left exactly as they set it, which is what `default_max_tokens` says
-    // and what `a_response_may_not_be_as_long_as_the_whole_window` holds this to.
     if choice.max_tokens >= choice.context_window && choice.context_window > 0 {
         choice.max_tokens = ceiling_within(choice.context_window, None);
     }
@@ -1773,11 +1665,6 @@ fn validate_model_choice(choice: &mut ModelChoice, id_name: &str) -> Result<(), 
             "Context window and maximum output tokens must be greater than zero".to_owned(),
         );
     }
-    // Dropped rather than refused, and dropped in two shapes. A blank word is a word nothing can
-    // send, and a word on a model that takes no effort field is a word nothing will read — both
-    // are settings files hand-edited to say something the catalogue never said. Left in place they
-    // would put a provider's private vocabulary onto the wire for a connection that has no use for
-    // it. See `CerebrasModel::off_effort`.
     if choice
         .off_effort
         .as_ref()
@@ -1964,8 +1851,6 @@ mod tests {
                 "serde writes {id} as {written}"
             );
         }
-        // And no driver is missing from the catalogue: the map every settings file is built with
-        // has one connection per driver, so its length is the count the enum really has.
         assert_eq!(
             default_connections(default_local_profile()).len(),
             DRIVER_IDS.len(),
@@ -1991,14 +1876,6 @@ mod tests {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/settings");
         for name in ["mod.rs", "secrets.rs", "legacy.rs"] {
             let body = std::fs::read_to_string(here.join(name)).expect("read a settings module");
-            // The test modules are exempt: `mod tests` in `mod.rs` drives the real per-driver
-            // decisions, and it holds this very sentence.
-            //
-            // Anchored on the `mod` and not on the attribute alone, which is what this was and is
-            // why it went quietly vacuous: `#[cfg(test)] use catalogue::*;` sits at the top of this
-            // file, so splitting on the first attribute left 25 of 4,800 lines to search and the
-            // test went on passing. A source-reading test that cannot say how much source it read
-            // is a test that can be switched off by an unrelated edit, so it says.
             let production = body
                 .split("\n#[cfg(test)]\nmod ")
                 .next()
@@ -2053,7 +1930,6 @@ mod tests {
             read(AiConnectionType::Cerebras),
             Some("cerebras".to_owned())
         );
-        // ChatGPT authenticates with an OAuth credential and takes no key at all.
         assert_eq!(read(AiConnectionType::OpenaiCodex), None);
     }
     use crate::{list_ai_models, test_ai_connection};
@@ -2199,9 +2075,6 @@ mod tests {
             "and still hold a whole file in one write: {}",
             shipped.max_tokens
         );
-        // And it fits inside the room compaction leaves above its own line, which is what the
-        // summary request and the answer after it share. An answer that can eat the whole reserve
-        // is the failure this ceiling exists for.
         let reserve = shipped.context_window
             - (shipped.context_window * u64::from(default_compaction_percent())) / 100;
         assert!(
@@ -2210,8 +2083,6 @@ mod tests {
             shipped.max_tokens
         );
 
-        // A stored ceiling is the user's, and reading their settings never replaces it — even out
-        // of a settings file written in the flat shape, which is what this one is.
         let chosen: AiSettings = serde_json::from_value(serde_json::json!({
             "connectionType": "openai-compatible",
             "name": "Local AI",
@@ -2326,20 +2197,12 @@ mod tests {
     /// produced by the ceiling alone, before the model is asked for anything.
     #[test]
     fn a_catalog_ceiling_is_taken_only_as_far_as_it_fits() {
-        // window 262,144 -> reserve 36,701. A declared 32,000 is under it and survives whole.
         assert_eq!(ceiling_within(262_144, Some(32_000)), 32_000);
-        // The same window, a ceiling the model would be glad to fill: cut to the reserve.
         assert_eq!(ceiling_within(262_144, Some(235_929)), 36_701);
-        // Nothing declared is not licence to use the window. 52 models declare nothing.
         assert_eq!(ceiling_within(256_000, None), 35_840);
-        // A window small enough that a quarter of it is the tighter of the two — and it is a
-        // quarter, not the 14% reserve, because 14% of a window this size is not one whole file.
         assert_eq!(ceiling_within(8_000, Some(8_000)), 2_000);
         assert_eq!(ceiling_within(32_768, None), 8_192);
-        // The floor lifts the cap, never a ceiling the model declared for itself. A model that
-        // really stops at 4,096 keeps its 4,096, or every answer from it is an HTTP 400.
         assert_eq!(ceiling_within(32_768, Some(4_096)), 4_096);
-        // And a window of zero cannot underflow into a ceiling of zero, which fails validation.
         assert_eq!(ceiling_within(0, Some(4_096)), 1);
     }
 
@@ -2413,8 +2276,6 @@ mod tests {
             ),
             Err("API key cannot be empty when setting a credential".to_owned())
         );
-        // Refused *before* the store is touched: a rejected save must leave the key it was going
-        // to replace exactly where it was.
         assert_eq!(
             store
                 .read(Secret::AiDefault)
@@ -2521,7 +2382,6 @@ mod tests {
                 value: "new-ai".to_owned(),
             },
             brave_api_key: ApiKeyUpdate::Clear,
-            // Untouched, so it is never read and never put back.
             openrouter_api_key: ApiKeyUpdate::Keep,
             cerebras_api_key: ApiKeyUpdate::Keep,
         };
@@ -2563,14 +2423,11 @@ mod tests {
             api_key: ApiKeyUpdate::Set {
                 value: "new-ai".to_owned(),
             },
-            // The second slot, and the one the keyring refuses.
             brave_api_key: ApiKeyUpdate::Clear,
             openrouter_api_key: ApiKeyUpdate::Keep,
             cerebras_api_key: ApiKeyUpdate::Keep,
         };
 
-        // `err()` rather than `unwrap_err()`: the window holds the keys that were taken out, and a
-        // type that can print itself is one an assertion can print them with.
         assert_eq!(
             apply_saved_secrets_with(&store, &request).err(),
             Some("fake clear failure".to_owned())
@@ -2664,14 +2521,11 @@ mod tests {
             restore(Secret::AiDefault, Some("previous"), &store_failure),
             Err("Could not restore the previous AI API key: fake store failure".to_owned())
         );
-        // The same sentence, about the slot it is actually about.
         assert_eq!(
             restore(Secret::Brave, Some("previous"), &store_failure),
             Err("Could not restore the previous Brave Search key: fake store failure".to_owned())
         );
 
-        // And the way round it is meant to work: a slot that held something gets it back, and a
-        // slot that held nothing is emptied.
         let store = FakeSecrets::default();
         store.put(Secret::AiDefault, "written-by-the-save");
         restore(Secret::AiDefault, Some("previous"), &store).expect("restore a previous key");
@@ -2723,12 +2577,9 @@ mod tests {
         let directory = TempDir::new().expect("temporary directory");
         let missing = directory.path().join("settings.json");
 
-        // No settings and no Pi catalogue: the shipped defaults, and nothing read off this machine.
         let shipped = read_settings_from_paths(&missing, None).expect("default settings");
         assert_eq!(shipped, GoferSettings::default());
 
-        // A Pi catalogue is what a first run is supposed to inherit from, so it wins over the
-        // shipped model. This is the branch that used to make the assertion above machine-dependent.
         let pi = directory.path().join("models.json");
         fs::write(
             &pi,
@@ -2755,7 +2606,6 @@ mod tests {
         assert_eq!(live(&inherited).model.id, "inherited.gguf");
         assert_eq!(live(&inherited).base_url, "http://127.0.0.1:9099/v1");
 
-        // An unreadable or unparseable catalogue is not a failure, it is simply no inheritance.
         let broken = directory.path().join("broken.json");
         fs::write(&broken, "{not json").expect("write broken catalogue");
         assert_eq!(
@@ -2780,14 +2630,12 @@ mod tests {
 
         let loaded = read_settings_from_path(&path).expect("read settings");
 
-        // Exa, because a fresh install has no key and must still be able to search.
         assert_eq!(loaded.ai.web, WebSettings::default());
         assert_eq!(loaded.ai.web.search_provider, "exa");
     }
 
     #[test]
     fn an_engine_nobody_recognises_is_corrected_rather_than_refused() {
-        // One field of one tool must not take the user's model, worktree and prompt down with it.
         let mut settings = GoferSettings::default();
         settings.ai.web.search_provider = "askjeeves".to_owned();
 
@@ -2795,7 +2643,6 @@ mod tests {
 
         assert_eq!(validated.ai.web.search_provider, "exa");
 
-        // Every engine this build knows survives validation unchanged.
         for provider in SEARCH_PROVIDERS {
             let mut settings = GoferSettings::default();
             settings.ai.web.search_provider = provider.to_owned();
@@ -2806,9 +2653,6 @@ mod tests {
 
     #[test]
     fn a_request_that_says_nothing_about_a_key_leaves_it_alone() {
-        // The default matters more than it looks: the settings page never reads a stored secret
-        // back, so it cannot send one. A request with no `braveApiKey` field at all must mean
-        // "leave it", never "clear it".
         let request: SettingsRequest = serde_json::from_value(serde_json::json!({
             "settings": serde_json::to_value(GoferSettings::default()).expect("settings as json"),
             "apiKey": {"action": "keep"}
@@ -2856,7 +2700,6 @@ mod tests {
         own.subagent.connection = Some(local_child.clone());
         let child = docs_expansion_connection(&own, None, None, None, None)
             .expect("a local sub-agent is reachable");
-        // The address stays the connection's; the model and its level are the child's own.
         assert_eq!(child.base_url, default_local_profile().base_url);
         assert_eq!(child.model, "small.gguf");
         assert_eq!(child.thinking_level, "low");
@@ -2883,7 +2726,6 @@ mod tests {
         assert_eq!(followed.model, "gpt-5.6-luna");
         assert_eq!(followed.base_url, default_chatgpt_profile().base_url);
         assert_eq!(followed.oauth_credential, Some(credential));
-        // The local server's key is not ChatGPT's, and must not travel with a ChatGPT connection.
         assert_eq!(followed.api_key, None);
 
         assert_eq!(
@@ -2921,14 +2763,9 @@ mod tests {
         let profile = local.connection().expect("the local connection is live");
         assert_eq!(profile.base_url, "http://127.0.0.1:9099/v1");
         assert_eq!(profile.model.id, "local");
-        // No level named, so nothing is claimed about thinking and the scripted acceptance suite
-        // that passes `None` here sends exactly what it always sent.
         assert!(!profile.chat_template_thinking);
         assert!(!profile.model.reasoning);
 
-        // A level named for a local server has to arrive as a chat-template argument, because that
-        // is the only thing llama.cpp reads. A build that left these three flags at their defaults
-        // sent no thinking field at all and the level did nothing — see `served_by`.
         let asked = AiSettings::served_by(
             AiConnectionType::OpenaiCompatible,
             Some("http://127.0.0.1:9099/v1".to_owned()),
@@ -2942,9 +2779,6 @@ mod tests {
         assert_eq!(profile.model.thinking_level, "medium");
         assert_eq!(profile.model.thinking_levels, vec!["medium".to_owned()]);
 
-        // `on` is Gofer's word for a template that thinks and names no efforts. It is not an
-        // effort, and listing it as one puts every effort out of pi-ai's reach and clamps the
-        // request to `off` — the opposite of what was asked for.
         let switched = AiSettings::served_by(
             AiConnectionType::OpenaiCompatible,
             None,
@@ -2967,14 +2801,9 @@ mod tests {
             .expect("the ChatGPT connection is live");
         assert_eq!(profile.base_url, default_chatgpt_profile().base_url);
         assert_eq!(profile.api, ApiDialect::OpenaiCodexResponses);
-        // Id and label both, because a run names one model and the report prints whichever it
-        // reaches for. A suite has no second string to give and no picker to have chosen from.
         assert_eq!(profile.model.id, "gpt-5.6-luna");
         assert_eq!(profile.model.name, "gpt-5.6-luna");
-        // Named rather than inherited: the shipped ChatGPT profile asks at `high`, and two runs
-        // are only comparable if the level each was asked at is the level the run wrote down.
         assert_eq!(profile.model.thinking_level, "medium");
-        // A chat template is a llama.cpp mechanism, and there is none behind this address.
         assert!(!profile.chat_template_thinking);
 
         let openrouter = AiSettings::served_by(
@@ -3033,9 +2862,6 @@ mod tests {
         assert_eq!(profile.model.context_window, 131_072);
         assert_eq!(profile.model.name, "Gemma 4 31B IT");
 
-        // The level a run named still wins. It is the one fact on the row the run chose itself,
-        // and the catalogue's own three efforts would put it back out of pi-ai's reach — the clamp
-        // `served_by` already writes at length about.
         let asked = AiSettings::served_by(
             AiConnectionType::Cerebras,
             None,
@@ -3050,8 +2876,6 @@ mod tests {
             vec!["text".to_owned(), "image".to_owned()]
         );
 
-        // A model the table has never seen keeps the seed's facts, because nothing knows better.
-        // The run still reaches it: the endpoint is the authority on what a key may ask for.
         let unknown = AiSettings::served_by(
             AiConnectionType::Cerebras,
             None,
@@ -3082,7 +2906,6 @@ mod tests {
         assert_eq!(loaded.ai.subagent.command_timeout_minutes, 5);
         assert_eq!(loaded.ai.subagent.max_turns, 24);
 
-        // And one bound dropped by hand fills in on its own, without taking the rest with it.
         let mut partial = serde_json::to_value(GoferSettings::default()).expect("settings as json");
         partial["ai"]["subagent"]
             .as_object_mut()
@@ -3140,14 +2963,10 @@ mod tests {
             .connection
             .expect("the sub-agent connection");
 
-        // Trimmed, and named after itself when the name was left blank — exactly what the parent's
-        // model gets.
         assert_eq!(stored.model.id, "gpt-5.4-mini");
         assert_eq!(stored.model.name, "gpt-5.4-mini");
         assert_eq!(stored.model.thinking_level, "low");
 
-        // A model that cannot reason has no level to keep, so the level is dropped rather than left
-        // pointing at nothing.
         let mut settings = GoferSettings::default();
         settings.ai.subagent.connection = Some(SubagentConnection {
             model: ModelChoice {
@@ -3216,8 +3035,6 @@ mod tests {
             "The sub-agent cannot use the local connection until one is configured"
         );
 
-        // The same child is fine the moment a local connection exists — including the case where
-        // it is the parent's own.
         let mut settings = GoferSettings::default();
         settings.ai.subagent.connection = Some(local);
 
@@ -3245,7 +3062,6 @@ mod tests {
         assert!(loaded.godot.strict_typing);
         assert!(loaded.godot.embed_game_window);
 
-        // And one rule dropped by hand fills in on its own, without dragging the other with it.
         let mut partial = serde_json::to_value(GoferSettings::default()).expect("settings as json");
         partial["godot"]
             .as_object_mut()
@@ -3284,7 +3100,6 @@ mod tests {
         assert!(saved.godot.embed_game_window);
         assert_eq!(live(&saved).model.id, "stored-model");
 
-        // What came back is what landed on disk, not just what was computed in memory.
         let loaded = read_settings_from_path(&path).expect("read settings");
         assert_eq!(loaded, saved);
         assert_eq!(live(&loaded).base_url, "http://localhost:9999/v1");
@@ -3300,7 +3115,6 @@ mod tests {
         write_settings_to_path(&path, &normalized).expect("write settings");
         let loaded = read_settings_from_path(&path).expect("read settings");
 
-        // One connection under the live driver, and no second copy of it anywhere.
         let local = live(&loaded);
         assert_eq!(local.name, "Test connection");
         assert_eq!(local.model.id, "model");
@@ -3416,7 +3230,6 @@ mod tests {
 
         let loaded = read_settings_from_paths(&path, None).expect("an older file still opens");
 
-        // The flat fields were the original and the slot was the copy, so the original wins.
         let local = live(&loaded);
         assert_eq!(local.name, "My server");
         assert_eq!(local.base_url, "http://127.0.0.1:8080/v1");
@@ -3430,7 +3243,6 @@ mod tests {
         assert_eq!(local.model.input, ["text", "image"]);
         assert_eq!(local.model.thinking_level, "medium");
 
-        // The two drivers it was not on came out of their slots unchanged.
         let openrouter = loaded
             .ai
             .connection_for(AiConnectionType::Openrouter)
@@ -3442,7 +3254,6 @@ mod tests {
             Some(&default_chatgpt_profile())
         );
 
-        // The sub-agent's model was an id with its facts beside it, and is a `ModelChoice` now.
         let child = loaded
             .ai
             .subagent
@@ -3455,7 +3266,6 @@ mod tests {
         assert_eq!(child.model.max_tokens, 128_000);
         assert_eq!(child.model.thinking_level, "low");
 
-        // And nothing else the user chose moved.
         assert_eq!(loaded.ai.max_retries, 1);
         assert_eq!(loaded.ai.timeout_ms, 90_000);
         assert_eq!(loaded.ai.compaction_percent, 75);
@@ -3464,8 +3274,6 @@ mod tests {
         assert_eq!(loaded.ai.web.search_provider, "brave");
         assert!(!loaded.godot.strict_typing);
 
-        // Written back in the new shape — one map, and no flat copy of anything in it — and read
-        // back as the very same value.
         write_settings_to_path(&path, &loaded).expect("write the migrated settings");
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).expect("settings contents"))
@@ -3555,23 +3363,17 @@ mod tests {
             thinking_levels(true, true, true, &named),
             ["max", "high", "low"]
         );
-        // And with nothing named, the whole scale minus the one position it does not have.
         assert!(
             !thinking_levels(true, true, true, &[])
                 .iter()
                 .any(|l| l == "off")
         );
         assert_eq!(thinking_levels(true, false, true, &[]), ["on"]);
-        // A model that does not reason at all is `off` and nothing else, mandatory or not: there
-        // is no reasoning for the flag to be about.
         assert_eq!(thinking_levels(false, true, true, &named), ["off"]);
 
-        // The stored level a mandatory model cannot use becomes the cheapest one it can — `low`,
-        // not `max`, which is what its own list happens to put first.
         assert_eq!(keep_level("off", true, true, true, &named), "low");
         assert_eq!(keep_level("medium", true, true, true, &named), "low");
         assert_eq!(keep_level("high", true, true, true, &named), "high");
-        // Wherever `off` is offered, this is the answer it always gave.
         assert_eq!(keep_level("medium", true, true, false, &named), "off");
         assert_eq!(keep_level("off", true, true, false, &named), "off");
     }
@@ -3642,7 +3444,6 @@ mod tests {
 
         let options = openrouter_model_options(catalog.data);
         let ids: Vec<&str> = options.iter().map(|o| o.id.as_str()).collect();
-        // The model with no `tools` is gone. It could never have run a turn.
         assert_eq!(
             ids,
             [
@@ -3656,19 +3457,15 @@ mod tests {
         let plain = &options[0];
         assert_eq!(plain.name, "NVIDIA: Nemotron 3.5 Lightning");
         assert_eq!(plain.context_window, 1_000_000);
-        // Under the reserve its window leaves, so the catalogue's own number stands.
         assert_eq!(plain.max_tokens, 131_072);
         assert!(!plain.reasoning);
         assert!(!plain.supports_reasoning_effort);
         assert!(plain.thinking_levels.is_empty());
         assert_eq!(plain.input, ["text"]);
 
-        // A null ceiling falls back to what the window leaves, not to the window — and never to
-        // zero, which would fail validation. See `ceiling_within`.
         assert_eq!(options[1].max_tokens, 35_840);
         assert_eq!(options[1].input, ["text", "image"]);
 
-        // A mandatory reasoner names its efforts and never names `none`.
         let mandatory = &options[2];
         assert!(mandatory.reasoning);
         assert!(mandatory.supports_reasoning_effort);
@@ -3676,21 +3473,12 @@ mod tests {
             mandatory.thinking_levels,
             ["xhigh", "high", "medium", "low", "minimal"]
         );
-        // And it says so, which is the whole difference between `off` being a quieter setting and
-        // `off` being a connection that answers HTTP 400 to every request it makes.
         assert!(mandatory.reasoning_mandatory);
 
-        // `none` is OpenRouter's word for "can be switched off", not an effort. `off` is prepended
-        // by the menu itself, and passing `none` through would put a level in the settings file
-        // that `EVERY_LEVEL` does not contain.
         let optional = &options[3];
         assert_eq!(optional.thinking_levels, ["max", "high", "low"]);
         assert!(!optional.reasoning_mandatory);
-        // A model with no reasoning block at all is not mandatory either — the field is read off
-        // the block, and `is_some_and` on an absent one is false rather than a panic.
         assert!(!plain.reasoning_mandatory);
-        // Pi types a model's input as text or image and nothing else. Video and file have nowhere
-        // to go, and an empty list would fail validation.
         assert_eq!(optional.input, ["text"]);
     }
 
@@ -3706,8 +3494,6 @@ mod tests {
             .expect("the OpenRouter connection");
         stored.name = "OpenRouter".to_owned();
         stored.model.id = "nvidia/nemotron-3.5-lightning:free".to_owned();
-        // A hand-edited file pointing this driver at somebody else's server would send the
-        // OpenRouter key there. It is put back rather than refused.
         stored.base_url = "https://not-openrouter.example/v1".to_owned();
         stored.api = ApiDialect::OpenaiCodexResponses;
         stored.chat_template_thinking = true;
@@ -3716,7 +3502,6 @@ mod tests {
         assert_eq!(live(&saved).base_url, OPENROUTER_BASE_URL);
         assert_eq!(live(&saved).api, ApiDialect::OpenaiCompletions);
         assert!(!live(&saved).chat_template_thinking);
-        // Stored under its own driver, and the other two are untouched.
         assert_eq!(live(&saved).model.id, "nvidia/nemotron-3.5-lightning:free");
         assert_eq!(
             saved.ai.connection_for(AiConnectionType::OpenaiCompatible),
@@ -3748,25 +3533,17 @@ mod tests {
         .expect("Cerebras answers the plain OpenAI shape");
         let options = cerebras_model_options(&live.data);
 
-        // The unmeasured one is gone, and the two measured ones are in the table's order.
         let ids: Vec<&str> = options.iter().map(|o| o.id.as_str()).collect();
         assert_eq!(ids, vec!["gpt-oss-120b", "gemma-4-31b"]);
 
         let oss = &options[0];
         assert_eq!(oss.name, "GPT OSS 120B");
-        // The endpoint's own number, from the body it refuses an oversized prompt with. Not
-        // 131,072: the two models on this endpoint do not share a window.
         assert_eq!(oss.context_window, 131_000);
-        // Cerebras declares no output ceiling, so the table repeats the window and this is what
-        // actually bounds a reply. A ceiling that is the whole window is not a ceiling.
         assert_eq!(oss.max_tokens, ceiling_within(131_000, Some(131_000)));
         assert!(oss.max_tokens < oss.context_window);
         assert_eq!(oss.input, vec!["text".to_owned()]);
         assert!(oss.reasoning);
         assert!(oss.supports_reasoning_effort);
-        // Its chat template refuses `reasoning_effort: "none"`, so it cannot be told to stop and
-        // has no word for stopping either. The two facts travel together or `off` is offered for a
-        // model that would ignore it.
         assert!(oss.reasoning_mandatory);
         assert_eq!(oss.off_effort, None);
         assert_eq!(
@@ -3777,18 +3554,15 @@ mod tests {
         let gemma = &options[1];
         assert_eq!(gemma.context_window, 131_072);
         assert_eq!(gemma.input, vec!["text".to_owned(), "image".to_owned()]);
-        // The other half of the pair: this one honours `none`, so `off` sends it and means it.
         assert!(!gemma.reasoning_mandatory);
         assert_eq!(gemma.off_effort.as_deref(), Some("none"));
 
-        // A table row the key cannot reach is not offered either.
         let one: ModelsResponse =
             serde_json::from_str(r#"{"data": [{"id": "gemma-4-31b"}]}"#).expect("one model");
         let narrowed = cerebras_model_options(&one.data);
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].id, "gemma-4-31b");
 
-        // And a key that reaches nothing Gofer knows offers nothing rather than everything.
         let none: ModelsResponse =
             serde_json::from_str(r#"{"data": [{"id": "unknown"}]}"#).expect("one unknown model");
         assert!(cerebras_model_options(&none.data).is_empty());
@@ -3835,15 +3609,12 @@ mod tests {
             ai.connection_for(AiConnectionType::Openrouter),
             Some(&default_openrouter_profile())
         );
-        // What the file did say is left exactly as it said it. The fill-in must never overwrite a
-        // connection the user configured, which is the whole risk of filling any in.
         let local = ai
             .connection_for(AiConnectionType::OpenaiCompatible)
             .expect("the file's own local connection");
         assert_eq!(local.name, "My server");
         assert_eq!(local.base_url, "http://127.0.0.1:9999/v1");
         assert_eq!(local.model.id, "mine");
-        // And a hosted one the file *did* name is its own, not the shipped seed.
         assert_eq!(
             ai.connection_for(AiConnectionType::OpenaiCodex)
                 .expect("the file's own ChatGPT connection")
@@ -3862,8 +3633,6 @@ mod tests {
             .connections
             .get_mut(&AiConnectionType::Cerebras)
             .expect("the Cerebras connection");
-        // A hand-edited file pointing this driver at somebody else's server would send the Cerebras
-        // key there. It is put back rather than refused.
         stored.base_url = "https://not-cerebras.example/v1".to_owned();
         stored.api = ApiDialect::OpenaiCodexResponses;
         stored.chat_template_thinking = true;
@@ -3872,7 +3641,6 @@ mod tests {
         assert_eq!(live(&saved).base_url, CEREBRAS_BASE_URL);
         assert_eq!(live(&saved).api, ApiDialect::OpenaiCompletions);
         assert!(!live(&saved).chat_template_thinking);
-        // The other three are untouched, OpenRouter's own pinning included.
         assert_eq!(
             saved.ai.connection_for(AiConnectionType::OpenaiCompatible),
             Some(&default_local_profile())
@@ -3964,7 +3732,6 @@ mod tests {
         assert_eq!(connection.connection_type, "openrouter");
         assert_eq!(connection.base_url, OPENROUTER_BASE_URL);
         assert_eq!(connection.model, "z-ai/glm-5.2:free");
-        // The local server's key must never reach openrouter.ai, and this is where they cross.
         assert_eq!(connection.api_key.as_deref(), Some("openrouter-key"));
     }
 
@@ -3997,7 +3764,6 @@ mod tests {
         assert_eq!(catalog.models[0].name, "Vision Model");
         assert!(catalog.models[0].reasoning);
         assert_eq!(catalog.models[0].input, ["text", "image"]);
-        // Read back without the trailing slash, because that is how the settings store a base URL.
         assert_eq!(
             catalog.servers.get("http://127.0.0.1:11434/v1"),
             Some(&true)
@@ -4055,8 +3821,6 @@ mod tests {
         assert!(model("thinker").supports_reasoning_effort);
         assert!(!model("plain").reasoning);
         assert!(!model("plain").supports_reasoning_effort);
-        // A thinking model on a server that cannot be told an effort still thinks. It just cannot
-        // be told how hard, which is what leaves its level at `off`.
         assert!(model("hopeful").reasoning);
         assert!(!model("hopeful").supports_reasoning_effort);
         assert_eq!(catalog.servers.get("http://127.0.0.1:8080/v1"), Some(&true));
@@ -4116,16 +3880,13 @@ mod tests {
             None,
         );
 
-        // The file the server was started with: not in the catalogue, and it thinks anyway.
         assert_eq!(served[0].id, "/models/Qwen3.8-27B-NVFP4.gguf");
         assert!(served[0].reasoning);
         assert!(served[0].supports_reasoning_effort);
         assert_eq!(served[0].context_window, 120_064);
-        // The one Pi does name is unaffected: its own answer, not its server's.
         assert!(served[1].reasoning);
         assert_eq!(served[1].name, "Qwen3.8 27B");
 
-        // And a server Pi says nothing about grants nothing. Silence is not a capability.
         let elsewhere = connection("http://127.0.0.1:9999/v1", "mystery.gguf");
         let unknown = local_model_options(
             vec![Model {
@@ -4262,8 +4023,6 @@ mod tests {
         let mut ai = settings_on(AiConnectionType::Openrouter, hosted).ai;
         let before = ai.clone();
 
-        // A Pi provider that happens to sit at the address OpenRouter is pinned to, and a llama.cpp
-        // host answering at the same one. Neither knows this model.
         let catalog = PiCatalog {
             models: Vec::new(),
             servers: HashMap::from([(OPENROUTER_BASE_URL.to_owned(), false)]),
@@ -4348,11 +4107,9 @@ mod tests {
 
         let loaded = read_settings_from_paths(&path, Some(&pi)).expect("read settings");
 
-        // The connection the driver runs on.
         let local = live(&loaded);
         assert!(local.model.reasoning);
         assert!(local.model.supports_reasoning_effort);
-        // And the sub-agent's own, which is a second model rather than a second copy of this one.
         let child = loaded
             .ai
             .subagent
@@ -4362,13 +4119,8 @@ mod tests {
         assert!(child.model.reasoning);
         assert!(child.model.supports_reasoning_effort);
 
-        // What the user owns is untouched. Only what the model decides is re-derived.
         assert_eq!(local.model.id, "/models/served.gguf");
         assert_eq!(local.model.context_window, stored.context_window);
-        // And what the catalogue does not know, it does not answer. A server's declared reasoning
-        // says nothing about what a model it has never described accepts, so the stored input
-        // stands — inventing `["text", "image"]` here turns the composer's image control on and
-        // ships pictures to a server that refuses them.
         assert_eq!(local.model.input, stored.input);
         assert_eq!(local.model.name, stored.name);
     }
@@ -4408,7 +4160,6 @@ mod tests {
 
         assert!(!live(&loaded).model.reasoning);
         assert!(!live(&loaded).model.supports_reasoning_effort);
-        // A level pointing at nothing is not left standing.
         assert_eq!(live(&loaded).model.thinking_level, "off");
         assert_eq!(live(&loaded).model.name, "Plain");
     }
@@ -4439,7 +4190,6 @@ mod tests {
 
         assert!(live(&loaded).model.reasoning);
         assert_eq!(live(&loaded).model.thinking_level, "high");
-        // And the ChatGPT connection, which Pi's file never describes, keeps everything it had.
         let chatgpt = loaded
             .ai
             .connection_for(AiConnectionType::OpenaiCodex)
@@ -4546,8 +4296,6 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "custom");
         assert_eq!(models[0].context_window, 4_096);
-        // And not 4,096. A ceiling equal to the window is no ceiling, and this is the endpoint the
-        // runaway was measured on.
         assert_eq!(models[0].max_tokens, 1_024);
         assert_eq!(models[1].name, "plain");
 
@@ -4630,8 +4378,6 @@ mod tests {
                 live_mut(&mut value).model.thinking_level = "impossible".to_owned();
                 value
             },
-            // A line drawn this low summarises a conversation that has barely started; drawn above
-            // 100 it never fires at all, which the 100 case already expresses honestly.
             {
                 let mut value = settings("http://localhost", "model");
                 value.ai.compaction_percent = 49;
@@ -4642,8 +4388,6 @@ mod tests {
                 value.ai.compaction_percent = 101;
                 value
             },
-            // The sub-agent's seven ceilings, which nothing in Rust bounded: the slider was the
-            // only thing enforcing them, and a hand-edited settings file never touches a slider.
             {
                 let mut value = settings("http://localhost", "model");
                 value.ai.subagent.command_timeout_minutes = 31;
@@ -4669,8 +4413,6 @@ mod tests {
                 value.ai.subagent.retry_attempts = 6;
                 value
             },
-            // Zero is the one floor that is not zero: the wait is read only when a retry happens,
-            // and a retry that waits for nothing is not a retry policy.
             {
                 let mut value = settings("http://localhost", "model");
                 value.ai.subagent.retry_base_delay_seconds = 0;
@@ -4687,9 +4429,6 @@ mod tests {
             assert!(validate_settings(value).is_err());
         }
 
-        // The four answers a connection test's key is read by, held once against every slot rather
-        // than written out per slot. OpenRouter's copy of this used to be its own function, which
-        // is what made it the credential module's coverage gap in the first place.
         let store = FakeSecrets::default();
         for secret in [
             Secret::AiDefault,
@@ -4728,8 +4467,6 @@ mod tests {
                 )
                 .is_err()
             );
-            // `Keep` is the stored key of *that* slot, which is the whole reason the slot is an
-            // argument: a test that sent the local key to openrouter.ai would pass without it.
             store.put(secret, secret.username());
             assert_eq!(
                 resolve(&ApiKeyUpdate::Keep, secret, &store),
@@ -4757,7 +4494,6 @@ mod probe_cost_tests {
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                // Held, never answered, never closed.
                 thread::sleep(std::time::Duration::from_secs(30));
                 drop(stream);
             }

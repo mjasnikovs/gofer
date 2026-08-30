@@ -1,16 +1,8 @@
-/**
- * `godot_docs_search ask` against `search`, on the same questions, interleaved.
- *
- * Two modes of one worker, so the retrieval is identical and the only difference is whether a model
- * reads the passages before the agent does. Interleaved rather than run in blocks: a hosted model's
- * rate limit and latency both move over minutes, and a block comparison measures the minute.
- */
 import {execFileSync, spawn} from 'node:child_process'
 import {homedir} from 'node:os'
 import {dirname, resolve} from 'node:path'
 import {fileURLToPath} from 'node:url'
 
-/** The repository root, so this runs from anywhere rather than from one checkout. */
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 const WORKER = resolve(ROOT, 'src-tauri/workers/rag-retrieve-worker.mjs')

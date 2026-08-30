@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Two surfaces the corpus has not covered, on the local model: error recovery from a project that
-# will not boot, and a game with more moving parts than any task so far.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 broken() { GOFER_LIVE_FIXTURE=/tmp/claude-1000/-home-edgars-hub-gofer/a29d6062-0e19-4794-a41f-a3c268f5354b/scratchpad/live-broken ./scripts/local-turn.sh "$1" "$2" > "logs/oxloop/$1.log" 2>&1; }

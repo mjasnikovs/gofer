@@ -39,16 +39,11 @@ type BottomPanelProps = Readonly<{
     onTabChange: (tab: BottomTab) => void
     isCollapsed: boolean
     onToggle: () => void
-    /*
-     * The two output filters are the frame's, not the panel's: they are remembered with the
-     * project, and a panel that owns them would forget them every time it unmounts.
-     */
     logSeverity: GodotLogSeverity
     onLogSeverityChange: (severity: GodotLogSeverity) => void
     logScope: LogScope
     onLogScopeChange: (scope: LogScope) => void
     diagnostics: Readonly<Record<string, readonly ScriptDiagnostic[]>>
-    /** Owned by the frame: the Run control launches the very session this panel drives. */
     debug: DebugSession
     files: readonly WorkspaceEntry[]
     onOpenLocation: (path: string, line: number) => void
@@ -83,13 +78,6 @@ function problems(diagnostics: Readonly<Record<string, readonly ScriptDiagnostic
         )
 }
 
-/**
- * The bottom region: what is wrong, what the debugger is doing, what the editor printed, and what
- * the importer holds.
- *
- * Collapsing keeps the tab strip: an IDE's bottom panel is a place the user returns to, and hiding
- * its tabs as well would lose the only affordance that brings it back.
- */
 export function BottomPanel({
     tab,
     onTabChange,
@@ -115,17 +103,6 @@ export function BottomPanel({
         minSeverity,
         contains
     })
-    /*
-     * The archive is searched, not followed: it holds the sessions that already stopped, so it
-     * answers a query rather than a filter over what is on screen.
-     *
-     * Deferred, because that query is a round trip. The box keeps its own value and stays
-     * responsive while the search lags behind it.
-     *
-     * A lower priority, not a debounce: React still commits an intermediate value when renders are
-     * cheap, so this reduces how many searches a typed filter issues rather than reducing it to one.
-     * A real debounce would need a timer, and the searches are already cancelled correctly.
-     */
     const query = useDeferredValue(contains)
     const history = useLogHistory({enabled: isOutput && scope === 'history', query})
 
@@ -171,21 +148,11 @@ export function BottomPanel({
                     :   'Not running'}
                 </Text>
             }
-            /*
-             * Seven actions in a row that is a fraction of a 1280 px window: labelled, the row
-             * measured wider than the panel and `Terminate` was cut off by its right edge. Launch
-             * keeps its label because it is the one the toolbar is for; the six that follow it are
-             * the transport controls every debugger draws as icons, and each carries its label as
-             * its tooltip and its accessible name.
-             */
             endContent={
                 <HStack gap={1}>
                     <Button
                         label='Launch'
                         size='sm'
-                        // Not primary, for the reason measured on `Run` in the Game panel: this is
-                        // disabled until a session exists, and a disabled accent fill reads dimmer
-                        // than the ghost icons next to it.
                         isDisabled={isOffline || debug.isLaunched || debug.isBusy}
                         clickAction={() => {
                             void debug.launch()
@@ -321,9 +288,6 @@ export function BottomPanel({
                     <HStack paddingInline={2}>
                         <IconButton
                             label={isCollapsed ? 'Show panel' : 'Hide panel'}
-                            // Through `Icon`, which sizes the drawing: a bare Heroicon has only a
-                            // `viewBox`, and WebKit — what the desktop renders in — draws that at
-                            // nothing, leaving an empty button where the chevron should be.
                             icon={
                                 <Icon
                                     icon={isCollapsed ? ChevronUpIcon : ChevronDownIcon}

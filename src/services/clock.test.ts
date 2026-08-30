@@ -12,8 +12,6 @@ import {
     wait
 } from './clock'
 
-// Back to the clock the application runs on, so one case cannot leave another running on a clock
-// it never asked for.
 afterEach(() => {
     setScheduler(timerScheduler)
     setIntervalScheduler(timerInterval)
@@ -26,7 +24,6 @@ describe('immediateScheduler', () => {
         expect(done).toEqual(['now'])
     })
 
-    /** Nothing is pending afterwards, so calling the work off has to be harmless rather than absent. */
     it('hands back a cancel that does nothing', () => {
         const cancel = immediateScheduler(() => undefined, 0)
         expect(() => {
@@ -46,7 +43,6 @@ describe('createManualScheduler', () => {
         expect(done).toEqual(['later'])
     })
 
-    /** A debounce cancels what it queued last. Running a cancelled delay is the bug it prevents. */
     it('does not run work that was called off', () => {
         const clock = createManualScheduler()
         const done: string[] = []
@@ -88,10 +84,6 @@ describe('the shared clock', () => {
 })
 
 describe('repeat', () => {
-    /*
-     * A poll and a debounce are separate switches on purpose. If they shared one, a test that asked
-     * its debounce to fire at once would put every poll in the application into a tight loop.
-     */
     it('never comes round on the clock a test runs on', () => {
         setIntervalScheduler(noInterval)
         const done: string[] = []

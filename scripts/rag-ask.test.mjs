@@ -13,7 +13,6 @@ const PASSAGES = [
     {text: 'PropertyTweener interpolates a property.', chapter: 'PropertyTweener', score: 0.42}
 ]
 
-/** A reader that answers with whatever tags it is handed, and records the prompt it was given. */
 function reader(reply) {
     const calls = []
     return {
@@ -117,7 +116,6 @@ test('an empty retrieval is the search missing, not the manual being silent', as
 
     assert.equal(result.nothingRetrieved, true)
     assert.equal(result.text, NOTHING_RETRIEVED)
-    // No model was asked: nothing cleared the threshold, so there was nothing to read.
     assert.equal(calls.length, 0)
 })
 

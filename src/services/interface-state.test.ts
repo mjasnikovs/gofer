@@ -4,21 +4,11 @@ import type {InterfaceStateStore} from './interface-state'
 
 type Store = InterfaceStateStore
     & Readonly<{
-        /** Every write in order, so a test can assert what was recorded and what was not. */
         writes: (readonly [string, unknown])[]
-        /** How many reads each key has taken. */
         reads: Record<string, number>
-        /** Lets a test hold a read open, which is the window this module exists to close. */
         settle: () => void
     }>
 
-/**
- * The project's state held in a Map, with the read deliberately slow.
- *
- * `read` resolves only when the test says so, because the gap between mounting and the read
- * answering is the whole reason this module exists — a store that answers instantly cannot
- * reproduce the write that lands in it.
- */
 function store(stored: Record<string, unknown> = {}): Store {
     const values = new Map(Object.entries(stored))
     const writes: (readonly [string, unknown])[] = []
@@ -158,7 +148,6 @@ describe('rememberValue', () => {
             await first
 
             const second = remembered.open('ui.draft.b')
-            // The composer still holds the previous task's text at this moment.
             remembered.change('one, still being written')
             backing.settle()
             await second

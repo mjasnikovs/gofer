@@ -13,7 +13,6 @@ const SKETCH: ProjectSketch = {
 }
 
 describe('a sketch', () => {
-    /** The reset goes in front of the agent's markup, not around it. */
     it('is served under Gofer’s reset and nothing else', () => {
         const document = sketchDocument('<p>hello</p>')
 
@@ -22,24 +21,12 @@ describe('a sketch', () => {
         expect(document).not.toContain('--color-')
     })
 
-    /**
-     * One canvas for both screens that draw a sketch.
-     *
-     * The card asks about a composition and the Sketches tab shows that composition again. Two
-     * canvases would mean the layout somebody re-checks is not the layout they agreed.
-     */
     it('is drawn at one size wherever it is shown', () => {
         expect(SKETCH_CANVAS).toEqual({width: 1280, height: 720})
     })
 })
 
 describe('a sketch sent to the chat', () => {
-    /**
-     * A picture of the result, said out loud.
-     *
-     * Without the sentence, the markup reads as code to port, and the first thing built off one was
-     * an HTML layout translated node for node instead of a Godot scene laid out the same way.
-     */
     it('says it is a layout to build, not code to port', () => {
         const message = sketchMessage(SKETCH, '<p>res://ui/panel.png</p>')
 
@@ -49,7 +36,6 @@ describe('a sketch sent to the chat', () => {
         expect(message).toContain('<p>res://ui/panel.png</p>')
     })
 
-    /** A draft is read before it is sent, and a folded code fence says nothing about which one. */
     it('opens with a line that names which layout it is', () => {
         const [caption] = sketchMessage(SKETCH, '<p>a</p>').split('\n')
 

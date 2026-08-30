@@ -28,9 +28,7 @@ export type ScriptReveal = Readonly<{
 }>
 
 type ScriptWorkspaceProps = Readonly<{
-    /** Owned by the frame, so the Problems list and the AI agent see the same buffers. */
     scripts: ScriptBuffers
-    /** Where each script's cursor and scroll were left, from the last time the project was open. */
     views: ScriptViews
     onViewChange: (path: string, view: unknown) => void
     reveal?: ScriptReveal | undefined
@@ -42,10 +40,8 @@ type RenameTarget = Readonly<{
     name: string
 }>
 
-/** Shared so a file with no published diagnostics does not hand Monaco a new array each render. */
 const NO_DIAGNOSTICS: readonly ScriptDiagnostic[] = []
 
-/** The same, for the open-path list when nothing is open. */
 const NO_PATHS: readonly string[] = []
 
 const DIFF_HEIGHT = 420
@@ -60,14 +56,6 @@ function tabLabel(buffer: ScriptBuffer) {
     return buffer.dirty ? `${name} •` : name
 }
 
-/**
- * The script editing surface: one tab per open buffer, with Monaco wired to Godot's language server
- * through Rust. Files are chosen in the workspace explorer, which owns the worktree listing.
- *
- * Everything destructive is explicit. A save is a command, never a side effect of typing; the
- * formatter and rename both show what they would write before anything is written; and a file that
- * changed underneath a dirty buffer raises a conflict rather than being overwritten.
- */
 export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWorkspaceProps) {
     const {
         activeBuffer,
@@ -91,18 +79,6 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
     const [renameTarget, setRenameTarget] = useState<RenameTarget>()
     const [renamePreview, setRenamePreview] = useState<RenamePreview>()
 
-    /*
-     * Both of these are effect dependencies inside `ScriptEditor` — the open list drives model
-     * disposal, the diagnostics drive `setModelMarkers`. Minted fresh in render they moved on every
-     * keystroke, so Monaco re-disposed and re-marked per character typed. The empty fallback is
-     * shared rather than built, because a file the language server has not published for is the
-     * common case, not the exception.
-     *
-     * Keyed on the paths themselves and not on `buffers`. Typing dispatches `edited`, which rebuilds
-     * the buffer array, so a memo over `[buffers]` is handed a new array per character and holds
-     * exactly as poorly as no memo at all. What the disposal effect actually cares about is which
-     * files are open, and that changes only when a tab opens or closes.
-     */
     const openPathKey = buffers.map(buffer => buffer.path).join('\n')
     const openPaths = useMemo(
         () => (openPathKey === '' ? NO_PATHS : openPathKey.split('\n')),
@@ -124,10 +100,6 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
         [saveBuffer]
     )
 
-    /**
-     * Asks the server what the symbol under the cursor is called before offering to rename it, so
-     * the dialog opens on the real identifier rather than on whatever the cursor happened to touch.
-     */
     const startRename = useCallback((path: string, position: ScriptPosition) => {
         const prepare = async () => {
             let name = ''
@@ -138,10 +110,7 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
                     position
                 })
                 if (response.op === 'prepareRename') name = response.placeholder ?? ''
-            } catch {
-                // A server that cannot prepare the rename can still perform it; the user types
-                // the new name either way.
-            }
+            } catch {}
             setRenameTarget({path, position, name})
         }
         void prepare()
@@ -197,13 +166,6 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
                 label='Script actions'
                 size='sm'
                 startContent={
-                    /*
-                     * The path is the one thing in this row that can afford to lose characters, and
-                     * it was the one thing refusing to: at 359 px of panel it held its full width
-                     * and pushed `Close` off the panel's own edge, cutting the word in half. It
-                     * gives way first now, and the tooltip that comes with truncation keeps the
-                     * whole path reachable.
-                     */
                     <Text
                         type='supporting'
                         color='secondary'
@@ -217,9 +179,6 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
                         <Button
                             label='Save'
                             size='sm'
-                            // Not primary, for the reason measured on `Run` in the Game panel: a
-                            // clean buffer disables it, and a disabled accent fill loses more
-                            // contrast than the secondary it replaced. The dialogs keep theirs.
                             isDisabled={!activeBuffer?.dirty}
                             clickAction={() => {
                                 if (activePath) save(activePath)

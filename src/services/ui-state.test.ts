@@ -15,14 +15,8 @@ type Call = Readonly<{command: string; arguments: unknown}>
 
 const calls: Call[] = []
 let answer: (command: string, arguments_: unknown) => unknown = () => null
-/** Set to make the bridge reject, the way a real failing command does. */
 let rejectWith: Error | undefined
 
-/*
- * The real desktop bridge, driven through the same test hook the application's own driver uses.
- * Nothing here substitutes a module: `services/desktop` is exercised as written, so a rename on
- * either side of it still fails.
- */
 beforeEach(() => {
     calls.length = 0
     answer = () => null
@@ -39,7 +33,6 @@ afterEach(() => {
     removeDesktopFake()
 })
 
-/** A clock nobody winds: work is held until the test decides time has passed. */
 function manualScheduler() {
     const due: (() => void)[] = []
     const schedule: WriteScheduler = write => {

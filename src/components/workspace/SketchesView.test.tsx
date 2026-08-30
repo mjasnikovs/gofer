@@ -10,7 +10,6 @@ import type {ProjectSketch, SketchHtml} from '../../models/sketch'
 
 const tauri = createDesktopFake()
 
-/** jsdom measures everything as zero, and a sketch in a zero-wide column has no scale. */
 beforeEach(() => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
         width: 640,
@@ -46,7 +45,6 @@ const REJECTED = sketch({
     savedAt: 1_600_000_000_000
 })
 
-/** The markup as the backend keeps it: what the user looked at, and what a builder can use. */
 function backend(
     rows: readonly ProjectSketch[] = [sketch(), REJECTED],
     html: SketchHtml = SKETCH_HTML
@@ -76,7 +74,6 @@ afterEach(() => {
 })
 
 describe('the sketches panel', () => {
-    /** The list is what the panel is for: a name for each layout, without fetching any of them. */
     it('names every saved layout without reading one', async () => {
         backend()
         await open()
@@ -86,7 +83,6 @@ describe('the sketches panel', () => {
         expect(tauri.invoke).toHaveBeenCalledTimes(1)
     })
 
-    /** A design that was completed is the one somebody comes back to look at. */
     it('narrows to what was agreed', async () => {
         backend()
         await open()
@@ -97,12 +93,6 @@ describe('the sketches panel', () => {
         expect(screen.queryByText('Side panel')).not.toBeInTheDocument()
     })
 
-    /**
-     * Opened once, not once per glance.
-     *
-     * The copy drawn here has the project's artwork inlined into it, so it is tens of kilobytes.
-     * Closing a row and opening it again is a gesture, not a request to fetch that twice.
-     */
     it('reads a layout when it is opened, and only the first time', async () => {
         const {log} = backend()
         await open()
@@ -117,13 +107,6 @@ describe('the sketches panel', () => {
         expect(log.sketchReads).toEqual(['question-1-run', 'question-2-run'])
     })
 
-    /**
-     * Closing a row throws its frame away. It must not throw away what the row cost to fetch.
-     *
-     * Only the open row is built, so shutting one drops its iframe and its observer — which is the
-     * whole point, and is also the moment a cache keyed on the open row would quietly stop being a
-     * cache. The gesture here is the plainest one there is: the same trigger, twice.
-     */
     it('keeps what it read when the same row is shut and opened again', async () => {
         const {log} = backend([sketch()])
         await open()
@@ -143,13 +126,6 @@ describe('the sketches panel', () => {
         expect(log.sketchReads).toEqual(['question-1-run'])
     })
 
-    /**
-     * A revision overwrites the layout under the same identifier, so the cache has to let go of it.
-     *
-     * `new_sketch_id` is per question, not per round: every revision of one question upserts the
-     * same row and rewrites both files in place. Cached forever, Refresh re-lists the rows and still
-     * draws round one under round three's label — and Send to chat pastes round one's markup.
-     */
     it('forgets what it read when the list is refreshed', async () => {
         const {log} = backend()
         await open()
@@ -164,13 +140,6 @@ describe('the sketches panel', () => {
         expect(log.sketchReads).toEqual(['question-1-run', 'question-1-run'])
     })
 
-    /**
-     * The one that would be silent if it were wrong.
-     *
-     * Both copies are the same layout to look at. Only one of them is buildable: the other is the
-     * project's artwork as base64, which says nothing a builder can act on. Sending the wrong one
-     * would look exactly like sending the right one.
-     */
     it('sends a builder the markup and never the inlined copy', async () => {
         const paste = vi.fn()
         backend()
@@ -187,7 +156,6 @@ describe('the sketches panel', () => {
         expect(sent).toContain('Centered overlay')
     })
 
-    /** A sketch kept before the second copy existed says why, rather than pasting the wrong one. */
     it('refuses to send a layout it has no buildable markup for', async () => {
         backend([sketch()], {shown: '<p>drawn</p>', source: null})
         await open()
@@ -201,7 +169,6 @@ describe('the sketches panel', () => {
         ).toBeInTheDocument()
     })
 
-    /** A read that failed is drawn as what it was, not as a row with nothing in it. */
     it('reports a layout it could not read', async () => {
         installBackend(tauri, {
             sketches: [sketch()],
@@ -219,12 +186,6 @@ describe('the sketches panel', () => {
         expect(screen.getByText(/There is no sketch \(sketch_not_found\)/u)).toBeInTheDocument()
     })
 
-    /**
-     * A 1280-pixel layout in a 330-pixel column is a picture of a layout, not a layout.
-     *
-     * The magnifier is what makes re-checking possible at all, and the viewer it opens is over the
-     * panel rather than beside it — so what was underneath is still there when it closes.
-     */
     it('opens one layout at full size and closes it again', async () => {
         backend([sketch()])
         await open()
@@ -244,7 +205,6 @@ describe('the sketches panel', () => {
         expect(screen.getByRole('button', {name: 'Send to chat'})).toBeInTheDocument()
     })
 
-    /** Nothing kept yet is a state of the project, not a failure of the panel. */
     it('says what fills the list when it is empty', async () => {
         backend([])
         await open()

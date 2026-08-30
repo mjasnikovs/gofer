@@ -107,8 +107,6 @@ fn remember(key: String, model: Option<ServedModel>) {
 fn probe(base_url: &str) -> Option<ServedModel> {
     let (authority, props, models) = probe_targets(base_url)?;
     let mut served = parse_props(&get(&authority, &props)?)?;
-    // A second round trip, to the endpoint the OpenAI client already uses. It is the only way to
-    // tell a host serving one file from a router serving a directory of them.
     served.sole = get(&authority, &models).as_deref().and_then(count_models) == Some(1);
     Some(served)
 }
@@ -162,8 +160,6 @@ fn get(authority: &str, path: &str) -> Option<String> {
     stream.flush().ok()?;
     let mut raw = Vec::new();
     let mut chunk = [0_u8; 8192];
-    // A read that fails is the timeout in nearly every case, and by then `raw` may already hold the
-    // whole response. Ending the loop on it keeps what was read; only an empty hand is no answer.
     while let Ok(read) = stream.read(&mut chunk) {
         if read == 0 {
             break;
@@ -264,8 +260,6 @@ fn accepted_efforts(template: &str) -> Vec<String> {
     else {
         return Vec::new();
     };
-    // Intersected with what Gofer can name, and in Gofer's order rather than the template's. A
-    // template naming an effort this build has no word for is one the settings file could not hold.
     KNOWN_EFFORTS
         .iter()
         .filter(|effort| {
@@ -305,11 +299,7 @@ pub(crate) fn parse_props(body: &str) -> Option<ServedModel> {
             .default_generation_settings
             .and_then(|settings| settings.n_ctx)
             .filter(|window| *window > 0),
-        // Either cap means the template has a place for thinking. Effort implies it on its own: a
-        // template that takes an effort and cannot think would have nothing to spend it on.
         reasoning: caps.supports_preserve_reasoning || caps.supports_reasoning_effort,
-        // The cap says the template takes an effort. The template says which. Without both, a
-        // level the user picked from a menu of seven is a 500 on every request of the turn.
         efforts: if caps.supports_reasoning_effort {
             props
                 .chat_template
@@ -320,7 +310,6 @@ pub(crate) fn parse_props(body: &str) -> Option<ServedModel> {
             Vec::new()
         },
         input,
-        // Answered by the caller, which is the only one making the second round trip.
         sole: false,
     })
 }
@@ -423,7 +412,6 @@ mod tests {
         ))
         .expect("a llama.cpp body is an answer");
         assert!(served.reasoning);
-        // The cap alone is not a list. Without a template to read, thinking is on or off.
         assert!(served.efforts.is_empty());
     }
 
@@ -502,7 +490,6 @@ mod socket_tests {
                 let Ok(mut stream) = stream else { continue };
                 let mut reader = BufReader::new(stream.try_clone().expect("a clone"));
                 let mut line = String::new();
-                // The request head, up to the blank line that ends it.
                 while reader.read_line(&mut line).unwrap_or(0) > 0 {
                     if line.ends_with("\r\n\r\n") || line == "\r\n" {
                         break;
@@ -513,8 +500,6 @@ mod socket_tests {
                 if close {
                     drop(stream);
                 } else {
-                    // Held open, the way a keep-alive proxy holds it: the body is complete and the
-                    // socket never reaches EOF.
                     thread::sleep(Duration::from_secs(5));
                 }
             }
@@ -560,7 +545,6 @@ mod socket_tests {
         let started = Instant::now();
         let text = get(&authority, "/props").expect("a body from a keep-alive host");
         assert!(text.contains("Qwen3.6-27B.gguf"), "got {text}");
-        // And it did not sit out the timeout to get it: the length said where the body ended.
         assert!(
             started.elapsed() < PROBE_TIMEOUT,
             "waited {:?}",

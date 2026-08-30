@@ -26,33 +26,16 @@ export function formatContextUsage(value: number, max: number) {
     return `${formatContextTokens(value)} / ${formatContextTokens(max)}`
 }
 
-/**
- * What the spinner says while the conversation is being summarised.
- *
- * The two numbers are the reason the wait exists, and they are the difference between a spinner
- * that looks stuck and one that is visibly working through a known amount.
- */
 export function compactionActivity(tokens: number, contextWindow: number) {
     return `Summarising the conversation to make room (${formatContextUsage(tokens, contextWindow)})`
 }
 
-/**
- * Says that this turn started from the conversation on screen rather than from the model's own
- * memory of it, which happens when a task's memory was lost with a turn that never finished.
- */
 export function rebuiltActivity(messages: number) {
     return `Rebuilt this conversation from the ${messages.toLocaleString()} message${
         messages === 1 ? '' : 's'
     } on screen`
 }
 
-/**
- * What the spinner says between a dropped turn and the next attempt at it.
- *
- * The countdown and the attempt number are the whole point: a turn that goes quiet for a minute
- * and a turn that has died look identical, and this is the one thing that tells them apart. The
- * cause is said too, because a model that keeps refusing for the same reason is worth seeing.
- */
 export function retryWaitActivity(
     attempt: number,
     maxAttempts: number,
@@ -64,7 +47,6 @@ export function retryWaitActivity(
     return `Model unavailable. Trying again in ${String(seconds)}s (${String(attempt)} of ${String(maxAttempts)})${because}`
 }
 
-/** What the spinner says once the wait is over and the model is being asked again. */
 export function retryActivity(attempt: number, maxAttempts: number) {
     return `Trying again (${String(attempt)} of ${String(maxAttempts)})`
 }

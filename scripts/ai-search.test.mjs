@@ -16,7 +16,6 @@ import {
     unwrapDdgRedirect
 } from './ai-search.mjs'
 
-/** A server that answers once, passed in rather than swapped onto the global. */
 function servedWith(body, {status = 200, statusText = 'OK', headers = {}} = {}) {
     const calls = []
     return {
@@ -35,8 +34,6 @@ const mcpText = (...blocks) => ({
 })
 
 const exaBlock = (title, url, text) => `Title: ${title}\nURL: ${url}\nText: ${text}`
-
-// ─── Exa ────────────────────────────────────────────────────────────────────
 
 test('an Exa event-stream body parses into results', async () => {
     const server = servedWith(
@@ -59,8 +56,6 @@ test('an Exa event-stream body parses into results', async () => {
 })
 
 test('a plain JSON Exa body parses the same way', async () => {
-    // The endpoint genuinely answers both ways. A parser written to only the documented shape
-    // breaks intermittently, which looks like the query having no results.
     const server = servedWith(
         JSON.stringify(mcpText(exaBlock('One', 'https://one.example/', 'first')))
     )
@@ -144,16 +139,12 @@ test('Exa is asked keylessly, and asked for what it was told', async () => {
 
     const [call] = server.calls
     assert.equal(call.url, 'https://mcp.exa.ai/mcp')
-    // Keyless is the whole reason this is the default engine. A header that looks like auth would
-    // mean a key had crept in from somewhere.
     for (const name of Object.keys(call.init.headers)) assert.doesNotMatch(name, /key|token|auth/iu)
     const body = JSON.parse(call.init.body)
     assert.equal(body.params.name, 'web_search_exa')
     assert.equal(body.params.arguments.query, 'bun sqlite api')
     assert.equal(body.params.arguments.numResults, 7)
 })
-
-// ─── DuckDuckGo ─────────────────────────────────────────────────────────────
 
 const ddgRow = (title, href, snippet, {ad = false} = {}) =>
     `<div class="result${ad ? ' result--ad' : ''}">`
@@ -179,8 +170,6 @@ test('a DuckDuckGo redirect is unwrapped to its destination', () => {
 })
 
 test('ad rows and links that never leave duckduckgo.com are dropped', () => {
-    // The middle href is a real observed shape: an ad click-tracker with no uddg destination.
-    // Without this, DuckDuckGo's own trackers are handed back as search results.
     const html = ddgPage(
         ddgRow('An ad', wrapped('https://sponsor.example/'), 'buy', {ad: true}),
         ddgRow('Tracker', '//duckduckgo.com/y.js?ad_provider=x', 'promoted'),
@@ -209,7 +198,6 @@ test('DuckDuckGo titles and snippets are collapsed to one line', () => {
 })
 
 test('a bot-challenge page is no results rather than a throw', () => {
-    // DuckDuckGo serves this with HTTP 200 and no error, so nothing else can tell it apart.
     assert.deepEqual(parseDdgHtml('<div class="anomaly-modal">prove you are human</div>'), [])
 })
 
@@ -231,8 +219,6 @@ test('DuckDuckGo is asked keylessly, as a browser', async () => {
 
     const [call] = server.calls
     assert.equal(call.url, 'https://html.duckduckgo.com/html/?q=bun%20sqlite%20api')
-    // Without a browser user-agent DuckDuckGo serves the challenge page above — HTTP 200, zero
-    // results, no error. The worst shape of silent breakage.
     assert.match(call.init.headers['user-agent'], /^Mozilla\/5\.0/u)
     for (const name of Object.keys(call.init.headers)) assert.doesNotMatch(name, /key|token|auth/iu)
 })
@@ -242,7 +228,6 @@ test('DuckDuckGo rate limiting is its own kind of failure', async () => {
         const server = servedWith('slow down', {status})
 
         await assert.rejects(ddgSearch('q', {fetch: server.fetch}), error => {
-            // Distinct from a broken engine, so the message can say "wait" rather than "it is down".
             assert.equal(error.kind, 'rate-limit')
             assert.match(error.message, /rate-limiting/u)
             return true
@@ -259,8 +244,6 @@ test('any other DuckDuckGo HTTP failure carries its status', async () => {
         return true
     })
 })
-
-// ─── Brave ──────────────────────────────────────────────────────────────────
 
 test('Brave results are normalised, and the key travels in its header', async () => {
     const server = servedWith(
@@ -307,8 +290,6 @@ test('an over-large Brave request is clamped rather than refused by Brave', asyn
     assert.match(server.calls[0].url, /count=20/u)
 })
 
-// ─── Choosing an engine ─────────────────────────────────────────────────────
-
 function refuses(name) {
     return () => {
         throw new Error(`${name} must not be called`)
@@ -340,9 +321,6 @@ test('the chosen engine is the only one asked', async () => {
 })
 
 test('a failing engine is reported as a failure, never answered by another one', async () => {
-    // The highest-value assertion here. A valid Brave key is present, so an engine that quietly
-    // fell back would pass every other test in this file — and the user would be reading results
-    // from an engine they did not choose, with nothing on screen saying so.
     const result = await search({
         query: 'q',
         provider: 'exa',
@@ -360,7 +338,6 @@ test('Brave with no key says so before any request is made', async () => {
     const result = await search({query: 'q', provider: 'brave', brave: refuses('brave')})
 
     assert.equal(result.kind, 'no_key')
-    // Both ways out are named: add a key, or pick an engine that needs none.
     assert.match(result.message, /settings page/u)
     assert.match(result.message, /Exa or DuckDuckGo/u)
 })
@@ -389,15 +366,11 @@ test('every engine has a label, and no label is a storable value', () => {
         assert.equal(typeof SEARCH_PROVIDER_LABELS[provider], 'string')
         assert.ok(isSearchProvider(provider))
     }
-    // A settings file holding "DuckDuckGo" would match no engine at all, so the display name must
-    // never pass as a stored id.
     assert.ok(!isSearchProvider('DuckDuckGo'))
     assert.ok(!isSearchProvider('Google'))
     const labels = Object.values(SEARCH_PROVIDER_LABELS)
     assert.equal(new Set(labels).size, labels.length)
 })
-
-// ─── The tool ───────────────────────────────────────────────────────────────
 
 test('results are numbered markdown the model can act on', () => {
     const text = formatResults([
@@ -412,8 +385,6 @@ test('results are numbered markdown the model can act on', () => {
 })
 
 test('an oversized result set is cut at a whole result', () => {
-    // tool-result.mjs caps only the results it builds itself, so a tool that assembles its own text is
-    // capped by nothing at all.
     const many = Array.from({length: 20}, (_unused, index) => ({
         title: `Result ${String(index)}`,
         url: `https://example.com/${String(index)}`,
@@ -424,7 +395,6 @@ test('an oversized result set is cut at a whole result', () => {
 
     assert.ok(text.length < 9_000)
     assert.match(text, /more results not shown/u)
-    // Cut between results, never mid-line: half a URL is not a link anyone can follow.
     for (const line of text.split('\n')) {
         if (line.startsWith('[')) continue
         assert.match(line, /^\d+\. \[.+\]\(https:\/\/example\.com\/\d+\) — x+$/u)
@@ -451,8 +421,6 @@ test('an engine failure reaches the model as words it can read', async () => {
 
     const result = await tool.execute('id', {query: 'q'}, undefined)
 
-    // Not a throw: the model can pick a different approach if it is told why, and a thrown error
-    // reads to it as the tool being broken.
     assert.match(result.content[0].text, /no API key/u)
     assert.equal(result.details.resultCount, 0)
 })
@@ -468,7 +436,5 @@ test('the tool proves itself before the turn, without spending a search', async 
 
     const result = await tool.execute('reachability-probe', {probe: true}, undefined)
 
-    // A real request here would leak a query to an engine every turn, and spend a Brave quota on a
-    // tool the user may never call.
     assert.match(result.content[0].text, /web-search-reachable/u)
 })

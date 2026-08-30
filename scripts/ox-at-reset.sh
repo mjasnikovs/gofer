@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Everything owed to Ox Alpha, in the order that answers the most per request.
-#
-# Its free tier is 1000 requests a day and resets at 00:00 UTC. The two benches are one request a
-# seed and answer questions the local model cannot; the four turns are the tasks that produced the
-# evidence for iterations 23, 24, 25, 30 and 35, re-run unchanged.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p logs/oxloop

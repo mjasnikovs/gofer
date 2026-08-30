@@ -4,9 +4,6 @@ import {registerBunOAuthFlows} from '@earendil-works/pi-ai/bun-oauth'
 import {openaiCodexProvider} from '@earendil-works/pi-ai/providers/openai-codex'
 import {createCredentialStore} from './ai-credentials.mjs'
 
-// The ChatGPT flow is loaded through a variable specifier, which a bundle has no file to satisfy.
-// See `scripts/ai-worker.mjs` for the whole story; this worker is the one that signs in, so it
-// needs the flow more than any other.
 registerBunOAuthFlows()
 
 const EVENT_PREFIX = 'GOFER_CODEX_EVENT:'
@@ -87,9 +84,6 @@ try {
         notify: event => write(EVENT_PREFIX, event)
     })
     write(EVENT_PREFIX, {type: 'completed'})
-    // Exited rather than returned: the reader above holds stdin open, and Gofer holds the other
-    // end open for as long as the login lives. Falling off the end would leave both sides waiting
-    // for the other to close first, and the sign-in button spinning forever.
     process.exit(0)
 } catch (error) {
     write(EVENT_PREFIX, {

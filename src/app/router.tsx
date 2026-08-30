@@ -68,25 +68,6 @@ async function redirectToCurrentTask() {
     })
 }
 
-/**
- * Opens the task the route names, or leaves the window on the task it is already showing.
- *
- * Run from `beforeLoad` rather than from the loader, because a loader's answer is cached per match
- * and a task opened a second time resolves from that cache at once — the workspace remounts and
- * reads before the switch it asked for has landed. `beforeLoad` runs on every navigation and the
- * navigation waits for it, which is the ordering the rest of the window assumes: the checkout, the
- * editor and the files are the task's own by the time anything mounts to read them.
- *
- * A switch is refused for reasons the click could not know about — a turn still running, another
- * task operation holding the checkout — and a loader that rejects has no error boundary above it:
- * the root one catches it and replaces the entire window with "Something went wrong", sidebar and
- * conversation and all, until the application is restarted. Measured in the shipped build, not
- * reasoned about.
- *
- * So a refusal sends the window back to the task the backend still calls current, which is the task
- * whose files are on disk and whose chat is on screen. A refusal about that task itself is nothing
- * to bounce: the route already names it.
- */
 async function openTaskRoute(taskId: string) {
     try {
         await activateTask(taskId)
@@ -111,8 +92,6 @@ function Application() {
     const [tasks, setTasks] = useState<readonly TaskSummary[]>([])
     const [isHealthy, setIsHealthy] = useState(false)
     const [isReady, setIsReady] = useState(false)
-    // Absent rather than defaulted until the project has answered: mounting the sidebar open and
-    // collapsing it a moment later is the same flash as never having remembered it.
     const navigate = useNavigate()
     const pathname = useRouterState({select: state => state.location.pathname})
     const selectedTaskId = useMatch({
@@ -121,26 +100,7 @@ function Application() {
         select: match => (match.status === 'success' ? match.params.taskId : undefined)
     })
     const page: Page = pathname === '/settings' ? 'settings' : 'workspace'
-    /*
-     * The task the workspace belongs to, held across a route that is not a task.
-     *
-     * Settings is a route, so opening it leaves the task route unmatched and `selectedTaskId`
-     * undefined — and the workspace's key below would have changed with it, remounting a workspace
-     * that never left the screen. Mid-turn that was fatal: the remount threw away the chat runner
-     * the running answer was streaming into, so the reply had nowhere to arrive and the next send
-     * met the backend's "already in progress" guard with no way out but a restart.
-     *
-     * Adjusted during the render rather than from an effect, because the key is needed by this
-     * render: an effect would let one render key the workspace on nothing first, which is the
-     * remount it exists to prevent.
-     */
     const [lastTaskId, setLastTaskId] = useState(selectedTaskId)
-    /*
-     * The loose files the new-task dialog is open about, or nothing while it is closed.
-     *
-     * One value rather than a flag beside a list: the dialog is only ever open because there are
-     * files to ask about, so "which files" and "is it open" are the same fact.
-     */
     const [pendingChanges, setPendingChanges] = useState<readonly PendingChange[]>([])
     if (selectedTaskId && selectedTaskId !== lastTaskId) setLastTaskId(selectedTaskId)
     const workspaceTaskId = selectedTaskId ?? lastTaskId
@@ -200,25 +160,12 @@ function Application() {
     const tasksChanged = useCallback(() => {
         void refreshTasks()
     }, [refreshTasks])
-    /*
-     * The failure is prevented rather than reported. Every refusal the backend has for a creation —
-     * a turn running, another task operation holding the checkout — is a state the sidebar can see,
-     * and it stops offering the control while it lasts.
-     */
     const newTask = useCallback(
         (bringChanges: boolean) => {
             void tasksActions.create(bringChanges).catch(() => undefined)
         },
         [tasksActions]
     )
-    /**
-     * Makes a task, asking about loose files first only when there are any.
-     *
-     * The dialog exists for that one question and nothing else, so a clean checkout skips it: the
-     * task is made on the press and its composer is what the user types into. The read is what
-     * decides, and a read that fails is treated as a clean checkout — refusing to make a task
-     * because Git could not be listed would be a worse answer than making one.
-     */
     const startNewTask = useCallback(() => {
         void listPendingChanges()
             .catch(() => [])
@@ -230,25 +177,11 @@ function Application() {
                 setPendingChanges(pending)
             })
     }, [newTask])
-    /*
-     * Opening, creating, deleting and merging a task each move the project's one checkout, and each
-     * stops the Godot editor before they do — a quit request and a wait of up to ten seconds. The
-     * window used to look idle through all of it and answer every control, so a second operation was
-     * one click away and the two met inside Git, where the loser died on `index.lock`.
-     *
-     * Read from the service rather than kept here, because opening a task is a route loader that
-     * runs before any of this exists. See `watchTaskOperation`.
-     */
     const isTaskBusy = useSyncExternalStore(
         watchTaskOperation,
         isTaskOperationRunning,
         isTaskOperationRunning
     )
-    /*
-     * Read the same way and for the same reason: the sidebar withholds the controls that would move
-     * the checkout, and the conversation that knows a turn is running is mounted beside it rather
-     * than above it.
-     */
     const isAnswering = useSyncExternalStore(watchTurn, isTurnRunning, isTurnRunning)
     const mergeDisplayedTask = useCallback(
         (unsavedWork?: UnsavedWork) => tasksActions.merge(displayedTask, unsavedWork),
@@ -262,9 +195,6 @@ function Application() {
         () => tasksActions.abandonMerge(displayedTask),
         [displayedTask, tasksActions]
     )
-    // Read while the health check and the models are still going, so it has arrived by the time
-    // there is a sidebar to draw. `value` is undefined until it has, which is what the splash
-    // below waits on — the sidebar never mounts on a default that would be written back.
     const {value: sideNav, change: changeSideNav} = useRememberedValue({
         key: SIDE_NAV_KEY,
         restore: toSideNavLayout
@@ -274,8 +204,6 @@ function Application() {
         [prepareModels, refreshTasks, tasks]
     )
 
-    // Deferred to after the render rather than run inside it, so a mount and its StrictMode double
-    // collapse into one refresh instead of two.
     useEffect(() => {
         if (!isReady) return
         return defer(() => {
@@ -283,19 +211,11 @@ function Application() {
         })
     }, [isReady, refreshTasks])
 
-    // The workspace is checked before the models are downloaded: a folder Gofer cannot work in is
-    // not worth a gigabyte of models, and the fixes for it are the ones the user can actually make.
     if (!isHealthy) return <HealthGate onReady={acceptWorkspace} />
     if (!isReady || !sideNav) return <InitializationSplash onReady={showApplication} />
 
     return (
         <ApplicationContext value={context}>
-            {/*
-             * `section` paints the task list and the workspace with one surface and separates them
-             * with a hairline: 89.8% of the window measured as a single grey, so nothing told the
-             * eye where the frame ended and the work began. `elevated` drops the nav to the body
-             * colour and leaves the content on surface, which is the layering the ramp is for.
-             */}
             <AppShell
                 contentPadding={0}
                 variant='elevated'
@@ -318,13 +238,6 @@ function Application() {
                 }
             >
                 <Suspense fallback={null}>
-                    {/*
-                     * The key resets the workspace when the user switches tasks, so it follows the
-                     * task the route names and nothing else. Keying on the task list instead would
-                     * remount the moment the first list arrives — while the workspace is already
-                     * showing that very task — and a remount discards whatever has not reached the
-                     * debounced chat save yet, which is exactly a message just sent.
-                     */}
                     <OpenTaskContext value={openTask}>
                         <Workspace
                             key={workspaceTaskId ?? 'workspace'}
@@ -339,12 +252,6 @@ function Application() {
                     </OpenTaskContext>
                 </Suspense>
                 <Outlet />
-                {/*
-                 * Mounted only while it is open. The dialog's own title is the same words as the
-                 * control that opens it, and a closed dialog left in the tree keeps that text in the
-                 * document — which is a real ambiguity for anything reading the screen, not only for
-                 * a test.
-                 */}
                 {pendingChanges.length > 0 && (
                     <NewTaskDialog
                         isOpen

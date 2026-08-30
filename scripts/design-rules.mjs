@@ -1,29 +1,7 @@
-/**
- * Rules that keep the built theme legible as a hierarchy.
- *
- * A theme can satisfy every contrast requirement for text and still render an interface nobody can
- * read, because reading an interface is reading the differences between its parts: which text is a
- * value and which is a hint, which panel floats over which, which button is the one to press. Those
- * differences live in the gaps between tokens, and a token file is the one place a gap can be
- * measured before anyone has to look at a screenshot to notice it is gone.
- *
- * Distances are in CIE L*, not in contrast ratios. A ratio answers "can this be read at all", which
- * is the wrong question for two greys that are both perfectly readable and three points apart; L*
- * is perceptual lightness, so a fixed distance means the same amount of visible difference at the
- * dark end of the ramp as at the light end.
- */
-
-/** WCAG 1.4.11 asks 3:1 of any boundary a user has to find in order to operate a control. */
 const MIN_BOUNDARY_CONTRAST = 3
 
-/**
- * Roles a reader has to tell apart at a glance, so they need more than a nudge. Twelve points is
- * roughly the step between the neutral ramp's own stops — below it, two roles read as one colour
- * that happened to render twice.
- */
 const MIN_ROLE_DISTANCE = 12
 
-/** Surfaces are told apart by their edge as much as their fill, so they need far less. */
 const MIN_SURFACE_DISTANCE = 3
 
 const HEX = /^#[0-9a-f]{6}$/i
@@ -33,7 +11,6 @@ const channel = value => {
     return scaled <= 0.04045 ? scaled / 12.92 : ((scaled + 0.055) / 1.055) ** 2.4
 }
 
-/** Relative luminance, the Y of CIE XYZ, as both WCAG contrast and L* are defined against it. */
 export function luminance(hex) {
     const [red, green, blue] = [1, 3, 5].map(at =>
         channel(Number.parseInt(hex.slice(at, at + 2), 16))
@@ -41,7 +18,6 @@ export function luminance(hex) {
     return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 }
 
-/** Perceptual lightness, 0 for black and 100 for white. */
 export function lightness(hex) {
     const y = luminance(hex)
     return y <= 216 / 24389 ? y * (24389 / 27) : 116 * Math.cbrt(y) - 16
@@ -52,13 +28,6 @@ export function contrastRatio(one, other) {
     return (lighter + 0.05) / (darker + 0.05)
 }
 
-/**
- * Reads the pairs out of a built theme.
- *
- * Only `light-dark()` pairs of plain hex are collected: a token that resolves through `var()` or
- * carries an alpha channel has no fixed lightness to measure, and guessing at what it composites
- * over would make a rule that fails on a colour nobody chose.
- */
 export function parseThemeTokens(css) {
     const tokens = new Map()
     const pattern = /(--[a-z0-9-]+):\s*light-dark\((#[0-9a-f]{6}),\s*(#[0-9a-f]{6})\)/gi
@@ -68,18 +37,11 @@ export function parseThemeTokens(css) {
 
 const modes = ['light', 'dark']
 
-/** A rule reports nothing when a token it needs is missing — an absent token is not a collapsed one. */
 function read(tokens, mode, name) {
     const pair = tokens.get(name)
     return pair && HEX.test(pair[mode]) ? pair[mode] : undefined
 }
 
-/**
- * Two roles far enough apart to read as two, in whichever direction.
- *
- * Use this where only the size of the gap carries meaning — a value against its supporting text,
- * the accent against body text. Where the order carries meaning too, use `ascent`.
- */
 function separation({tokens, rule, mode, from, to, minimum, why}) {
     const one = read(tokens, mode, from)
     const other = read(tokens, mode, to)
@@ -95,14 +57,6 @@ function separation({tokens, rule, mode, from, to, minimum, why}) {
     }
 }
 
-/**
- * One step up the surface ramp: `to` has to be both far enough from `from` and above it.
- *
- * An unsigned distance passes a ramp that runs backwards, which is how dark mode shipped a popover
- * five points *below* the panel it floats over and the gate saw nothing. Astryx documents the order
- * — body → surface → card → popover, each level above the previous — so the order is measurable and
- * a step in the wrong direction is a violation of the same rule, not a separate one.
- */
 function ascent({tokens, rule, mode, from, to, minimum, why}) {
     const one = read(tokens, mode, from)
     const other = read(tokens, mode, to)
@@ -143,12 +97,6 @@ function boundary({tokens, rule, mode, edge, against, why}) {
     }
 }
 
-/**
- * Every violation the built theme currently carries, in both modes.
- *
- * The rules are deliberately few. Each one names a distinction a user makes without being taught
- * it, and each one failed on a real screen before it was written here.
- */
 export function findViolations(tokens) {
     const found = []
     for (const mode of modes) {
@@ -220,7 +168,6 @@ export function findViolations(tokens) {
     return found.filter(violation => violation !== undefined)
 }
 
-/** Violations the theme is allowed to keep, keyed by id, so only new ones fail the build. */
 export function partitionAgainstBaseline(violations, baseline) {
     const allowed = new Set(baseline)
     const present = new Set(violations.map(violation => violation.id))

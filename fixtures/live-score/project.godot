@@ -1,14 +1,3 @@
-; Engine configuration file.
-; The workspace for a rename that a grep gets wrong.
-;
-; `score` is the variable to rename. The project also holds `high_score`, `score_label`,
-; `reset_score`, `scoreboard`, `scoreboard_path` and the string "Score: %d" — so `grep -w score`
-; finds nine of the seventeen lines that hold the word, and a careless replace breaks five names and
-; the text on screen. There is one further trap the words do not show: `add(score: int)` takes a
-; parameter with the same name, which after a rename would shadow the field and stop the score ever
-; changing.
-;
-; Everything else is `fixtures/live-project`'s, for the reasons its own comments give.
 config_version=5
 
 [application]

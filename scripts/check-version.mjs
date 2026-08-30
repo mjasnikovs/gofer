@@ -1,8 +1,3 @@
-/**
- * Refuses a tree whose three version fields disagree.
- *
- * Run by `npm run check`. `scripts/set-version.mjs` is how they are moved together.
- */
 import {readVersions} from './version.mjs'
 
 const found = await readVersions()

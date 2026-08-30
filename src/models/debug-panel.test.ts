@@ -3,7 +3,6 @@ import {INITIAL_DEBUG_PANEL, isDebugBusy, reduceDebug, whileTheGameRuns} from '.
 import type {DebugAction, DebugPanel, ScopeVariables} from './debug-panel'
 import type {DebugStackFrame, DebugStopped} from './godot'
 
-/** Applies a run of actions in order, which is the only way the panel ever reaches a state. */
 function apply(...actions: readonly DebugAction[]): DebugPanel {
     return actions.reduce(reduceDebug, INITIAL_DEBUG_PANEL)
 }
@@ -31,7 +30,6 @@ describe('launching', () => {
         expect(isDebugBusy(INITIAL_DEBUG_PANEL)).toBe(false)
     })
 
-    /** A relaunch must not open on the frames of the run before it. */
     it('clears the previous run when a new one launches', () => {
         const relaunched = apply(
             {type: 'launched'},
@@ -54,7 +52,6 @@ describe('stopping', () => {
         expect(stacked.frameId).toBe(1)
     })
 
-    /** Variables belonging to no frame are worse than none: they read as the current ones. */
     it('drops the scopes when the stack comes back empty', () => {
         const stacked = apply(
             {type: 'launched'},
@@ -81,10 +78,6 @@ describe('stopping', () => {
 })
 
 describe('resuming', () => {
-    /*
-     * The whole point of the machine. Frames read at the last stop describe a game that is running
-     * again, and leaving them up says the debugger is stopped somewhere it is not.
-     */
     it('forgets the stop, the stack and the scopes when the game runs on', () => {
         const resumed = apply(
             {type: 'launched'},
@@ -97,7 +90,6 @@ describe('resuming', () => {
         expect(resumed.frames).toEqual([])
         expect(resumed.frameId).toBeUndefined()
         expect(resumed.scopes).toEqual([])
-        // Still launched: the game is running, not gone.
         expect(resumed.isLaunched).toBe(true)
     })
 
@@ -115,17 +107,12 @@ describe('resuming', () => {
 })
 
 describe('what the user is waiting on', () => {
-    /*
-     * Reading a frame issues one request per scope. A flag would come back to life between them
-     * and let a second click through mid-read.
-     */
     it('stays busy until every overlapping request has answered', () => {
         const two = apply({type: 'began'}, {type: 'began'}, {type: 'ended'})
         expect(isDebugBusy(two)).toBe(true)
         expect(isDebugBusy(reduceDebug(two, {type: 'ended'}))).toBe(false)
     })
 
-    /** A count that can go negative disables every control for the rest of the session. */
     it('never counts below nothing running', () => {
         expect(apply({type: 'ended'}, {type: 'ended'}, {type: 'began'}).running).toBe(1)
     })
@@ -139,16 +126,10 @@ describe('what the user is waiting on', () => {
         expect(reduceDebug(failed, {type: 'succeeded'}).error).toBeUndefined()
     })
 
-    /** Nothing changed, so nothing re-renders: an answer with no failure on screen is a no-op. */
     it('answers with the same value when there was no failure to retire', () => {
         expect(reduceDebug(INITIAL_DEBUG_PANEL, {type: 'succeeded'})).toBe(INITIAL_DEBUG_PANEL)
     })
 
-    /**
-     * Everything the panel holds describes a game, and the adapter does not always say when one
-     * ends: a debuggee killed from outside, or an editor that went away under it, sends nothing.
-     * Godot's own play state is asked instead, and the whole reading goes with it.
-     */
     describe('while the game runs', () => {
         const stopped = reduceDebug(apply({type: 'launched'}, {type: 'stopped', stop: STOP}), {
             type: 'stack-read',
@@ -168,7 +149,6 @@ describe('what the user is waiting on', () => {
             expect(gone.scopes).toEqual([])
         })
 
-        /** Nothing to retire is a no-op, so a panel with no game does not re-render every tick. */
         it('answers with the same value when nothing was launched', () => {
             expect(whileTheGameRuns(INITIAL_DEBUG_PANEL, false)).toBe(INITIAL_DEBUG_PANEL)
         })

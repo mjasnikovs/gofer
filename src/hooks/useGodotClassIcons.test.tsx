@@ -24,7 +24,6 @@ describe('useGodotClassIcons', () => {
             {initialProps: {root: first}}
         )
 
-        // The editor touches the scene, so the tree is read again and comes back as a new object.
         rerender({root: node('Node2D', [node('SubViewport')])})
         answer({icons: {Node2D: 'AAA', SubViewport: 'BBB'}})
 

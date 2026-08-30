@@ -23,14 +23,6 @@ async function waitForReadyWorkspace() {
     await expect(browser.$('[aria-label="Local AI connected"]')).toBeExisting()
 }
 
-/**
- * The composer's role is whichever one Astryx last spread over its editable.
- *
- * `ChatComposerInput` writes `role="textbox"` and then, once the composer is given triggers,
- * spreads `role="combobox"` over the top of it. Gofer's composer has the file-mention trigger, so
- * it is a combobox today — and a selector naming only one of the two silently stops matching the
- * moment that changes, which is a journey that cannot find the box it types into.
- */
 const COMPOSER = '[role="combobox"], [role="textbox"]'
 
 async function sendMessage(text: string) {
@@ -39,7 +31,6 @@ async function sendMessage(text: string) {
     await browser.keys('Enter')
 }
 
-/** Invokes one of the application's own commands in the packaged renderer. */
 function command<Response>(name: string, payload: Record<string, unknown>): Promise<Response> {
     return browser.execute(
         async (invoked: string, argument: Record<string, unknown>) => {
@@ -52,12 +43,6 @@ function command<Response>(name: string, payload: Record<string, unknown>): Prom
     ) as Promise<Response>
 }
 
-/**
- * One protocol v2 request to the Gofer addon inside the managed editor.
- *
- * This is the renderer's own `call_godot` command, not a test-only transport: the packaged journey
- * proves the shipped path from the window to the editor rather than a parallel one.
- */
 async function callGodot(
     name: string,
     params: Record<string, unknown>,
@@ -77,7 +62,6 @@ async function callGodot(
     return response.result
 }
 
-/** The session output the application captured, quoted when the editor never answers. */
 async function sessionOutput() {
     const page = await command<{entries: {message: string}[]}>('read_godot_logs', {
         query: {limit: 60}
@@ -85,13 +69,6 @@ async function sessionOutput() {
     return page.entries.map(entry => entry.message).join('\n')
 }
 
-/**
- * Waits for the addon inside the editor to report a ready session.
- *
- * Starting a session spawns the editor; the addon connects back only once Godot has imported the
- * project and enabled the plugin, so readiness is asked of the addon itself rather than inferred
- * from the process being alive.
- */
 async function awaitReadySession() {
     const started = await command<SessionSummary>('start_godot_session', {request: {}})
     expect(started.sessionId).not.toBe('')
@@ -138,19 +115,12 @@ describe('packaged desktop application', () => {
             },
             true
         )
-        // The scene lives in memory until it is explicitly saved, which is what makes the file on
-        // disk evidence that the whole path — window, command, RPC, editor — did the work.
         await callGodot('scene.save', {}, true)
 
         const savedScene = readFileSync(resolve(session.worktree, 'packaged.tscn'), 'utf8')
         expect(savedScene).toContain('PackagedNode')
         expect(savedScene).toContain('Vector2(12, 34)')
 
-        // The formatter is the one sidecar Gofer ships rather than launches from the user's
-        // machine, so the packaged application is the only place its bundled resolution can be
-        // proven: `wdio.packaged.conf.ts` removes any GOFER_GDFORMAT override, which leaves
-        // `src-tauri/sidecar/gdformat` — copied beside the executable by the Tauri build — as the
-        // only binary that can answer.
         const unformatted = 'extends Node\n\n\nfunc _ready( ) -> void:\n    print( "packaged" )\n'
         const formatted = await command<{formatted: string; changed: boolean}>('format_gdscript', {
             request: {source: unformatted}
@@ -161,8 +131,6 @@ describe('packaged desktop application', () => {
         )
 
         await command('stop_godot_session', {})
-        // Stopping removes what the session staged: the addon is Gofer's, the project is the
-        // user's, and a stopped session leaves nothing of the former in the latter.
         expect(existsSync(resolve(session.worktree, 'addons/gofer'))).toBe(false)
 
         const attachmentData = readFileSync(resolve('src-tauri/icons/32x32.png')).toString('base64')
@@ -192,18 +160,6 @@ describe('packaged desktop application', () => {
         )
         const stopButton = browser.$('button[aria-label*="Stop"]')
         await stopButton.click()
-        // Retry is drawn only when the last assistant message is `error` or `aborted`, so its
-        // absence would mean the stop never landed. On Windows it is drawn and the assertion still
-        // fails: three runs now have ended here with the stored message already `aborted` and the
-        // word "Retry" inside `body.getText()`, which returns rendered text. Waiting longer does
-        // not help — sixty seconds failed exactly as fifteen did — so this is not the runner being
-        // slow, it is `button*=Retry` resolving to something WebView2 calls undisplayed while
-        // WebKitGTK does not.
-        //
-        // `tag*=text` is XPath `.//button[contains(., "Retry")]` and `$` answers with the first
-        // match in document order, so a hidden button whose text contains the word wins over the
-        // real one. The diagnostic below asks every candidate what it is rather than guessing which:
-        // its size, what the driver says about displayedness, and its markup.
         try {
             await expect(browser.$('button*=Retry')).toBeDisplayed()
         } catch (failure) {
@@ -234,8 +190,6 @@ describe('packaged desktop application', () => {
             )
         }
 
-        // The restart journey asserts this conversation comes back, so the process must not be torn
-        // down until it is durable. Reading the stored chat is what proves that; a pause only hopes.
         let stored: string[] = []
         for (let attempt = 0; attempt < 60; attempt++) {
             const chat = await command<{messages: {text: string}[]}>('load_chat', {})

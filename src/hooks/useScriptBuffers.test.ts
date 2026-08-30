@@ -17,14 +17,12 @@ interface FileRecord {
     version: number
 }
 
-/** The fields the fake backend reads out of a command's request body. */
 interface ScriptCommandRequest {
     path?: string
     text?: string
     expectedHash?: string
 }
 
-/** The structured failure Rust rejects with, as an error object the lint rules accept. */
 class BackendError extends Error {
     constructor(
         readonly code: string,
@@ -38,7 +36,6 @@ class BackendError extends Error {
 
 const CONFLICT = new BackendError('file_conflict', 'player.gd changed on disk since it was read')
 
-/** The backend the hook talks to, reduced to what a buffer's lifecycle actually needs. */
 function backend() {
     const files = new Map<string, FileRecord>([
         ['player.gd', {text: 'extends Node\n', hash: 'hash-1', version: 0}]
@@ -136,7 +133,6 @@ async function openPlayer(onError = vi.fn()) {
     return {hook, onError}
 }
 
-/** The change debounce, held until a test says the typing has stopped. */
 let clock = createManualScheduler()
 
 beforeEach(() => {
@@ -174,7 +170,6 @@ describe('script buffers', () => {
             hook.result.current.changeBuffer('player.gd', 'extends Node\nvar speed := 2.0\n')
         })
         expect(hook.result.current.activeBuffer?.dirty).toBe(true)
-        // Two keystrokes, one delay outstanding: the second call off the first rather than adding.
         expect(clock.pending).toBe(1)
 
         await act(async () => {
@@ -207,7 +202,6 @@ describe('script buffers', () => {
         const server = backend()
         const {hook, onError} = await openPlayer()
 
-        // Something else wrote the file after this buffer read it.
         const file = server.files.get('player.gd')
         if (file) file.hash = 'hash-external'
 
@@ -221,10 +215,6 @@ describe('script buffers', () => {
         expect(server.saved).toEqual([])
         expect(hook.result.current.activeBuffer?.conflict).toBe('staleSave')
         expect(hook.result.current.activeBuffer?.dirty).toBe(true)
-        // The conflict is the report, and it is attached to the buffer that has the two answers to
-        // it. Sending a copy to the frame as well put the same sentence in a banner that only a
-        // click can remove, so the workspace went on saying the file could not be saved long after
-        // it had been — through every later save, every tab, and every task.
         expect(onError).not.toHaveBeenCalled()
     })
 
@@ -372,13 +362,6 @@ describe('script buffers', () => {
         expect(hook.result.current.diagnostics['player.gd']).toHaveLength(1)
     })
 
-    /*
-     * The regression: diagnostics accumulated per path and nothing ever removed one.
-     *
-     * `closeBuffer` dropped the tab and left the rows, so the bottom panel kept counting errors for
-     * a file that is not open — and for a file the agent had deleted, whose rows open nothing when
-     * clicked. Neither the close nor the external-change handler touched the map.
-     */
     it("drops a closed file's diagnostics with its tab", async () => {
         const server = backend()
         const {hook} = await openPlayer()

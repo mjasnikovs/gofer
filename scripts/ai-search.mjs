@@ -1,22 +1,3 @@
-/**
- * Searching the live web, through whichever engine the user picked.
- *
- * No model is involved. A search is an HTTP request and a parse, and the result is a list of titles
- * and URLs the agent then reads one of with `web_fetch`. That is why this tool hands its results
- * straight back rather than through a child: there is nothing to distil, and a list of ten links is
- * already smaller than any summary of it would be.
- *
- * Three engines, because they fail differently and cost differently. Exa and DuckDuckGo need no key
- * and can be used the moment the app is installed; Brave needs one and is the one that keeps working
- * under load. Which is used is the user's setting, and it is STRICT — a failure is reported as a
- * failure and never quietly answered by a different engine. Results that came from somewhere other
- * than where the user thinks they came from are worse than no results.
- *
- * `fetch` is a parameter everywhere rather than the global, so a test scripts a response instead of
- * mutating the process. Node runs test files in parallel, and a global swapped in one file is
- * swapped under every other.
- */
-
 import {parseHTML} from 'linkedom'
 
 export const WEB_SEARCH_TOOL_NAME = 'web_search'
@@ -24,16 +5,8 @@ export const WEB_SEARCH_TOOL_NAME = 'web_search'
 const DEFAULT_COUNT = 10
 const MAX_COUNT = 20
 
-/** Every engine, by the id the settings file stores. */
 export const SEARCH_PROVIDERS = ['exa', 'ddg', 'brave']
 
-/**
- * What each engine is called on screen.
- *
- * Separate from the stored id on purpose: the ids mean nothing to somebody who has not read this
- * file, and a label must never become a stored value — a settings file holding `DuckDuckGo` would
- * match no engine at all.
- */
 export const SEARCH_PROVIDER_LABELS = {exa: 'Exa', ddg: 'DuckDuckGo', brave: 'Brave'}
 
 export function isSearchProvider(value) {
@@ -61,12 +34,6 @@ export class SearchError extends Error {
     }
 }
 
-/**
- * One request, under a clock the caller cannot forget to set, and cancellable by the parent turn.
- *
- * Both signals reach one controller: the user's stop and the timeout end the same request, and the
- * two are told apart afterwards so a stopped turn is never reported as a broken site.
- */
 async function requestWith({url, init, timeoutMs, signal, fetchImpl, engine}) {
     const controller = new AbortController()
     let userAborted = false
@@ -89,17 +56,10 @@ async function requestWith({url, init, timeoutMs, signal, fetchImpl, engine}) {
     }
 }
 
-// ─── Exa ────────────────────────────────────────────────────────────────────
-
 const EXA_ENDPOINT = 'https://mcp.exa.ai/mcp'
 const EXA_TIMEOUT_MS = 30_000
 const MAX_DESCRIPTION_CHARS = 400
 
-/**
- * The endpoint answers as an event stream on some requests and as plain JSON on others, and it does
- * genuinely do both. A parser written to only the documented shape breaks intermittently, which is
- * the worst way for a search to break — it looks like the query having no results.
- */
 export function parseExaBody(body) {
     for (const line of body.split('\n')) {
         if (!line.startsWith('data:')) continue
@@ -108,26 +68,20 @@ export function parseExaBody(body) {
         try {
             const candidate = JSON.parse(payload)
             if (candidate.result || candidate.error) return candidate
-        } catch {
-            // Not this frame. A stream carries keep-alives and partial frames too.
-        }
+        } catch {}
     }
     try {
         const candidate = JSON.parse(body)
         if (candidate.result || candidate.error) return candidate
-    } catch {
-        // Neither shape.
-    }
+    } catch {}
     throw new SearchError('Exa returned a response that could not be read.', 'protocol')
 }
 
-/** Split the payload into `Title:`/`URL:` blocks, and cap each description to a snippet. */
 export function parseExaResults(text) {
     const results = []
     for (const block of text.split(/(?=^Title: )/mu).filter(part => part.trim().length > 0)) {
         const title = /^Title: (.+)/mu.exec(block)?.[1]?.trim() ?? ''
         const url = /^URL: (.+)/mu.exec(block)?.[1]?.trim() ?? ''
-        // A block with no URL is not a result. There is nothing to read next.
         if (!url) continue
 
         let content = ''
@@ -210,24 +164,11 @@ export async function exaSearch(query, {count, signal, fetch: fetchImpl = global
     return parseExaResults(text).slice(0, wanted)
 }
 
-// ─── DuckDuckGo ─────────────────────────────────────────────────────────────
-
 const DDG_ENDPOINT = 'https://html.duckduckgo.com/html/'
 const DDG_TIMEOUT_MS = 15_000
 
-/**
- * DuckDuckGo serves a bot-challenge page to anything that does not look like a browser, and it
- * serves it with HTTP 200 and no error. So the request carries a browser user-agent, and a page that
- * parses to nothing comes back as no results rather than as a throw — which is what the challenge
- * page actually is.
- */
 const DDG_USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0'
 
-/**
- * A result link is wrapped in `//duckduckgo.com/l/?uddg=<destination>`. Unwrap it, pass a non-DDG
- * href through, and drop anything that stays on duckduckgo.com — those are ad click-trackers, and
- * emitting one as a result hands the agent DuckDuckGo's own tracker to read.
- */
 export function unwrapDdgRedirect(href) {
     let parsed
     try {
@@ -297,8 +238,6 @@ export async function ddgSearch(query, {count, signal, fetch: fetchImpl = global
     return parseDdgHtml(await response.text()).slice(0, clampCount(count))
 }
 
-// ─── Brave ──────────────────────────────────────────────────────────────────
-
 const BRAVE_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search'
 const BRAVE_TIMEOUT_MS = 10_000
 
@@ -356,19 +295,10 @@ export async function braveSearch(
         }))
 }
 
-// ─── Choosing between them ──────────────────────────────────────────────────
-
 const NO_KEY_MESSAGE =
     'Brave Search has no API key. Add one on the settings page, or switch the search engine to '
     + 'Exa or DuckDuckGo, which need no key.'
 
-/**
- * One search, on the chosen engine and no other.
- *
- * Strict by design. A failed engine is reported as a failure rather than answered by whichever
- * engine happens to work, because results silently sourced from somewhere other than the user's
- * choice are worse than none: nothing on screen says the setting was ignored.
- */
 export async function search({
     query,
     count,
@@ -396,13 +326,6 @@ export async function search({
     }
 }
 
-/**
- * How much of a result set is worth sending to the model.
- *
- * `tool-result.mjs` caps only the results it builds itself, so a tool that assembles its own text is
- * capped by nothing. Twenty results with four-hundred-character snippets is most of a small model's
- * context spent on things it will not read.
- */
 const MAX_RESULT_TEXT_CHARS = 8_000
 
 export function formatResults(results) {
@@ -412,7 +335,6 @@ export function formatResults(results) {
     )
     const text = lines.join('\n')
     if (text.length <= MAX_RESULT_TEXT_CHARS) return text
-    // Cut whole results rather than mid-line: half a URL is not a link anyone can follow.
     const kept = []
     let used = 0
     for (const line of lines) {
@@ -459,8 +381,6 @@ export function createWebSearchTool({provider, apiKey, search: searchImpl = sear
             required: ['query']
         },
         execute: async (_toolCallId, params, signal) => {
-            // Answered before the query is read, and without a request: proving the tool works must
-            // not spend a search quota once per turn, nor leak a query to an engine every turn.
             if (params?.probe === true) {
                 return {
                     content: [{type: 'text', text: WEB_SEARCH_PROBE_ANSWER}],

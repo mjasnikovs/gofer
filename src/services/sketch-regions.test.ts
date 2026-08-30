@@ -1,12 +1,6 @@
 import {describe, expect, it} from 'vitest'
 import {describeBlocked, remoteReferences} from './sketch-regions'
 
-/**
- * A blocked webfont arrives as a URL longer than the sentence carrying it.
- *
- * The origin and the filename identify it; the rest is a query string the agent pays for by the
- * character in a tool result it has to read.
- */
 describe('describeBlocked', () => {
     it('keeps the origin and the filename and drops the query string', () => {
         expect(
@@ -27,13 +21,6 @@ describe('describeBlocked', () => {
     })
 })
 
-/**
- * Read out of the markup rather than waited for.
- *
- * Measured against a real WebKitGTK: a frame has already parsed and started fetching by the time its
- * `load` event fires, so a remote image in the first revision is refused and the listener attached
- * afterwards never hears about it. The markup needs no timing to be right.
- */
 describe('remoteReferences', () => {
     it('finds every shape of request that leaves the machine', () => {
         const html = [
@@ -52,7 +39,6 @@ describe('remoteReferences', () => {
         ])
     })
 
-    /** Only what loads. A link to a page is a destination, not a request, and often the point. */
     it('says nothing about what is already in the document, or about a plain link', () => {
         const html =
             '<a href="https://godotengine.org/docs">docs</a>'
@@ -61,13 +47,6 @@ describe('remoteReferences', () => {
         expect(remoteReferences(html)).toEqual([])
     })
 
-    /**
-     * A project file is not a remote one.
-     *
-     * The backend reads `res://` out of the workspace and puts the bytes in the page, so one that is
-     * still spelt that way here is a file that is missing, not a request the policy refused. The
-     * agent is told about it separately, because the fix is a different fix.
-     */
     it('says nothing about a project asset', () => {
         const html =
             '<img src="res://ui/hero.png">'

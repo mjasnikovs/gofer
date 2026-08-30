@@ -25,8 +25,6 @@ if (!root) {
     throw new Error('Application root was not found')
 }
 
-// A layout change made in the last quarter second before the window closes is still a change the
-// user made. Nothing tears this down: it lives as long as the window does.
 watchForWindowClose()
 
 ReactDOM.createRoot(root).render(

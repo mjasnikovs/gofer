@@ -186,13 +186,7 @@ fn settle_transition<R: Runtime>(app: &AppHandle<R>, from: SessionState, to: Ses
     if after_transition(from, to) != AfterTransition::SettleReadyEditor {
         return;
     }
-    // Read here rather than on the spawned thread so a settings file that cannot be read leaves the
-    // rules alone instead of guessing at them. Godot reads the embed mode once, when its game view
-    // becomes ready, so a session that has already started is the last moment this can be set for
-    // that session at all.
     let godot = read_godot_settings(app).ok();
-    // Off this thread: opening a scene is an RPC round trip, and the watch has to keep looking
-    // while it is in flight.
     thread::spawn(move || {
         if let Some(godot) = godot {
             let _ = enforce_godot_policy(&godot);
@@ -208,15 +202,10 @@ fn start_session_watch<R: Runtime>(app: &AppHandle<R>) {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
     let app = app.clone();
-    // Seeded from the state the session is in right now, which a session that has just started is
-    // `Starting` — so the arrival at `Ready` is a transition this has seen the whole of.
     let mut last_state = godot_session::current_state();
     let worker = thread::spawn(move || {
         while !flag.load(Ordering::Acquire) {
             thread::sleep(SESSION_WATCH_TICK);
-            // An editor that is gone is noticed here, in time, rather than whenever the window next
-            // asks. This does the bookkeeping and tells the window itself, so there is nothing left
-            // for the loop to report.
             if noticed_editor_exit(&app) {
                 break;
             }
@@ -333,9 +322,6 @@ fn session_owner_by_worktree(storage: &ProjectStorage) -> SessionOwner {
                 .as_ref()
                 .is_some_and(|tree| Path::new(&tree.worktree_path) == session_worktree)
         })
-        // A list that was read and matched nothing is an answer: this session is not running out of
-        // any task's worktree, so there is no task to cross. Only a list that could not be read at
-        // all leaves the question open.
         .map_or(SessionOwner::NoTask, |task| SessionOwner::Task(task.id))
 }
 
@@ -352,20 +338,12 @@ pub fn require_session_task<R: Runtime>(app: &AppHandle<R>) -> Result<(), RpcErr
     };
     let held = owner.clone();
     drop(owner);
-    // A storage that cannot be read is not evidence of a mismatch, so it is not treated as one.
     let Ok(storage) = project_storage(app) else {
         return Ok(());
     };
-    // An owner nobody could read at session start is worked out now, from the session's own
-    // worktree — not from whichever task is active, which is the question being asked, not the
-    // answer. The worktree is what the session was started on and it does not move, so the
-    // task that owns that directory is still the task that owns the session.
     let held = match held {
         SessionOwner::Unknown => {
             let resolved = session_owner_by_worktree(&storage);
-            // Only a definite answer is kept. Storing `Unknown` would cache the failure and refuse
-            // every call for the rest of the session — the same latching this whole change is
-            // about, one level up.
             if resolved != SessionOwner::Unknown
                 && let Ok(mut slot) = SESSION_TASK.lock()
             {
@@ -378,9 +356,6 @@ pub fn require_session_task<R: Runtime>(app: &AppHandle<R>) -> Result<(), RpcErr
     let session_task = match held {
         SessionOwner::Task(id) => id,
         SessionOwner::NoTask => return Ok(()),
-        // Refused, not allowed. This is the guard's own principle applied to its own ignorance:
-        // answering out of a checkout nobody can name is exactly the failure it exists to stop,
-        // and "I could not tell" is not evidence that there is nothing to tell.
         SessionOwner::Unknown => {
             return Err(RpcError::new(
                 "session_owner_unknown",
@@ -395,9 +370,6 @@ pub fn require_session_task<R: Runtime>(app: &AppHandle<R>) -> Result<(), RpcErr
     if active.as_deref() == Some(session_task.as_str()) {
         return Ok(());
     }
-    // The task is named rather than merely referred to. "Another task" is true and useless: the
-    // sidebar holds several, and the user cannot tell which one to open from a refusal that will
-    // not say. The title travels in the details too, because a button is built from those.
     let title = storage
         .tasks()
         .list()
@@ -461,17 +433,10 @@ pub fn start_session<R: Runtime>(
         )
     })?;
 
-    // A session whose editor is gone must not answer for this start. Answering with it is what
-    // "starting a session that is already running answers with the one that is running" used to do
-    // to a dead one: the call returned the failed session, reported success, and started nothing,
-    // so the button the user pressed to get their editor back did nothing at all.
     noticed_editor_exit(app);
     if let Some(running) = godot_session::current_info()
         && !godot_session::editor_has_exited()
     {
-        // The running session reports the path it resolved; the task table holds the one it was
-        // given, and on a machine with a symlinked temporary directory those are different strings
-        // for one directory.
         let resolved = crate::paths::canonical(&worktree).unwrap_or_else(|_| worktree.clone());
         if Path::new(&running.worktree) == resolved {
             return Ok(to_response(&running));
@@ -506,10 +471,6 @@ pub fn start_session<R: Runtime>(
     match godot_session::start(LaunchRequest {
         worktree: worktree.clone(),
         binary: crate::workspace::configured_godot_binary(app),
-        // The other half of the same rule. `enforce_godot_policy` writes the editor setting once
-        // the editor is ready; this decides the display driver it is launched with, because on
-        // Linux only one of them can embed anything. A settings file that cannot be read falls
-        // back to what a machine that never chose gets, rather than to "off".
         embed_game_window: read_godot_settings(app)
             .map(|godot| godot.embed_game_window)
             .unwrap_or_else(|_| GodotSettings::default().embed_game_window),
@@ -517,8 +478,6 @@ pub fn start_session<R: Runtime>(
         Ok(info) => {
             remember_session_task(storage.tasks().active());
             start_run_logging(&storage, &info, &worktree);
-            // Started with the session, not with a subscription, so what the editor becoming ready
-            // obliges Gofer to do happens whether or not a window is listening for it.
             start_session_watch(app);
             Ok(to_response(&info))
         }
@@ -566,8 +525,6 @@ fn start_run_logging(storage: &ProjectStorage, info: &SessionInfo, worktree: &Pa
     let worker = thread::spawn(move || {
         let mut cursor = 0_u64;
         let mut waited = Duration::ZERO;
-        // The wait is ticked rather than slept through, so stopping a session does not sit out a
-        // whole flush interval before its final drain.
         while !flag.load(Ordering::Acquire) {
             thread::sleep(LOG_TICK);
             waited += LOG_TICK;
@@ -577,7 +534,6 @@ fn start_run_logging(storage: &ProjectStorage, info: &SessionInfo, worktree: &Pa
             waited = Duration::ZERO;
             flush_logs(&sink, &run_id, &mut cursor);
         }
-        // The lines that explain a crash arrive last, so the final drain happens after the stop.
         flush_logs(&sink, &run_id, &mut cursor);
     });
 
@@ -745,21 +701,13 @@ fn end_session(end: SessionEnd<'_>) -> Result<(), SessionError> {
 fn end_session_with(end: SessionEnd<'_>, editor: &dyn EditorLifecycle) -> Result<(), SessionError> {
     let stopped_by_gofer = matches!(end, SessionEnd::Stopped { .. });
 
-    // 1. The language server and the debug adapter both die with the editor, so the cached clients
-    //    are dropped before the process is stopped rather than left to fail the renderer's next
-    //    script or debugger request.
     crate::script::disconnect();
     crate::debug::disconnect();
 
-    // 2. The watch, but only for a stop. An exit is noticed *by* the watch, which breaks its own
-    //    loop, and joining it from inside itself would never return.
     if stopped_by_gofer {
         stop_session_watch();
     }
 
-    // 3. The process, again only for a stop: an editor that exited on its own has nothing left to
-    //    kill. A binding released with nothing of the supervisor's behind it is a complete ending,
-    //    not a failure.
     let result = if stopped_by_gofer {
         let was_bound = editor.release_binding();
         match editor.stop() {
@@ -770,29 +718,20 @@ fn end_session_with(end: SessionEnd<'_>, editor: &dyn EditorLifecycle) -> Result
         Ok(())
     };
 
-    // 4. The run row, after the editor is stopped so the drain's last pass sees the output the
-    //    shutdown itself produced. An editor that exited on its own did not complete anything.
     stop_run_logging(if stopped_by_gofer && result.is_ok() {
         RunOutcome::Completed
     } else {
         RunOutcome::Failed
     });
 
-    // 5. The addon, once nothing is reading it. Only a stop may do this: after an exit Gofer no
-    //    longer knows the state of the directory, and unstaging from under one it does not know is
-    //    how the addon is left half out.
     if let SessionEnd::Stopped {
         worktree: Some(worktree),
         stager,
     } = end
     {
-        // Unstaging must read the same ledger staging wrote, or the addon is left in the worktree.
         let _ = stager.unstage(&worktree);
     }
 
-    // 6. The bookkeeping, for both. An exit used to skip these two, so after a crash the events
-    //    kept being forwarded from a session that was gone, and the next refusal named the task the
-    //    dead editor had belonged to rather than the one the window is on.
     stop_event_subscription();
     remember_session_task(Ok::<_, ()>(None));
     result
@@ -800,8 +739,6 @@ fn end_session_with(end: SessionEnd<'_>, editor: &dyn EditorLifecycle) -> Result
 
 /// Stops the active session and removes the staged addon.
 pub fn stop_session<R: Runtime>(app: &AppHandle<R>) -> Result<(), SessionError> {
-    // Read before anything is torn down: this is the running session's own worktree, and stopping
-    // is what makes it unreadable.
     let worktree = current_worktree();
     end_session(SessionEnd::Stopped {
         worktree,
@@ -836,13 +773,10 @@ fn release_worktree_with<R: Runtime>(
     stager: &AddonStager,
     worktree: &Path,
 ) -> Result<(), String> {
-    // The running session reports the path it resolved, so the comparison is made against the
-    // canonical form of the one the task table holds.
     let resolved = crate::paths::canonical(worktree).unwrap_or_else(|_| worktree.to_path_buf());
     let ours = godot_session::current_info()
         .is_some_and(|running| Path::new(&running.worktree) == resolved);
     if ours {
-        // Stopping the session is what unstages the addon.
         return stop_session(app).map_err(|error| {
             format!(
                 "The Godot editor could not be stopped, so the files were left as they are: {}",
@@ -850,7 +784,6 @@ fn release_worktree_with<R: Runtime>(
             )
         });
     }
-    // Unstaged against the same canonical path staging wrote, or the entry is not found.
     let _ = stager.unstage(&resolved);
     Ok(())
 }
@@ -984,8 +917,6 @@ pub fn subscribe_godot_events<R: Runtime>(
     let stop = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop);
 
-    // The state a subscriber arrives to, so a window that attaches mid-session draws the editor it
-    // actually has rather than waiting for the next change.
     emit_state_changed(app, godot_session::current_state());
 
     let worker = thread::spawn(move || {
@@ -1163,8 +1094,6 @@ mod tests {
 
         godot_session::clear_logs();
         godot_session::append_log(LogSource::Editor, "Godot Engine v4.7.2.stable\n");
-        // A blank line is what the engine prints between phases. Storage refuses an empty message,
-        // so one of them must not be able to lose the batch it arrived in.
         godot_session::append_log(LogSource::Editor, "   \n");
         godot_session::append_log(
             LogSource::EditorError,
@@ -1186,8 +1115,6 @@ mod tests {
         assert_eq!(hits[0].level, "error");
         assert_eq!(hits[0].source.as_deref(), Some("editorError"));
 
-        // Stopping twice is what a crashed editor followed by a normal stop looks like: the
-        // second stop finds no logger and answers rather than closing someone else's run.
         stop_run_logging(RunOutcome::Completed);
     }
 
@@ -1283,11 +1210,8 @@ mod tests {
         app.manage(crate::storage::StorageSlot::new(Ok(storage.clone())));
 
         let _planted = PlantedSession::new(&worktree, &first);
-        // The session started, but the question "whose is it?" failed at that moment.
         remember_session_task(Err::<Option<String>, _>("the database was busy"));
 
-        // The window then moves to another task. A guard that had recorded the failure as "no
-        // task" would answer this happily, out of the first task's checkout.
         let second = storage
             .tasks()
             .create(&storage.switch_with_no_turn_to_refuse(&|_| Ok(())))
@@ -1296,9 +1220,6 @@ mod tests {
             .expect("the new task has an id");
         assert_ne!(second, first);
 
-        // The owner is worked out from the session's own worktree rather than from whichever task
-        // is active — which is the question, not the answer. These tasks have no worktree of their
-        // own, so the list is read, nothing matches, and there is genuinely no task to cross.
         assert_eq!(
             session_owner_by_worktree(&storage),
             SessionOwner::NoTask,
@@ -1307,14 +1228,12 @@ mod tests {
         require_session_task(app.handle())
             .expect("a session that belongs to no task's worktree has nothing to cross");
 
-        // A definite answer is kept, so the question is asked once rather than on every call.
         assert_eq!(
             *SESSION_TASK.lock().expect("owner"),
             SessionOwner::NoTask,
             "the resolved answer replaces Unknown"
         );
 
-        // And once the owner is known, the ordinary rules resume: the window has moved on.
         remember_session_task(Ok::<_, ()>(Some(first.clone())));
         let named = require_session_task(app.handle())
             .expect_err("the window has moved to the second task");
@@ -1335,12 +1254,9 @@ mod tests {
         let app = tauri::test::mock_builder()
             .build(crate::app_context())
             .expect("build mock Tauri app");
-        // No storage at all, so the owner can never be worked out.
         godot_session::bind(Some(Arc::new(godot_session::ExternalEditor::absent())));
         remember_session_task(Err::<Option<String>, _>("the database was busy"));
 
-        // Without storage the guard has nothing to compare against and says nothing, which is the
-        // pre-existing rule. What matters is that the failure was not written down as "no task".
         assert!(require_session_task(app.handle()).is_ok());
         assert_eq!(
             *SESSION_TASK.lock().expect("owner"),
@@ -1367,7 +1283,6 @@ mod tests {
         std::fs::create_dir(&worktree).expect("create worktree");
         let storage = ProjectStorage::open(&directory.path().join("data"), &worktree)
             .expect("open project storage");
-        // Opening the storage leaves one task active, which is the task the session will own.
         let first = storage
             .tasks()
             .active()
@@ -1378,9 +1293,6 @@ mod tests {
             .expect("build mock Tauri app");
         app.manage(crate::storage::StorageSlot::new(Ok(storage.clone())));
 
-        // No session at all: there is nothing to be wrong about, and the guard says nothing. The
-        // absent editor is bound rather than left unbound, because the supervisor's own answer
-        // depends on whether some other test in this process left a real session behind.
         godot_session::bind(Some(Arc::new(godot_session::ExternalEditor::absent())));
         remember_session_task(Ok::<_, ()>(Some("some-other-task".to_owned())));
         require_session_task(app.handle()).expect("no session means nothing to refuse");
@@ -1390,7 +1302,6 @@ mod tests {
         require_session_task(app.handle())
             .expect("the session's own task must be able to call into it");
 
-        // Switching tasks is what makes the same session the wrong one to answer from.
         let second = storage
             .tasks()
             .create(&storage.switch_with_no_turn_to_refuse(&|_| Ok(())))
@@ -1401,8 +1312,6 @@ mod tests {
         let refused =
             require_session_task(app.handle()).expect_err("another task's session must not answer");
         assert_eq!(refused.code, "session_other_task");
-        // The refusal has to be actionable: the window builds an "open that task" control out of
-        // these, and the user reads the title out of the sentence.
         assert_eq!(refused.details["taskId"], json!(first));
         assert_eq!(refused.details["taskTitle"], json!("New task"));
         assert!(
@@ -1411,7 +1320,6 @@ mod tests {
             refused.message
         );
 
-        // And moving back is enough to make it answerable again — nothing has to be restarted.
         storage
             .tasks()
             .activate(&first, &storage.switch_with_no_turn_to_refuse(&|_| Ok(())))
@@ -1436,8 +1344,6 @@ mod tests {
         std::fs::create_dir(&worktree).expect("create worktree");
         std::fs::write(worktree.join("project.godot"), "config_version=5\n").expect("project file");
         let workspace = Workspace::open(&worktree).expect("workspace");
-        // The stager is handed in rather than read off the app: a test may never stage into, or
-        // unstage out of, the developer's own Gofer installation.
         let stager = AddonStager::new(directory.path().join("ledger.json"));
         let app = tauri::test::mock_builder()
             .build(crate::app_context())
@@ -1446,7 +1352,6 @@ mod tests {
         stager.stage(&workspace).expect("stage the addon");
         assert!(workspace.root().join("addons/gofer").is_dir());
 
-        // The editor that staged it is gone, and nothing else took its place.
         godot_session::bind(None);
         release_worktree_with(app.handle(), &stager, workspace.root()).expect("release");
 
@@ -1509,14 +1414,6 @@ mod tests {
         }
     }
 
-    /*
-     * Both endings do the bookkeeping; only one of them kills anything.
-     *
-     * An exit used to return early after closing the run row, skipping the event subscription and
-     * the session's task. So after a crash the forwarder kept draining a session that was gone, and
-     * the next refusal named the task the dead editor had belonged to rather than the one the
-     * window is on — "open the task you are already on" is not a way out of anything.
-     */
     #[test]
     fn an_editor_that_exited_on_its_own_does_the_same_bookkeeping_as_a_stop() {
         let _test = godot_session::SESSION_TEST_LOCK
@@ -1550,7 +1447,6 @@ mod tests {
                     .is_none(),
                 "a session that has ended cannot still be forwarding events ({ending})"
             );
-            // Only a stop has a process to kill. An editor that exited on its own has nothing left.
             assert_eq!(
                 editor.stopped(),
                 usize::from(ending == "stopped"),
@@ -1559,13 +1455,6 @@ mod tests {
         }
     }
 
-    /*
-     * A stop that failed still closes the run row.
-     *
-     * The row is the only record that the session happened at all, and an editor that would not
-     * stop is exactly when somebody goes looking for it. Nothing could reach this branch before:
-     * the only adapter was the supervisor's static, which cannot be made to refuse.
-     */
     #[test]
     fn an_editor_that_will_not_stop_still_closes_its_run() {
         let _test = godot_session::SESSION_TEST_LOCK
@@ -1599,8 +1488,6 @@ mod tests {
         .expect_err("a stop that did not happen is answered");
         assert_eq!(refusal.code, "godot_kill_failed");
 
-        // The run is closed, so nothing can be appended to it any more — the one thing storage
-        // refuses for a run that is not running.
         let run = storage
             .runs()
             .search_logs(&SearchGodotLogsRequest {

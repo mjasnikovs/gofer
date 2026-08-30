@@ -174,13 +174,6 @@ mod tests {
         std::env::temp_dir().join("gofer-switch-tests-nowhere")
     }
 
-    /*
-     * The stop comes first, and a refusal ends the move.
-     *
-     * This is the rule the whole module exists for: a checkout moved under a running editor loses
-     * the outgoing task's work with no error anywhere. Four operations spelt it out separately and
-     * one of them dropped the answer.
-     */
     #[test]
     fn a_refused_stop_moves_nothing() {
         let recorder = Recorder::new(true);
@@ -207,7 +200,6 @@ mod tests {
         assert_eq!(recorder.released(), 1);
     }
 
-    // `onto` is the merge's move: already on the branch, and the stop is the whole point.
     #[test]
     fn moving_onto_a_branch_always_stops_first() {
         let recorder = Recorder::new(true);
@@ -234,8 +226,6 @@ mod tests {
      */
     #[test]
     fn a_switch_holds_the_provider_operation_until_it_is_dropped() {
-        // The provider operation is process-wide, and every `ai_turn` test that begins a turn takes
-        // this lock — so this waits behind them rather than refusing one of them by holding it.
         let _gate = crate::approvals::serialize_gate_tests();
         let release = |_: &Path| Ok(());
 

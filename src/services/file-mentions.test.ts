@@ -19,11 +19,6 @@ describe('the search source behind an @ mention', () => {
         })
     })
 
-    /*
-     * The composer's menu never calls `bootstrap`: it calls `search`, twice per keystroke. So a
-     * source that only read the worktree on `bootstrap` would answer every query out of an empty
-     * list, which is the menu saying "No results" about a file that is right there.
-     */
     it('reads the worktree for a search, without being bootstrapped first', async () => {
         const list = vi.fn().mockResolvedValue(LISTING)
         const source = createFileMentionSource(list)
@@ -33,7 +28,6 @@ describe('the search source behind an @ mention', () => {
         expect(list).toHaveBeenCalledTimes(1)
     })
 
-    /* Ten characters typed is twenty searches. It is one read, not twenty. */
     it('reads once for a burst of searches', async () => {
         const list = vi.fn().mockResolvedValue(LISTING)
         const source = createFileMentionSource(list)
@@ -41,7 +35,6 @@ describe('the search source behind an @ mention', () => {
         expect(list).toHaveBeenCalledTimes(1)
     })
 
-    /* The agent writes files mid-turn, so a listing that never expires goes stale under the user. */
     it('reads again once the listing it held is old', async () => {
         const list = vi.fn().mockResolvedValue(LISTING)
         let clock = 0
@@ -52,12 +45,6 @@ describe('the search source behind an @ mention', () => {
         expect(list).toHaveBeenCalledTimes(2)
     })
 
-    /*
-     * Issue #3. The menu asks `search('')` on every keystroke to find out whether this source is
-     * async, and puts itself on a 150 ms debounce showing "Searching…" whenever the answer is a
-     * promise. Answering with an array is what keeps the rows on screen and keeps Enter meaning
-     * "take this file"; a promise here is the flicker, so it is asserted rather than assumed.
-     */
     it('answers a search out of the listing it already holds, on the same tick', async () => {
         const source = createFileMentionSource(() => Promise.resolve(LISTING))
         await source.search('')
@@ -65,11 +52,6 @@ describe('the search source behind an @ mention', () => {
         expect(source.bootstrap()).not.toBeInstanceOf(Promise)
     })
 
-    /*
-     * The folders are the browsable half and the Rust scan reports none of them, so the source is
-     * the only place they can come from. A folder's `id` is what marks it: the trailing slash is
-     * both what the row inserts and what the composer reads to decide whether to step in.
-     */
     it('offers the folders above the files as well', async () => {
         const source = createFileMentionSource(() => Promise.resolve(LISTING))
         await source.bootstrap()
@@ -82,13 +64,11 @@ describe('the search source behind an @ mention', () => {
         ])
     })
 
-    /* A workspace that cannot be listed is an empty menu, not a thrown message half-written. */
     it('answers with no files when the workspace cannot be listed', async () => {
         const source = createFileMentionSource(() => Promise.reject(new Error('no workspace')))
         expect(await source.search('anything')).toEqual([])
     })
 
-    /* One failed IPC mid-browse must not take the file away until the reuse window is out. */
     it('keeps the listing it holds when a later read fails', async () => {
         const list = vi
             .fn()

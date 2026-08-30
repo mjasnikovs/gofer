@@ -6,12 +6,10 @@ const user = text => ({role: 'user', content: [{type: 'text', text}]})
 const assistant = text => ({role: 'assistant', content: [{type: 'text', text}]})
 const toolResult = id => ({role: 'tool', content: [{type: 'tool_result', toolCallId: id}]})
 
-/** The agent, as far as the transcript is concerned: somewhere the messages live. */
 function fakeAgent(messages) {
     return {state: {messages}}
 }
 
-/** Records every event the transcript emitted, in order. */
 function recorder() {
     const emitted = []
     return {emitted, emit: event => emitted.push(event)}
@@ -19,8 +17,6 @@ function recorder() {
 
 test('the trailing answer comes off, and nothing else does', () => {
     assert.deepEqual(withoutTrailingAnswer([user('a'), assistant('b')]), [user('a')])
-    // A turn that ended on a tool result is work, not an answer: it stays, and it is also the shape
-    // `Agent.continue` requires to resume from.
     assert.deepEqual(withoutTrailingAnswer([user('a'), toolResult('t1')]), [
         user('a'),
         toolResult('t1')
@@ -30,8 +26,6 @@ test('the trailing answer comes off, and nothing else does', () => {
 })
 
 test('only one answer comes off, however many are on the end', () => {
-    // Deliberately not the loop `retryEntry` uses. That one unwinds a whole failed turn back to the
-    // prompt; this one takes the single answer being retried off the end. They look alike.
     assert.deepEqual(withoutTrailingAnswer([user('a'), assistant('b'), assistant('c')]), [
         user('a'),
         assistant('b')
@@ -61,21 +55,12 @@ test('a compaction leaves stored and sent holding the same thing', () => {
     const compacted = [user('summary'), user('c')]
     const sent = transcript.replaceWith(compacted)
 
-    // What the next request sends is what the checkpoint reports. A compaction that wrote only one
-    // of them would leave the desktop holding a memory the model does not have.
     assert.deepEqual(sent, compacted)
     assert.deepEqual(transcript.messages(), compacted)
     transcript.checkpoint()
     assert.deepEqual(emitted.at(-1), {type: 'turn-state', agentMessages: compacted})
 })
 
-/*
- * The interleavings, which is the whole reason this is a module.
- *
- * Both of these were reachable only end to end — through a fake HTTP server, a scripted model, and
- * a whole run of `runAgent` — because the transcript was five statements spread over three hundred
- * lines rather than a thing with an interface.
- */
 test('a compaction followed by a retry drops the answer from the compacted transcript', () => {
     const agent = fakeAgent([user('a'), assistant('long'), user('b'), assistant('failed')])
     const transcript = createTranscript(agent, recorder().emit)
@@ -90,12 +75,10 @@ test('an overflow recovery followed by a transient failure takes only one answer
     const agent = fakeAgent([user('a'), assistant('too big')])
     const transcript = createTranscript(agent, recorder().emit)
 
-    // The overflow path compacts what is left after the error message comes off.
     const withoutError = withoutTrailingAnswer(transcript.messages())
     assert.deepEqual(withoutError, [user('a')])
     transcript.replaceWith([user('summary')])
 
-    // The turn is asked again, answers with a transient error, and that answer comes off in turn.
     agent.state.messages = [user('summary'), assistant('transient error')]
     transcript.dropTrailingAnswer()
 

@@ -3,7 +3,6 @@ import {INITIAL_SESSION_LOGS, MAX_ENTRIES, reduceSessionLogs} from './session-lo
 import type {SessionLogAction, SessionLogs} from './session-logs'
 import type {GodotLogEntry, GodotLogPage} from './godot'
 
-/** Applies a run of actions in order, which is the only way the panel ever reaches a state. */
 function apply(...actions: readonly SessionLogAction[]): SessionLogs {
     return actions.reduce(reduceSessionLogs, INITIAL_SESSION_LOGS)
 }
@@ -31,7 +30,6 @@ describe('reading pages', () => {
         expect(more.cursor).toBe(3)
     })
 
-    /** A poll that found nothing must not rebuild the list, or the panel re-renders once a second. */
     it('answers with the same lines when a page brings none', () => {
         const empty = reduceSessionLogs(opened, {type: 'page-read', page: page([], 2)})
         expect(empty.entries).toBe(opened.entries)
@@ -69,11 +67,6 @@ describe('reading pages', () => {
 })
 
 describe('changing a filter', () => {
-    /*
-     * The filter belongs to the query. The backend is the only place that still holds the lines
-     * the previous filter excluded, so a new query starts from the oldest buffered line rather
-     * than sieving what is already on screen.
-     */
     it('replaces the previous query rather than adding to it', () => {
         const refiltered = apply(
             {type: 'page-read', page: page([line(1), line(2)], 2)},
@@ -89,7 +82,6 @@ describe('changing a filter', () => {
 })
 
 describe('failures and clearing', () => {
-    /** A poll that could not reach the editor says nothing about the output it read a second ago. */
     it('keeps the lines on screen when a poll fails', () => {
         const failed = reduceSessionLogs(opened, {
             type: 'failed',
@@ -108,7 +100,6 @@ describe('failures and clearing', () => {
         expect(recovered.error).toBeUndefined()
     })
 
-    /** Clearing empties the panel and nothing else: the cursor still says what has been read. */
     it('empties the panel without rewinding the cursor', () => {
         const cleared = reduceSessionLogs(opened, {type: 'cleared'})
         expect(cleared.entries).toEqual([])

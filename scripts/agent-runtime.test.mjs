@@ -18,7 +18,6 @@ const model = {
     contextWindow: 120_064
 }
 
-/** A tool that answers with whatever it is handed, and says what it was called with. */
 function spyTool(answer, name = 'read') {
     const calls = []
     return {
@@ -43,7 +42,6 @@ test('a zero usage record is the same record for both loops', () => {
         totalTokens: 0,
         cost: {input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0}
     })
-    // A fresh object each time. Shared, one turn's accounting would add to another's.
     assert.notEqual(zeroUsage(), zeroUsage())
 })
 
@@ -57,8 +55,6 @@ test('the words are taken out of a content list, and an absent one reads as empt
         ]),
         'first second'
     )
-    // The half of the split that used to differ: the turn's copy threw on this and the child's
-    // did not, and every call site of the turn's had written `?? []` to make up for it.
     assert.equal(textContent(undefined), '')
     assert.equal(textContent([]), '')
 })
@@ -112,7 +108,6 @@ test('the refusal counter is on every decorated tool, and it is one counter per 
         /refused this exact call 3 times/u
     )
 
-    // A second agent built from the same tool has heard nothing.
     const [again] = decorateTools({env: {}, tools: [tool], model})
     await assert.rejects(again.execute('a', {path: 'a.gd'}, undefined, undefined), /anchor/u)
 })
@@ -136,8 +131,6 @@ test('extras go on the outside, in the order the caller listed them', async () =
 
     await decorated.execute('a', {}, undefined, undefined)
 
-    // The last one listed is the outermost, so it is the first to run — and the tool still ran
-    // inside the environment the pipeline bound.
     assert.deepEqual(order, ['second', 'first'])
     assert.equal(tool.calls.length, 1)
 })
@@ -152,10 +145,8 @@ test('a turn that ended empty is worth asking again', () => {
 })
 
 test('the error a delegation throws is classified by the sentence it carries', () => {
-    // The shape the child throws: no `errorMessage`, only a reason written for a model to read.
     assert.equal(isWorthRetrying({reason: 'fetch failed'}, model), true)
     assert.equal(isWorthRetrying({reason: 'insufficient_quota: quota exceeded'}, model), false)
-    // And the shape it throws when it kept the message that caused it.
     assert.equal(
         isWorthRetrying(
             {
@@ -182,7 +173,6 @@ test('a context that will not fit is never waited on, by either loop', () => {
     assert.equal(isWorthRetrying({reason: overflowed.errorMessage}, model), false)
 })
 
-/** A clock that owes nothing: every wait is written down and then run at once. */
 function instantTimers() {
     const waited = []
     return {
@@ -204,7 +194,6 @@ test('a wait is served by the clock it was handed', async () => {
 })
 
 test('a wait with no signal at all is an ordinary timer', async () => {
-    // The turn's own retry has never had a signal in production, and the wait must still be a wait.
     await abortableWait(0, undefined)
 })
 

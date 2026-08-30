@@ -5,7 +5,6 @@ import {createGodotTools} from './godot-tools.mjs'
 import {normalizeToolCalls} from './tool-call-repair.mjs'
 import {declaredDomains} from './declared-domains.mjs'
 
-/** The four domains a repaired call is checked against, as the router would send them. */
 const catalog = [
     {
         name: 'godot_scene',
@@ -25,8 +24,6 @@ const catalog = [
         description: 'Project resources.',
         operations: [{op: 'delete', summary: 'Deletes a resource. Asks the user first.'}]
     },
-    // The tool the reachability pass was written for: it answers through a sidecar and a model
-    // cache, so it is the one that can be declared with nothing behind it.
     {
         name: 'godot_docs_search',
         description: 'The Godot documentation on this machine.',
@@ -34,25 +31,6 @@ const catalog = [
     }
 ]
 
-/**
- * The calls the router repairs reach it exactly as the model wrote them.
- *
- * The `repairs` half of the fixture is the calls a model wrote that the router would have refused
- * as written. All nine are the same one: a tagged value wrapped in a second copy of its own tag.
- * Across those five turns the model wrote 86 tagged values, 41 of them double-wrapped, and 22 of
- * the 41 spelled the inner tag with the engine's capital — `{type: "string", value: {type:
- * "String", …}}`.
- *
- * Unwrapping them is `tool_params::repair_tagged`'s, and
- * `every_shape_the_fixture_records_as_repaired_is_the_shape_the_router_accepts` is what proves the
- * `repaired` field beside each of these is the shape `check` accepts. It used to be proven here,
- * against this layer, which is how a fix for the 22 came to exist only in JavaScript: the router
- * looked its tags up case-sensitively, the acceptance suites call `dispatch` directly, and nothing
- * ran both halves.
- *
- * What is left for this layer is the other half of that split — that it hands the router the call
- * the model wrote, unchanged. Key order is not meaning, so the comparison is on sorted keys.
- */
 test('a call the router repairs reaches it as the model wrote it', async () => {
     const recorded = JSON.parse(
         await readFile(new URL('../fixtures/recorded-tool-calls.json', import.meta.url), 'utf8')
@@ -70,7 +48,6 @@ test('a call the router repairs reaches it as the model wrote it', async () => {
     }
 })
 
-/** A value of the smallest shape a parameter of this kind will take. */
 function somethingOf(kind, param) {
     switch (kind) {
         case 'text':
@@ -99,7 +76,6 @@ function somethingOf(kind, param) {
     }
 }
 
-/** The smallest entry an operation accepts: its `op`, every required parameter, nothing else. */
 function theLeastEntry(operation) {
     const entry = {op: operation.op}
     for (const param of operation.params ?? []) {
@@ -115,17 +91,6 @@ function theLeastEntry(operation) {
     return entry
 }
 
-/**
- * A call the router would accept is never rewritten here, for any operation in the catalogue.
- *
- * The Rust half got this check tonight and found two rules that rewrote calls that were already
- * right. This layer runs *before* the router, so a wrong rewrite here is one nothing downstream can
- * see — the router is handed a call the model never wrote and refuses it by a name the model never
- * used. The round-trip test above is the same promise over a fixture of recorded shapes; this one
- * asks it of every operation there is.
- *
- * Asked twice, because a repair that is not stable on its own output is one that would keep moving.
- */
 test('a call the router would accept is never rewritten, for every operation', async () => {
     const domains = await declaredDomains()
     let asked = 0
@@ -150,7 +115,6 @@ test('a call the router would accept is never rewritten, for every operation', a
     assert.ok(asked > 100, `the catalogue has to be reached for this to mean anything: ${asked}`)
 })
 
-/** One value written out with every object's keys in order, so key order is not a difference. */
 function sortedKeys(value) {
     return JSON.stringify(value, (key, held) =>
         held && typeof held === 'object' && !Array.isArray(held) ?
@@ -159,11 +123,6 @@ function sortedKeys(value) {
     )
 }
 
-/*
- * `{"op": "save"}` sent to `godot_node`, twice across two live turns on 2026-08-25, batched beside
- * `connect_signal`. The generated enum refused the whole batch with `ops.2.op: must be equal to one
- * of the allowed values` — no value, no allowed list, and no word about `save` being one tool away.
- */
 test('an operation this tool does not have is refused by name, with a signpost', () => {
     const tools = createGodotTools(catalog, {call: async () => ({})})
     const node = tools.find(tool => tool.name === 'godot_scene')
@@ -171,16 +130,13 @@ test('an operation this tool does not have is refused by name, with a signpost',
         () => node.prepareArguments({ops: [{op: 'get_tree'}, {op: 'capture'}]}),
         error => {
             assert.match(error.message, /no 'capture' operation/u)
-            // What it does have, so the next call has somewhere to go.
             assert.match(error.message, /get_tree, save/u)
-            // And where that operation really lives.
             assert.match(error.message, /godot_runtime/u)
             return true
         }
     )
 })
 
-/* An operation nothing has is refused the same way, minus a signpost it cannot honestly give. */
 test('an operation no tool has is refused without inventing a signpost', () => {
     const tools = createGodotTools(catalog, {call: async () => ({})})
     const scene = tools.find(tool => tool.name === 'godot_scene')
@@ -194,7 +150,6 @@ test('an operation no tool has is refused without inventing a signpost', () => {
     )
 })
 
-/* And a call whose operations are all real is prepared exactly as before. */
 test('a call naming only real operations is left alone', () => {
     const tools = createGodotTools(catalog, {call: async () => ({})})
     const scene = tools.find(tool => tool.name === 'godot_scene')
@@ -203,17 +158,6 @@ test('a call naming only real operations is left alone', () => {
     })
 })
 
-/*
- * `godot_node inspect` sent `properties: ["text", "position", "size"]` — a live turn asking to read
- * three named properties. `properties` belonged to `set_properties` alone, so the merged entry
- * types answered `ops.0.properties.0: must be object`; the model then wrote `[{property: "text"}, …]`
- * and was answered `must have required properties node, value`. Two turns spent being taught to
- * write the properties it wanted to read.
- *
- * That exact call is now correct — `inspect` takes the list — so the case here is the same mistake
- * one operation over: `create` written with `create_nodes`' list, which is what a model does when it
- * flattens a batch back onto the single call.
- */
 test('a parameter belonging to a sibling operation is refused by name', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node')
@@ -224,14 +168,12 @@ test('a parameter belonging to a sibling operation is refused by name', async ()
             }),
         error => {
             assert.match(error.message, /create has no `nodes` parameter/u)
-            // And where that parameter really lives, so the next call has somewhere to go.
             assert.match(error.message, /is a parameter of create_nodes/u)
             return true
         }
     )
 })
 
-/* The shape it does take, quoted from the signature Rust printed off the same parameter table. */
 test('the refusal quotes the signature the operation was advertised under', () => {
     const operations = [
         {op: 'create', signature: '{parent: text}', params: [{name: 'parent', kind: 'text'}]},
@@ -250,11 +192,6 @@ test('the refusal quotes the signature the operation was advertised under', () =
     )
 })
 
-/*
- * A key many operations declare is left for the router, which answers it better. `godot_script edit`
- * sent `path` was refused here with a signpost naming ten operations, where the router's own
- * sentence is shorter, carries the parameter's note, and spells the nearest real name.
- */
 test('a key more than one sibling declares is left for the router', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script')
@@ -264,7 +201,6 @@ test('a key more than one sibling declares is left for the router', async () => 
     assert.deepEqual(normalizeToolCalls(script.operations, call), call)
 })
 
-/* And a sibling that declares the name without a shape inside it, likewise. */
 test('a sibling parameter with nothing inside it is left for the router', () => {
     const operations = [
         {op: 'stop', signature: '{}', params: []},
@@ -274,10 +210,6 @@ test('a sibling parameter with nothing inside it is left for the router', () => 
     assert.deepEqual(normalizeToolCalls(operations, call), call)
 })
 
-/*
- * A key no operation declares is left exactly where it was. The entry schema is open for it, and
- * the router answers it better than this can — it spells the nearest real parameter.
- */
 test('a key no operation declares is left for the router to refuse', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node')
@@ -287,10 +219,6 @@ test('a key no operation declares is left for the router to refuse', async () =>
     )
 })
 
-/*
- * A bracket opened by mistake in front of three operations the model meant. The whole call was
- * refused with `ops.0.op: must have required properties op`, about the one entry that is empty.
- */
 test('an entry with nothing written into it does not take the batch with it', async () => {
     const domains = await declaredDomains()
     const runtime = domains.find(domain => domain.name === 'godot_runtime')
@@ -302,14 +230,12 @@ test('an entry with nothing written into it does not take the batch with it', as
     )
 })
 
-/* A call that is only empty entries is left to be refused by name, not turned into an empty list. */
 test('a call with nothing in it at all is left exactly as it came', async () => {
     const domains = await declaredDomains()
     const runtime = domains.find(domain => domain.name === 'godot_runtime')
     assert.deepEqual(normalizeToolCalls(runtime.operations, {ops: [{}]}), {ops: [{}]})
 })
 
-/* And a padded key is renamed onto its real parameter before this ever looks at it. */
 test('a padded key that trims onto a real parameter is not refused as a stranger', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node')
@@ -319,11 +245,6 @@ test('a padded key that trims onto a real parameter is not refused as a stranger
     )
 })
 
-/*
- * The one entry of a list, written flat on the operation. Three times across two live turns, and
- * the router's own refusal — which prints the whole `{files: [{path, edits}]}` shape — was resent
- * in the same shape once. Same mistake `foldStrayEntries` repairs, one bracket earlier.
- */
 test('a single list entry written flat on the operation is folded into its list', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script')
@@ -347,11 +268,6 @@ test('a single list entry written flat on the operation is folded into its list'
     })
 })
 
-/*
- * Both mistakes at once, which is what a model writes when it flattens the first file and then
- * keeps going. The stray fold needs the list to exist before it can add to it, so the flat fold has
- * to run first — the other way round, `b.gd` stays an entry with no `op` and the batch is refused.
- */
 test('a flattened first file and a stray second one are folded into one list', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script')
@@ -368,7 +284,6 @@ test('a flattened first file and a stray second one are folded into one list', a
     ])
 })
 
-/* An operation that really does take its parameters flat keeps them flat. */
 test('an operation that declares its own parameters is not folded', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script')
@@ -376,7 +291,6 @@ test('an operation that declares its own parameters is not folded', async () => 
     assert.deepEqual(normalizeToolCalls(script.operations, {ops: [written]}).ops[0], written)
 })
 
-/* And a call that already carries the list is left alone rather than given a second entry. */
 test('a list that is already there is not given the operation as a second entry', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script')
@@ -384,15 +298,6 @@ test('a list that is already there is not given the operation as a second entry'
     assert.deepEqual(normalizeToolCalls(script.operations, {ops: [written]}).ops[0], written)
 })
 
-/*
- * The other half of the tagged-value split: the payload wrapper left out rather than written twice.
- *
- * Eight of these across two live turns against `stealth/ox-alpha` on 2026-08-25, in two
- * `set_properties` calls that were each refused whole — `set_properties` writes nothing unless
- * every entry is accepted, so one flattened tag costs the other six. The schema requires `value`,
- * so this one never reaches `tool_params::check` and its sentence is never written; it has to be
- * repaired before validation or not at all.
- */
 test('a resource written straight into a tagged value is put back inside it', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node')
@@ -421,13 +326,10 @@ test('a resource written straight into a tagged value is put back inside it', as
         type: 'resource',
         value: {path: 'res://scripts/coin.gd'}
     })
-    // The one that was already right is not wrapped a second time, and a tag that is not a
-    // resource is not touched at all.
     assert.deepEqual(already.value, {type: 'resource', value: {path: 'res://assets/coin.png'}})
     assert.deepEqual(untagged.value, {type: 'vector2', value: [8, 8]})
 })
 
-/* `set_property` carries its tagged value directly rather than inside a list. Same repair. */
 test('the same repair reaches a tagged value that is not inside a list', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node')
@@ -447,7 +349,6 @@ test('the same repair reaches a tagged value that is not inside a list', async (
     })
 })
 
-/* Narrow on purpose: a second key beside `path` is not something this can read, so it is left. */
 test('a resource tag carrying more than a path is left for the router to refuse', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node')
@@ -458,8 +359,6 @@ test('a resource tag carrying more than a path is left for the router to refuse'
     assert.deepEqual(repaired.ops[0].value, written)
 })
 
-// Every call below was written by a model in a recorded turn and refused. The op is real, the
-// parameters are real, and only the wrapper was in the wrong place.
 test('the wrapper a model got wrong is repaired rather than refused', () => {
     const script = [
         {op: 'open', params: [{name: 'path', kind: 'text', required: true}]},
@@ -495,12 +394,10 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }
     ]
 
-    // The parameter list flat beside the op, which is the shape the schema now asks for.
     assert.deepEqual(normalizeToolCalls(script, {ops: [{op: 'open', path: 'scripts/enemy.gd'}]}), {
         ops: [{path: 'scripts/enemy.gd', op: 'open'}]
     })
 
-    // The wrapper under the name the prose uses.
     assert.deepEqual(
         normalizeToolCalls(runtime, {
             ops: [{op: 'inspect_node', parameters: {path: '/root/Main/Game'}}]
@@ -508,7 +405,6 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         {ops: [{path: '/root/Main/Game', op: 'inspect_node'}]}
     )
 
-    // One parameter hoisted out of a wrapper that is otherwise right.
     assert.deepEqual(
         normalizeToolCalls([{op: 'set', params: [{name: 'node'}, {name: 'expectedRevision'}]}], {
             ops: [{op: 'set', expectedRevision: 0, params: {node: '/Main'}}]
@@ -516,14 +412,10 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         {ops: [{expectedRevision: 0, node: '/Main', op: 'set'}]}
     )
 
-    // A key no parameter is named after reaches the router, which refuses it by name and offers
-    // the near miss. Dropped here, the call would run without it and answer as if it had worked.
     assert.deepEqual(normalizeToolCalls(script, {ops: [{op: 'open', file: 'scripts/enemy.gd'}]}), {
         ops: [{file: 'scripts/enemy.gd', op: 'open'}]
     })
 
-    // Unless a wrapper was written too, which is the shape the dropping was measured on: the
-    // parameters in their wrapper, and something loose beside it that was never one of them.
     assert.deepEqual(
         normalizeToolCalls(script, {
             ops: [{op: 'open', thinking: 'now open it', params: {path: 'a.gd'}}]
@@ -531,31 +423,23 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         {ops: [{path: 'a.gd', op: 'open'}]}
     )
 
-    // The wrapper as sent stays the wrapper, and it wins over a flat key of the same name.
     assert.deepEqual(
         normalizeToolCalls(script, {ops: [{op: 'open', path: 'a.gd', params: {path: 'b.gd'}}]}),
         {ops: [{path: 'b.gd', op: 'open'}]}
     )
 
-    // No list at all: the previous shape, and what a model writes when it wants one thing. A list
-    // of one rather than a refusal, because refusing it would spend a round trip teaching a bracket.
     assert.deepEqual(normalizeToolCalls(script, {op: 'open', path: 'a.gd'}), {
         ops: [{path: 'a.gd', op: 'open'}]
     })
 
-    // A domain with one operation still does not need to be told which: there is only one, so a
-    // call that omits `op` is not ambiguous.
     assert.deepEqual(normalizeToolCalls([script[0]], {ops: [{path: 'a.gd'}]}), {
         ops: [{path: 'a.gd', op: 'open'}]
     })
 
-    // The operation under the word the prose uses. A live turn wrote this and was refused with four
-    // `must not have additional properties` lines that never named the key it should have written.
     assert.deepEqual(normalizeToolCalls(script, {ops: [{operation: 'open', path: 'a.gd'}]}), {
         ops: [{path: 'a.gd', op: 'open'}]
     })
 
-    // `method` is a real parameter on other operations, so it is never read as the operation.
     assert.deepEqual(
         normalizeToolCalls([{op: 'connect', params: [{name: 'method'}]}], {
             ops: [{op: 'connect', method: '_on_pressed'}]
@@ -563,11 +447,6 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         {ops: [{method: '_on_pressed', op: 'connect'}]}
     )
 
-    // One list parameter split across the `ops` list. Recorded four times in one project, always
-    // the same way: the first file inside a proper `edit` entry, and every file after it written
-    // as a sibling of that entry instead of a sibling of the first file. Every one was refused
-    // with `ops.1.op: must have required properties op` — a line that names neither the key that
-    // is wrong nor the list it belonged in — and the largest of them lost six files at once.
     assert.deepEqual(
         normalizeToolCalls(script, {
             ops: [
@@ -590,11 +469,6 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }
     )
 
-    // A stray that does not fit the list is not folded into it — a file folded into an edit it was
-    // never part of is the one outcome worse than a refusal. It is refused by name rather than left
-    // where it is: `required: ['op']` in `jsonSchemaOfEntry` means an entry with no operation never
-    // reaches the router at all, so "left for the router" was pi's `ops.1.op: must have required
-    // properties op` and nothing else.
     assert.throws(
         () =>
             normalizeToolCalls(script, {
@@ -606,13 +480,6 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         /names no operation, and its keys — path and text —/su
     )
 
-    // Nothing to fold into — the first entry of a call is nobody's stray — and still not left as
-    // it came: `{path, edits}` is exactly the shape of `edit`'s own `files` entry and of nothing
-    // else in the domain, so `nameTheOperation` reads the operation back out of it. This used to
-    // be asserted the other way round, when the only reading of a missing `op` was an exact fit
-    // against an operation's own parameters; `s33-iterate` sent this shape as a whole call and was
-    // refused with `ops.0.op: must have required properties op`, which is the agent loop's own
-    // sentence rather than one this repo can write.
     assert.deepEqual(
         normalizeToolCalls(script, {
             ops: [
@@ -628,9 +495,6 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }
     )
 
-    // The parameters written without the operation they belong to. The fifth recorded refusal was
-    // an `edit` followed by four of these, and `{path, timeoutMs}` is a pair only `diagnostics`
-    // takes — so the operation is not a guess, it is the only one the keys fit.
     assert.deepEqual(
         normalizeToolCalls(script, {
             ops: [
@@ -646,28 +510,12 @@ test('the wrapper a model got wrong is repaired rather than refused', () => {
         }
     )
 
-    // A pair of operations the same keys fit is still a guess, and is still not guessed at. It
-    // used to be left here "for the router to name", which it never was: the schema refuses an
-    // entry with no `op` before the router is reached, so what the caller actually got was pi's
-    // `ops.0.op: must have required properties op` and no word about the two it had to choose
-    // between. Now it is refused by naming them — see `refuseUnnamedOperation`.
     assert.throws(
         () => normalizeToolCalls(script, {ops: [{path: 'a.gd'}, {path: 'b.gd'}]}),
         /open and diagnostics both take/su
     )
 })
 
-// The tagged value a model wrapped twice. One live turn against a local Qwen3.6-27B sent 51 of
-// these in 114 tool calls, and every one was refused by a sentence that named the shape it wanted
-// and never noticed that the shape it wanted was sitting inside the one it got.
-/**
- * Every repair in this layer leaves a call that was already right alone.
- *
- * The repairs are all "a model wrote this shape and meant that one", and each one is a licence to
- * rewrite a call nobody is watching. This is the other half of that: the 93 distinct shapes sixteen
- * real tasks produced, normalized against the declared contract, must come back meaning the same
- * thing. Key order is not meaning — `op` moves to the end — so the comparison is on sorted keys.
- */
 test('normalizing a recorded call changes nothing about what it says', async () => {
     const domains = await declaredDomains()
     const recorded = JSON.parse(
@@ -693,7 +541,6 @@ test('a parameter set parked under an invented key is read as the wrapper it is'
     const project = domains.find(domain => domain.name === 'godot_project').operations
     const script = domains.find(domain => domain.name === 'godot_script').operations
 
-    // What one live turn wrote, twice, then once more with the other parameter's name glued on.
     assert.deepEqual(
         normalizeToolCalls(project, {
             ops: [
@@ -720,8 +567,6 @@ test('a parameter set parked under an invented key is read as the wrapper it is'
         {ops: [{op: 'set_autoload', enabled: true, name: 'Score', path: 'res://score.gd'}]}
     )
 
-    // A call already carrying every required parameter keeps its stray key, and the refusal that
-    // names it: a model that wrote a whole wrapper deliberately did not also write them flat.
     const complete = {
         op: 'save',
         path: 'a.gd',
@@ -730,15 +575,12 @@ test('a parameter set parked under an invented key is read as the wrapper it is'
     }
     assert.deepEqual(normalizeToolCalls(script, {ops: [complete]}), {ops: [complete]})
 
-    // An object that does not hold every required parameter is not the parameter set.
     const partial = {op: 'set_autoload', enabled: true, thinking: {name: 'Score'}}
     assert.deepEqual(normalizeToolCalls(project, {ops: [partial]}), {ops: [partial]})
 
-    // An object holding a key no parameter is named after is not it either.
     const extra = {op: 'set_autoload', held: {name: 'Score', path: 'a.gd', why: 'because'}}
     assert.deepEqual(normalizeToolCalls(project, {ops: [extra]}), {ops: [extra]})
 
-    // Two that fit make it a guess, and a guess is left for the router to refuse by name.
     const both = {
         op: 'set_autoload',
         one: {name: 'Score', path: 'a.gd'},
@@ -747,14 +589,6 @@ test('a parameter set parked under an invented key is read as the wrapper it is'
     assert.deepEqual(normalizeToolCalls(project, {ops: [both]}), {ops: [both]})
 })
 
-/**
- * The tagged value whose own key names arrived wearing quotation marks.
- *
- * `gemma-4-31b` sent `godot_node set_property` this **sixteen times in one turn**, and it is the
- * mistake `a parameter named with whitespace around it is named without it` already repairs one
- * punctuation mark over. Validation answered `ops.0.value.type: must have required properties type`
- * every time — the name it wanted, and nothing about the name that arrived.
- */
 test('a tagged value whose keys wear quotation marks is read without them', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node').operations
@@ -782,8 +616,6 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
         }
     )
 
-    // Through a list of tagged values as well, because `set_properties` is where a turn writing a
-    // whole screen puts them.
     assert.deepEqual(
         normalizeToolCalls(node, {
             ops: [
@@ -811,8 +643,6 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
         }
     )
 
-    // A dictionary's payload is the caller's own, and a key there wearing quotation marks may be a
-    // key that means them. Only the tag's two names, and a resource's `path`, are ever touched.
     const dictionary = {
         op: 'set_property',
         node: '/A',
@@ -824,7 +654,6 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
     }
     assert.deepEqual(normalizeToolCalls(node, {ops: [dictionary]}), {ops: [dictionary]})
 
-    // And a name that is already there is never written over.
     const both = {
         op: 'set_property',
         node: '/A',
@@ -835,12 +664,9 @@ test('a tagged value whose keys wear quotation marks is read without them', asyn
 })
 
 test('a parameter named with whitespace around it is named without it', async () => {
-    // The real declared contract, not a fixture: the shapes below are what a live turn wrote, and
-    // what makes them repairable is the parameter list the router will hold them to.
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node').operations
 
-    // Three times in one turn, the same call resent unchanged after being refused by name.
     assert.deepEqual(
         normalizeToolCalls(node, {
             ops: [
@@ -864,9 +690,6 @@ test('a parameter named with whitespace around it is named without it', async ()
         }
     )
 
-    // Inside a list parameter's entries, which is the position the router cannot repair for
-    // itself: a nested entry's schema is closed and requires its own names, so a padded key
-    // there is refused by the agent loop before `tool_params::repair` is ever called.
     assert.deepEqual(
         normalizeToolCalls(node, {
             ops: [
@@ -894,8 +717,6 @@ test('a parameter named with whitespace around it is named without it', async ()
         }
     )
 
-    // A padded key the operation does not declare is left where it is, for the router to refuse by
-    // name — trimming it would invent a parameter and be refused for that instead.
     assert.deepEqual(
         normalizeToolCalls(node, {ops: [{op: 'connect_signal', 'signaller ': '/Coin'}]}),
         {
@@ -903,15 +724,11 @@ test('a parameter named with whitespace around it is named without it', async ()
         }
     )
 
-    // A padded key beside the real one is left alone too: the entry already carries the name, and
-    // the model wrote the unpadded one deliberately.
     assert.deepEqual(
         normalizeToolCalls(node, {ops: [{op: 'connect_signal', node: '/Coin', 'node ': '/Other'}]}),
         {ops: [{op: 'connect_signal', node: '/Coin', 'node ': '/Other'}]}
     )
 
-    // A dictionary payload's keys are the caller's own, and the walk stops at a tagged value rather
-    // than reaching into one.
     const padded = {
         type: 'dictionary',
         value: [{key: {type: 'string', value: 'node '}, value: {type: 'int', value: 1}}]
@@ -934,17 +751,11 @@ test('a call is a list, and a bare operation is a list of one', async () => {
     }
     const [scene, , , docs] = createGodotTools(catalog, host)
 
-    // As the agent loop drives it: arguments are prepared, then validated against the schema, then
-    // executed. Repair that happened after validation would already have been refused.
     const drive = (tool, id, args) => tool.execute(id, tool.prepareArguments(args))
 
-    // Three questions in one call, which is the whole reason the list exists. Sent one at a time,
-    // each would be a turn of its own waiting on the one before it.
     await drive(docs, 'call-1', {
         ops: [{question: 'Camera2D shake'}, {question: 'TileMapLayer'}, {question: 'AnimationTree'}]
     })
-    // The op is the only one there is, so an entry that omits it is not ambiguous — and a call with
-    // no list at all is the one a model writes when it reads the operation line and nothing else.
     await drive(docs, 'call-2', {question: 'Camera2D shake'})
     await drive(docs, 'call-3', {op: 'search', params: {question: 'Camera2D shake'}})
     assert.deepEqual(
@@ -962,20 +773,10 @@ test('a call is a list, and a bare operation is a list of one', async () => {
         ]
     )
 
-    // Every tool asks for the list, whatever it holds.
     assert.deepEqual(scene.parameters.required, ['ops'])
     assert.deepEqual(docs.parameters.required, ['ops'])
 })
 
-/*
- * A refusal thrown here has run none of the list, and used to say nothing about it.
- *
- * `r08-coin`, live, 2026-08-25: `godot_scene [create, create_nodes, set_properties,
- * connect_signal, connect_signal, save]`, refused because `create_nodes` is `godot_node`'s. The
- * model then wrote "The scene is created and open — the node-level ops belong to `godot_node`.
- * Continuing there:" and sent the rest of the batch. `create` had not run, so every path in it was
- * `node_not_found`, and four calls went on establishing what the refusal could have said.
- */
 test('a refused list says that none of it ran, and a refused single call does not', () => {
     const operations = [
         {op: 'create', signature: '{parent: text}', params: [{name: 'parent', kind: 'text'}]},
@@ -1001,9 +802,6 @@ test('a refused list says that none of it ran, and a refused single call does no
         }
     )
 
-    // The clause is a sentence, not a run-on. Both refusals thrown here end in a full stop and are
-    // not given a second one; the router's own `node_not_found` ends on the path it could not find,
-    // and gets one — `said_that_none_of_it_ran` holds that side.
     assert.throws(
         () =>
             normalizeToolCalls(operations, {
@@ -1017,16 +815,6 @@ test('a refused list says that none of it ran, and a refused single call does no
     )
 })
 
-/*
- * Two entries a live run wrote that only pi's own validator ever answered.
- *
- * `s22-hud` sent `{"ops": ["wait", {"op": "wait", "ms": 2200}, {"op": "inspect_node", …},
- * {"op": "capture"}]}` — the first entry as a bare string, the three after it properly written —
- * and `s33-iterate` sent `{"ops": [{"path": "scripts/player.gd", "edits": […]}]}`, which is
- * `edit`'s own `files` entry written as the entry. Both were refused with `ops.0.op: must have
- * required properties op`, which comes out of the agent loop's schema check rather than out of
- * this repo, so it is the one refusal here that cannot be improved — only avoided.
- */
 test('an entry written as an operation name, and one written as its own list entry', () => {
     const runtime = [
         {op: 'wait', params: [{name: 'ms', kind: 'int'}]},
@@ -1036,8 +824,6 @@ test('an entry written as an operation name, and one written as its own list ent
         ops: [{op: 'wait'}, {op: 'capture'}]
     })
 
-    // A string naming nothing is left to be refused. Repairing it would mean inventing an
-    // operation out of a word the domain does not have.
     assert.deepEqual(normalizeToolCalls(runtime, {ops: ['nonsense', {op: 'capture'}]}), {
         ops: [{}, {op: 'capture'}]
     })
@@ -1064,20 +850,11 @@ test('an entry written as an operation name, and one written as its own list ent
         ops: [{op: 'edit', files: [{path: 'scripts/player.gd', edits}]}]
     })
 
-    // `{path}` alone fits `open` outright and is named that way, not folded into `edit`.
     assert.deepEqual(normalizeToolCalls(script, {ops: [{path: 'scripts/player.gd'}]}), {
         ops: [{op: 'open', path: 'scripts/player.gd'}]
     })
 })
 
-/**
- * The failure this pins cost one live turn twelve identical calls in a row.
- *
- * `{"limit 50": null, "minSeverityWarning": "warning", "op": "read", "source": "editorError"}` was
- * refused with the parameter named and the whole shape printed back, and the model sent the same
- * bytes again, and again, until the guard had counted to twelve. Wording had nothing left to try:
- * the model could not see the key it had written.
- */
 test('a key that swallowed its own value is split back into the two the model meant', () => {
     const logs = [
         {
@@ -1091,7 +868,6 @@ test('a key that swallowed its own value is split back into the two the model me
             ]
         }
     ]
-    // Both forms in one call, which is how they arrived.
     assert.deepEqual(
         normalizeToolCalls(logs, {
             ops: [
@@ -1106,56 +882,35 @@ test('a key that swallowed its own value is split back into the two the model me
         {ops: [{limit: 50, minSeverity: 'warning', op: 'read', source: 'editorError'}]}
     )
 
-    // A number goes back as a number: `limit` is an `int`, and handing the schema "50" would move
-    // the refusal rather than remove it.
     assert.equal(
         typeof normalizeToolCalls(logs, {ops: [{'limit 50': null, op: 'read'}]}).ops[0].limit,
         'number'
     )
 
-    // A name the model invented is not a tear, and is left for the router to refuse by name: a
-    // guess repaired silently is a guess the caller never learns was wrong.
     assert.deepEqual(normalizeToolCalls(logs, {ops: [{afterCursor: 37, op: 'read'}]}), {
         ops: [{afterCursor: 37, op: 'read'}]
     })
 
-    // The same guess with nothing held. Without the space that `limit 50` has, `afterCursor` reads
-    // as `after` carrying "Cursor" — a value nobody wrote, into a slot declared `int`. The space is
-    // the evidence that the tail is a value, and it has to be required.
     assert.deepEqual(normalizeToolCalls(logs, {ops: [{afterCursor: null, op: 'read'}]}), {
         ops: [{afterCursor: null, op: 'read'}]
     })
 
-    // An `int` slot takes an integer and nothing else. Repairing this to 3.7 would have the schema
-    // refuse the value having just accepted the name.
     assert.deepEqual(normalizeToolCalls(logs, {ops: [{'limit 3.7': null, op: 'read'}]}), {
         ops: [{'limit 3.7': null, op: 'read'}]
     })
 
-    // And a tail that is not a number at all never reaches a numeric slot.
     assert.deepEqual(normalizeToolCalls(logs, {ops: [{'limit lots': null, op: 'read'}]}), {
         ops: [{'limit lots': null, op: 'read'}]
     })
 
-    // A torn structure carries a second entry the caller wrote. Repairing it would invent one:
-    // the tail here is not a value, it is the rest of a call.
     const torn = {'contains": "x"}, {"op": "read"': 'read', op: 'read'}
     assert.deepEqual(normalizeToolCalls(logs, {ops: [{...torn}]}).ops[0], torn)
 
-    // And a call nobody got wrong comes out exactly as it went in.
     assert.deepEqual(normalizeToolCalls(logs, {ops: [{limit: 50, op: 'read'}]}), {
         ops: [{limit: 50, op: 'read'}]
     })
 })
 
-/*
- * A list handed over as the text of itself.
- *
- * A live turn building a Pong board sent `create_shape` `"size": "[16, 32]"` six times in one turn.
- * Validation answered with three lines about `size` — `must be number`, `must be array`, `must
- * match a schema in anyOf` — and never mentioned the empty `path` that was the real reason the call
- * could not run. The model rewrote the same quotes each time.
- */
 test('a list written as the text of itself is read as the list', () => {
     const resource = [
         {
@@ -1186,7 +941,6 @@ test('a list written as the text of itself is read as the list', () => {
         }
     )
 
-    // A `text` parameter holding the same characters is a caller writing a string, and stays one.
     assert.deepEqual(
         normalizeToolCalls(resource, {
             ops: [{op: 'create_shape', path: '[16, 32]', shapeType: 'RectangleShape2D'}]
@@ -1194,8 +948,6 @@ test('a list written as the text of itself is read as the list', () => {
         {ops: [{op: 'create_shape', path: '[16, 32]', shapeType: 'RectangleShape2D'}]}
     )
 
-    // And text that parses to something other than a list is left for the schema to refuse: a
-    // `list` is not what the caller wrote either way.
     assert.deepEqual(
         normalizeToolCalls(resource, {
             ops: [{op: 'create_shape', path: 'a.tres', shapeType: 'CircleShape2D', size: '16'}]
@@ -1204,7 +956,6 @@ test('a list written as the text of itself is read as the list', () => {
     )
 })
 
-/** The same repair inside a declared entry, reached by walking the structure. */
 test('a list written as text inside a declared entry is read there too', () => {
     const node = [
         {
@@ -1231,7 +982,6 @@ test('a list written as text inside a declared entry is read there too', () => {
     )
 })
 
-/** The same mistake under the other two declarations that mean "a list may go here". */
 test('a list written as text is read under listOf and under either', () => {
     const wider = [
         {
@@ -1259,20 +1009,12 @@ test('a list written as text is read under listOf and under either', () => {
         }),
         {ops: [{op: 'inspect', node: '/Main', properties: ['text', 'position']}]}
     )
-    // A path that is text and only text is untouched, whatever it looks like.
     assert.deepEqual(
         normalizeToolCalls(wider, {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}),
         {ops: [{op: 'create_texture', path: 'a.png', size: 16}]}
     )
 })
 
-/**
- * Cerebras' `gemma-4-31b` writes the operation as the key its parameters sit under.
- *
- * Eleven entries in eight refused calls across four of five live turns on 2026-08-27, every one
- * answered `ops.N.op: must have required properties op` and every one taking its whole batch with
- * it — the largest was three node creations at once.
- */
 test('an operation written as the key of its own parameters is read as the operation', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node').operations
@@ -1304,8 +1046,6 @@ test('an operation written as the key of its own parameters is read as the opera
         }
     )
 
-    // The same shape one bracket down: the wrapper the model parked its parameters under is still
-    // read, because the unwrap runs before `normalizeEntry` rather than instead of it.
     const script = domains.find(domain => domain.name === 'godot_script').operations
     const edits = [{oldText: 'extends Node\nclass_name GameState\n', newText: 'extends Node\n'}]
     assert.deepEqual(
@@ -1313,10 +1053,6 @@ test('an operation written as the key of its own parameters is read as the opera
         {ops: [{op: 'edit', files: [{path: 'a.gd', edits}]}]}
     )
 
-    // A key that is not an operation, a second key beside it, and a value that is not an object.
-    // None of the three can be read as an operation, so none is unwrapped — and each is refused by
-    // name rather than passed on, because an entry with no `op` never reaches the router. Where the
-    // key is one of this tool's operations the refusal says so, which is the word the caller wrote.
     assert.throws(
         () => normalizeToolCalls(script, {ops: [{save: 'a.gd'}]}),
         /`save` is an operation of this tool: write it as `"op": "save"`/su
@@ -1330,28 +1066,15 @@ test('an operation written as the key of its own parameters is read as the opera
         /its keys — save and why —.*`save` is an operation of this tool/su
     )
 
-    // The inner naming the model reached for after the first refusal, agreeing with the key it had
-    // already written. Both halves say `edit`, so there is nothing to choose between and the unwrap
-    // runs. Recorded twice — `g04-signal` and `g05-refactor` — each as a second try that cost the
-    // same sentence again.
     const files = [{path: 'main.gd', edits: [{oldText: 'a', newText: 'b'}]}]
     assert.deepEqual(normalizeToolCalls(script, {ops: [{edit: {files, op: 'edit'}}]}), {
         ops: [{op: 'edit', files}]
     })
-    // The other two spellings of the same word, dropped rather than left as a stray key: `op: key`
-    // overwrites only the one it is spelled with.
     assert.deepEqual(normalizeToolCalls(script, {ops: [{edit: {files, operation: 'edit'}}]}), {
         ops: [{op: 'edit', files}]
     })
 })
 
-/**
- * What makes the unwrap above a repair rather than a guess, held to the shipped contract.
- *
- * If any operation ever declares a parameter named after an operation of its own tool, a lone key
- * stops being unambiguous — `{"create": {…}}` could then be that parameter written without its
- * `op`, and the unwrap would run an operation the caller never asked for.
- */
 test('no operation is named after a parameter of its own tool', async () => {
     for (const domain of await declaredDomains()) {
         const named = new Set(domain.operations.map(operation => operation.op))
@@ -1366,13 +1089,6 @@ test('no operation is named after a parameter of its own tool', async () => {
     }
 })
 
-/**
- * The entry whose parameters two operations share, told which two they are.
- *
- * `{path, text}` is `godot_script save` and `godot_script update`; `{question}` is
- * `godot_docs_search search` and `ask`. Three across five live turns on 2026-08-27, each answered
- * `ops.0.op: must have required properties op` — the missing word named, the choice behind it not.
- */
 test('an entry that fits two operations is refused by naming both', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script').operations
@@ -1387,37 +1103,12 @@ test('an entry that fits two operations is refused by naming both', async () => 
         /search and ask both take/su
     )
 
-    // An entry no operation fits is refused too, and it used to be left for the schema to answer —
-    // which meant `ops.0.op: must have required properties op`, the sentence this file replaces.
-    // Nothing here can name it, so the refusal names the words the tool does have and stops. An
-    // entry exactly one operation fits is still named rather than refused, which is
-    // `an entry written as an operation name, and one written as its own list entry`.
     assert.throws(
         () => normalizeToolCalls(script, {ops: [{nonsense: 1}]}),
         /its keys — nonsense — are not the parameters of any one operation.*operations are: list, open/su
     )
 })
 
-/**
- * Past two, the list is the answer and the suggestion is a guess.
- *
- * Ten of the twenty ambiguous shapes in the shipped catalogue fit more than three operations, and
- * `{path, position}` on `godot_script` fits eight. The sentence used to read "hover and completion
- * and signature_help and … **both** take", and then told the model to add `"op": "hover"` — which
- * is catalogue order, not likelihood. A model that takes that literally sends `hover` when it meant
- * `definition`, and the refusal has cost a round trip to say something untrue.
- */
-/**
- * The operation written under a key that is not `op`, and why it is named rather than repaired.
- *
- * `{"path": "scripts/player.gd", "text": "extends Node2D…", "type": "save"}` is what `g33-input`
- * wrote. `type` cannot join `OP_KEYS` — `godot_node create` takes a `type`, and reading that as the
- * operation would throw away the node class — so nothing names the entry, and until this refusal it
- * fell through every repair to `ops.0.op: must have required properties op`.
- *
- * The word the caller wants is sitting in the entry. Saying which key holds it is not a guess: the
- * entry is refused, nothing runs, and the caller sends it again spelled the way the schema asks.
- */
 test('an operation written under a key that is not `op` is named where it sits', async () => {
     const domains = await declaredDomains()
     const script = domains.find(domain => domain.name === 'godot_script').operations
@@ -1430,8 +1121,6 @@ test('an operation written under a key that is not `op` is named where it sits',
         /`type` holds "save", which is an operation of this tool: write it as `"op": "save"`/su
     )
 
-    // Two candidates is two words to choose between, and this refusal chooses nothing. The list of
-    // the tool's own operations is what is left to say.
     assert.throws(
         () => normalizeToolCalls(script, {ops: [{was: 'open', now: 'save'}]}),
         /This tool's operations are: list, open/su
@@ -1458,23 +1147,12 @@ test('an entry that fits more than two operations is named without being told wh
         }
     )
 
-    // And the two-way case still hands over something to copy, because there it is a choice of two
-    // rather than a guess among eight.
     assert.throws(
         () => normalizeToolCalls(script, {ops: [{files: []}]}),
         /what edit and apply_rename both take.*add `"op": "edit"`/su
     )
 })
 
-/**
- * The key names the operation, so nothing inside the object it wraps may take that name back.
- *
- * `{"create": {"op": 7, "parent": "/Main"}}` used to come out as `{op: 7, parent: "/Main"}`: the
- * wrapped object was spread after the repair and overwrote it. The guard above only declines an
- * inner `op` that is a *string*, so a number went straight through, and `refuseUnknownOperation`
- * skipped the result for the same reason — leaving the model the generic enum refusal this repair
- * was written to replace.
- */
 test('the operation the key names survives whatever the object it wraps holds', async () => {
     const domains = await declaredDomains()
     const node = domains.find(domain => domain.name === 'godot_node').operations
@@ -1482,41 +1160,15 @@ test('the operation the key names survives whatever the object it wraps holds', 
     assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 7, parent: '/Main'}}]}), {
         ops: [{op: 'create', parent: '/Main'}]
     })
-    // A string that disagrees with the key still declines the repair outright, because then the
-    // model named two operations and guessing which it meant is not this function's to do. It is
-    // refused rather than passed on — the entry reaches the schema with no `op` either way, so the
-    // choice is between this sentence and pi's.
     assert.throws(
         () => normalizeToolCalls(node, {ops: [{create: {op: 'rename', parent: '/Main'}}]}),
         /`create` is an operation of this tool/su
     )
-    // A string that agrees with it is the model repeating itself, not choosing, and unwraps.
     assert.deepEqual(normalizeToolCalls(node, {ops: [{create: {op: 'create', parent: '/Main'}}]}), {
         ops: [{op: 'create', parent: '/Main'}]
     })
 })
 
-/**
- * Every repair in the shared corpus is made by the engine the corpus says makes it.
- *
- * There are two repair engines, and one rule split across them: this file repairs what the agent
- * loop's schema would refuse before the router is reached, `tool_repair.rs` repairs everything a
- * value or a key means. The split is real — the entry schema is open, so a key no operation
- * declares reaches the router untouched — but until now it was written down in two prose comments
- * and checked by nothing. A fix for the double-wrapped tag came to exist only in JavaScript that
- * way, and both suites stayed green.
- *
- * `fixtures/tool-call-repairs.json` is one row per repair, naming which engine owns it. Both halves
- * of every row are asserted here:
- *
- * - `worker` and `both`: this engine turns `wrote` into `becomes`.
- * - `router`: this engine leaves `wrote` exactly as the model wrote it, because the open entry
- *   schema carries it through to `tool_repair.rs`, which is what `every_repair_in_the_shared_corpus`
- *   in that file proves.
- *
- * So a repair that migrates from one engine to the other fails here or there, rather than silently
- * existing twice or nowhere.
- */
 test('every repair in the shared corpus is made by the engine that owns it', async () => {
     const corpus = JSON.parse(
         await readFile(new URL('../fixtures/tool-call-repairs.json', import.meta.url), 'utf8')
@@ -1544,18 +1196,6 @@ test('every repair in the shared corpus is made by the engine that owns it', asy
     }
 })
 
-/**
- * Everything the worker leaves for the router passes the schema the agent loop validates against.
- *
- * This is the rule the corpus's `repairedBy` states, proven rather than asserted. A repair belongs
- * to the router only if the call still reaches it: the agent loop runs `prepareArguments` and then
- * validates the result, so a shape the schema refuses is answered there and the table is never
- * called. A row marked `router` whose repaired call ajv refuses is a repair that runs nowhere.
- *
- * The chain is the real one — `createGodotTools` over the declared contract, `prepareArguments`,
- * then ajv over the tool's own generated parameters — and it ran only in `bench-schema-probe.mjs`
- * until now, which is a bench and not a gate.
- */
 test('what the worker leaves for the router still passes the schema', async () => {
     const corpus = JSON.parse(
         await readFile(new URL('../fixtures/tool-call-repairs.json', import.meta.url), 'utf8')
@@ -1579,8 +1219,6 @@ test('what the worker leaves for the router still passes the schema', async () =
             `${row.tool} ${row.op}: ${row.why} — the worker left a call the schema refuses: `
                 + `${ajv.errorsText(validate.errors)}`
         )
-        // And the shape as the model wrote it, for a `worker` row, is one the schema really does
-        // refuse — otherwise the row is recording a repair that had no reason to live there.
         if (row.repairedBy !== 'worker') continue
         assert.ok(
             !validate({ops: [{op: row.op, ...row.wrote}]}),

@@ -602,8 +602,6 @@ fn anchor_not_found(at: &str, path: &str, text: &str, old_text: &str) -> LspErro
     let Some((first, _)) = found.next() else {
         return LspError::new("anchor_not_found", unmatched);
     };
-    // A line is counted rather than indexed: the alternative is a second table over the file, and
-    // this runs once, on the way out of a call that has already failed.
     let line_of = |offset: usize| text[..offset].matches('\n').count() + 1;
     let others: Vec<usize> = found.map(|(start, _)| start).collect();
     if !others.is_empty() {
@@ -626,8 +624,6 @@ fn anchor_not_found(at: &str, path: &str, text: &str, old_text: &str) -> LspErro
     let last = first + needle.text.len() - 1;
     let held = &text[start..haystack.ends[last]];
     let first_line = line_of(start);
-    // The last character's start, not the region's end: an end offset can fall inside a character,
-    // and slicing there panics.
     let last_line = line_of(haystack.starts[last]);
     if held.len() > MAX_NEAR_MISS_BYTES {
         let opening = held.lines().next().unwrap_or_default().trim();
@@ -1066,8 +1062,6 @@ pub fn call(request: ScriptRequest) -> Result<ScriptResponse, LspError> {
             symbols: client.workspace_symbols(&workspace, &query)?,
         }),
         ScriptRequest::Diagnostics { path, timeout_ms } => {
-            // Through the batch reader, so one path and a list of them can never answer differently
-            // about the same file.
             let report = diagnostics_for(vec![path], timeout_ms)?
                 .pop()
                 .expect("one path answers with one report");
@@ -1120,8 +1114,6 @@ pub fn subscribe_diagnostics(
         while !flag.load(Ordering::Acquire) {
             match events.recv_timeout(DIAGNOSTICS_POLL_INTERVAL) {
                 Ok(published) => {
-                    // A file outside the worktree cannot be shown in the renderer, and its path
-                    // would escape the binding every other command enforces, so it is dropped.
                     let Ok(path) = godot_lsp::relative_path(&workspace, &published.uri) else {
                         continue;
                     };
@@ -1164,9 +1156,6 @@ pub fn disconnect() {
 /// Returns the connection for the active session, connecting on first use. A restarted editor
 /// binds a new random RPC port, so the key changes and the stale client is shut down.
 fn connection() -> Result<(Arc<LspClient>, Workspace), LspError> {
-    // The same guard the editor's other two doors take. A language server answering about a
-    // checkout the window has moved away from describes another task's files, and looks exactly
-    // like an answer about this one.
     crate::godot_session_api::require_session_task_here().map_err(|refusal| {
         LspError::new("session_other_task", refusal.message).with_details(refusal.details)
     })?;
@@ -1260,17 +1249,11 @@ fn prepare_rename_response(response: Option<PrepareRenameResponse>) -> ScriptRes
                 renameable: true,
             }
         }
-        // `defaultBehavior` leaves the renamed span to the client; Monaco falls back to the word
-        // at the cursor, which is exactly what an absent range asks it to do.
         Some(PrepareRenameResponse::DefaultBehavior { .. }) => ScriptResponse::PrepareRename {
             range: None,
             placeholder: None,
             renameable: true,
         },
-        // Nothing at all is the server saying this position cannot be renamed, and it used to be
-        // folded into the answer above — so `prepare_rename`, whose whole job is to say whether a
-        // symbol can be renamed, answered `{}` either way. A live turn read that `{}` and learned
-        // nothing from it.
         None => ScriptResponse::PrepareRename {
             range: None,
             placeholder: None,
@@ -1386,8 +1369,6 @@ mod tests {
         let started = Instant::now();
         let edited = collect_published(synchronized, budget, |_, wait| {
             allowances.push(wait);
-            // A server that says nothing burns whatever it was given and answers `None`, which is
-            // silence rather than a clean file.
             thread::sleep(wait);
             Ok(None)
         })
@@ -1397,7 +1378,6 @@ mod tests {
         assert_eq!(edited.len(), 3);
         assert!(edited.iter().all(|file| !file.published));
         assert_eq!(allowances.len(), 3);
-        // The rule, stated for any count: one budget, shared. A per-file deadline hands out three.
         assert!(
             allowances.iter().sum::<Duration>() <= budget,
             "{allowances:?}"
@@ -1406,7 +1386,6 @@ mod tests {
             allowances.windows(2).all(|pair| pair[1] <= pair[0]),
             "an allowance may only shrink: {allowances:?}"
         );
-        // And the allowances are honoured rather than merely computed, with room for scheduling.
         assert!(elapsed < budget * 2, "the batch took {elapsed:?}");
     }
 
@@ -1440,7 +1419,6 @@ mod tests {
             paths.iter().collect::<Vec<_>>(),
             "each answer names its own file, in the order the call asked"
         );
-        // Silence is not a clean file, and the batch says so about every one of them.
         assert!(reports.iter().all(|report| !report.published));
         assert!(
             allowances.iter().sum::<Duration>() <= budget,
@@ -1482,8 +1460,6 @@ mod tests {
     #[test]
     fn a_save_whose_client_reconnected_is_still_recorded() {
         let stale = FakeClient::new();
-        // The editor restarts while the file is being written: the cache drops the closed client
-        // and the write goes through a fresh one.
         stale.close();
         let fresh = FakeClient::new();
         let saved = SynchronizedSave {
@@ -1508,7 +1484,6 @@ mod tests {
         .expect("a file that reached disk is not lost because the editor restarted");
 
         assert!(stale.is_closed());
-        // The hash is what the caller records; losing it is what makes the next save unwinnable.
         assert_eq!(published.hash, "written");
         assert_eq!(published.version, 3);
         assert!(published.published);
@@ -1598,8 +1573,6 @@ mod tests {
             "the refused edit is named by its position in the call: {}",
             repeated.message
         );
-        // Lines 4 and 7 — the two bodies. Counting them is what makes "extend it" a fixable
-        // instruction rather than a search.
         assert!(
             repeated.message.contains("2 times, at lines 4, 7"),
             "every match is counted and placed: {}",
@@ -1659,8 +1632,6 @@ mod tests {
         .expect_err("the anchor is one tab off");
 
         assert_eq!(refusal.code, "anchor_not_found");
-        // The file's own bytes, at the file's own indentation — not the squeezed form the region
-        // was found with, which would be unusable as the next anchor.
         assert!(
             refusal
                 .message
@@ -1789,7 +1760,6 @@ mod tests {
                 "overlapping_edits"
             );
         }
-        // Adjacent is not overlapping: one ending where the next begins is two regions, not one.
         assert_eq!(
             edited(
                 "extends Node\n",
@@ -1923,7 +1893,6 @@ mod tests {
             refused.message
         );
 
-        // A plan with a file in it is the plan.
         let planned = a_plan_with_something_in_it(
             vec![PlannedFile {
                 path: "scripts/player.gd".to_owned(),

@@ -152,12 +152,6 @@ fn named_fixture(named: &str) -> PathBuf {
 /// Failures are ignored on purpose. This is the harness making its fixture look like a real
 /// checkout, and a machine without `git` should still be able to run a turn.
 fn make_it_a_repository(worktree: &std::path::Path) {
-    // A fixture that is itself a kept worktree brings its own `.git` along — `copy_tree` copies
-    // everything — and `git init` on a directory that already has one keeps the history and stays
-    // on whatever branch it was left on. `loc-41-modify`, run against `loc-31-unicode`'s worktree,
-    // therefore opened on a branch called `gofer/task-01a0461b2099` and concluded that the scene it
-    // was looking at "existed only on the sibling branch". The file was in front of it the whole
-    // time. One commit, no foreign history, which is what the message below already promises.
     let _ = std::fs::remove_dir_all(worktree.join(".git"));
     let git = |arguments: &[&str]| {
         let _ = std::process::Command::new("git")
@@ -263,7 +257,6 @@ fn a_fixture_that_carries_its_own_history_starts_the_turn_without_it() {
         !read(&["branch", "--show-current"]).starts_with("gofer/task-"),
         "on a branch of its own rather than somebody else's task"
     );
-    // What the fixture carried is still there. Only the history went.
     assert!(
         worktree.join("kept.txt").exists(),
         "the files are the fixture"
@@ -278,9 +271,6 @@ fn live_agent_acceptance() {
     let out = PathBuf::from(
         std::env::var("GOFER_LIVE_OUT").expect("GOFER_LIVE_OUT names where the events go"),
     );
-    // Which of the four drivers answers this run. `openai-compatible` is the default because a
-    // local server is what a run with nothing named wants; the other three reach a hosted endpoint
-    // and need the credential their own environment variable carries.
     let driver = match std::env::var("GOFER_LIVE_CONNECTION").as_deref() {
         Ok("openai-codex") => crate::settings::AiConnectionType::OpenaiCodex,
         Ok("openrouter") => crate::settings::AiConnectionType::Openrouter,
@@ -291,45 +281,16 @@ fn live_agent_acceptance() {
              openrouter or cerebras"
         ),
     };
-    // Only the local driver gets an address filled in from nothing. Every hosted driver's is a
-    // constant in the shipped connection, and a run that overwrote one with this default would
-    // ask `127.0.0.1` for a hosted model.
     let base_url = std::env::var("GOFER_LIVE_BASE_URL").ok().or_else(|| {
         (driver == crate::settings::AiConnectionType::OpenaiCompatible)
             .then(|| "http://127.0.0.1:8080/v1".to_owned())
     });
     let model = std::env::var("GOFER_LIVE_MODEL").unwrap_or_else(|_| "local".to_owned());
-    // Named rather than inherited, because how hard a model is asked to think decides what a run
-    // costs and how long it takes — so two runs being comparable depends on it being written down.
     let thinking_level = std::env::var("GOFER_LIVE_THINKING")
         .ok()
         .filter(|l| !l.is_empty());
-    // Whether the model is told it can see. `GOFER_LIVE_IMAGES=off` says it cannot, and every
-    // captured frame then costs the turn a sentence instead of a picture — the path
-    // `withoutPictures` already takes for a text-only model.
-    //
-    // It is a knob because one llama.cpp build on this machine advertises `vision` in `/props` and
-    // dies on every image request: a 16x16 PNG closed the connection and restarted the server twice
-    // out of two, with a text request either side of each answering normally. A run that captures
-    // the game then never finishes — the frame kills the server, and each of the ten retries
-    // resends it and kills it again.
     let sees = std::env::var("GOFER_LIVE_IMAGES").as_deref() != Ok("off");
 
-    // The project database is opened before the editor, and this order is the whole run.
-    //
-    // Opening a project creates its first task, and creating a task moves the checkout onto that
-    // task's branch — cut from the base, so whatever was loose in the working tree is committed to
-    // the base branch and left there. `ProjectStorage::open` is allowed to do that because in the
-    // application it runs before any editor exists, so there is nothing staged to lose.
-    //
-    // Started the other way round, the addon is staged first and that switch throws it away:
-    // `GoferRuntime` goes into a commit on `master` and the task branch begins without it. The
-    // editor keeps running with the plugin it loaded, so nothing looks wrong — until a game is
-    // launched, boots with no runtime helper, and every `godot_runtime` call waits for a helper
-    // that can never announce. A live turn spent seventeen calls in that loop: `run` answering
-    // `runtime_slow_start`, `get_state` answering `running: true, runtimeReady: false`, `wait`
-    // answering `runtime_not_running`, over and over, about a game that was on screen the whole
-    // time.
     let directory = TempDir::new().expect("temporary directory");
     let worktree = live_worktree(&directory);
     let app = mock_app();
@@ -339,17 +300,11 @@ fn live_agent_acceptance() {
     app.manage(crate::storage::StorageSlot::new(Ok(storage)));
 
     let session = start_session(directory, worktree);
-    // The rules a real session applies when it goes ready. Without them the strict-typing policy
-    // Gofer ships turned on is simply absent, and a run measures a project nobody has.
     for call in crate::godot_policy::policy_calls(&crate::settings::GodotSettings::default()) {
         let answered = session.try_call(call.command, call.params.clone(), None);
         println!("policy {} -> {answered:?}", call.command);
     }
 
-    // The user's own retrieval cache and the real retrieve worker, so `godot_docs_search` answers
-    // out of the real corpus. A fixture worker would answer canned passages, and the agent is told
-    // to search the docs before writing any Godot name — canned answers would be the experiment
-    // measuring its own fixture.
     // SAFETY: the acceptance runner gives each test its own process.
     unsafe {
         std::env::set_var(
@@ -360,12 +315,6 @@ fn live_agent_acceptance() {
         );
     }
 
-    // Every event twice: held for the report, and appended to a sibling `.jsonl` as it arrives.
-    //
-    // The report is written when the turn returns, and a turn that does not return writes nothing.
-    // One run spent twenty-four minutes on a debugging task, was killed on its budget, and left an
-    // empty directory — a whole turn of the evidence this file exists to collect, gone because the
-    // only write was at the end. Appending is O(1) per event, so the running cost is a line.
     let trace = out.with_extension("jsonl");
     let _ = std::fs::remove_file(&trace);
     let events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
@@ -392,10 +341,6 @@ fn live_agent_acceptance() {
     let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
     answer_the_prompts_nobody_is_watching(Arc::clone(&finished));
 
-    // The context the application builds, from the same function — so what this run measures is
-    // the turn Gofer composes, not one this file assembled to look like it. The run still chooses
-    // where the model is, that none of this machine's credentials are sent, and which checkout the
-    // editor it started is bound to.
     let context = JobContext::for_suite(
         app.handle(),
         if sees {
@@ -442,15 +387,9 @@ fn live_agent_acceptance() {
         serde_json::to_string(&report).expect("serialize the report"),
     )
     .expect("write the report");
-    // The worktree is a temporary directory the session removes, so anything the agent built has to
-    // be copied out before this returns.
     if let Ok(keep) = std::env::var("GOFER_LIVE_KEEP") {
         keep_the_worktree(&session.worktree, &PathBuf::from(&keep));
     }
-    // The game the turn launched is not the editor's child to reap, and dropping the session kills
-    // only the editor. Four runs each left one behind, all of them holding Godot's default remote
-    // debug port, and the fifth hung for thirty minutes waiting for a port three dead games were
-    // sitting on. Asking the runtime to stop is the same call the agent would have made.
     let _ = session.try_call("runtime.stop", serde_json::json!({}), None);
     println!("live agent finished in {seconds:.1}s -> {}", out.display());
 }
@@ -472,10 +411,6 @@ fn live_agent_acceptance() {
 /// first. Only its contents: the directory itself may be one the caller made, and removing it
 /// would break a path they had already handed to something else.
 fn keep_the_worktree(worktree: &std::path::Path, keep: &std::path::Path) {
-    // Only a directory this function has filled before. `GOFER_LIVE_KEEP` names a path the caller
-    // typed, and one level off — `logs/oxloop` rather than `logs/oxloop/<run>-worktree` — is every
-    // recorded batch in the corpus. A worktree has a `project.godot` in it; anything else is either
-    // empty, or somebody else's, and is merged into rather than emptied.
     let ours = keep.join("project.godot").exists();
     if !ours && keep.read_dir().is_ok_and(|mut held| held.next().is_some()) {
         println!(
@@ -489,9 +424,6 @@ fn keep_the_worktree(worktree: &std::path::Path, keep: &std::path::Path) {
     {
         for entry in entries.flatten() {
             let path = entry.path();
-            // `symlink_metadata`, so a symlink to a directory is unlinked rather than followed into
-            // `remove_dir_all` — which fails with ENOTDIR and leaves the entry to be merged into,
-            // the one thing this exists to prevent.
             let kind = entry.path().symlink_metadata().map(|held| held.is_dir());
             let removed = if kind.unwrap_or(false) {
                 std::fs::remove_dir_all(&path)
@@ -499,8 +431,6 @@ fn keep_the_worktree(worktree: &std::path::Path, keep: &std::path::Path) {
                 std::fs::remove_file(&path)
             };
             if let Err(error) = removed {
-                // Said rather than swallowed. A destination that could not be emptied is one the
-                // copy is about to merge into, which is the failure this function exists for.
                 println!(
                     "GOFER_LIVE_KEEP could not clear {}: {error}",
                     path.display()
@@ -559,8 +489,6 @@ fn a_question_nobody_is_watching_is_skipped_rather_than_waited_out() {
     finished.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::ask::cancel_user_prompts();
 
-    // A skip, not prose: the question was read and the decision is left to the implementer.
-    // Inventing an answer would make the turn a measurement of this file's opinions.
     match answered {
         crate::ask::Answer::Answered(reply) => assert!(reply.skipped, "{reply:?}"),
         other => panic!("the run must answer its own question, and it answered {other:?}"),
@@ -584,9 +512,6 @@ fn a_kept_worktree_holds_one_acceptance_run_and_not_two() {
         .expect("write the project");
 
     let keep = TempDir::new().expect("a destination");
-    // What the run before this one left behind: a file this run also writes, one it does not, and
-    // a directory. All three were merged into before. The `project.godot` is what marks the
-    // destination as a worktree this function filled, and so as one it may empty.
     std::fs::write(keep.path().join("project.godot"), "the run that died").expect("stale project");
     std::fs::create_dir_all(keep.path().join("scripts")).expect("stale scripts directory");
     std::fs::write(keep.path().join("scripts/player.gd"), "the run that died")

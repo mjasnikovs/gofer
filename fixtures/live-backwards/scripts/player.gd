@@ -1,7 +1,5 @@
 extends Node2D
 
-# The bug this fixture exists for: pressing Right walks left. Nothing on this line says so — the
-# sign comes back from `_direction_for`, whose table has its two entries the wrong way round.
 
 const SPEED := 120.0
 

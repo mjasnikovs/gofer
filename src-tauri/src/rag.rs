@@ -186,7 +186,6 @@ pub fn cache_path() -> Result<PathBuf, String> {
     }
 }
 
-// coverage-critical-start: cache
 fn validate_cache_path(path: PathBuf) -> Result<PathBuf, String> {
     if path
         .components()
@@ -243,9 +242,6 @@ fn delete_cache_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    // The sentences below name the cache, not its path. `cache_status` already reports the
-    // location as a field the renderer can show deliberately; an error message is not the place to
-    // put a host path the user did not ask for.
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("Could not inspect the Gofer RAG cache: {error}"))?;
     if metadata.file_type().is_symlink() {
@@ -257,7 +253,6 @@ fn delete_cache_path(path: &Path) -> Result<(), String> {
     fs::remove_dir_all(path)
         .map_err(|error| format!("Could not delete the Gofer RAG cache: {error}"))
 }
-// coverage-critical-end: cache
 
 /// Mirrors the model definitions gofer-rag downloads, so a cache missing any of
 /// them reads as `Incomplete` rather than claiming a retrieval that cannot run.
@@ -271,7 +266,6 @@ fn required_model_files(cache: &Path) -> [PathBuf; 10] {
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/config.json"),
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/tokenizer.json"),
         cache.join("onnx-community/bge-reranker-v2-m3-ONNX/onnx/model_quantized.onnx"),
-        // The prefilter that skims the pool before the reranker scores it.
         cache.join("Xenova/ms-marco-MiniLM-L-6-v2/config.json"),
         cache.join("Xenova/ms-marco-MiniLM-L-6-v2/tokenizer.json"),
         cache.join("Xenova/ms-marco-MiniLM-L-6-v2/onnx/model_quantized.onnx"),
@@ -507,9 +501,6 @@ impl GodotDocsResponse {
     /// the one that matters most — an answer whose quote is not in the manual, which is an answer
     /// written from memory and must never become the cached truth.
     pub fn is_worth_remembering(&self) -> bool {
-        // A reader that was not reachable is the one dead end that is about this machine rather
-        // than about the manual, so caching it would hand every later task a refusal that has
-        // since cleared.
         if self.reader_unavailable.is_some() {
             return false;
         }
@@ -519,7 +510,6 @@ impl GodotDocsResponse {
         if self.excerpt_verified == Some(false) {
             return false;
         }
-        // A search answers with passages and a read answers with prose. Neither is an answer empty.
         self.text.is_some() || !self.passages.is_empty()
     }
 }
@@ -622,7 +612,6 @@ struct RetrieveWorkerResponse {
 /// question its expansion and nothing else, so neither is reported as a failure.
 pub fn expansion_connection<R: Runtime>(app: &AppHandle<R>) -> Option<RetrieveConnection> {
     let settings = crate::settings::read_settings(app).ok()?;
-    // Through the one store, by slot. Which of the four is spent is the connection's to decide.
     let secrets = crate::settings::SystemSecrets;
     let key = secrets.read(Secret::AiDefault).ok().flatten();
     let openrouter_key = secrets.read(Secret::OpenRouter).ok().flatten();
@@ -687,16 +676,10 @@ pub fn retrieve_query_with(
     };
     let mut payload = serde_json::to_vec(&request)
         .map_err(|error| format!("Could not serialize the Gofer RAG query: {error}"))?;
-    // The worker reads one request per line.
     payload.push(b'\n');
     stdin
         .write_all(&payload)
         .map_err(|error| format!("Could not send the Gofer RAG query: {error}"))?;
-    // Held open rather than dropped here, and closed the moment the answer is in. A ChatGPT
-    // expansion may rotate its refresh token, and the acknowledgement for the keyring write goes
-    // back down this pipe — but a sidecar reading stdin until EOF will not exit while it is open,
-    // and the `wait` below would then never return. Closing it is what ends the exchange, and it
-    // is the reader's own end-of-input rather than a shutdown the reader has to be taught.
     let mut stdin = Some(stdin);
 
     let stdout = child
@@ -737,8 +720,6 @@ pub fn retrieve_query_with(
         if let Some(error) = response.error {
             return Err(error);
         }
-        // The answer is in, so nothing more will be asked of this pipe. Its closing is what tells a
-        // sidecar looping on stdin that it is finished.
         drop(stdin.take());
         let status = child.wait().map_err(|error| {
             format!("Could not wait for the Gofer RAG retrieve worker: {error}")
@@ -765,8 +746,6 @@ pub fn retrieve_query_with(
         });
     }
 
-    // The same close on the path where no answer ever arrived: the sidecar may still be waiting on
-    // input, and a `wait` for a child that is waiting for us is a deadlock either way.
     drop(stdin.take());
     let status = child
         .wait()
@@ -914,8 +893,6 @@ fn probe_models(cache: &Path) -> Result<(), String> {
 }
 
 fn retrieve_worker_path() -> Result<PathBuf, String> {
-    // `rag-retrieve.mjs` holds the injectable request handling; only the worker reads stdin and
-    // loads gofer-rag, so spawning the module itself would produce no output.
     crate::workers::resolve(
         "The Gofer RAG retrieve worker",
         "GOFER_RAG_RETRIEVE_WORKER",
@@ -991,9 +968,6 @@ mod tests {
             .is_worth_remembering(),
             "an answer whose quote is not in the manual was written from memory"
         );
-        // The one dead end that is about this machine rather than about the manual: a reader that
-        // was refused a request, whose passages are a real answer and whose refusal may have
-        // cleared by the time anything asks again.
         assert!(
             !GodotDocsResponse {
                 reader_unavailable: Some(
@@ -1264,8 +1238,6 @@ mod tests {
 
     #[test]
     fn sidecar_paths_resolve_to_executable_workers() {
-        // Both modules split injectable request handling from the entry point that reads stdin.
-        // Spawning the handling half would exit silently without ever answering.
         for path in [
             worker_path().expect("warmup worker"),
             retrieve_worker_path().expect("retrieve worker"),
@@ -1356,16 +1328,11 @@ mod tests {
             max_text_chars: 2000,
         };
 
-        // One number for both operations: an `ask` reads the same list to write prose from, and the
-        // cases a tighter ceiling costs are the ones it would have had to abstain on.
         assert_eq!(passages_for(&asked(None)), 4);
 
-        // The desktop Docs panel names its own bound, and nothing here may override it.
         assert_eq!(passages_for(&asked(Some(8))), 8);
         assert_eq!(passages_for(&asked(Some(1))), 1);
 
-        // Absent is absent: a query that names nothing deserializes to `None` rather than to a
-        // number no caller wrote.
         let parsed: GodotDocsQuery =
             serde_json::from_value(serde_json::json!({"question": "how do I tween?"}))
                 .expect("parse a query");

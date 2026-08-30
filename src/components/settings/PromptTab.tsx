@@ -12,12 +12,6 @@ import {agentPromptIsDefault, agentPromptIsUnsaved} from '../../models/settings-
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {SettingsTabView, SettingsView} from './settings-view'
 
-/**
- * The prompt the agent is told before every turn.
- *
- * It has a store of its own — it belongs to the project rather than to the connection — which is why
- * its Save is here rather than the AI tab's.
- */
 export function usePromptTab(view: SettingsView): SettingsTabView {
     const {state, dispatch, run} = view
     const draft = state.settings

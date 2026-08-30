@@ -1,9 +1,3 @@
-/**
- * The wire shapes the script commands exchange with Rust. They mirror `src-tauri/src/script.rs`,
- * which speaks the Language Server Protocol on the far side, so positions are zero-based lines and
- * UTF-16 characters — Monaco's are one-based, and `monaco-lsp.ts` owns that conversion.
- */
-
 export type ScriptPosition = Readonly<{
     line: number
     character: number
@@ -22,7 +16,6 @@ export type ScriptDocument = Readonly<{
     version: number
 }>
 
-/** What a write or an in-memory change leaves the renderer to record. */
 export type ScriptStamp = Readonly<{
     path: string
     hash?: string | undefined
@@ -30,7 +23,6 @@ export type ScriptStamp = Readonly<{
     version: number
 }>
 
-/** LSP severities: 1 error, 2 warning, 3 information, 4 hint. */
 export type ScriptDiagnostic = Readonly<{
     range: ScriptRange
     message: string
@@ -45,13 +37,11 @@ export type ScriptDiagnosticsEvent = Readonly<{
     diagnostics: readonly ScriptDiagnostic[]
 }>
 
-/** A place the renderer can open: workspace-relative, never a `file://` URI. */
 export type ScriptLocation = Readonly<{
     path: string
     range: ScriptRange
 }>
 
-/** One file a rename would rewrite, carrying everything the apply transaction needs. */
 export type PlannedScriptFile = Readonly<{
     path: string
     originalText: string
@@ -106,7 +96,6 @@ export type ScriptSignatureHelp = Readonly<{
     activeParameter?: number | undefined
 }>
 
-/** LSP document-highlight kinds: 1 text, 2 read, 3 write. */
 export type ScriptHighlight = Readonly<{
     range: ScriptRange
     kind?: number | undefined
@@ -121,7 +110,6 @@ export type ScriptDocumentSymbol = Readonly<{
     children?: readonly ScriptDocumentSymbol[] | undefined
 }>
 
-/** A flat symbol, either from a flat `documentSymbol` answer or the synthesized workspace index. */
 export type ScriptSymbolInformation = Readonly<{
     name: string
     kind: number
@@ -155,7 +143,6 @@ export type ScriptRequest =
     | Readonly<{op: 'prepareRename'; path: string; position: ScriptPosition}>
     | Readonly<{op: 'rename'; path: string; position: ScriptPosition; newName: string}>
     | Readonly<{op: 'workspaceSymbols'; query: string}>
-    /** Reads what the server last published for one file, waiting briefly for a first answer. */
     | Readonly<{op: 'diagnostics'; path: string; timeoutMs?: number}>
 
 export type ScriptResponse =
@@ -180,7 +167,6 @@ export type ScriptResponse =
           diagnostics: readonly ScriptDiagnostic[]
       }>
 
-/** The structured failure every script command rejects with. */
 export type ScriptError = Readonly<{
     code: string
     message: string

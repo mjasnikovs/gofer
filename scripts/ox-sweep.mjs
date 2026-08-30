@@ -1,19 +1,3 @@
-/**
- * What the recorded live turns actually failed at, ranked by how many of them failed at it.
- *
- * Written after the fifth iteration of the improvement loop had hand-rolled the same three
- * analyses: which calls were refused, how many tokens each answer cost, and how much of a run's
- * input was a cache read. The last of those hand-rolls found the corpus's single most common
- * failure — one configuration fact that killed `godot_docs_search` in seven of the nine runs that
- * reached it — and it would have found it hours earlier if it had been a command.
- *
- * The grouping is the part worth keeping. A refusal is a sentence with the caller's own paths,
- * node names and numbers in it, so two occurrences of one bug never look alike; those are blanked
- * before counting, and runs are counted rather than occurrences, because one model retrying one
- * mistake five times is one bug and five runs hitting it is five.
- *
- *   node scripts/ox-sweep.mjs [directory]     # default logs/oxloop
- */
 import {readdirSync, readFileSync} from 'node:fs'
 import {join} from 'node:path'
 
@@ -22,7 +6,6 @@ const traces = readdirSync(directory)
     .filter(name => name.endsWith('.jsonl'))
     .sort()
 
-/** One refusal reduced to its shape, so two occurrences of one bug count as one. */
 function shapeOf(message) {
     return message
         .replace(/res:\/\/[^\s"'`,)]+/gu, 'PATH')
@@ -33,8 +16,6 @@ function shapeOf(message) {
 
 const failures = new Map()
 const runs = []
-/** Per refusal code: how many there were, how many were followed by a call that worked, and how
- * many by the same code again. */
 const recovery = new Map()
 
 for (const name of traces) {
@@ -46,7 +27,6 @@ for (const name of traces) {
     let fresh = 0
     let cached = 0
     let requests = 0
-    /** Every call of this run in order, as `[code or null, wasRefused]`. */
     const sequence = []
     for (const line of readFileSync(join(directory, name), 'utf8').trim().split('\n')) {
         let record
@@ -82,8 +62,6 @@ for (const name of traces) {
         row.runs.add(run)
         failures.set(shape, row)
     }
-    // What the caller's very next call did. The closest thing this corpus holds to whether a
-    // refusal's sentence worked: a message that says what to do next is one the next call acts on.
     for (const [index, [code, wasRefused]] of sequence.entries()) {
         if (!wasRefused || code === null) continue
         const row = recovery.get(code) ?? {total: 0, recovered: 0, repeated: 0}
@@ -122,7 +100,6 @@ for (const row of ranked) {
     )
 }
 
-// Ranked worst first, because a code every caller recovers from is one nobody has to work on.
 console.log("\nrefusal codes, by what the caller's next call did\n")
 console.log('code'.padEnd(24), 'n'.padStart(4), 'next ok'.padStart(8), 'same again'.padStart(11))
 const scored = [...recovery.entries()]

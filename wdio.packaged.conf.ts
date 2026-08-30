@@ -16,22 +16,10 @@ process.env.GOFER_RAG_CACHE_DIR = join(fixtureRoot, 'cache')
 process.env.GOFER_WEBDRIVER_RAG_READY = '1'
 process.env.GOFER_WEBDRIVER_SKIP_CREDENTIAL_STORE = '1'
 process.env.GOFER_AI_WORKER = resolve('fixtures/packaged/fake-ai-worker.mjs')
-// The journey drives a real Godot editor session over protocol v2, so the application needs a
-// workspace it can create a task worktree in, and an editor it can launch without a display.
 process.env.GOFER_WORKSPACE_DIR = workspace
 process.env.GOFER_GODOT_HEADLESS = '1'
-// The formatter is the one thing a shipped Gofer resolves from its own resource directory rather
-// than from a process it launches, so the journey must not be handed a developer's local override:
-// with it set, a bundle that ships no sidecar at all would still format and the assertion would
-// prove nothing about what a user receives.
 delete process.env.GOFER_GDFORMAT
 
-/**
- * Git inherits the environment of whatever ran the journey — a Git hook exports `GIT_DIR` and
- * `GIT_INDEX_FILE` — so the fixture repository is addressed the same scrubbed way `git.rs`
- * addresses the real ones. Without it, `add` writes these fixture files into Gofer's own index
- * while their objects stay here, leaving that repository referencing objects it cannot find.
- */
 const GIT_ENVIRONMENT = new Set([
     'GIT_DIR',
     'GIT_WORK_TREE',
@@ -55,28 +43,16 @@ function git(...arguments_: string[]) {
     }
 }
 
-/**
- * Prepares the repository the packaged application manages.
- *
- * Gofer binds every editor session to the active task's isolated worktree, and a task only gets a
- * worktree inside a Git repository with a commit, so the fixture project is committed here rather
- * than merely copied.
- */
 function prepareWorkspace() {
     if (!process.env.GOFER_GODOT_BINARY) {
         throw new Error('GOFER_GODOT_BINARY is required for the packaged journey')
     }
-    // The restart journey runs a second application process against the same fixture root, and it
-    // must find the repository the first one worked in rather than a fresh one.
     if (existsSync(join(workspace, '.git'))) return
     mkdirSync(workspace, {recursive: true})
     cpSync(resolve('fixtures/godot-project'), workspace, {recursive: true})
     git('init', '--quiet', '--initial-branch', 'main')
     git('config', 'user.email', 'packaged@gofer.test')
     git('config', 'user.name', 'Gofer packaged journey')
-    // Git for Windows installs `core.autocrlf=true`, which would check every task worktree out
-    // with CRLF and leave the journey's script assertions measuring Git's line-ending policy
-    // instead of the round trip through the editor. The fixture hands back the bytes it committed.
     git('config', 'core.autocrlf', 'false')
     git('config', 'core.eol', 'lf')
     git('add', '--all')
@@ -107,8 +83,6 @@ export const config: WebdriverIO.Config = {
     connectionRetryCount: 0,
     framework: 'mocha',
     reporters: ['spec'],
-    // A real editor session imports the project before the addon can answer, which is slower than
-    // anything else in this suite.
     mochaOpts: {ui: 'bdd', timeout: 240_000},
     onPrepare: () => {
         prepareWorkspace()

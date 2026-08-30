@@ -5,14 +5,6 @@ import {createRef} from 'react'
 import {ChatConversation} from './ChatConversation'
 import type {Message, ToolActivity, VerifyPoint} from '../../models/chat'
 
-/**
- * The row a slow call draws while it is still running.
- *
- * Gofer's editor calls wait twenty to thirty seconds before they admit a timeout, and one recorded
- * task spent three hundred and ninety-seven seconds inside calls that ended that way. For all of it
- * the row showed a spinner and nothing else, which is indistinguishable from a window that has
- * stopped responding — and is what it was reported as. The age on the row is the difference.
- */
 const STARTED_AT = 1_000_000
 
 function conversation(tool: ToolActivity) {
@@ -57,17 +49,10 @@ describe('ChatConversation', () => {
 
         expect(await screen.findByText('scenes/player.tscn · 3s')).toBeTruthy()
 
-        // The whole point is that it keeps moving: a number frozen at three seconds says no more
-        // than a frozen spinner does.
         await vi.advanceTimersByTimeAsync(21_000)
         expect(await screen.findByText('scenes/player.tscn · 24s')).toBeTruthy()
     })
 
-    /*
-     * A brief is typed as paragraphs and pasted as a block, and it has to read back that way. The
-     * bubble used to hand the string to a `Text` with no `white-space`, so the browser's `normal`
-     * collapsed every newline and every blank line into one wall of prose.
-     */
     it('keeps the line breaks in a message the way it was typed', () => {
         const message: Message = {
             id: 1,
@@ -85,14 +70,11 @@ describe('ChatConversation', () => {
             />
         )
 
-        // jsdom does not lay text out, so the evidence is the preserved string plus the rule that
-        // decides whether a browser would honour it.
         const sent = screen.getByText(/BLOCKER/)
         expect(sent.textContent).toBe(message.text)
         expect(sent.style.whiteSpace).toBe('pre-wrap')
     })
 
-    /* A sent picture is still the thing the turn is about, so it has to open bigger than a thumbnail. */
     it('opens a sent attachment full size', async () => {
         const user = userEvent.setup()
         const message: Message = {
@@ -138,11 +120,6 @@ describe('ChatConversation', () => {
     })
 })
 
-/**
- * Measured on a live run: two points went red and the turn ended "The verification passes. The code
- * is already correct." The answer carries the verdict in its text now, and this is the other half —
- * the points are on screen while they run, not only once they have all finished.
- */
 describe('verification points', () => {
     afterEach(cleanup)
 
@@ -180,7 +157,6 @@ describe('verification points', () => {
         )
 
         expect(screen.getByText('Verification failed — 1 of 2')).toBeTruthy()
-        // Opened, because a red point the reader has to click to find is a red point they miss.
         expect(screen.getByText('the boss moves')).toBeTruthy()
     })
 

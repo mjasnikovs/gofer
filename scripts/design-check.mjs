@@ -1,13 +1,3 @@
-/**
- * Fails the build when the theme loses a distinction it used to make.
- *
- * The theme already carries violations, and fixing them all at once would repaint every screen and
- * every visual snapshot in the same commit. So the gate is a ratchet rather than a bar: the
- * baseline lists what today's theme is allowed to keep, anything new fails, and a violation that
- * gets fixed has to leave the baseline in the same commit that fixes it. The list only ever gets
- * shorter.
- */
-
 import {readFile} from 'node:fs/promises'
 import {findViolations, parseThemeTokens, partitionAgainstBaseline} from './design-rules.mjs'
 

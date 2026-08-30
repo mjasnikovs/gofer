@@ -23,8 +23,6 @@ jobs:
               with:
                   toolchain: 1.97.1
                   components: clippy,rustfmt
-            # Every run before this one rebuilt the whole dependency tree from source, inside a
-            # thirty-minute cap. Nothing in that tree changes between commits.
             - name: Reuse the compiled dependency tree between runs
               uses: Swatinem/rust-cache@v2
               with:
@@ -32,9 +30,6 @@ jobs:
             - uses: actions/setup-python@v5
               with:
                   python-version: '3.13'
-            # xvfb is not optional here: three acceptance tests run the fixture as a real windowed
-            # game, and `scripts/godot-acceptance.mjs` claims a display through `xvfb-run` when the
-            # machine has none.
             - name: Install system dependencies
               run: >-
                   sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
@@ -53,9 +48,6 @@ jobs:
               env:
                   GOFER_GODOT_INSTALL_DIR: ${{ runner.temp }}/godot
               run: node scripts/install-godot.mjs
-            # Exports GOFER_GDFORMAT, which is what makes the acceptance journey take the branch
-            # where formatting actually ran. Without it that assertion accepts
-            # `formatter_unavailable` and proves nothing about the formatter.
             - name: Build the pinned gdformat sidecar
               run: npm run build:gdformat
             - name: Run required checks with zero retries
@@ -63,14 +55,8 @@ jobs:
                   GOFER_CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}
                   GOFER_CHROMEDRIVER_BINARY: ${{ steps.chrome.outputs.chromedriver-path }}
               run: npm run check
-            # The visual suite is enforced here and nowhere else. Committed snapshots are exact
-            # pixels, and this runner's font stack is not the developer's, so a suite that has to
-            # pass in both places can only ever be tuned until it proves nothing. One environment
-            # owns them; `visual-snapshots.yml` is how they are regenerated.
             - name: Run the visual and accessibility suite
               run: npm run --silent test:visual
-            # A pixel failure is unreadable without the images: the diff names what moved, and the
-            # actual is the candidate snapshot when the change was intended.
             - name: Collect the visual differences
               if: failure()
               uses: actions/upload-artifact@v4
@@ -80,7 +66,6 @@ jobs:
                   if-no-files-found: ignore
                   retention-days: 14
 
-    # The same journey the nightly matrix runs on Windows and macOS, so the platforms cannot drift.
     packaged:
         uses: ./.github/workflows/packaged-journey.yml
         with:
@@ -99,20 +84,14 @@ jobs:
               with:
                   toolchain: nightly-2026-07-25
                   components: llvm-tools-preview
-            # Every run before this one rebuilt the whole dependency tree from source, inside a
-            # thirty-minute cap. Nothing in that tree changes between commits.
             - name: Reuse the compiled dependency tree between runs
               uses: Swatinem/rust-cache@v2
               with:
                   workspaces: src-tauri
-                  # Coverage builds land in a target directory of their own.
                   key: llvm-cov
             - uses: taiki-e/install-action@v2
               with:
                   tool: cargo-llvm-cov
-            # Coverage runs the real-editor acceptance suites, so this job needs the same engine
-            # and the same virtual display the gate does. Measuring without them reported the
-            # Godot subsystems as untested while eleven acceptance tests were driving them.
             - name: Install Linux Tauri dependencies
               run: >-
                   sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev

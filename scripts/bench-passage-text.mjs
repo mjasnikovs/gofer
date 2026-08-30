@@ -1,32 +1,3 @@
-/**
- * How much of a documentation passage is worth carrying?
- *
- * `maxTextChars` is a hard `slice` applied after retrieval, and it ships at 2000 — a number that
- * has never been measured, unlike `DEFAULT_PASSAGES` beside it, which was chosen by replaying 83
- * labelled questions through every ceiling. In the recorded live runs a `search` passage is
- * 1,750–1,800 characters and `godot_docs_search` is 27% of every byte the model reads back.
- *
- * One retrieval per question, at a ceiling nothing reaches, and every smaller ceiling applied to
- * the same text afterwards. That is the whole design: the caps are then compared against identical
- * passages rather than against separate retrievals, whose query expansion is a model call and does
- * not repeat.
- *
- *   node scripts/bench-passage-text.mjs
- *
- * **What it found, 2026-08-25, and why nothing was changed.** No passage the corpus returns is
- * longer than 1,800 characters — 24 of 24 across six questions — so `maxTextChars: 2000` never cuts
- * anything. It is a cap in name only, exactly as `DEFAULT_PASSAGES: 10` was before it was measured
- * down to four. What decides passage size is gofer-rag's chunker, not this number.
- *
- * The six questions cannot answer the second half — whether a smaller ceiling would cost anything.
- * The fact survives every ceiling down to 400 characters here, but the checks are regexes over the
- * whole answer and one of them is `/Area2D/`, which is not a test of anything. The instrument that
- * can answer it is gofer-rag's own 83 labelled questions, which is where `DEFAULT_PASSAGES` was
- * settled and which does not live in this repository.
- *
- * `GOFER_BENCH_ENDPOINT`-style configuration is not used here — the connection below is the
- * expansion model, and it is the local server by default because this runs many times.
- */
 import {execFileSync, spawn} from 'node:child_process'
 import {homedir} from 'node:os'
 import {dirname, resolve} from 'node:path'
@@ -37,7 +8,6 @@ const WORKER = resolve(ROOT, 'src-tauri/workers/rag-retrieve-worker.mjs')
 const NODE = resolve(ROOT, 'src-tauri/runtime/node')
 const CACHE = resolve(homedir(), '.cache/gofer-rag')
 
-/** The expansion model. Local by default; OpenRouter when a key is asked for by name. */
 const connection =
     process.env.OX_MODEL ?
         {
@@ -106,14 +76,12 @@ const retrieve = question =>
                 question,
                 cacheDir: CACHE,
                 maxPassages: 4,
-                // Past anything the corpus holds, so the ceilings below are the only cut made.
                 maxTextChars: 100_000,
                 connection
             })}\n`
         )
     })
 
-/** The same questions `ox-docs-ab.mjs` asks, and the same regex for whether the fact survived. */
 const QUESTIONS = [
     [
         'move_and_slide',

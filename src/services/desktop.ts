@@ -1,12 +1,6 @@
 import {Channel, invoke as tauriInvoke, isTauri as tauriIsTauri} from '@tauri-apps/api/core'
 import {listen as tauriListen} from '@tauri-apps/api/event'
 import type {EventCallback, UnlistenFn} from '@tauri-apps/api/event'
-/*
- * The picker's own option type, from the plugin that defines it. The command is invoked directly
- * rather than through the plugin's `open()` so that the test driver intercepts it like every other
- * desktop call — but the payload shape is the plugin's to declare, not this file's to guess at.
- * The package is a devDependency: nothing here imports its runtime.
- */
 import type {OpenDialogOptions} from '@tauri-apps/plugin-dialog'
 import type {DownloadProgress} from '@mjasnikovs/gofer-rag'
 import type {PendingChange, TaskSummary} from '../models/app'
@@ -94,7 +88,6 @@ export type SendAiMessageRequest = Readonly<{
     taskId?: string | undefined
     agentMessages: readonly unknown[]
     messages: readonly ChatMessageInput[]
-    /** Set when this turn replaces one that already ran, so the worker rolls the failed one back. */
     isRetry: boolean
 }>
 
@@ -103,7 +96,6 @@ type AttachmentUpload = Readonly<{
     data: string
 }>
 
-/** A PNG the backend read off the system clipboard, base64 encoded. */
 export type ClipboardImage = Readonly<{
     width: number
     height: number
@@ -112,18 +104,11 @@ export type ClipboardImage = Readonly<{
 
 type BackupResult = Readonly<{path: string}>
 
-/** Putting one memory to a read-only sub-agent: which turn it runs as, and which memory. */
 type JudgeMemoryRequest = Readonly<{
     requestId: number
     memoryId: string
 }>
 
-/**
- * Putting a list of memories to the same sub-agent as one turn.
- *
- * The ids come from the panel rather than being chosen in Rust, because a judgement is a minute
- * each and only the person pressing the button can see whether that is worth paying for.
- */
 type SweepMemoryRequest = Readonly<{
     requestId: number
     memoryIds: readonly string[]
@@ -134,15 +119,12 @@ type ToolApprovalRequest = Readonly<{
     approved: boolean
 }>
 
-/** Starting a brief: which task it is for, and the ask it works from. */
 type RunTaskBriefRequest = Readonly<{
     requestId: number
     taskId: string
     prompt: string
 }>
 
-// The backend returns the formatted buffer for the caller to diff; applying it is a separate,
-// explicit workspace write.
 type FormatGdscriptRequest = Readonly<{source: string}>
 
 type FormatGdscriptResponse = Readonly<{
@@ -170,10 +152,8 @@ type StoredChatPayload = Omit<StoredChat, 'taskId'>
         taskId?: string | undefined
     }>
 
-/** What bringing the project's branch into a task left for the agent to reconcile. */
 export type ResolveTaskMergeResult = Readonly<{
     taskId: string
-    /** Empty when the two branches merged on their own and there is nothing to resolve. */
     conflicts: readonly string[]
 }>
 
@@ -192,11 +172,8 @@ export type DesktopCommandMap = Readonly<{
     create_chat_task: CommandSpec<{bringChanges: boolean}, StoredChat>
     create_project_backup: CommandSpec<undefined, BackupResult>
     delete_chat_task: CommandSpec<{taskId: string}, StoredChat>
-    // Forgetting one memory, so no later turn is given it again.
     delete_project_memory: CommandSpec<{id: string}, void>
     delete_rag_cache: CommandSpec<undefined, CacheStatus>
-    // Every skills command answers with the whole list: an import can add a warning instead of a
-    // row, and a save can turn a warning back into one, so a caller cannot patch a single row.
     delete_skill: CommandSpec<{name: string}, SkillsResponse>
     delete_workspace_path: CommandSpec<{request: DeleteWorkspacePathRequest}, void>
     edit_workspace_file: CommandSpec<{request: EditWorkspaceFileRequest}, WorkspaceFileStamp>
@@ -204,21 +181,14 @@ export type DesktopCommandMap = Readonly<{
     get_godot_session: CommandSpec<undefined, GodotSessionSummary | undefined>
     get_rag_cache_status: CommandSpec<undefined, CacheStatus>
     import_legacy_chat: CommandSpec<{chat: StoredChat}, StoredChat>
-    // The path of a Markdown file the user picked. The backend copies it in and names it.
     import_skill: CommandSpec<{sourcePath: string}, SkillsResponse>
     initialize_rag: CommandSpec<undefined, void>
-    // Runs as a turn, so it takes the channel one does — that is what Stop reaches. Its own
-    // progress rides `ai-memory-judge` window events instead: the panel is not the chat timeline.
     judge_project_memory: CommandSpec<
         {request: JudgeMemoryRequest; stream: Channel<AiStreamPayload>},
         ProjectMemory
     >
     list_ai_models: CommandSpec<{request: SettingsRequest}, readonly AiModelOption[]>
-    // Every memory, each already checked against the files the workspace has now. The check is not
-    // a second command: it is one directory walk, and one nobody would press a button for.
     list_project_memory: CommandSpec<undefined, readonly ProjectMemory[]>
-    // Named, not drawn: a sketch's markup is fetched one at a time, because the copy the user
-    // looked at has the project's artwork inlined into it.
     list_project_sketches: CommandSpec<undefined, readonly ProjectSketch[]>
     list_project_tasks: CommandSpec<undefined, readonly TaskSummary[]>
     list_skills: CommandSpec<undefined, SkillsResponse>
@@ -238,26 +208,19 @@ export type DesktopCommandMap = Readonly<{
     query_godot_docs: CommandSpec<{request: DocsQuery}, DocsResponse>
     read_agent_prompt: CommandSpec<undefined, AgentPrompt>
     read_chat_attachment: CommandSpec<{attachment: ChatAttachment}, string>
-    // The clipboard's image, which the webview keeps from the paste event. Null when it holds
-    // anything else.
     read_clipboard_image: CommandSpec<undefined, ClipboardImage | null>
     read_godot_logs: CommandSpec<{query: GodotLogQuery}, GodotLogPage>
-    // Remembered interface state, as the JSON the renderer wrote. Absent when nothing is stored.
     read_project_sketch: CommandSpec<{id: string}, SketchHtml>
     read_project_state: CommandSpec<{key: string}, string | null>
-    // A skill's own Markdown, for the editor. Read on the row the user opened, not with the list.
     read_skill: CommandSpec<{name: string}, string>
     read_task_brief: CommandSpec<{taskId: string}, BriefRun | null>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
-    // A small `data:` square for a worktree picture. `null` for every file that is not one.
     read_workspace_thumbnail: CommandSpec<{path: string}, string | null>
     resolve_task_merge: CommandSpec<{taskId: string}, ResolveTaskMergeResult>
     respond_chatgpt_login: CommandSpec<{value: string}, void>
     respond_tool_approval: CommandSpec<{request: ToolApprovalRequest}, void>
     respond_user_question: CommandSpec<{request: UserQuestionResponse}, void>
     run_storage_maintenance: CommandSpec<undefined, StorageMaintenanceResult>
-    // Runs as a turn, so it takes the same channel one does — the brief's own progress rides
-    // `ai-brief` window events instead, because a phase is not part of an assistant message.
     run_task_brief: CommandSpec<
         {request: RunTaskBriefRequest; stream: Channel<AiStreamPayload>},
         void
@@ -265,11 +228,7 @@ export type DesktopCommandMap = Readonly<{
     save_agent_prompt: CommandSpec<{prompt: string}, AgentPrompt>
     save_chat: CommandSpec<{chat: StoredChatPayload}, void>
     save_chat_attachment: CommandSpec<{request: AttachmentUpload}, void>
-    // The Godot rules alone. Separate from save_settings because the tab has no Save of its own,
-    // and a checkbox must not store another tab's half-typed draft as a side effect.
     save_godot_settings: CommandSpec<{godot: GodotSettings}, SettingsResponse>
-    // Only the three fields the window may change. The backend carries provenance, the task and any
-    // supersession across, because the upsert behind this overwrites whatever it is handed.
     save_project_memory: CommandSpec<{edit: MemoryEdit}, ProjectMemory>
     save_script_document: CommandSpec<{request: SaveScriptRequest}, ScriptStamp>
     save_settings: CommandSpec<{request: SettingsRequest}, SettingsResponse>
@@ -277,13 +236,10 @@ export type DesktopCommandMap = Readonly<{
         {request: GodotLogSearchRequest},
         readonly GodotLogSearchHit[]
     >
-    // The turn's deltas ride this channel: they are high-rate, ordered, and tied to this one call.
     send_ai_message: CommandSpec<
         {request: SendAiMessageRequest; stream: Channel<AiStreamPayload>},
         void
     >
-    // Bulk triage, and only the state: the rows keep their words, their verdict and the reason it
-    // was given, and stop reaching the prompt. It re-embeds nothing, because nothing was rewritten.
     set_memory_states: CommandSpec<
         {ids: readonly string[]; state: MemoryState},
         readonly ProjectMemory[]
@@ -292,11 +248,7 @@ export type DesktopCommandMap = Readonly<{
     start_godot_session: CommandSpec<{request: StartGodotSessionRequest}, GodotSessionSummary>
     stop_godot_session: CommandSpec<undefined, void>
     subscribe_godot_events: CommandSpec<{events: Channel<GodotSessionEvent>}, void>
-    // Published diagnostics arrive on this channel until the renderer unsubscribes.
     subscribe_script_diagnostics: CommandSpec<{diagnostics: Channel<ScriptDiagnosticsEvent>}, void>
-    // One turn for the whole list, which is what makes Stop reach the run rather than whichever
-    // memory is in flight. The count rides `ai-memory-sweep`; each row's spinner still rides the
-    // judge's own event.
     sweep_project_memory: CommandSpec<
         {request: SweepMemoryRequest; stream: Channel<AiStreamPayload>},
         readonly ProjectMemory[]
@@ -306,9 +258,7 @@ export type DesktopCommandMap = Readonly<{
     unsubscribe_script_diagnostics: CommandSpec<undefined, void>
     unwatch_workspace_files: CommandSpec<undefined, void>
     update_script_document: CommandSpec<{request: UpdateScriptRequest}, ScriptStamp>
-    // The backend streams settled batches of external changes down this channel.
     watch_workspace_files: CommandSpec<{changes: Channel<readonly WorkspaceFileChange[]>}, void>
-    // No `value` forgets the key, which is how a task's draft goes when the draft is emptied.
     write_project_state: CommandSpec<{key: string; value?: string}, void>
     write_skill: CommandSpec<{name: string; text: string}, SkillsResponse>
     write_workspace_file: CommandSpec<{request: WriteWorkspaceFileRequest}, WorkspaceFileStamp>
@@ -317,25 +267,17 @@ export type DesktopCommandMap = Readonly<{
 type DesktopEventMap = Readonly<{
     'ai-approval-request': ToolApprovalPrompt
     'ai-approval-settled': ToolApprovalSettled
-    /**
-     * A brief's progress. An event rather than the turn's channel, because the chat timeline drops
-     * every event it does not draw — and a phase is not part of an assistant message.
-     */
     'ai-brief': BriefEvent
     'ai-question-request': UserQuestionPrompt
     'ai-question-settled': UserQuestionSettled
-    /** How judging one memory is going, and how it ended. Not the chat's, so not the channel's. */
     'ai-memory-judge': MemoryJudgeEvent
-    /** How far through the list a sweep is, and how it ended. One event for the run, not the row. */
     'ai-memory-sweep': MemorySweepEvent
     'godot-session-event': GodotSessionEvent
     'rag-download-progress': DownloadProgress
-    /** What the settings file now says, sent by whichever screen saved it to every other one. */
     'settings-saved': SettingsResponse
 }>
 
 export type DesktopCommand = keyof DesktopCommandMap
-/** Every event the backend sends, so a listener cannot subscribe to one that is never emitted. */
 export type DesktopEvent = keyof DesktopEventMap
 type CommandArguments<Command extends DesktopCommand> =
     DesktopCommandMap[Command]['arguments'] extends undefined ? []

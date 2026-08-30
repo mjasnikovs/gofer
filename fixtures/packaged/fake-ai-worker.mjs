@@ -1,15 +1,10 @@
 import {createInterface} from 'node:readline'
 
-// The worker channel is duplex: Rust sends the startup context as the first line and keeps stdin
-// open for tool results, so this fixture reads one line rather than waiting for end of input.
 const request = JSON.parse(
     await new Promise(resolve => {
         const reader = createInterface({input: process.stdin})
         reader.once('line', line => {
             reader.close()
-            // Rust holds stdin open for the whole turn. A worker that stays attached to it never
-            // exits, and Rust reads this worker's stdout until end of file — so the turn would
-            // never finish even after the done event.
             process.stdin.destroy()
             resolve(line)
         })
@@ -22,10 +17,6 @@ function emit(event) {
     process.stdout.write(`GOFER_AI_EVENT:${JSON.stringify(event)}\n`)
 }
 
-// What the turn says is streamed, and streamed whole before the tool card rather than either side
-// of it. The timeline prefers the deltas over `done.text` — a turn that called tools has one
-// `turn_end` per step, so preferring the last would throw away everything said before it — and it
-// draws the tool between the deltas that surround it, which splits a sentence asserted as one.
 if (prompt?.text?.toLowerCase().includes('cancel')) {
     emit({type: 'text-delta', delta: 'Deterministic response'})
     setInterval(() => undefined, 1_000)

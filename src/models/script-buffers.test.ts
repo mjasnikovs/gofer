@@ -3,7 +3,6 @@ import {NO_SCRIPT_TABS, reduceScriptTabs} from './script-buffers'
 import type {ScriptTabs, ScriptTabsAction} from './script-buffers'
 import type {ScriptDocument, ScriptStamp} from './script'
 
-/** Applies a run of actions in order, which is the only way the tabs ever reach a state. */
 function apply(...actions: readonly ScriptTabsAction[]): ScriptTabs {
     return actions.reduce(reduceScriptTabs, NO_SCRIPT_TABS)
 }
@@ -43,7 +42,6 @@ describe('opening and closing', () => {
         expect(two.activePath).toBe('enemy.gd')
     })
 
-    /** A background reopen — the watcher noticing a file changed — must not steal the tab. */
     it('leaves the reading where it is when a file opens quietly', () => {
         const two = reduceScriptTabs(opened, {type: 'opened', document: ENEMY, activate: false})
         expect(two.activePath).toBe('player.gd')
@@ -59,10 +57,6 @@ describe('opening and closing', () => {
         expect(buffer(reloaded, 'player.gd')?.version).toBe(4)
     })
 
-    /*
-     * A breakpoint belongs to the line the user set it on. A reload is this same action, so
-     * dropping them here would silently clear the gutter of every file that changed on disk.
-     */
     it('keeps the breakpoints when a file is reopened', () => {
         const reloaded = apply(
             {type: 'opened', document: PLAYER, activate: true},
@@ -118,7 +112,6 @@ describe('editing and writing', () => {
         expect(buffer(typed, 'player.gd')?.dirty).toBe(true)
     })
 
-    /** Typing back to what was saved is not an edit worth a write. */
     it('goes clean again when the text is typed back to what was saved', () => {
         const undone = apply(
             {type: 'opened', document: PLAYER, activate: true},
@@ -128,10 +121,6 @@ describe('editing and writing', () => {
         expect(buffer(undone, 'player.gd')?.dirty).toBe(false)
     })
 
-    /*
-     * A sync is the server catching up with text the buffer already holds. Taking anything but the
-     * version from it would undo whatever was typed while the request was in flight.
-     */
     it('takes only the document version from a sync', () => {
         const synced = apply(
             {type: 'opened', document: PLAYER, activate: true},
@@ -164,7 +153,6 @@ describe('editing and writing', () => {
         })
     })
 
-    /** A keystroke landing while the write was in flight leaves the tab dirty, which it is. */
     it('stays dirty when the buffer moved on while the save was in flight', () => {
         const saved = apply(
             {type: 'opened', document: PLAYER, activate: true},
@@ -182,7 +170,6 @@ describe('editing and writing', () => {
 })
 
 describe('conflicts', () => {
-    /** A conflict warns; it does not choose a side. Both answers to it need the user's text. */
     it('keeps the edited text when a save is refused as stale', () => {
         const refused = apply(
             {type: 'opened', document: PLAYER, activate: true},
@@ -258,11 +245,9 @@ describe('renaming', () => {
             dirty: false,
             version: 7
         })
-        // A file the transaction did not touch is left exactly as it was.
         expect(buffer(renamed, 'enemy.gd')?.text).toBe('extends Node2D\n')
     })
 
-    /** No stamp means no version, and the next edit would be sent under a number nobody knows. */
     it('leaves a rewritten file alone when the transaction answered with no version for it', () => {
         const renamed = apply(
             {type: 'opened', document: PLAYER, activate: true},
@@ -284,7 +269,6 @@ describe('renaming', () => {
 })
 
 describe('reopening a project', () => {
-    /** The stored active tab may name one of the files that no longer opens. */
     it('falls back to the last tab that opened when the stored one did not', () => {
         const reopened = reduceScriptTabs(
             {buffers: [], activePath: 'deleted.gd'},

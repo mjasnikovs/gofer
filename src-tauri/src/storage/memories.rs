@@ -386,11 +386,6 @@ impl Memories<'_> {
                 })
             })
             .collect::<Vec<_>>();
-        // Ties break on the id, and that is not tidiness. `scores` is a `HashMap`, so what
-        // `into_iter` hands over is in no order at all, and two memories fused to the same score
-        // came out in a different order run to run — for the same question, against the same rows.
-        // The six this answers with are sent on every turn, and a provider's prompt cache is a run
-        // of bytes: two rows swapping places re-buys the whole conversation behind them.
         results.sort_by(|left, right| {
             right
                 .score
@@ -429,11 +424,6 @@ impl Memories<'_> {
         let mut connection = self.storage.connection()?;
         let mut restored = 0;
         for entry in pending {
-            // Re-read under the lock, because the vector was computed without it. A memory deleted
-            // in that window has nothing to write; one edited in it had its vector dropped on
-            // purpose, and writing this one back would index the row under text it no longer holds
-            // while `missing_embeddings` stops reporting it. Both are skipped rather than raised:
-            // the backfill is one of six upkeep views and must not take the other five down.
             let current = connection
                 .query_row(
                     "SELECT content FROM memory_items WHERE id = ?1",
@@ -523,7 +513,6 @@ impl Memories<'_> {
                 .optional()
                 .map_err(database_error)?
             else {
-                // Its memory is gone, which is the orphan sweep's to answer for and it already has.
                 continue;
             };
             if belongs == scope {
@@ -809,17 +798,14 @@ mod tests {
         let mut query_vector = vec![0.0; MEMORY_EMBEDDING_DIMENSIONS];
         query_vector[0] = 1.0;
         for index in 0..6 {
-            // Found by its words, never by a vector: no embedding is ever saved for it.
             save(
                 format!("ffffffff-0000-7000-8000-00000000000{index}"),
                 format!("The player controller is a CharacterBody2D, note {index}"),
             );
-            // Found by its vector, never by the words: nothing in it matches the question.
             let vectored = save(
                 format!("00000000-0000-7000-8000-00000000000{index}"),
                 format!("The wind moves the grass, note {index}"),
             );
-            // Spaced apart so the six of them rank 1 to 6 rather than tying with each other.
             let mut vector = query_vector.clone();
             vector[1] = index as f32 / 100.0;
             storage
@@ -908,7 +894,6 @@ mod tests {
                 .is_empty()
         );
 
-        // Rewriting the content invalidates the vector, which must make it pending again.
         storage
             .memory()
             .upsert(&UpsertMemoryRequest {
@@ -952,17 +937,6 @@ mod tests {
         assert_eq!(vectors, 0);
     }
 
-    /*
-     * The vectors are computed before the write lock is taken, so what they came FROM is checked
-     * once it is held.
-     *
-     * Two hundred round trips to the memory worker is a window minutes wide, and both things that
-     * can happen in it used to go wrong. A memory deleted in that window made `write_embedding`
-     * error and the `?` took the whole maintenance fold down — backups unpruned, stale answers
-     * unpurged. A memory EDITED in it had its vector dropped precisely because the content changed,
-     * and the stale one was written back against the new text: `missing_embeddings` stopped
-     * reporting the row, so nothing would ever notice it was indexed under words it no longer held.
-     */
     #[test]
     fn a_vector_is_written_only_if_the_text_it_was_computed_from_is_still_there() {
         let directory = TempDir::new().expect("temporary directory");
@@ -996,7 +970,6 @@ mod tests {
         };
         let pending = vec![computed(&edited), computed(&removed), computed(&kept)];
 
-        // The window: one memory rewritten, one deleted, while the worker was busy.
         storage
             .memory()
             .upsert(&UpsertMemoryRequest {
@@ -1152,7 +1125,6 @@ mod tests {
                 vector: vector.clone(),
             })
             .expect("save embedding");
-        // What a pre-V3 database is left holding: the memory deleted, the vector not.
         let connection = storage.connection().expect("connection");
         connection
             .execute(

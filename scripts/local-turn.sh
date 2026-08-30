@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# One live turn against the local OpenAI-compatible server, on its own display.
-# Usage: local-turn.sh <name> <task>
-#
-# The same harness `ox-turn.sh` drives, pointed at 127.0.0.1 instead of OpenRouter. It exists
-# because OpenRouter's free stealth tier is capped per day: a sweep that runs out at request 1000
-# has nowhere else to go, and the local model answers the same turn for nothing.
 set -euo pipefail
 name="$1"; shift
 task="$1"
@@ -19,9 +13,5 @@ run=(cargo test --manifest-path src-tauri/Cargo.toml --features godot-acceptance
 if [ "${GOFER_GODOT_DISPLAY:-}" = host ]; then
   exec "${run[@]}"
 fi
-# The Wayland session goes with the desktop it belongs to. `xvfb-run` sets DISPLAY and nothing
-# else, Gofer reads WAYLAND_DISPLAY to decide the editor's display driver, and a turn under this
-# wrapper otherwise opens its editor on the developer's own compositor. Same reason, and the same
-# two lines, as `live-turn.sh` and `scripts/virtual-display.mjs`.
 unset WAYLAND_DISPLAY XDG_SESSION_TYPE
 exec xvfb-run -a -s "-screen 0 1920x1080x24" "${run[@]}"

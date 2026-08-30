@@ -20,18 +20,10 @@ function requireRequest(request) {
     return request
 }
 
-/**
- * Builds the line handler used by the memory worker.
- *
- * `loadPipeline` is injected so tests never download or run the real ONNX model. The extractor is
- * created once and reused, because loading it costs far more than an embedding call.
- */
 export function createEmbedder({loadPipeline}) {
     let extractor
 
     return async function handleLine(line) {
-        // The id is read before any validation so a failure can always be correlated to its
-        // request; an unparseable line is the only case that answers without one.
         let id
         try {
             const parsed = JSON.parse(line)

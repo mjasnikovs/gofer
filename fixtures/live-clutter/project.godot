@@ -1,21 +1,3 @@
-; Engine configuration file.
-; The workspace for a task about taking things away.
-;
-; Every fixture before this one asks for something to be added, and no live run has ever reached an
-; inverse operation as a result: `remove_autoload`, `reset_setting`, `remove_input_action`,
-; `reset_input_action`, `disconnect_signal` and `remove_from_group` were all unreached across 45
-; recorded turns. Nothing reaches them while building.
-;
-; So this project is cluttered on purpose, and every piece of clutter is provably dead:
-;   * `OldSaveSystem` is an autoload no script mentions.
-;   * `debug_noclip` and `old_jump` are Input Map actions no script reads.
-;   * `physics/2d/default_gravity` is 1400 where Godot's default is 980, and no script reads it.
-;   * `application/config/use_custom_user_dir` is on for no reason.
-; The scene carries the rest: a Timer wired to a handler that does nothing, and the Player in a
-; `pickups` group it has no business being in.
-;
-; What must survive: `move_left`/`move_right`, which `player.gd` really uses, and the window and
-; rendering settings the other fixtures explain.
 config_version=5
 
 [application]

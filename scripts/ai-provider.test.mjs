@@ -1,12 +1,3 @@
-/**
- * One turn, from the prompt to the answer: what reaches the model, what comes back, and what the
- * turn does when either of those goes wrong.
- *
- * Compaction, the retry ladder, the transcript it rebuilds, the sub-agent's model, and the thinking
- * level a chat-template server is sent — all of it is `runAgent` and the context it builds, which is
- * why it is tested through that one door.
- */
-
 import assert from 'node:assert/strict'
 import {readdir, rm} from 'node:fs/promises'
 import {createServer} from 'node:http'
@@ -44,10 +35,6 @@ import {
     withoutProbes
 } from './ai-turn-harness.mjs'
 
-/// The session the turn belongs to has to reach the request, and nothing else notices when it does
-/// not: the turn works, it just pays for the whole story on every ask. It was read from a settings
-/// field that has never existed, so every request went out anonymous — a measured 24-ask turn cost
-/// 328,533 tokens against about 12,664 characters of tool output, and one lucky ask cost 875.
 test('carries the task through to the request, so a server can route it to its own cache', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -216,11 +203,6 @@ test('rejects requests without a user prompt or image before network dispatch', 
     )
 })
 
-/**
- * A conversation that has outgrown the model's context window does not fail: the server answers a
- * token or two and says it stopped for length. Recorded as an answer, that is a complete assistant
- * message reading "I", and the work carries on against a conversation that can never reply again.
- */
 test('reports a turn that ran out of context rather than recording it as an answer', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -264,7 +246,6 @@ test('reports a turn that ran out of context rather than recording it as an answ
             workspacePath: workspace.path,
             emit: () => undefined
         }),
-        // The two numbers that explain it, and the way out.
         /116,449 of the model's 120,064-token context window.*Start a new task/su
     )
 })
@@ -431,12 +412,9 @@ test('runs the Pi agent tool loop and streams tool lifecycle events', async cont
             'gofer'
         )
         assert.equal(bodies[1].messages.at(-1).role, 'tool')
-        // The ask that issued the call is charged to it, by id and not by time. `input + output`
-        // and never `cacheRead`, which is the same prompt re-sent on every ask of the turn.
         const cost = events.find(event => event.type === 'tool-cost')
         assert.deepEqual(cost.ids, [events.find(event => event.type === 'tool-start').id])
         assert.equal(cost.tokens, 13)
-        // The final ask answered with text, so it issued no calls and charged nothing.
         assert.equal(events.filter(event => event.type === 'tool-cost').length, 1)
 
         await runAgent({
@@ -493,15 +471,9 @@ test('a refused tool call reaches the model as an error result', async context =
     assert.match(end.output, /revision_conflict/u)
 })
 
-/*
- * The prompt itself is composed in Rust and shown to the user in settings, so what is left to
- * prove here is that the worker does not touch it: the text arrives whole and reaches the model
- * whole. Memory is the exception, because it is this turn's data rather than the user's wording.
- */
 test('the system prompt reaches the model as it arrived, and this turn’s own data does not', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    // One server per turn: the shared mock accumulates request bodies, and this test compares two.
     const sent = async extra => {
         const mock = startServer()
         await new Promise(resolve => mock.server.listen(0, '127.0.0.1', resolve))
@@ -523,9 +495,6 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
 
     const godot = {tools: catalog, host: {call: () => Promise.resolve({})}}
 
-    // The prompt is the user's, whole, whatever else the turn knows. That is the whole contract:
-    // every provider's cache prefix begins at the system message, so anything re-derived per turn
-    // that lands here costs the conversation behind it.
     const bare = await sent({})
     assert.equal(bare.system, 'Be brief. Never mention cats.')
     assert.equal(bare.prompt, 'Hello')
@@ -537,9 +506,6 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
         'Hello\n\nRelevant persistent project memory:\nThe player is a cat.'
     )
 
-    // The editor session, after the memory. It replaces a call: the shipped prompt used to say
-    // "call godot_session status first, every time", and 58 of 72 recorded turns opened with
-    // exactly that — one round trip per turn for a state the backend already holds.
     const withSession = await sent({
         ...godot,
         memoryContext: 'The player is a cat.',
@@ -553,8 +519,6 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
             + '\n\nEditor session: ready. Godot 4.7.2.'
     )
 
-    // The project's files after the session, for the same reason and with the same measurement:
-    // 98 of 113 recorded turns opened with a call that only asked what the project holds.
     const withInventory = await sent({
         ...godot,
         memoryContext: 'The player is a cat.',
@@ -570,7 +534,6 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
             + "\n\nThe project's tracked files:\nscripts/player.gd"
     )
 
-    // And a turn with none of it to describe asks the question the user asked, and nothing else.
     assert.deepEqual(await sent({sessionContext: undefined}), {
         system: 'Be brief. Never mention cats.',
         prompt: 'Hello'
@@ -581,15 +544,6 @@ test('the system prompt reaches the model as it arrived, and this turn’s own d
     })
 })
 
-/**
- * Two calls in flight at once, on the one domain where that is still what happens.
- *
- * It used to be `godot_scene get_tree` beside `godot_runtime capture`, and those are ordered now:
- * every domain that reaches the editor runs one at a time, for the race
- * `the editor is one caller at a time` in `godot-tools.test.mjs` records. `godot_docs_search`
- * answers through a sidecar and a cache and keeps no state a sibling can disturb, so two of its
- * searches still run together — which is what leaves this test something real to prove.
- */
 test('parallel domain calls are answered out of order without crossing results', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -603,9 +557,6 @@ test('parallel domain calls are answered out of order without crossing results',
         {text: 'Both answered'}
     ])
     const url = await baseUrl(context, mock.server)
-    // The backend's half: hold both requests, then answer them in reverse arrival order. Two calls
-    // are in flight at once precisely because the channel is duplex, and only the correlation id
-    // says which result belongs to which.
     const held = []
     const host = createToolHost(call => {
         if (isProbe(call)) return host.deliver(probeResult(call))
@@ -635,9 +586,6 @@ test('parallel domain calls are answered out of order without crossing results',
         held.map(request => request.params.ops[0].question),
         ['signals', 'tweens']
     )
-    // Both calls are the same operation, so the `target` a start event carries cannot tell them
-    // apart and the question has to. The backend saw them in the order they were started — that is
-    // the assertion directly above — so the two lists line up by position.
     const started = events.filter(event => event.type === 'tool-start').map(event => event.id)
     const requested = new Map(started.map((id, index) => [id, held[index].params.ops[0].question]))
     const ended = events.filter(event => event.type === 'tool-end')
@@ -647,17 +595,6 @@ test('parallel domain calls are answered out of order without crossing results',
     assert.equal(host.pendingCount, 0)
 })
 
-/**
- * Two editor calls in one assistant message run one at a time, in the order they were written.
- *
- * The turn that bought this wrote `godot_runtime stop` beside `godot_node connect_signal` and
- * `godot_scene save`. Run together, both mutations were refused `session_playing` before the stop
- * they were sent with had returned, and the retry after that met `revision_conflict`. Five of that
- * turn's seven refusals were the race; none of its parameters was wrong.
- *
- * The backend holds each call for a tick before answering, so an overlap would be seen rather than
- * missed by luck: with the old `parallel` both calls arrive before either is answered.
- */
 test('two editor calls in one message do not overlap', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -711,8 +648,6 @@ test('aborting a turn cancels the domain tool call it is waiting on', async cont
     const called = new Promise(resolve => {
         notifyCalled = resolve
     })
-    // A backend that never answers the call the model made: the only thing that can settle it is
-    // the abort. The startup probes are answered, or the turn would never reach the model.
     const host = createToolHost(call => {
         if (isProbe(call)) return host.deliver(probeResult(call))
         notifyCalled()
@@ -768,8 +703,6 @@ test('a denied approval reaches the model as approval_denied without failing the
         emit: event => events.push(event)
     })
 
-    // A refusal is an answer, not a failure: the turn continues and the model reads the code, which
-    // the system prompt has already told it not to retry.
     assert.equal(completion.text, 'I did not delete it')
     const end = events.find(event => event.type === 'tool-end')
     assert.equal(end.isError, true)
@@ -811,8 +744,6 @@ test('a captured frame reaches the model as an image and not as base64 in the to
         emit: event => events.push(event)
     })
 
-    // The frame rides the second request as an image part; the text the model reads keeps the
-    // frame's dimensions and drops its payload, which is worth nothing as characters.
     assert.match(JSON.stringify(mock.bodies[1]), new RegExp(`data:image/png;base64,${data}`, 'u'))
     const tool = mock.bodies[1].messages.find(message => message.role === 'tool')
     assert.doesNotMatch(JSON.stringify(tool.content), new RegExp(data, 'u'))
@@ -830,8 +761,6 @@ test('the confined shell does destructive work in the worktree without asking an
         {text: 'Removed'}
     ])
     const url = await baseUrl(context, mock.server)
-    // The Godot tools are offered, so a gated typed delete was available; nothing reaches the
-    // backend because the shell is the deliberate autonomous exception to the approval model.
     const asked = []
     const host = {call: (tool, params) => Promise.resolve(asked.push({tool, params}) && {})}
     const events = []
@@ -868,8 +797,6 @@ test('a conversation past the compaction line is summarised before the turn', as
         emit: event => events.push(event)
     })
 
-    // The summary comes first, and costs a second request when the cut lands mid-turn: the history
-    // and the half-finished turn above it are summarised separately. Then comes the turn itself.
     assert.ok(mock.bodies.length >= 2, 'the summary is a request of its own')
     assert.match(JSON.stringify(mock.bodies[0].messages), /summarization assistant/)
 
@@ -878,18 +805,12 @@ test('a conversation past the compaction line is summarised before the turn', as
     const summary = sent.find(message =>
         JSON.stringify(message).includes('SUMMARY OF THE EARLY WORK')
     )
-    // The Agent's default message conversion drops this message. Losing it would leave a turn that
-    // is shorter, cheaper, and has forgotten everything — which no assertion on length would catch.
     assert.ok(summary, 'the summary reaches the model')
     assert.equal(summary.role, 'user')
 
-    // Stored is what was sent, so the next turn starts from the compacted conversation rather than
-    // summarising the same history again.
     assert.ok(completion.agentMessages.length < history.length)
     assert.equal(completion.agentMessages[0].role, 'compactionSummary')
 
-    // Summarising happens before a single token of the answer exists, so the only thing that keeps
-    // the wait from reading as a hang is that it is announced and then withdrawn.
     const start = events.find(event => event.type === 'compaction-start')
     assert.ok(start, 'the wait is announced')
     assert.equal(start.contextWindow, 120_064)
@@ -917,23 +838,12 @@ test('compaction set to 100 percent sends the conversation whole', async context
     })
 
     assert.equal(mock.bodies.length, 1)
-    // The system prompt and the new prompt on either side of an untouched conversation.
     assert.equal(mock.bodies[0].messages.length, history.length + 2)
 })
-
-/*
- * The next three tests are the Mario session of 2026-08-08. One prompt, one twenty-minute turn:
- * the context crossed the line while the turn ran, nothing compacted because the only check had
- * already happened at the turn's start, and the turn died where Pi on the same server recovers.
- * Pi's policy is checked after every assistant message, on the usage the server reported. These
- * tests hold this worker to that policy.
- */
 
 test('a turn that crosses the line mid-flight compacts before its next request', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    // Textually the history estimates well under the line, so the pre-turn check stays quiet. The
-    // server then reports what the estimate missed: this conversation is already at 110k tokens.
     const history = longConversation(30, 3_500)
     const mock = startScriptedServer([
         {
@@ -954,8 +864,6 @@ test('a turn that crosses the line mid-flight compacts before its next request',
         emit: event => events.push(event)
     })
 
-    // The turn finishes; summarising was one or two requests of its own between the tool result
-    // and the answer, and the answer was asked against the compacted conversation, not the whole.
     assert.equal(completion.text, 'Finished the level')
     assert.ok(mock.bodies.length >= 3, 'the summary is a request of its own')
     assert.match(JSON.stringify(mock.bodies[1].messages), /summarization assistant/u)
@@ -963,7 +871,6 @@ test('a turn that crosses the line mid-flight compacts before its next request',
     assert.match(finalRequest, /MID-TURN SUMMARY/u)
     assert.ok(mock.bodies.at(-1).messages.length < mock.bodies[0].messages.length)
 
-    // The wait is announced with the number the server reported, not the estimate that missed it.
     const start = events.find(event => event.type === 'compaction-start')
     assert.ok(start, 'mid-turn compaction is announced')
     assert.ok(start.tokens >= 110_000)
@@ -972,7 +879,6 @@ test('a turn that crosses the line mid-flight compacts before its next request',
         'the line was crossed mid-turn, after the tool ran'
     )
 
-    // Stored is what was sent, so the next turn starts from the compacted conversation.
     assert.equal(completion.agentMessages[0].role, 'compactionSummary')
 })
 
@@ -980,8 +886,6 @@ test('a context overflow from the model compacts and retries instead of failing 
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
     const history = longConversation(30, 3_500)
-    // llama.cpp's overflow, verbatim. Pi strips the error, compacts, and asks again; a worker that
-    // surfaces this error instead hands the user a Retry button that wipes the conversation.
     const mock = startScriptedServer([
         {
             error: {
@@ -1008,8 +912,6 @@ test('a context overflow from the model compacts and retries instead of failing 
     assert.match(JSON.stringify(mock.bodies[1].messages), /summarization assistant/u)
     const retried = JSON.stringify(mock.bodies.at(-1).messages)
     assert.match(retried, /RECOVERY SUMMARY/u)
-    // The failed attempt is rolled back, not summarised: an error message in the retried context
-    // would teach the model that its last answer was the error text.
     assert.doesNotMatch(retried, /exceeds the available context size/u)
     assert.ok(events.find(event => event.type === 'compaction-start'))
     assert.equal(completion.agentMessages[0].role, 'compactionSummary')
@@ -1018,8 +920,6 @@ test('a context overflow from the model compacts and retries instead of failing 
 test('overflow recovery is attempted once, not forever', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    // A server that overflows on every request, including the summary request. One recovery
-    // attempt is owed; a second is a loop against a model that cannot answer.
     const mock = startScriptedServer([
         {
             error: {
@@ -1061,8 +961,6 @@ test('a turn reports what the agent remembers at every step, not only at the end
         emit: event => events.push(event)
     })
 
-    // Two steps, so two checkpoints — the first one lands while the turn is still running, which is
-    // the only reason a turn that dies part-way leaves anything behind at all.
     const checkpoints = events.filter(event => event.type === 'turn-state')
     assert.equal(checkpoints.length, 2)
     assert.ok(checkpoints[0].agentMessages.length > 0)
@@ -1077,8 +975,6 @@ test('a retry drops the abandoned answer and does not ask the prompt twice', asy
     context.after(workspace.remove)
     const mock = startScriptedServer([{text: 'This time it worked'}])
     const url = await baseUrl(context, mock.server)
-    // What a crashed turn leaves behind: the settled turn above it, then its own prompt and the
-    // half-finished work it did before it died.
     const crashed = [
         ...longConversation(1, 20),
         {role: 'user', content: 'Build the level', timestamp: 10},
@@ -1104,7 +1000,6 @@ test('a retry drops the abandoned answer and does not ask the prompt twice', asy
     })
 
     const sent = mock.bodies[0].messages
-    // The one settled turn, then the prompt being asked again — and only once.
     assert.equal(sent.length, 3)
     assert.equal(
         sent.filter(message => JSON.stringify(message).includes('Build the level')).length,
@@ -1118,9 +1013,6 @@ test('a retry of a turn that never checkpointed keeps the turns before it', asyn
     context.after(workspace.remove)
     const mock = startScriptedServer([{text: 'Exported'}])
     const url = await baseUrl(context, mock.server)
-    // A turn can fail before it stores anything: the worker cannot start, the process is killed,
-    // the tool probe refuses. The transcript then still ends at the last turn that succeeded, and
-    // the failed prompt was never written into it.
     const transcript = [
         ...settledTurn('Build the level', 'Built it', 1),
         ...settledTurn('Add a light', 'Added it', 3)
@@ -1142,7 +1034,6 @@ test('a retry of a turn that never checkpointed keeps the turns before it', asyn
     })
 
     const sent = JSON.stringify(mock.bodies[0].messages)
-    // Nothing the screen still shows may be taken off the model's memory by a retry.
     assert.ok(sent.includes('Build the level'), 'the first turn survives')
     assert.ok(sent.includes('Add a light'), 'the last settled prompt survives')
     assert.ok(sent.includes('Added it'), 'the last settled answer survives')
@@ -1154,9 +1045,6 @@ test('a retry keeps the work the turn already did', async context => {
     context.after(workspace.remove)
     const mock = startScriptedServer([{text: 'Picking up where it stopped'}])
     const url = await baseUrl(context, mock.server)
-    // Force-quit mid-turn: the prompt is on the transcript, so are twenty steps of real work, and
-    // the turn never got to write an answer. The screen shows four bubbles; the model remembers
-    // forty-five messages. Retry must not be the thing that throws the forty-one away.
     const transcript = [
         ...settledTurn('Create Mario 1-1 clone.', 'Built it', 1),
         {role: 'user', content: 'Debug errors', timestamp: 3},
@@ -1167,8 +1055,6 @@ test('a retry keeps the work the turn already did', async context => {
 
     await runAgent({
         settings: servedBy(url),
-        // What `retryPlan` sends: every message except the reply being rewritten, so the last one
-        // is the user turn being asked again.
         messages: [
             {sender: 'user', text: 'Create Mario 1-1 clone.', timestamp: 1},
             {sender: 'assistant', text: 'Built it', timestamp: 2},
@@ -1181,11 +1067,9 @@ test('a retry keeps the work the turn already did', async context => {
     })
 
     const sent = JSON.stringify(mock.bodies[0].messages)
-    // Every step the turn managed to take is still the model's to build on.
     for (let index = 0; index < 20; index += 1) {
         assert.ok(sent.includes(`result of step${String(index)}`), `step ${String(index)} survives`)
     }
-    // And the question is still asked exactly once.
     assert.equal(sent.split('Debug errors').length - 1, 1)
 })
 
@@ -1221,7 +1105,6 @@ test('a retry of a turn that answered replaces the answer, not the work', async 
 
     const sent = JSON.stringify(mock.bodies[0].messages)
     assert.ok(sent.includes('result of one'), 'the work survives')
-    // The answer being retried is not left in front of the model as its own last word.
     assert.ok(!sent.includes('I gave up'), 'the failed answer is replaced')
     assert.equal(completion.text, 'A better answer')
 })
@@ -1238,7 +1121,6 @@ test('the wait doubles from five seconds and is held at a minute', () => {
 test('a turn whose model drops out is asked again by itself', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    // A model that died and came back — the everyday failure a local runtime has.
     const mock = startScriptedServer([
         {error: {status: 503, message: 'upstream connect error: connection refused'}},
         {text: 'Back online'}
@@ -1257,28 +1139,16 @@ test('a turn whose model drops out is asked again by itself', async context => {
     })
 
     assert.equal(completion.text, 'Back online')
-    // The shipped policy, run rather than shortened: the first wait is five seconds and nothing
-    // sat through it.
     assert.deepEqual(timers.waited, [5_000])
     const scheduled = events.filter(event => event.type === 'retry-scheduled')
     assert.equal(scheduled.length, 1)
     assert.equal(scheduled[0].attempt, 1)
     assert.equal(scheduled[0].maxAttempts, 10)
     assert.ok(events.some(event => event.type === 'retry-start'))
-    // The prompt is on the transcript already, so the retry continues rather than asking twice.
     assert.equal(JSON.stringify(mock.bodies.at(-1).messages).split('Build the level').length - 1, 1)
-    // An error message left in the transcript teaches the model that its last word was the error.
     assert.ok(!JSON.stringify(completion.agentMessages).includes('connection refused'))
 })
 
-/**
- * Stop lands in the backoff more than anywhere else, because the backoff is what is on screen.
- *
- * `retry-scheduled` draws a countdown and invites the user to use it — up to a minute of it, on the
- * shipped curve. `abortableWait` rejects with its own wording, which threw straight past the loop's
- * stopped ending and out as a failed turn: no `done` event, so nothing recorded that the turn had
- * ended at all. Unreachable before the worker started passing a real signal.
- */
 test('a stop during the wait between attempts ends the turn as stopped', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1289,11 +1159,9 @@ test('a stop during the wait between attempts ends the turn as stopped', async c
     const url = await baseUrl(context, mock.server)
     const events = []
     const controller = new AbortController()
-    // A clock that never fires: the wait ends on the signal instead, which is the whole point.
     const timers = {
         ...instantTimers(),
         schedule(_fn, ms) {
-            // After the listener is on, so this is the ordinary abort path rather than a race.
             queueMicrotask(() => {
                 controller.abort()
             })
@@ -1343,17 +1211,11 @@ test('a turn gives up once its retry budget is spent', async context => {
         /unavailable/iu
     )
 
-    // The first ask, then two retries. Not forever.
     assert.equal(mock.bodies.length, 3)
     assert.equal(events.filter(event => event.type === 'retry-scheduled').length, 2)
-    // Doubling, on the real numbers, and the whole test paid neither wait.
     assert.deepEqual(timers.waited, [5_000, 10_000])
 })
 
-/**
- * OpenRouter's free pool, as it answered on 2026-08-25: HTTP 429, no `Retry-After`, and a body
- * whose `metadata` holds both the real cause and the one thing the user can do about it.
- */
 const RATE_LIMITED = {
     status: 429,
     body: {
@@ -1371,14 +1233,6 @@ const RATE_LIMITED = {
     }
 }
 
-/*
- * A refusal that is about this second, waited on like one.
- *
- * Four live turns against that pool spent their whole ten-attempt budget — about nine minutes each
- * — being refused, and died. Sampled back to back in the same state the refusals cleared within a
- * second and never ran more than three deep, so the budget was not too small; the waits in front of
- * it were too long. The first five attempts now land inside 31 seconds rather than 155.
- */
 test('a rate-limited turn is asked again in a second, not five', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1400,17 +1254,9 @@ test('a rate-limited turn is asked again in a second, not five', async context =
     })
 
     assert.equal(completion.text, 'Through on the third ask')
-    // The shipped curve for a rate limit: one second, doubling. Not the five-second one, which
-    // would have put these same two attempts 15 seconds apart.
     assert.deepEqual(timers.waited, [1_000, 2_000])
 })
 
-/*
- * OpenRouter reports one refusal two ways: HTTP 429 with its body, and an in-band stream error
- * whose text is the four words `Provider returned error` with the code stripped. A live turn
- * alternated between them, and reading the base off each failure made the waits climb 4 s, 40 s,
- * 16 s — the exponent kept counting while the base flipped. Being rate-limited is the turn's state.
- */
 test('a turn that has been rate-limited keeps the short curve when the wording changes', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1433,14 +1279,9 @@ test('a turn that has been rate-limited keeps the short curve when the wording c
     })
 
     assert.equal(completion.text, 'Through')
-    // Doubling from one second all the way, rather than jumping to 20 for the middle attempt.
     assert.deepEqual(timers.waited, [1_000, 2_000, 4_000])
 })
 
-/*
- * An outage is still waited out at five seconds. A model server that was killed is being restarted,
- * and asking again in a second is asking a socket that is not listening.
- */
 test('a failure that is not a rate limit keeps the five-second curve', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1464,13 +1305,6 @@ test('a failure that is not a rate limit keeps the five-second curve', async con
     assert.deepEqual(timers.waited, [5_000])
 })
 
-/*
- * What the user is told when the budget really is spent.
- *
- * The turn used to end on 400 characters of the provider's JSON, with the only actionable line in
- * it — OpenRouter's `remedy_hint` — buried in the middle. The status stays in the sentence so a bug
- * report still names it.
- */
 test('a spent rate-limit budget ends the turn in a sentence, not in JSON', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1499,14 +1333,6 @@ test('a spent rate-limit budget ends the turn in a sentence, not in JSON', async
     )
 })
 
-/*
- * A spent quota is still a spent quota after the sentence is written.
- *
- * The readable form keeps the status and the provider's own detail and drops everything else — and
- * `GoUsageLimitError` lives in `error.type`, which is one of the markers Pi's classifier reads to
- * decide a failure will never fix itself. Classified on the readable form, this 429 kept its number,
- * matched the retryable pattern, and burned all ten attempts against an account with nothing left.
- */
 test('a quota that will never clear is not retried, however it is worded', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1545,7 +1371,6 @@ test('a quota that will never clear is not retried, however it is worded', async
     assert.deepEqual(timers.waited, [])
 })
 
-/* A body this cannot read is handed back exactly as it came, rather than replaced by a guess. */
 test('a provider error that is not JSON is left alone', () => {
     assert.equal(readableProviderError('fetch failed'), 'fetch failed')
     assert.equal(readableProviderError('429: not json at all'), '429: not json at all')
@@ -1555,7 +1380,6 @@ test('a provider error that is not JSON is left alone', () => {
 test('a failure that will not fix itself is not waited on', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    // A spent quota is the account's problem, not the moment's. Waiting only delays the news.
     const mock = startScriptedServer([
         {error: {status: 429, message: 'insufficient_quota: quota exceeded for this key'}}
     ])
@@ -1583,9 +1407,6 @@ test('a failure that will not fix itself is not waited on', async context => {
 test('a turn that stops without saying anything is asked again', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    // What a gateway does when the model behind it dies mid-request: HTTP 200, `finish_reason:
-    // "stop"`, and nothing in the message. Measured against OpenRouter, which reports the upstream
-    // failure only in `native_finish_reason` — a field the completions dialect does not carry.
     const mock = startScriptedServer([{text: ''}, {text: 'Back with an answer'}])
     const url = await baseUrl(context, mock.server)
     const events = []
@@ -1601,16 +1422,12 @@ test('a turn that stops without saying anything is asked again', async context =
 
     assert.equal(completion.text, 'Back with an answer')
     assert.equal(events.filter(event => event.type === 'retry-scheduled').length, 1)
-    // The blank answer is not left in front of the model as its own last word.
     assert.equal(JSON.stringify(mock.bodies.at(-1).messages).split('Build the level').length - 1, 1)
 })
 
 test('a turn that only thought and never answered is asked again', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
-    // The same gateway failure, against a reasoning model: the reasoning block arrives, the answer
-    // never does, and `finish_reason` still says the turn ended normally. Thinking is not something
-    // the user was told, so a turn holding only thinking has not answered.
     const mock = startScriptedServer([
         {reasoning: 'Let me work out what they want.'},
         {text: 'Back with an answer'}
@@ -1649,7 +1466,6 @@ test('a turn that only ever stops without saying anything gives up loudly', asyn
         /empty/iu
     )
 
-    // The first ask, then two retries. An empty answer is never returned as the answer.
     assert.equal(mock.bodies.length, 3)
 })
 
@@ -1678,8 +1494,6 @@ test('an empty transcript is rebuilt from the conversation on screen', async con
     const url = await baseUrl(context, mock.server)
     const events = []
 
-    // What a task looks like after its first turn failed: three messages on screen, and a model
-    // that was never told any of them.
     await runAgent({
         settings: servedBy(url),
         messages: [
@@ -1726,12 +1540,9 @@ test('a delegated question comes back as an answer, not as what it read', async 
     })
     context.after(workspace.remove)
     const mock = startScriptedServer([
-        // The parent delegates.
         {calls: [{name: 'subagent', args: {prompt: 'Where is the player speed set?'}}]},
-        // The child reads the big file, then answers from it.
         {calls: [{name: 'read', args: {path: 'physics.gd'}}]},
         {text: 'physics.gd sets SPEED to 512.'},
-        // The parent answers its user.
         {text: 'The speed is 512, set in physics.gd.'}
     ])
     const url = await baseUrl(context, mock.server)
@@ -1747,28 +1558,19 @@ test('a delegated question comes back as an answer, not as what it read', async 
     assert.equal(completion.text, 'The speed is 512, set in physics.gd.')
     assert.equal(mock.bodies.length, 4)
 
-    // The whole point, asserted on the wire: the child read two hundred lines and the parent's
-    // context holds one sentence about them. The marker only ever existed in the child's request.
     const child = JSON.stringify(mock.bodies[2])
     const parent = JSON.stringify(mock.bodies[3])
     assert.match(child, /SECRET-MARKER/u)
     assert.doesNotMatch(parent, /SECRET-MARKER/u)
     assert.match(parent, /physics\.gd sets SPEED to 512/u)
-    // And what it cost rides with it, on the call that spent it.
     assert.match(parent, /sub-agent: Qwen3\.6-27B-UD-Q4_K_XL\.gguf, 2 steps/u)
 
-    // On screen it is one tool row, named and captioned by the question it was asked.
     const started = events.find(event => event.type === 'tool-start')
     assert.equal(started.name, 'subagent')
     assert.equal(started.target, 'Where is the player speed set?')
     assert.equal(events.find(event => event.type === 'tool-end').isError, false)
 })
 
-/*
- * The whole point of letting the child name a model: the parent plans on the large one and the
- * child reads on the small one. Asserted on the wire, because the child builds its own `Agent` and
- * nothing between here and the request would notice it streaming through the parent's model object.
- */
 test('a delegation is answered by the model the sub-agent was given, not the parents', async context => {
     const workspace = await temporaryWorkspace({'physics.gd': 'extends Node\n'})
     context.after(workspace.remove)
@@ -1791,12 +1593,6 @@ test('a delegation is answered by the model the sub-agent was given, not the par
     assert.equal(mock.bodies[2].model, MODEL_ID)
 })
 
-/*
- * The two connections a turn may need at once, which is the arrangement the whole field exists for:
- * a ChatGPT parent that plans, and a local child that reads. Both providers are registered on one
- * `Models`, and this proves the registration rather than the requests — the parent's own ask needs
- * a ChatGPT credential no test has. What it must never fail with is the local provider missing.
- */
 test('registers both connections when the sub-agent is on the other one', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -1847,7 +1643,6 @@ test('stops the turn by name when the sub-agent has nowhere to run', async conte
             error => String(error)
         )
 
-    // A local child on a settings file that has never held a local connection.
     assert.match(
         await start({
             connectionType: 'openai-codex',
@@ -1865,7 +1660,6 @@ test('stops the turn by name when the sub-agent has nowhere to run', async conte
         /no local connection is configured/u
     )
 
-    // And a ChatGPT model that is not in this Pi release.
     assert.match(
         await start({
             subagent: {
@@ -1879,14 +1673,6 @@ test('stops the turn by name when the sub-agent has nowhere to run', async conte
     )
 })
 
-/**
- * A turn that failed its own verification must say so in the answer, not only on the transcript.
- *
- * Measured live against a local model: a point failed twice, the model was handed the report and
- * asked again, and the turn still ended "The verification passes. The code is already correct." —
- * four seconds after the second red. The turn reported `stopReason: 'stop'` and nothing anywhere
- * near the sentence a person reads said otherwise, which is the Centipede failure one layer up.
- */
 test('a turn whose verification failed carries the verdict in its answer', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -1909,7 +1695,6 @@ test('a turn whose verification failed carries the verdict in its answer', async
             emit: () => undefined
         })
 
-        // The model said "Hello" and stopped. The answer says what actually happened.
         assert.match(completion.text, /^Hello/u)
         assert.match(completion.text, /Verification failed: 1 of 2 points/u)
         assert.match(completion.text, /FAIL {2}the boss registers every part it builds/u)
@@ -1940,7 +1725,6 @@ test('a turn that passes its verification says nothing extra', async context => 
             emit: () => undefined
         })
 
-        // Exactly what the model said, and not a word more.
         assert.equal(completion.text, 'Hello Gofer')
         assert.equal(completion.verify.failed, 0)
     } finally {
@@ -1948,14 +1732,6 @@ test('a turn that passes its verification says nothing extra', async context => 
     }
 })
 
-/**
- * The switch a llama.cpp host actually reads.
- *
- * Measured, not assumed. One machine, two Qwen builds in turn: with no `chat_template_kwargs` the
- * server produced 0 characters of reasoning, with `enable_thinking: true` it produced 1175, and a
- * top-level `reasoning_effort` was accepted and ignored. So a connection that turns thinking on
- * with a template argument has to say so, or the reasoning level does nothing at all.
- */
 test('a chat-template server is sent the argument that turns thinking on', () => {
     const template = {
         name: 'Local AI',
@@ -1986,8 +1762,6 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
         preserve_thinking: true
     })
 
-    // A template that names its own efforts gets the effort argument too. The same template raises
-    // on an effort it does not know, so this only ever carries a level the server itself named.
     const {model: withEfforts} = createModelContext({
         settings: on({
             ...template,
@@ -2000,8 +1774,6 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
         omitWhenOff: true
     })
 
-    // And a server that never answered `/props` is left exactly as it was: no template argument
-    // reaches an endpoint that would reject an unknown field.
     const {model: plain} = createModelContext({
         settings: on({...template, chatTemplateThinking: false}),
         apiKey: 'local'
@@ -2010,15 +1782,6 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
     assert.equal(plain.compat.chatTemplateKwargs, undefined)
 })
 
-/**
- * The level the menu offers, in the body the server receives.
- *
- * The test above reads the model's compat block, which is the shape of the request rather than the
- * request. Between the two sits `clampThinkingLevel`, and it does not know the word `on`: an
- * unknown level clamps to the lowest one available, which is `off`, which resolves
- * `enable_thinking` to false. So the connection that only has on and off sent thinking explicitly
- * disabled on every request — the one setting it exists to turn on.
- */
 test('the on level reaches a chat-template server as thinking enabled', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -2044,14 +1807,12 @@ test('the on level reaches a chat-template server as thinking enabled', async co
         const {body} = mock.request()
         assert.equal(body.chat_template_kwargs?.enable_thinking, true)
         assert.equal(body.chat_template_kwargs?.preserve_thinking, true)
-        // The template does not name efforts, so it is never told one.
         assert.equal('reasoning_effort' in body.chat_template_kwargs, false)
     } finally {
         mock.server.close()
     }
 })
 
-/** And off still means off, or the level would be a label with one state. */
 test('the off level reaches a chat-template server as thinking disabled', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -2080,17 +1841,6 @@ test('the off level reaches a chat-template server as thinking disabled', async 
     }
 })
 
-/*
- * A model that refuses to be asked not to think, with `off` still in its settings file.
- *
- * This is the failure a live turn hit: the sub-agent was left at `off` against `stealth/ox-alpha`,
- * every `godot_docs_search ask` went out as `reasoning: {enabled: false}`, and OpenRouter answered
- * HTTP 400 `Reasoning is mandatory for this endpoint and cannot be disabled` to all of them. The
- * settings page no longer offers `off` for such a model, but a file written before that still holds
- * it, so the request itself has to be the thing that never disables reasoning.
- *
- * The body is what is asserted, not the level: pi-ai rewrites a level on the way past.
- */
 test('a stored off never disables reasoning on a model that requires it', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -2117,14 +1867,12 @@ test('a stored off never disables reasoning on a model that requires it', async 
         const {body} = mock.request()
         assert.notEqual(body.reasoning_effort, 'none')
         assert.notEqual(body.reasoning?.enabled, false)
-        // The least effort it named, which is the nearest thing it has to the setting that was made.
         assert.equal(body.reasoning_effort, 'low')
     } finally {
         mock.server.close()
     }
 })
 
-/** And a model that may be turned off still is. The rule is narrow on purpose. */
 test('a stored off still disables reasoning where off is allowed', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -2154,7 +1902,6 @@ test('a stored off still disables reasoning where off is allowed', async context
     }
 })
 
-/** A template that does name its efforts still carries the one the user picked. */
 test('a named effort reaches a chat-template server unchanged', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -2185,17 +1932,6 @@ test('a named effort reaches a chat-template server unchanged', async context =>
     }
 })
 
-/**
- * A level the server named has to reach it under the name the server used.
- *
- * pi-ai treats `xhigh` and `max` as levels a model only has if it says so, and a model that has not
- * said so has them clamped away — `xhigh` becomes `high`. The chat template these levels come from
- * is the one that raises on an effort it does not know, and llama.cpp answers that with HTTP 500.
- * Measured against a real Qwen3.8 build: its guard is `('xhigh', 'medium', 'low')`, Gofer offered
- * xhigh because the server named it, and the request went out saying `high`. That one survived only
- * because its template happens to alias high onto xhigh a line earlier. A template without that
- * line answers every request with a 500.
- */
 test('a level the server named is sent under that name, not the nearest one', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -2225,7 +1961,6 @@ test('a level the server named is sent under that name, not the nearest one', as
     }
 })
 
-/** And a level the server did not name is never reached for, however near it looks. */
 test('a level the server did not name is never what a request settles on', async context => {
     const mock = startServer()
     const workspace = await temporaryWorkspace()
@@ -2241,8 +1976,6 @@ test('a level the server did not name is never what a request settles on', async
                     reasoning: true,
                     supportsReasoningEffort: true,
                     thinkingLevels: ['low', 'medium', 'xhigh'],
-                    // Nothing in the app can pick this — the menu offers what the server named —
-                    // but a settings file written against an older model can still hold it.
                     thinkingLevel: 'high'
                 }
             }),
@@ -2261,69 +1994,27 @@ test('a level the server did not name is never what a request settles on', async
     }
 })
 
-/*
- * Two length limits reach the same `stopReason`, and they need opposite advice.
- *
- * A live turn asked to build a whole Breakout spent 16,384 tokens planning — exactly `maxTokens` —
- * with 84,104 of its 120,064-token window still free, and was told the conversation had no room
- * left and to point the connection at a model with a larger context window. A larger window would
- * have changed nothing.
- *
- * The number was wrong too, and always was: `usage.input` is the part of the request the provider
- * did *not* serve from cache, so the same run reported "the request filled 1,000 of 120,064" about
- * a conversation holding 35,960.
- */
 test('a length stop names which limit it was, and what the conversation really held', () => {
     const model = {contextWindow: 120064, maxTokens: 16384}
 
-    // The Breakout run, to the token.
     const ceiling = outOfRoom({usage: {input: 1000, cacheRead: 34960, output: 16384}}, model)
     assert.match(ceiling, /whole response limit/u)
     assert.match(ceiling, /84,104 of its 120,064-token context window still free/u)
     assert.match(ceiling, /a larger context window would not change it/u)
     assert.doesNotMatch(ceiling, /no longer leaves room/u)
 
-    // A conversation that genuinely crowded out its reply keeps the old answer — and names what it
-    // really held, cache included, rather than the sliver that missed the cache.
     const crowded = outOfRoom({usage: {input: 900, cacheRead: 118000, output: 40}}, model)
     assert.match(crowded, /no longer leaves room/u)
     assert.match(crowded, /filled 118,900 of the model's 120,064-token/u)
     assert.match(crowded, /larger context window/u)
 })
 
-/**
- * The one thing that makes a long conversation affordable, and the one thing nothing checked.
- *
- * Every provider Gofer talks to caches a prompt by its leading bytes and charges full price for the
- * first byte that differs and everything after it. So what a turn re-sends has to be what the last
- * turn sent, exactly — the same system message, the same tool schemas, the same transcript in front
- * of the new words.
- *
- * It was not. The memory block, the session line and the file listing were concatenated onto the
- * system prompt, and all three are re-derived every turn — the memory block is a search keyed on
- * the words the user just typed, so it was never twice the same. Measured across one project's
- * 1,645 requests: 96.6% of the prompt came from cache inside a turn and 14.3% at a turn boundary,
- * the cached prefix stopped at 9,728 tokens every single time — the base prompt and the tool
- * schemas, and not one byte past where the memory block began — and 94 prompts cost as much as the
- * 1,551 tool results between them.
- *
- * Three turns rather than two, because two share only the system message and that is not a prefix
- * worth the name. Turns two and three share the whole of turn one.
- *
- * "Byte for byte" up to one message, and the exception is the point of the design rather than a
- * gap in it. The block is sent and not stored, so turn N+1 re-sends turn N's prompt without it and
- * the prefix ends there — one turn's span re-read, once. What it buys is everything in front of
- * that: the system message, the tool schemas, and every turn before the last. The loop below names
- * the shared run for each pair, and the `+ 1` is that one message.
- */
 test('what a turn re-sends is what the last turn sent, byte for byte', async context => {
     const mock = startScriptedServer([{text: 'One'}, {text: 'Two'}, {text: 'Three'}])
     const url = await baseUrl(context, mock.server)
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
 
-    // Everything a turn derives for itself, different on every turn — which is what the real ones
-    // do. Retrieval is keyed on the prompt, the editor moves, and the model writes files.
     const derived = turn => ({
         memoryContext: `Turn ${String(turn)} remembered something else entirely.`,
         sessionContext: `Editor session: ready. Godot 4.7.${String(turn)}.`,
@@ -2353,7 +2044,6 @@ test('what a turn re-sends is what the last turn sent, byte for byte', async con
 
     assert.equal(mock.bodies.length, 3, 'three turns, three requests')
 
-    /** Where two requests stop being the same request, as a person can read it. */
     const divergence = (before, after) => {
         const at = [...before].findIndex((part, index) => part !== after[index])
         if (at < 0) return undefined
@@ -2364,31 +2054,22 @@ test('what a turn re-sends is what the last turn sent, byte for byte', async con
         }
     }
 
-    // Each turn's request holds the one before it plus an answer and a new prompt, so the run of
-    // messages both requests have to agree on grows by two a turn. Named rather than derived from
-    // the shorter request: `earlier.length - 1` is the same number today and stops meaning anything
-    // the moment a regression makes a request shorter, which is exactly when this has to fail.
     for (const [earlier, later, shared] of [
         [mock.bodies[0], mock.bodies[1], 1],
         [mock.bodies[1], mock.bodies[2], 3]
     ]) {
-        // The tool schemas, first, because they are the largest single thing in the request and a
-        // reordered key in one of them is as expensive as a rewritten one.
         assert.equal(
             JSON.stringify(later.tools),
             JSON.stringify(earlier.tools),
             'the tool schemas have to be the same bytes every turn'
         )
 
-        // The system message, which is where every provider starts counting.
         assert.equal(
             later.messages[0].content,
             earlier.messages[0].content,
             'the system message has to be the same bytes every turn'
         )
 
-        // And the conversation in front of the new words. The earlier request's own last message is
-        // where this turn's context was hung, so it is the one message allowed to differ.
         assert.equal(
             earlier.messages.length,
             shared + 1,
@@ -2403,8 +2084,6 @@ test('what a turn re-sends is what the last turn sent, byte for byte', async con
         )
     }
 
-    // And the turn's own data still reaches the model, on the tail where it costs nothing. Without
-    // this, deleting the memory feature outright would pass every assertion above.
     const asked = mock.bodies[2].messages.at(-1).content
     assert.ok(asked.startsWith('Ask number 3'), 'the user still asks first')
     assert.ok(asked.includes('Turn 3 remembered something else entirely.'), 'memory still arrives')
@@ -2412,16 +2091,6 @@ test('what a turn re-sends is what the last turn sent, byte for byte', async con
     assert.ok(asked.includes('scripts/player.gd'), 'the file listing still arrives')
 })
 
-/**
- * The block this turn appends is sent, never stored — and Retry is where that stops being a detail.
- *
- * A retry decides between carrying on from the transcript and asking the prompt again by matching
- * the stored prompt against the one being retried, word for word. The words the turn hangs on the
- * tail are re-derived every time — memory is a search keyed on the prompt, against a corpus the
- * failed turn already wrote to — so a block written into the stored message would never match twice.
- * The retry would fall through to asking again, and the prompt would land on the transcript a
- * second time: the exact loss `retryEntry` was written to prevent, reintroduced from below.
- */
 test('a retry still recognises its own prompt, whatever this turn remembered', async context => {
     const mock = startScriptedServer([{text: 'Carrying on'}])
     const url = await baseUrl(context, mock.server)
@@ -2449,7 +2118,6 @@ test('a retry still recognises its own prompt, whatever this turn remembered', a
         isRetry: true,
         tools: catalog,
         host: {call: () => Promise.resolve({})},
-        // Nothing like what the failed turn was given, which is the realistic case.
         memoryContext: 'Something the last attempt never saw.',
         sessionContext: 'Editor session: ready. Godot 4.7.2.',
         workspacePath: workspace.path,
@@ -2462,20 +2130,10 @@ test('a retry still recognises its own prompt, whatever this turn remembered', a
         1,
         'the retry carried on rather than asking the prompt a second time'
     )
-    // And this turn's data still reached it, on the prompt the transcript already held.
     const asked = sent.find(message => JSON.stringify(message).includes('Build the level'))
     assert.ok(String(asked.content).includes('Something the last attempt never saw.'))
 })
 
-/**
- * A turn can ask a second question of itself, and the block has to stay where it was put.
- *
- * A red verify report is asked as a user message, partway through a turn that has already sent
- * twenty tool results. Hanging this turn's context on "the last user message" would move it off the
- * original prompt and onto the report — and every earlier request of that turn had already sent it
- * on the prompt, so the prefix would break there and throw away the whole turn behind it. Once per
- * re-prompted turn is better than once per tool call and still worse than never.
- */
 test('a red verify report does not move this turn’s context off the prompt', async context => {
     const mock = startScriptedServer([{text: 'Hello'}, {text: 'Fixed it'}])
     const url = await baseUrl(context, mock.server)
@@ -2495,27 +2153,15 @@ test('a red verify report does not move this turn’s context off the prompt', a
     const [asked, reasked] = mock.bodies
     const prompt = body => body.messages.find(message => String(message.content).includes('GOAL'))
 
-    // The prompt reaches the second request exactly as it reached the first — block and all.
     assert.equal(
         JSON.stringify(prompt(reasked)),
         JSON.stringify(prompt(asked)),
         'the prompt has to be the same bytes in both requests'
     )
     assert.ok(String(prompt(asked).content).includes('The player is a cat.'))
-    // And the report is asked without a second copy of it.
     assert.ok(!String(reasked.messages.at(-1).content).includes('The player is a cat.'))
 })
 
-/// A turn can be driven with no model server at all, which is what the world seam is for.
-///
-/// `brief/run.mjs` and `memory-judge.mjs` have had this since they were written; the turn did not,
-/// so every case here stands up an HTTP listener — a port, a workspace, and SSE frames written by
-/// hand. Most of them should: the retry ladder, the overflow recovery and the prefix stability are
-/// all statements about what a *server* did, and a fake that simply answers cannot make them.
-///
-/// This one is the other kind. It says the turn folds a completed answer into a completion and
-/// emits the events around it, and none of that is about the wire. The adapter is `cannedModels`,
-/// which is not written for this test — it is what the sub-agent probe uses in a shipped build.
 test('a turn runs against a canned world, with no server behind it', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -2546,13 +2192,6 @@ test('a turn runs against a canned world, with no server behind it', async conte
     )
 })
 
-/// The default is the live world, which the case above cannot say: it passes one.
-///
-/// Asserting that `LIVE_WORLD.createModelContext` is a function says nothing about what `runAgent`
-/// falls back to — the default could be deleted and that assertion would still pass, while every
-/// turn in the app died on `world.createModelContext is not a function`. So this asks for a turn
-/// with no world at all and no connections, and reads back the message only the real adapter
-/// writes. No listener: the throw is the first statement of the turn.
 test('a turn with no world given reaches the live one', async context => {
     const workspace = await temporaryWorkspace()
     context.after(workspace.remove)
@@ -2568,16 +2207,6 @@ test('a turn with no world given reaches the live one', async context => {
     )
 })
 
-/// A driver no provider was registered for stops the turn by name, rather than running as `local`.
-///
-/// This read used to be `PROVIDER_IDS[settings.connectionType] ?? PROVIDER_ID`. The fallback made
-/// the one failure `PROVIDER_IDS` exists to prevent unreachable: a driver added to the Rust enum
-/// and the TypeScript union but not to that map resolved to the local provider id, and the turn was
-/// put to `127.0.0.1` carrying a hosted model's name — with the hosted key never sent, and nothing
-/// said about any of it.
-///
-/// The fifth driver here is not hypothetical in the shape that matters: it is what a settings file
-/// written by a newer build looks like to an older one.
 test('a driver this build has no provider for is refused by name', () => {
     const profile = {
         name: 'Somewhere',
@@ -2606,10 +2235,6 @@ test('a driver this build has no provider for is refused by name', () => {
     )
 })
 
-/// The driver list is the four this build knows, and nothing reads a driver that is not on it.
-///
-/// `check-command-surface.mjs` holds this list to the Rust enum and the TypeScript union. What it
-/// cannot say is that the list is the one this file actually uses, which is what this asserts.
 test('every driver but ChatGPT has a pi-ai provider registered for it', () => {
     assert.deepEqual([...DRIVERS].sort(), [
         'cerebras',
@@ -2617,9 +2242,6 @@ test('every driver but ChatGPT has a pi-ai provider registered for it', () => {
         'openai-compatible',
         'openrouter'
     ])
-    // pi-ai ships the ChatGPT provider, so it is set rather than built and has no entry of its own.
-    // A driver with no connection configured still fails — on the model, which is a later question
-    // and a different sentence. What must not happen is the provider refusal.
     for (const driver of DRIVERS) {
         if (driver === 'openai-codex') continue
         let said = ''
@@ -2635,14 +2257,6 @@ test('every driver but ChatGPT has a pi-ai provider registered for it', () => {
     }
 })
 
-/// A sub-agent pointed at a driver this build has no provider for is refused too.
-///
-/// The second of the two reads that answered an unknown driver with the local one. This one is
-/// worse than the parent's, because the function it sits in documents the opposite: "A child
-/// pointed at a connection or a model that is not there stops the turn by name: falling back to the
-/// parent would spend the large model on the small model's work and say nothing about having done
-/// so." `chosen.connectionType in PROVIDER_IDS ? chosen.connectionType : 'openai-compatible'` did
-/// exactly that, one line under the sentence saying it does not.
 test('a sub-agent driver this build has no provider for is refused by name', () => {
     const connection = {
         name: 'Local AI',
@@ -2675,16 +2289,6 @@ test('a sub-agent driver this build has no provider for is refused by name', () 
     )
 })
 
-/// Every hosted driver the catalogue declares has a key slot that reaches it.
-///
-/// `HOSTED_DRIVERS` is generated from `protocol/drivers.json`; the map from driver to key argument
-/// is not, and cannot be — the keys arrive as named parameters of `createModelContext`. That is the
-/// last unchecked step of adding a driver, and the failure it used to produce was the worst kind:
-/// `providerIdOf` succeeded, `modelFor` returned a truthy model, so the named refusal never fired
-/// and the turn died inside pi-ai under a provider id nothing had created.
-///
-/// Driven through the real function rather than by reading the map, so it fails if the wiring stops
-/// being reached as well as if a row is missing from it.
 test('every hosted driver the catalogue declares has a key that reaches it', () => {
     const profile = name => ({
         name,

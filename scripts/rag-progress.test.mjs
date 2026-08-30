@@ -84,7 +84,6 @@ test('throttles intermediate updates and always reports final readiness', () => 
 test('a warm cache reports the models it loads rather than none at all', () => {
     const {events, reporter, advance} = setup()
 
-    // Nothing approves a download: every file is already in the cache and is only being read.
     reporter.reportProgress({model: 'embedding', file: 'model.onnx', loaded: 250, total: 1_000})
     advance(250)
     reporter.reportProgress({model: 'reranker', file: 'model.onnx', loaded: 500, total: 1_000})

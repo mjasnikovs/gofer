@@ -1,27 +1,9 @@
-/*
- * A row action that is not there until the pointer is on the row.
- *
- * Mentioning a node in the message is a per-row action, and a button drawn on every row of a scene
- * tree would out-shout the tree itself — as would the gap a hidden one leaves behind. So it takes
- * no width at rest and swallows the row's own gap with it: the tree reads exactly as it did before
- * the button existed, and the row opens to let it in. `:focus-within` opens the same way for
- * anyone arriving by keyboard.
- *
- * The hover is claimed by the row's own element rather than by its list item: a tree nests its
- * children inside their parent's item, so hovering a child is also hovering every ancestor, and an
- * item-level rule revealed the whole branch's buttons at once.
- */
-
 .gofer-row-action {
     display: inline-flex;
     width: 0;
-    /* The row sets a gap between everything in it, and a part with no width still gets one. */
     margin-inline-end: calc(var(--spacing-2) * -1);
     overflow: hidden;
     opacity: 0;
-    /* The easing tokens are compiled into the component styles rather than published as custom
-     * properties, so this names the curve itself: an unresolved `var()` would void the whole
-     * shorthand and take the animation with it. */
     transition:
         width var(--duration-medium) cubic-bezier(0.2, 0, 0.2, 1),
         margin-inline-end var(--duration-medium) cubic-bezier(0.2, 0, 0.2, 1),
@@ -41,15 +23,6 @@ li > div:focus-within .gofer-row-action {
     }
 }
 
-/*
- * Explorer trees are read as a shape, not as a list of paragraphs.
- *
- * A scene runs to dozens of nodes and the column is 260 px wide, so every row's padding costs the
- * reader a node they could have seen without scrolling. The row keeps the text size it had — only
- * the space around it goes, and the row action is held to the line's own height so hovering one
- * cannot make the row taller than its neighbours.
- */
-
 .astryx-tree-list-item {
     padding-block: 0;
 }
@@ -60,35 +33,10 @@ li > div:focus-within .gofer-row-action {
     min-height: 0;
 }
 
-/*
- * Nothing in a row may set the column's width.
- *
- * Tree rows are flex containers whose default `min-width: auto` refuses to shrink below the text
- * inside them, so a long name in a deep branch widens the row past the panel and pushes the row's
- * action out of sight. Letting every part of the row shrink is what keeps the action reachable.
- */
-
 .astryx-tree-list-item,
 .astryx-tree-list-item > * {
     min-width: 0;
 }
-
-/*
- * A list row is indented from the panel edge; its divider is not.
- *
- * `Collapsible` pads only the block axis, so a `CollapsibleGroup` list drew its text hard against
- * the panel's left edge while the header above it sat on `padding={3}` — the memory panel's 84 rows
- * against a header that was indented, which is what made the column look broken rather than dense.
- *
- * The padding goes on the trigger and the content rather than on the row's root, because the root
- * is where the hairline lives: `borderBlockStart` spans the border box, which padding inside it
- * does not shrink. So the divider still runs edge to edge, which is what Astryx's layout guidance
- * asks of a dense list, and only the words move.
- *
- * `[data-density]` is the group marker. `CollapsibleGroup` resolves a density only when it draws
- * dividers, so a standalone Collapsible — one placed inside a Card that already has padding — is
- * left alone rather than indented twice.
- */
 
 .astryx-collapsible-trigger[data-density],
 .astryx-collapsible-content[data-density] {
