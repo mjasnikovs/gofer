@@ -31,7 +31,7 @@ npm run astryx -- component ChatMessageList
 npm run astryx -- component ChatToolCalls
 ```
 
-`AGENTS.md` carries the mechanical half of this (import paths, tokens not hex, no raw `<div>`). This
+`CLAUDE.md` carries the mechanical half of this (import paths, tokens not hex, no raw `<div>`). This
 skill carries the half that decides whether the screen is readable.
 
 ## The failures this repo actually shipped

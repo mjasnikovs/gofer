@@ -231,8 +231,8 @@ their own machine before tagging a release, and after any change to the desktop 
 passed, not on `npm run check` alone: `check` stubs the backend, and the backend is where the class
 of bug that this suite exists to catch has always lived.
 
-Astryx's project guidance lives in `AGENTS.md`. Refresh it after an Astryx upgrade with:
+Astryx's project guidance lives in `CLAUDE.md`. Refresh it after an Astryx upgrade with:
 
 ```bash
-npx astryx init --all --agent codex
+npx astryx init --all --agent claude
 ```
