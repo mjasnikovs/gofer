@@ -18,10 +18,12 @@ import {Item} from '@astryxdesign/core/Item'
 import {SegmentedControl, SegmentedControlItem} from '@astryxdesign/core/SegmentedControl'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
+import {DEBUGGER_TAB, IMPORT_TAB, OUTPUT_TAB, PROBLEMS_TAB} from '../tab-icons'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
+import {useCompactTabs} from '../../hooks/useCompactTabs'
 import type {DebugSession} from '../../hooks/useDebugSession'
 import {useEditorSession} from '../../hooks/useEditorSession'
 import {useLogHistory} from '../../hooks/useLogHistory'
@@ -93,6 +95,7 @@ export function BottomPanel({
     onOpenLocation
 }: BottomPanelProps) {
     const {call, state} = useEditorSession()
+    const [isBottomCompact, onBottomStrip] = useCompactTabs()
     const [contains, setContains] = useState('')
     const [rescan, setRescan] = useState<GodotError>()
     const [isRescanning, setIsRescanning] = useState(false)
@@ -251,6 +254,7 @@ export function BottomPanel({
                     isScrollable
                 >
                     <TabList
+                        ref={onBottomStrip}
                         size='sm'
                         aria-label='Bottom panel views'
                         value={tab}
@@ -261,6 +265,8 @@ export function BottomPanel({
                         <Tab
                             value='problems'
                             label='Problems'
+                            isLabelHidden={isBottomCompact}
+                            {...PROBLEMS_TAB}
                             endContent={
                                 errorCount > 0 ?
                                     <Badge
@@ -273,14 +279,20 @@ export function BottomPanel({
                         <Tab
                             value='debugger'
                             label='Debugger'
+                            isLabelHidden={isBottomCompact}
+                            {...DEBUGGER_TAB}
                         />
                         <Tab
                             value='output'
                             label='Output'
+                            isLabelHidden={isBottomCompact}
+                            {...OUTPUT_TAB}
                         />
                         <Tab
                             value='import'
                             label='Import'
+                            isLabelHidden={isBottomCompact}
+                            {...IMPORT_TAB}
                         />
                     </TabList>
                 </StackItem>

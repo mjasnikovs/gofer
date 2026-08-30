@@ -2,6 +2,8 @@ import {useMemo, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {EmptyState} from '@astryxdesign/core/EmptyState'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
+import {FILES_TAB, RUNTIME_TAB, SCENE_TAB} from '../tab-icons'
+import {useCompactTabs} from '../../hooks/useCompactTabs'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
@@ -264,6 +266,7 @@ export function ExplorerPanel({
     const shownRoot = tab === 'runtime' ? runtime.data?.root : scene.data?.root
     const icons = useGodotClassIcons(call, shownRoot, isSessionReadable(state) && tab !== 'files')
     const references = useChatReferences()
+    const [isCompact, onStrip] = useCompactTabs()
     const [fileFilter, setFileFilter] = useState('')
     const [nodeFilter, setNodeFilter] = useState('')
 
@@ -351,6 +354,7 @@ export function ExplorerPanel({
             height='100%'
         >
             <TabList
+                ref={onStrip}
                 size='sm'
                 hasDivider
                 layout='fill'
@@ -363,14 +367,20 @@ export function ExplorerPanel({
                 <Tab
                     value='scene'
                     label='Scene'
+                    isLabelHidden={isCompact}
+                    {...SCENE_TAB}
                 />
                 <Tab
                     value='files'
                     label='Files'
+                    isLabelHidden={isCompact}
+                    {...FILES_TAB}
                 />
                 <Tab
                     value='runtime'
                     label='Runtime'
+                    isLabelHidden={isCompact}
+                    {...RUNTIME_TAB}
                 />
             </TabList>
             {tab === 'files' ?

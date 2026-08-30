@@ -2,6 +2,8 @@ import {useEffect, useMemo, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {EmptyState} from '@astryxdesign/core/EmptyState'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
+import {EDITOR_TAB, NODE_TAB, PROJECT_TAB} from '../tab-icons'
+import {useCompactTabs} from '../../hooks/useCompactTabs'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Table} from '@astryxdesign/core/Table'
 import {proportional} from '@astryxdesign/core/Table'
@@ -101,6 +103,7 @@ export function InspectorPanel({
     selection,
     onStartSession
 }: InspectorPanelProps) {
+    const [isCompact, onStrip] = useCompactTabs()
     const [projectQuery, setProjectQuery] = useState('')
     const [editorQuery, setEditorQuery] = useState('')
     const settledProject = useDebounced(projectQuery)
@@ -158,6 +161,7 @@ export function InspectorPanel({
             height='100%'
         >
             <TabList
+                ref={onStrip}
                 size='sm'
                 hasDivider
                 layout='fill'
@@ -170,14 +174,20 @@ export function InspectorPanel({
                 <Tab
                     value='node'
                     label='Node'
+                    isLabelHidden={isCompact}
+                    {...NODE_TAB}
                 />
                 <Tab
                     value='project'
                     label='Project'
+                    isLabelHidden={isCompact}
+                    {...PROJECT_TAB}
                 />
                 <Tab
                     value='editor'
                     label='Editor'
+                    isLabelHidden={isCompact}
+                    {...EDITOR_TAB}
                 />
             </TabList>
             <StackItem

@@ -30,12 +30,8 @@ function git(workspace: string, ...arguments_: string[]) {
     }
 }
 
-export function seedLiveWorkspace() {
-    const workspace = liveWorkspacePath()
+export function seedGodotProject(workspace: string) {
     if (existsSync(join(workspace, 'project.godot'))) return workspace
-    if (process.env.GOFER_LIVE_WORKSPACE) {
-        throw new Error(`GOFER_LIVE_WORKSPACE=${workspace} is not a Godot project`)
-    }
     mkdirSync(workspace, {recursive: true})
     cpSync(resolve('fixtures/live-project'), workspace, {recursive: true})
     git(workspace, 'init', '--quiet', '--initial-branch', 'master')
@@ -44,4 +40,13 @@ export function seedLiveWorkspace() {
     git(workspace, 'add', '--all')
     git(workspace, 'commit', '--quiet', '--message', 'Gofer live sweep fixture project')
     return workspace
+}
+
+export function seedLiveWorkspace() {
+    const workspace = liveWorkspacePath()
+    if (existsSync(join(workspace, 'project.godot'))) return workspace
+    if (process.env.GOFER_LIVE_WORKSPACE) {
+        throw new Error(`GOFER_LIVE_WORKSPACE=${workspace} is not a Godot project`)
+    }
+    return seedGodotProject(workspace)
 }

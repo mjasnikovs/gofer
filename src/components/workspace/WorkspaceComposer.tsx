@@ -196,6 +196,7 @@ function ModelMenu() {
                     <Text
                         type='supporting'
                         color='secondary'
+                        maxLines={1}
                     >
                         Model: {state.selectedModel}
                     </Text>
@@ -284,6 +285,7 @@ function ComposerFooter() {
     const {state} = useComposer()
     return (
         <HStack
+            className='composer-footer'
             gap={1}
             paddingInline={2}
             vAlign='center'

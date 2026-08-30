@@ -23,6 +23,7 @@
         "format": "prettier --write . --log-level warn",
         "format:check": "prettier --check . --cache --log-level warn",
         "test:visual": "playwright test",
+        "test:layout": "node scripts/run-layout-gate.mjs",
         "test:visual:update": "playwright test --update-snapshots",
         "test:desktop:packaged": "node scripts/run-packaged-journey.mjs",
         "test:desktop:skills": "wdio run wdio.skills.conf.ts",

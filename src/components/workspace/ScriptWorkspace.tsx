@@ -5,6 +5,8 @@ import {Button} from '@astryxdesign/core/Button'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {EmptyState} from '@astryxdesign/core/EmptyState'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
+import {SCRIPT_BUFFER_TAB} from '../tab-icons'
+import {useCompactTabs} from '../../hooks/useCompactTabs'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {TextInput} from '@astryxdesign/core/TextInput'
@@ -57,6 +59,7 @@ function tabLabel(buffer: ScriptBuffer) {
 }
 
 export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWorkspaceProps) {
+    const [isCompact, onStrip] = useCompactTabs()
     const {
         activeBuffer,
         activePath,
@@ -140,6 +143,7 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
             height='100%'
         >
             <TabList
+                ref={onStrip}
                 size='sm'
                 hasDivider
                 aria-label='Open scripts'
@@ -151,6 +155,8 @@ export function ScriptWorkspace({scripts, views, onViewChange, reveal}: ScriptWo
                         key={buffer.path}
                         value={buffer.path}
                         label={tabLabel(buffer)}
+                        isLabelHidden={isCompact}
+                        {...SCRIPT_BUFFER_TAB}
                         endContent={
                             diagnostics[buffer.path]?.length ?
                                 <Badge

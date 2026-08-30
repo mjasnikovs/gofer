@@ -25,6 +25,13 @@ const CARGO_LANE = [
     ['check:cargo', `cargo check --quiet --jobs ${CARGO_JOBS} --manifest-path src-tauri/Cargo.toml`]
 ]
 
+// The only gate that drives the real engine, so it needs the release binary. That
+// build rewrites the worker bundle and locks the cargo target directory, and other
+// lanes read both, so it runs alone once they are done.
+const AFTER_THE_LANES = [
+    ['test:layout', 'npm run --silent build:desktop:test && npm run --silent test:layout']
+]
+
 const NODE_COVERAGE_EXCLUDES = [
     '*.test.mjs',
     'check.mjs',
@@ -124,6 +131,7 @@ async function lane(steps, width) {
 
 const started = Date.now()
 await Promise.all([lane(GODOT_LANE, 1), lane(CARGO_LANE, 1), lane(OTHER_LANE, LANE_WIDTH)])
+await lane(AFTER_THE_LANES, 1)
 
 const failures = results.filter(result => result.status !== 0)
 for (const failure of failures) {

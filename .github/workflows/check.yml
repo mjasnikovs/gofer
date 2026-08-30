@@ -50,6 +50,8 @@ jobs:
               run: node scripts/install-godot.mjs
             - name: Build the pinned gdformat sidecar
               run: npm run build:gdformat
+            - name: Install the WebDriver that drives the real window
+              run: cargo install tauri-driver --locked
             - name: Run required checks with zero retries
               env:
                   GOFER_CHROME_BINARY: ${{ steps.chrome.outputs.chrome-path }}

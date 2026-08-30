@@ -9,6 +9,15 @@ import {ResizeHandle, useResizable} from '@astryxdesign/core/Resizable'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
+import {
+    CHAT_TAB,
+    DESIGN_TAB,
+    DOCS_TAB,
+    GAME_TAB,
+    MEMORY_TAB,
+    SCRIPTS_TAB,
+    SKILLS_TAB
+} from '../tab-icons'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {Text} from '@astryxdesign/core/Text'
 import {Toolbar} from '@astryxdesign/core/Toolbar'
@@ -17,6 +26,9 @@ import {EditorSessionContext, useEditorSession} from '../../hooks/useEditorSessi
 import {useGodotSession} from '../../hooks/useGodotSession'
 import {useScriptBuffers} from '../../hooks/useScriptBuffers'
 import {OpenCenterTabContext} from '../../hooks/useCenterTab'
+import {Icon} from '@astryxdesign/core/Icon'
+import CubeIcon from '@heroicons/react/24/outline/CubeIcon'
+import {useCompactTabs} from '../../hooks/useCompactTabs'
 import {useRememberedLayout} from '../../hooks/useRememberedLayout'
 import {useWaitingQuestions} from '../../hooks/useUserQuestions'
 import {WorkspaceFailureContext} from '../../hooks/useWorkspaceFailure'
@@ -197,6 +209,7 @@ function FrameRegions({
     const inspectorButton = useRef<HTMLButtonElement>(null)
 
     const isNarrow = useNarrowViewport()
+    const [isCentreCompact, onCentreStrip] = useCompactTabs()
 
     const scripts = useScriptBuffers({
         onError: report,
@@ -388,6 +401,13 @@ function FrameRegions({
                                         <Button
                                             ref={inspectorButton}
                                             label='Inspector'
+                                            isIconOnly
+                                            icon={
+                                                <Icon
+                                                    icon={CubeIcon}
+                                                    size='sm'
+                                                />
+                                            }
                                             size='sm'
                                             variant='ghost'
                                             aria-expanded={isInspectorOpen}
@@ -434,6 +454,7 @@ function FrameRegions({
                                 isScrollable
                             >
                                 <TabList
+                                    ref={onCentreStrip}
                                     size='sm'
                                     hasDivider
                                     style={{flexGrow: 1}}
@@ -446,30 +467,44 @@ function FrameRegions({
                                     <Tab
                                         value='chat'
                                         label='Chat'
+                                        isLabelHidden={isCentreCompact}
+                                        {...CHAT_TAB}
                                     />
                                     <Tab
                                         value='scripts'
                                         label='Scripts'
+                                        isLabelHidden={isCentreCompact}
+                                        {...SCRIPTS_TAB}
                                     />
                                     <Tab
                                         value='game'
                                         label='Game'
+                                        isLabelHidden={isCentreCompact}
+                                        {...GAME_TAB}
                                     />
                                     <Tab
                                         value='docs'
                                         label='Docs'
+                                        isLabelHidden={isCentreCompact}
+                                        {...DOCS_TAB}
                                     />
                                     <Tab
                                         value='memory'
                                         label='Memory'
+                                        isLabelHidden={isCentreCompact}
+                                        {...MEMORY_TAB}
                                     />
                                     <Tab
                                         value='sketches'
                                         label='Design'
+                                        isLabelHidden={isCentreCompact}
+                                        {...DESIGN_TAB}
                                     />
                                     <Tab
                                         value='skills'
                                         label='Skills'
+                                        isLabelHidden={isCentreCompact}
+                                        {...SKILLS_TAB}
                                     />
                                 </TabList>
                             </HStack>

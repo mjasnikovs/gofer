@@ -3,6 +3,14 @@ import type {ReactNode} from 'react'
 import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog'
 import {Layout, LayoutContent} from '@astryxdesign/core/Layout'
 import {VStack} from '@astryxdesign/core/Stack'
+import {
+    AI_SETTINGS_TAB,
+    GODOT_SETTINGS_TAB,
+    MODELS_SETTINGS_TAB,
+    PROMPT_SETTINGS_TAB,
+    STORAGE_SETTINGS_TAB
+} from '../tab-icons'
+import {useCompactTabs} from '../../hooks/useCompactTabs'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
 import {invoke, isTauri} from '../../services/desktop'
 import {commandErrorMessage} from '../../utils/command-error'
@@ -22,6 +30,7 @@ type SettingsPageProps = Readonly<{
 }>
 
 export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPageProps) {
+    const [isCompact, onStrip] = useCompactTabs()
     const hasLoaded = useRef(false)
     const [state, dispatchAny] = useReducer(reduce, INITIAL_SETTINGS_DRAFT)
     const dispatch: (action: SettingsAction) => void = dispatchAny
@@ -111,6 +120,7 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                 paddingInline={6}
                             >
                                 <TabList
+                                    ref={onStrip}
                                     hasDivider
                                     aria-label='Settings sections'
                                     value={tab}
@@ -124,22 +134,32 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
                                     <Tab
                                         value='ai'
                                         label='AI connection'
+                                        isLabelHidden={isCompact}
+                                        {...AI_SETTINGS_TAB}
                                     />
                                     <Tab
                                         value='prompt'
                                         label='Agent prompt'
+                                        isLabelHidden={isCompact}
+                                        {...PROMPT_SETTINGS_TAB}
                                     />
                                     <Tab
                                         value='godot'
                                         label='Godot rules'
+                                        isLabelHidden={isCompact}
+                                        {...GODOT_SETTINGS_TAB}
                                     />
                                     <Tab
                                         value='models'
                                         label='Documentation models'
+                                        isLabelHidden={isCompact}
+                                        {...MODELS_SETTINGS_TAB}
                                     />
                                     <Tab
                                         value='storage'
                                         label='Project storage'
+                                        isLabelHidden={isCompact}
+                                        {...STORAGE_SETTINGS_TAB}
                                     />
                                 </TabList>
                             </VStack>

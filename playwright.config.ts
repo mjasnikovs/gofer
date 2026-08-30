@@ -1,4 +1,5 @@
 import {defineConfig} from '@playwright/test'
+import {DEFAULT_WINDOW} from './e2e/visual/window-size'
 
 export default defineConfig({
     testDir: './e2e/visual',
@@ -9,7 +10,7 @@ export default defineConfig({
     expect: {timeout: 10_000},
     use: {
         baseURL: 'http://127.0.0.1:1420',
-        viewport: {width: 1280, height: 800},
+        viewport: DEFAULT_WINDOW,
         locale: 'en-US',
         timezoneId: 'Europe/Riga',
         contextOptions: {reducedMotion: 'reduce'}
