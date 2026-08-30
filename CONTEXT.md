@@ -4,8 +4,6 @@ The words Gofer's code uses, and what each one means here. A term is in this lis
 something narrower than it sounds, or because two things that look alike are deliberately kept
 apart.
 
-Architecture decisions live in [`docs/adr/`](docs/adr/).
-
 ## The work
 
 **Workspace** — the folder the user opened, and the Godot project inside it. It is the process's

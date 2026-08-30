@@ -108,8 +108,7 @@ types to `src/services/desktop.ts` by hand.
 
 The renderer spells a Godot command with `GodotCommandName`, emitted into
 `src/models/godot-commands.ts`. Give a command a real params or result type by adding one entry to
-`KnownGodotCommands` in that file; leave it out and it keeps the generic dictionary shape. See
-`docs/adr/0002-command-names-are-generated-shapes-are-not.md`.
+`KnownGodotCommands` in that file; leave it out and it keeps the generic dictionary shape.
 
 ## Commands fail in one shape
 
