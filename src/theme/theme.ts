@@ -26,12 +26,31 @@ export const goferTheme = defineTheme({
         // Stone's dark border is 2.66:1 on the surface; WCAG 1.4.11 wants 3:1 for a
         // control edge, and axe never checks it because it is not text.
         '--color-border-emphasized': ['#83838a', '#77777c'],
+        // Tokens rather than a `color.accent` seed, which would re-tint every neutral.
+        // Stone bakes all five as literals, so each has to be moved by hand.
+        '--color-accent': ['#00695c', '#2fa88f'],
+        '--color-on-accent': ['#ffffff', '#1b1b1f'],
+        // Re-picked alpha: stone's byte was tuned against a near-white accent, and the
+        // same alpha on a mid-tone teal lifts half as far.
+        '--color-accent-muted': ['#00695c19', '#2fa88f38'],
+        '--color-text-accent': ['#00695c', '#2fa88f'],
+        '--color-icon-accent': ['#00695c', '#2fa88f'],
         '--radius-chat': '3px'
     },
     components: {
         // Stone rounds buttons to a full pill, which fights a dense tool workspace.
         button: {base: {borderRadius: 'var(--radius-element)'}},
         tab: {base: {paddingInline: '8px'}},
+        // A filled chip on each of a reply's five paths turned the sentence into blocks.
+        // Scoped to the default colour, or it would beat `Code color='inherit'` too.
+        code: {
+            'color:primary': {
+                backgroundColor: 'transparent',
+                paddingInline: '0',
+                color: 'var(--color-text-accent)',
+                fontWeight: 'var(--font-weight-medium)'
+            }
+        },
         'text-input': {base: {backgroundColor: 'var(--color-background-body)'}},
         'tree-list-item': {
             selected: {

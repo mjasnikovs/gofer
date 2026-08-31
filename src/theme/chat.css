@@ -7,6 +7,21 @@
     row-gap: var(--spacing-3);
 }
 
+/* A tool row is 24px of text and a Thinking caption is 18px. Paragraph spacing around
+   each one buries the reply they belong to, so run them together and keep the gap for
+   the prose either side. */
+.astryx-chat-message > div > div > .astryx-chat-tool-calls {
+    margin-block-start: 0;
+}
+
+.astryx-chat-message
+    > div
+    > div
+    > :is(.astryx-chat-tool-calls, .astryx-collapsible)
+    + :is(.astryx-chat-tool-calls, .astryx-collapsible) {
+    margin-block-start: calc(-1 * var(--spacing-2));
+}
+
 .astryx-card.gofer-ask-surface {
     background-color: var(--color-background-popover);
 }

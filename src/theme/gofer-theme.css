@@ -176,8 +176,8 @@
             --color-syntax-property: light-dark(#4e6357, #94b2a0);
             --color-syntax-punctuation: light-dark(#5e5e5e, #ababb0);
             --color-syntax-background: light-dark(#f3f3f5, #171719);
-            --color-accent: light-dark(#25252a, #f3f3f5);
-            --color-accent-muted: light-dark(#25252a14, #f3f3f520);
+            --color-accent: light-dark(#00695c, #2fa88f);
+            --color-accent-muted: light-dark(#00695c19, #2fa88f38);
             --color-neutral: light-dark(#25252a0f, #f3f3f51a);
             --color-background-surface: light-dark(#ffffff, #1b1b1f);
             --color-background-body: light-dark(#f3f3f5, #111015);
@@ -188,14 +188,14 @@
             --color-text-primary: light-dark(#25252a, #f3f3f5);
             --color-text-secondary: light-dark(#46464b, #b8b8be);
             --color-text-disabled: light-dark(#6a6a6f, #909095);
-            --color-text-accent: light-dark(#25252a, #f3f3f5);
+            --color-text-accent: light-dark(#00695c, #2fa88f);
             --color-on-dark: #ffffff;
             --color-on-light: light-dark(#25252a, #28282a);
-            --color-on-accent: light-dark(#ffffff, #25252a);
+            --color-on-accent: light-dark(#ffffff, #1b1b1f);
             --color-on-success: light-dark(#374c36, #d0e9ce);
             --color-on-error: light-dark(#58413e, #f9dcd7);
             --color-on-warning: light-dark(#524622, #f4e1b7);
-            --color-icon-accent: light-dark(#25252a, #f3f3f5);
+            --color-icon-accent: light-dark(#00695c, #2fa88f);
             --color-icon-primary: light-dark(#25252a, #f3f3f5);
             --color-icon-secondary: light-dark(#83838a, #9d9da3);
             --color-icon-disabled: light-dark(#d7d7da, #5e5e61);
@@ -610,6 +610,13 @@
 
         .astryx-tab {
             padding-inline: 8px;
+        }
+
+        .astryx-code.primary {
+            background-color: transparent;
+            padding-inline: 0;
+            color: var(--color-text-accent);
+            font-weight: var(--font-weight-medium);
         }
 
         .astryx-tree-list-item.selected {
