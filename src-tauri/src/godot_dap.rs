@@ -982,12 +982,6 @@ pub(crate) fn note_the_debuggee_is_running() {
     DEBUGGEE_IS_STOPPED.store(false, Ordering::Relaxed);
 }
 
-/// Sets the flag for a test about what a caller is told while the debuggee is halted.
-#[cfg(test)]
-pub(crate) fn pretend_the_debuggee_is_stopped(stopped: bool) {
-    DEBUGGEE_IS_STOPPED.store(stopped, Ordering::Relaxed);
-}
-
 fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, message: Value) {
     match message.get("type").and_then(Value::as_str) {
         Some("response") => {

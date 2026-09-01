@@ -1,0 +1,108 @@
+{
+    "$comment": "One rule, two languages: which thinking levels a model offers, and which one a stored setting keeps against it. `thinking_levels`/`keep_level` in `src-tauri/src/settings/mod.rs` and `thinkingLevelsFor`/`keepThinkingLevel` in `src/models/settings.ts` are the same arithmetic written twice, and until this file they were held together by a prose comment in each saying the other agreed. Both suites read every row here, so a divergence is a failing test rather than a stored setting quietly downgraded on the next save.",
+    "$scopeComment": "Not `piThinkingLevel` in `scripts/thinking-level.mjs`, which answers a different question: what a chosen level is called in pi's own effort vocabulary at request time. Its mandatory fallback looks like this rule and is not one — it picks out of the model's own list rather than out of the offered set, and it answers `medium` where this answers `off`, because `off` is not a thing a mandatory model can be sent.",
+    "$orderComment": "`kept` falls back to the cheapest level the model still offers, cheapest by the ascending EFFORT_LEVELS order and never by the model's own list — OpenRouter answers [\"max\", \"high\", \"low\"], and taking the first of that would answer a stored request for no thinking with the most expensive setting there is.",
+    "rows": [
+        {
+            "name": "a model that does not reason offers nothing but off",
+            "model": {
+                "reasoning": false,
+                "supportsReasoningEffort": true,
+                "reasoningMandatory": true,
+                "thinkingLevels": ["low", "high"]
+            },
+            "offered": ["off"],
+            "kept": [
+                {"stored": "off", "is": "off"},
+                {"stored": "high", "is": "off"}
+            ]
+        },
+        {
+            "name": "a model that names its own levels offers those, with off in front",
+            "model": {
+                "reasoning": true,
+                "supportsReasoningEffort": true,
+                "reasoningMandatory": false,
+                "thinkingLevels": ["high", "low"]
+            },
+            "offered": ["off", "high", "low"],
+            "kept": [
+                {"stored": "high", "is": "high"},
+                {"stored": "medium", "is": "off"},
+                {"stored": "off", "is": "off"}
+            ]
+        },
+        {
+            "name": "a model that must reason drops off from what it offers",
+            "model": {
+                "reasoning": true,
+                "supportsReasoningEffort": true,
+                "reasoningMandatory": true,
+                "thinkingLevels": ["high", "low"]
+            },
+            "offered": ["high", "low"],
+            "kept": [
+                {"stored": "off", "is": "low"},
+                {"stored": "medium", "is": "low"},
+                {"stored": "high", "is": "high"}
+            ]
+        },
+        {
+            "name": "a model that takes an effort but names no levels offers the whole scale",
+            "model": {
+                "reasoning": true,
+                "supportsReasoningEffort": true,
+                "reasoningMandatory": false,
+                "thinkingLevels": []
+            },
+            "offered": ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+            "kept": [
+                {"stored": "off", "is": "off"},
+                {"stored": "max", "is": "max"},
+                {"stored": "on", "is": "off"}
+            ]
+        },
+        {
+            "name": "a model that must reason and names no levels offers the scale without off",
+            "model": {
+                "reasoning": true,
+                "supportsReasoningEffort": true,
+                "reasoningMandatory": true,
+                "thinkingLevels": []
+            },
+            "offered": ["minimal", "low", "medium", "high", "xhigh", "max"],
+            "kept": [
+                {"stored": "off", "is": "minimal"},
+                {"stored": "high", "is": "high"}
+            ]
+        },
+        {
+            "name": "a template with a place for thinking and no effort to name is on or off",
+            "model": {
+                "reasoning": true,
+                "supportsReasoningEffort": false,
+                "reasoningMandatory": false,
+                "thinkingLevels": []
+            },
+            "offered": ["off", "on"],
+            "kept": [
+                {"stored": "on", "is": "on"},
+                {"stored": "high", "is": "off"}
+            ]
+        },
+        {
+            "name": "the same template, when thinking cannot be turned off, is on and nothing else",
+            "model": {
+                "reasoning": true,
+                "supportsReasoningEffort": false,
+                "reasoningMandatory": true,
+                "thinkingLevels": []
+            },
+            "offered": ["on"],
+            "kept": [
+                {"stored": "off", "is": "on"},
+                {"stored": "high", "is": "on"}
+            ]
+        }
+    ]
+}

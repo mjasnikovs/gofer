@@ -1,0 +1,21 @@
+{
+    "$comment": "What a parent turn does when the provider fails, and why each number is what it is. One row per bound, emitted into `TURN_RETRY` in `scripts/ai-provider.mjs` by `scripts/generate-command-surface.mjs`. They were three bare constants beside a settings lookup — `settings.retryAttempts`, `retryBaseDelayMs` and `retryMaxDelayMs` — and no settings type in either language carries those fields, so in a running Gofer the three `??` branches were unreachable and the numbers beside them were the whole rule, undocumented. The sub-agent's equivalent ceilings have been a protocol row since they were written; these are the parent's.",
+    "$overrideComment": "A test that needs a different budget passes `retry` to `runAgent`, which is a parameter it can actually set. It used to reach for a settings field the application has no way to write, so the override worked in the harness and nowhere else.",
+    "bounds": [
+        {
+            "name": "attempts",
+            "value": 10,
+            "note": "How many times one turn is put to the provider again after a failure worth retrying. High because the failures this exists for are a local server being reloaded and a hosted one rate-limiting: both clear on their own, and both take longer than two attempts to clear. A failure that is not worth retrying does not reach this."
+        },
+        {
+            "name": "baseDelayMs",
+            "value": 5000,
+            "note": "The first wait, doubled on every attempt after it. Five seconds is what a llama.cpp host takes to finish loading a model it has just been handed, which is the failure the retry is most often waiting out."
+        },
+        {
+            "name": "maxDelayMs",
+            "value": 60000,
+            "note": "The ceiling the doubling stops at, so ten attempts are minutes rather than hours. A provider still refusing after a minute of backoff is not going to answer this turn."
+        }
+    ]
+}

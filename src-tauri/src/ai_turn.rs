@@ -10,7 +10,9 @@
 
 use crate::command_error::CommandError;
 use crate::process::{ProcessSpawner, SystemProcessSpawner};
-use crate::settings::{AiSettings, Secret, Secrets, SystemSecrets};
+use std::collections::BTreeMap;
+
+use crate::settings::{AiSettings, Secret, SystemSecrets};
 use crate::storage::{ProjectStorage, StoredAttachment};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -176,15 +178,11 @@ pub(crate) struct ChatRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiWorkerRequest {
     pub(crate) settings: AiSettings,
-    pub(crate) api_key: Option<String>,
-    /// OpenRouter's key, from its own keyring slot. Every key travels because the parent and the
-    /// sub-agent can be on different key-based drivers in the same turn.
-    pub(crate) openrouter_api_key: Option<String>,
-    /// Cerebras' key, from its own keyring slot, for the same reason.
-    pub(crate) cerebras_api_key: Option<String>,
-    /// The Brave Search key, when the user has set one. Absent is ordinary: the two other engines
-    /// need no key, and `web_search` says so itself when Brave is chosen without one.
-    pub(crate) brave_api_key: Option<String>,
+    /// Every stored key, under the slot it is kept in. All of them travel: the parent and the
+    /// sub-agent can be on different key-based drivers in the same turn, and the search engine is
+    /// a third. Which one a driver sends is [`driver_secret`], not a field name — a name had to
+    /// match across the process boundary, and a missed one authenticated nothing.
+    pub(crate) secrets: BTreeMap<Secret, String>,
     pub(crate) oauth_credential: Option<serde_json::Value>,
     /// The prompt cache key, which the provider sends so the server can route an ask back to the
     /// machine already holding this story's prefix. The task, not the turn: what a turn re-sends is
@@ -357,31 +355,24 @@ pub(crate) enum Job {
     },
 }
 
-/// The four secrets a worker may be sent, read in one place.
+/// The secrets a worker may be sent, read in one place.
 ///
-/// One value rather than four calls in each of four assemblers, because they are read together or
-/// not at all — and because where a secret is kept is one decision, not four. The default is
-/// nothing stored, which is what a suite driving its own model server sends.
+/// One value rather than a call per slot in each of four assemblers, because they are read
+/// together or not at all — and because where a secret is kept is one decision, not four. The
+/// default is nothing stored, which is what a suite driving its own model server sends.
 #[derive(Clone, Debug, Default)]
 struct Credentials {
-    api_key: Option<String>,
-    openrouter_api_key: Option<String>,
-    cerebras_api_key: Option<String>,
-    brave_api_key: Option<String>,
+    keys: BTreeMap<Secret, String>,
     oauth_credential: Option<serde_json::Value>,
 }
 
 impl Credentials {
-    /// Everything this machine has stored. Four of the five are the same read under a different
-    /// slot, so they are the same call with a different [`Secret`]. The ChatGPT one stays a helper
-    /// because it parses what it read rather than handing back the string.
+    /// Everything this machine has stored. The keys are one fold over [`Secret::ORDER`], so a
+    /// sixth slot costs a row in `protocol/drivers.json` and nothing here. The ChatGPT one stays a
+    /// helper because it parses what it read rather than handing back the string.
     fn read() -> Result<Self, String> {
-        let secrets = SystemSecrets;
         Ok(Self {
-            api_key: secrets.read(Secret::AiDefault)?,
-            openrouter_api_key: secrets.read(Secret::OpenRouter)?,
-            cerebras_api_key: secrets.read(Secret::Cerebras)?,
-            brave_api_key: secrets.read(Secret::Brave)?,
+            keys: crate::settings::stored_api_keys(&SystemSecrets),
             oauth_credential: crate::settings::stored_chatgpt_credential()?,
         })
     }
@@ -389,27 +380,22 @@ impl Credentials {
     /// The one credential a suite was handed, in the slot the driver it names actually reads.
     ///
     /// A suite is given a single key on the command line and the host looks one up per provider,
-    /// so a key in the wrong slot is no key at all — `scripts/ai-provider.mjs` resolves the
-    /// OpenRouter connection from `openrouterApiKey`, Cerebras from `cerebrasApiKey`, and every
-    /// other one from `apiKey`. Filling more than one would authenticate a local server with a
-    /// hosted key, which is the mistake in the other direction.
+    /// so a key in the wrong slot is no key at all. Which slot that is is [`driver_secret`], the
+    /// same row the application reads, rather than a match that had to be kept in step with it.
     #[cfg(all(test, feature = "godot-acceptance"))]
     fn for_driver(
         driver: crate::settings::AiConnectionType,
         api_key: Option<String>,
         oauth_credential: Option<serde_json::Value>,
     ) -> Self {
-        use crate::settings::AiConnectionType;
-        let slot = |wanted| (driver == wanted).then(|| api_key.clone()).flatten();
+        let secret = crate::settings::driver_secret(driver);
         Self {
-            api_key: match driver {
-                AiConnectionType::Openrouter | AiConnectionType::Cerebras => None,
-                _ => api_key.clone(),
-            },
-            openrouter_api_key: slot(AiConnectionType::Openrouter),
-            cerebras_api_key: slot(AiConnectionType::Cerebras),
+            keys: api_key
+                .filter(|_| secret.is_api_key())
+                .map(|key| (secret, key))
+                .into_iter()
+                .collect(),
             oauth_credential,
-            ..Self::default()
         }
     }
 }
@@ -629,17 +615,15 @@ impl JobContext {
             ),
             Job::Judge { memory_id, memory } => (None, WorkerJob::Judge { memory_id, memory }),
         };
-        let brave_api_key = if matches!(job, WorkerJob::Judge { .. }) {
-            None
-        } else {
-            self.credentials.brave_api_key.clone()
-        };
+        let mut secrets = self.credentials.keys.clone();
+        // A judgement reads what is already filed and searches nothing, so the search key has no
+        // errand on that request.
+        if matches!(job, WorkerJob::Judge { .. }) {
+            secrets.remove(&Secret::Brave);
+        }
         AiWorkerRequest {
             settings: self.ai.clone(),
-            api_key: self.credentials.api_key.clone(),
-            openrouter_api_key: self.credentials.openrouter_api_key.clone(),
-            cerebras_api_key: self.credentials.cerebras_api_key.clone(),
-            brave_api_key,
+            secrets,
             oauth_credential: self.credentials.oauth_credential.clone(),
             session_id,
             workspace_path: self.workspace_path.clone(),
@@ -2244,38 +2228,29 @@ mod tests {
     fn a_suite_key_fills_the_slot_its_driver_reads() {
         use crate::settings::AiConnectionType;
 
-        let openrouter = Credentials::for_driver(
-            AiConnectionType::Openrouter,
-            Some("or-key".to_owned()),
-            None,
-        );
-        assert_eq!(openrouter.openrouter_api_key.as_deref(), Some("or-key"));
-        assert_eq!(openrouter.api_key, None);
-        assert_eq!(openrouter.cerebras_api_key, None);
-
-        let local = Credentials::for_driver(
+        for driver in [
             AiConnectionType::OpenaiCompatible,
-            Some("local-key".to_owned()),
-            None,
-        );
-        assert_eq!(local.api_key.as_deref(), Some("local-key"));
-        assert_eq!(local.openrouter_api_key, None);
-        assert_eq!(local.cerebras_api_key, None);
-
-        let cerebras =
-            Credentials::for_driver(AiConnectionType::Cerebras, Some("csk-key".to_owned()), None);
-        assert_eq!(cerebras.cerebras_api_key.as_deref(), Some("csk-key"));
-        assert_eq!(cerebras.api_key, None);
-        assert_eq!(cerebras.openrouter_api_key, None);
+            AiConnectionType::Openrouter,
+            AiConnectionType::Cerebras,
+        ] {
+            let filled = Credentials::for_driver(driver, Some("a-key".to_owned()), None);
+            let slot = crate::settings::driver_secret(driver);
+            assert_eq!(
+                filled.keys,
+                BTreeMap::from([(slot, "a-key".to_owned())]),
+                "{driver:?} fills its own slot and no other"
+            );
+        }
 
         let chatgpt = Credentials::for_driver(
             AiConnectionType::OpenaiCodex,
-            None,
+            Some("not-a-key".to_owned()),
             Some(serde_json::json!({"access_token": "t"})),
         );
-        assert_eq!(chatgpt.api_key, None);
-        assert_eq!(chatgpt.openrouter_api_key, None);
-        assert_eq!(chatgpt.cerebras_api_key, None);
+        assert!(
+            chatgpt.keys.is_empty(),
+            "an OAuth driver sends no bearer, whatever the command line handed it"
+        );
         assert!(chatgpt.oauth_credential.is_some());
     }
 
@@ -2698,10 +2673,7 @@ mod tests {
     fn worker_request() -> AiWorkerRequest {
         AiWorkerRequest {
             settings: AiSettings::default(),
-            api_key: None,
-            openrouter_api_key: None,
-            cerebras_api_key: None,
-            brave_api_key: None,
+            secrets: BTreeMap::new(),
             oauth_credential: None,
             session_id: Some("task-1".to_owned()),
             workspace_path: "/tmp/workspace".to_owned(),
@@ -2790,10 +2762,11 @@ mod tests {
     /// Everything this machine could have stored, so a job that must not carry one is visible.
     fn every_credential() -> Credentials {
         Credentials {
-            api_key: Some("ai-default-key".to_owned()),
-            openrouter_api_key: Some("openrouter-key".to_owned()),
-            cerebras_api_key: None,
-            brave_api_key: Some("brave-key".to_owned()),
+            keys: BTreeMap::from([
+                (Secret::AiDefault, "ai-default-key".to_owned()),
+                (Secret::OpenRouter, "openrouter-key".to_owned()),
+                (Secret::Brave, "brave-key".to_owned()),
+            ]),
             oauth_credential: Some(serde_json::json!({"type": "oauth", "access": "token"})),
         }
     }
@@ -2864,10 +2837,10 @@ mod tests {
         .expect("serialize the request");
 
         assert_eq!(judgement["mode"], "judge");
-        assert_eq!(judgement["braveApiKey"], serde_json::Value::Null);
+        assert_eq!(judgement["secrets"]["brave"], serde_json::Value::Null);
         assert_eq!(judgement["sessionId"], serde_json::Value::Null);
-        assert_eq!(judgement["apiKey"], "ai-default-key");
-        assert_eq!(judgement["openrouterApiKey"], "openrouter-key");
+        assert_eq!(judgement["secrets"]["ai-default"], "ai-default-key");
+        assert_eq!(judgement["secrets"]["openrouter"], "openrouter-key");
 
         let turn = serde_json::to_value(context.request(Job::Turn {
             task_id: Some("task-1".to_owned()),
@@ -2877,7 +2850,7 @@ mod tests {
             memory_context: None,
         }))
         .expect("serialize the request");
-        assert_eq!(turn["braveApiKey"], "brave-key");
+        assert_eq!(turn["secrets"]["brave"], "brave-key");
         assert_eq!(turn["sessionId"], "task-1");
     }
 

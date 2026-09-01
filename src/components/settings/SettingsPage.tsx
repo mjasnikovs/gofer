@@ -12,7 +12,7 @@ import {
 } from '../tab-icons'
 import {useCompactTabs} from '../../hooks/useCompactTabs'
 import {Tab, TabList} from '@astryxdesign/core/TabList'
-import {invoke, isTauri} from '../../services/desktop'
+import {invoke, isTauri, listen} from '../../services/desktop'
 import {commandErrorMessage} from '../../utils/command-error'
 import {INITIAL_SETTINGS_DRAFT, reduce, runSettingsTask} from '../../models/settings-draft'
 import type {SettingsAction, SettingsTab, SettingsTask} from '../../models/settings-draft'
@@ -77,6 +77,25 @@ export function SettingsPage({isOpen, onOpenChange, onCacheDeleted}: SettingsPag
         }
 
         void load()
+    }, [dispatch])
+
+    // Another writer of the settings file — the composer reconciling a model — is adopted rather
+    // than overwritten by the next Save, which sends the whole object.
+    useEffect(() => {
+        if (!isTauri()) return
+        let isCancelled = false
+        let dispose: (() => void) | undefined
+        void listen('settings-saved', event => {
+            if (isCancelled) return
+            dispatch({type: 'announced', settings: event.payload.settings})
+        }).then(unlisten => {
+            if (isCancelled) unlisten()
+            else dispose = unlisten
+        })
+        return () => {
+            isCancelled = true
+            dispose?.()
+        }
     }, [dispatch])
 
     const ai = useAiTab(view)

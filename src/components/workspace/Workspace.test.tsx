@@ -509,7 +509,7 @@ describe('Workspace game screenshots', () => {
                     }
                 }
             },
-            hasApiKey: true
+            storedSecrets: {'ai-default': true}
         })
     }
 
@@ -610,7 +610,7 @@ describe('Workspace planning with a picture attached', () => {
                     }
                 }
             },
-            hasApiKey: true
+            storedSecrets: {'ai-default': true}
         })
     }
 

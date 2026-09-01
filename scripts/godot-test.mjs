@@ -10,7 +10,9 @@ const project = resolve('fixtures/godot-project')
 const SUITES = [
     'res://tests/protocol_test.gd',
     'res://tests/params_test.gd',
-    'res://tests/parse_test.gd'
+    'res://tests/parse_test.gd',
+    'res://tests/project_config_test.gd',
+    'res://tests/runtime_queue_test.gd'
 ]
 
 const STAGED = resolve(project, 'addons/gofer')
@@ -18,7 +20,14 @@ const ADDON = resolve('src-tauri/addon')
 
 function stageAddon() {
     mkdirSync(STAGED, {recursive: true})
-    for (const name of ['protocol.gd', 'params.gd', 'plugin.gd', 'runtime.gd'])
+    for (const name of [
+        'protocol.gd',
+        'params.gd',
+        'project_config.gd',
+        'runtime_queue.gd',
+        'plugin.gd',
+        'runtime.gd'
+    ])
         copyFileSync(resolve(ADDON, name), resolve(STAGED, name))
 }
 

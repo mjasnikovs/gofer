@@ -1310,8 +1310,61 @@ const GAME_IS_NOT_ANSWERING: [&str; 5] = [
     "session_closed",
 ];
 
+/// Everything about the session that an explanation of a runtime failure is arithmetic over.
+///
+/// Each of these seven facts lives in a different module's process-wide state, and each explainer
+/// used to reach for its own. That made a sentence about an armed breakpoint provable only by
+/// forging `debug`'s and `godot_dap`'s globals from this module's tests, through `#[cfg(test)]`
+/// doors those modules had to carry for it. Gathered once, the explaining is a fold over a value.
+pub(crate) struct SessionFacts {
+    /// Whether a process is still there, which is what decides whose crash line a marker was.
+    editor_is_running: bool,
+    /// The crash line, when one was printed recently enough to belong to the call being answered.
+    crash: Option<String>,
+    /// The session's last error lines, oldest first, the engine's own chatter already dropped.
+    errors: Vec<String>,
+    debugger_holds_a_game: bool,
+    /// The files that still hold a breakpoint this session set.
+    armed_breakpoints: Vec<String>,
+    /// Whether `project.godot` has stopped registering the runtime helper.
+    helper_missing: bool,
+}
+
+impl SessionFacts {
+    /// Reads the session once. The only part of the explaining that touches anything outside it.
+    fn gathered() -> Self {
+        Self {
+            editor_is_running: an_editor_is_still_running(),
+            crash: a_crash_line_from_this_call(),
+            errors: last_session_errors(CARRIED_ERROR_LINES),
+            debugger_holds_a_game: crate::debug::holds_a_game(),
+            armed_breakpoints: crate::debug::armed_breakpoints(),
+            helper_missing: current_info().is_some_and(|info| {
+                crate::addon::runtime_helper_missing(std::path::Path::new(&info.worktree))
+            }),
+        }
+    }
+}
+
 /// What Godot prints as it dies of a signal.
 const CRASH_MARKER: &str = "Program crashed with signal";
+
+/// The newest crash marker, when it is recent enough to be about the call being answered.
+///
+/// Whose death it was is not decided here. The game inherits the editor's pipes, so both write the
+/// same line into the same buffer, and only [`SessionFacts::editor_is_running`] tells them apart.
+fn a_crash_line_from_this_call() -> Option<String> {
+    let entry = newest_logs(
+        &LogQuery {
+            contains: Some(CRASH_MARKER.to_owned()),
+            ..LogQuery::default()
+        },
+        1,
+    )
+    .pop()?;
+    (now_millis().saturating_sub(entry.timestamp) <= CRASH_IS_THIS_CALLS_MS)
+        .then_some(entry.message)
+}
 
 /// The crash line, when the editor died rather than merely stopped answering.
 ///
@@ -1336,22 +1389,11 @@ const CRASH_MARKER: &str = "Program crashed with signal";
 /// Guarded by [`an_editor_is_still_running`], because the marker on its own does not say whose
 /// death it is: the game inherits the editor's pipes, so a segfaulting game writes the same line
 /// into the same buffer.
-fn editor_crashed() -> Option<String> {
-    if an_editor_is_still_running() {
+fn editor_crashed(facts: &SessionFacts) -> Option<String> {
+    if facts.editor_is_running {
         return None;
     }
-    let entry = newest_logs(
-        &LogQuery {
-            contains: Some(CRASH_MARKER.to_owned()),
-            ..LogQuery::default()
-        },
-        1,
-    )
-    .pop()?;
-    if now_millis().saturating_sub(entry.timestamp) > CRASH_IS_THIS_CALLS_MS {
-        return None;
-    }
-    Some(entry.message)
+    facts.crash.clone()
 }
 
 /// How recent a crash line must be to be the crash that ended this call.
@@ -1383,26 +1425,16 @@ const CRASH_IS_THIS_CALLS_MS: u64 = 60_000;
 /// Guarded from the other side: the editor has to still be there, so a marker this reads cannot be
 /// the editor's own death, and the same sixty seconds decide whether the crash belongs to the call
 /// being answered.
-fn the_game_crashed() -> Option<String> {
-    if !an_editor_is_still_running() {
+fn the_game_crashed(facts: &SessionFacts) -> Option<String> {
+    if !facts.editor_is_running {
         return None;
     }
-    let entry = newest_logs(
-        &LogQuery {
-            contains: Some(CRASH_MARKER.to_owned()),
-            ..LogQuery::default()
-        },
-        1,
-    )
-    .pop()?;
-    if now_millis().saturating_sub(entry.timestamp) > CRASH_IS_THIS_CALLS_MS {
-        return None;
-    }
+    let message = facts.crash.as_ref()?;
     Some(format!(
         "The game died of a signal: {}. That is the game process crashing, not this call — \
          running it again will not help until the cause is gone. The backtrace under it is in \
          godot_logs read.",
-        entry.message.trim()
+        message.trim()
     ))
 }
 
@@ -1447,11 +1479,19 @@ fn an_editor_is_still_running() -> bool {
 ///
 /// A pointer to a side channel costs a turn, and the turn after a crash is the one the model has
 /// least to spare. So the lines travel with the failure instead of being described.
-pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -> ToolFailure {
+pub(crate) fn carrying_the_error_that_ended_the_game(failure: ToolFailure) -> ToolFailure {
     if !GAME_IS_NOT_ANSWERING.contains(&failure.code.as_str()) {
         return failure;
     }
-    if let Some(crash) = editor_crashed() {
+    explaining(&SessionFacts::gathered(), failure)
+}
+
+/// The fold itself: which sentences a failure carries, given what the session looks like.
+fn explaining(facts: &SessionFacts, mut failure: ToolFailure) -> ToolFailure {
+    if !GAME_IS_NOT_ANSWERING.contains(&failure.code.as_str()) {
+        return failure;
+    }
+    if let Some(crash) = editor_crashed(facts) {
         failure.message = format!(
             "{}\n\nThe Godot editor itself died: {crash}. That is the engine crashing, not this \
              call — retrying it will not help. Start a new session with godot_session start.",
@@ -1459,19 +1499,19 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
         );
     }
     if failure.code.starts_with("runtime_") {
-        if let Some(crash) = the_game_crashed() {
+        if let Some(crash) = the_game_crashed(facts) {
             failure.message = format!("{}\n\n{crash}", failure.message.trim_end());
-        } else if let Some(missing) = the_helper_is_not_installed() {
+        } else if let Some(missing) = the_helper_is_not_installed(facts) {
             failure.message = format!("{}\n\n{missing}", failure.message.trim_end());
-        } else if let Some(broken) = the_games_own_scripts_did_not_compile() {
+        } else if let Some(broken) = the_games_own_scripts_did_not_compile(facts) {
             failure.message = format!("{}\n\n{broken}", failure.message.trim_end());
-        } else if let Some(held) = the_debugger_holds_the_game() {
+        } else if let Some(held) = the_debugger_holds_the_game(facts) {
             failure.message = format!("{}\n\n{held}", failure.message.trim_end());
-        } else if let Some(armed) = a_breakpoint_is_still_armed() {
+        } else if let Some(armed) = a_breakpoint_is_still_armed(facts) {
             failure.message = format!("{}\n\n{armed}", failure.message.trim_end());
         }
     }
-    let printed = last_session_errors(CARRIED_ERROR_LINES);
+    let printed = &facts.errors;
     if printed.is_empty() {
         return failure;
     }
@@ -1485,22 +1525,32 @@ pub(crate) fn carrying_the_error_that_ended_the_game(mut failure: ToolFailure) -
 
 /// The runtime operations that cannot answer until the game draws a frame.
 ///
-/// Read out of the addon rather than written again here. `FRAME_AWAITING_OPS` in `plugin.gd` is
-/// what decides which timeout a caller gets and it is where the wait actually happens, so a second
-/// copy in Rust would be a second thing to keep in step — and the one that drifted would refuse
-/// the wrong calls, silently, in the direction that costs a working call.
+/// Read out of the addon rather than written again here. `FRAME_AWAITING_OPS` in
+/// `runtime_queue.gd` is what decides which timeout a caller gets and it is where the wait
+/// actually happens, so a second copy in Rust would be a second thing to keep in step — and the
+/// one that drifted would refuse the wrong calls, silently, in the direction that costs a working
+/// call.
+///
+/// A parse that finds nothing panics rather than answering with an empty list. It used to answer
+/// with one, and moving the constant into its own script turned this guard off without failing
+/// anything but the one acceptance test that watches a halted game.
 static FRAME_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let source = include_str!("../addon/plugin.gd");
-    let Some(rest) = source.split_once("FRAME_AWAITING_OPS: Array[String] = [") else {
-        return Vec::new();
-    };
-    let Some((list, _)) = rest.1.split_once(']') else {
-        return Vec::new();
-    };
-    list.split(',')
+    let source = include_str!("../addon/runtime_queue.gd");
+    let list = source
+        .split_once("FRAME_AWAITING_OPS: Array[String] = [")
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(list, _)| list)
+        .expect("runtime_queue.gd declares FRAME_AWAITING_OPS as a literal array");
+    let ops: Vec<String> = list
+        .split(',')
         .filter_map(|word| word.trim().strip_prefix('"')?.strip_suffix('"'))
         .map(str::to_owned)
-        .collect()
+        .collect();
+    assert!(
+        !ops.is_empty(),
+        "runtime_queue.gd's FRAME_AWAITING_OPS parsed as empty, which refuses nothing"
+    );
+    ops
 });
 
 /// Refuses a frame-awaiting runtime call against a game the debugger has halted.
@@ -1524,10 +1574,24 @@ static FRAME_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
 /// Retryable, because it is: the call is right and the game is in the wrong state for it, which is
 /// exactly what `godot_debug continue` fixes.
 pub(crate) fn a_game_the_debugger_has_halted(op: &str) -> Result<(), ToolFailure> {
-    if !FRAME_AWAITING_OPS.iter().any(|frame_op| frame_op == op) {
+    refusing_a_halted_game(
+        op,
+        crate::debug::holds_a_game(),
+        crate::godot_dap::debuggee_is_stopped(),
+    )
+}
+
+/// The decision itself. Kept apart from the rest of [`SessionFacts`] because this runs before every
+/// runtime call, where gathering the others would cost a project-file read per call.
+fn refusing_a_halted_game(
+    op: &str,
+    debugger_holds_a_game: bool,
+    debuggee_is_stopped: bool,
+) -> Result<(), ToolFailure> {
+    if !debugger_holds_a_game || !debuggee_is_stopped {
         return Ok(());
     }
-    if !crate::debug::holds_a_game() || !crate::godot_dap::debuggee_is_stopped() {
+    if !FRAME_AWAITING_OPS.iter().any(|frame_op| frame_op == op) {
         return Ok(());
     }
     Err(ToolFailure {
@@ -1557,8 +1621,8 @@ pub(crate) fn a_game_the_debugger_has_halted(op: &str) -> Result<(), ToolFailure
 /// The flag says the debugger launched this game, not that it is halted this instant, and the
 /// sentence says exactly that much: it names the call that lets a stopped game run on and leaves
 /// the reader to look. Nothing here can be wrong about a game the debugger never started.
-fn the_debugger_holds_the_game() -> Option<String> {
-    crate::debug::holds_a_game().then(|| {
+fn the_debugger_holds_the_game(facts: &SessionFacts) -> Option<String> {
+    facts.debugger_holds_a_game.then(|| {
         "This game was launched by the debugger, and a game stopped at a breakpoint answers \
          nothing until it runs on. If one is set, godot_debug continue is what lets this call \
          through; godot_debug stack_trace says where it is stopped."
@@ -1595,9 +1659,12 @@ fn the_debugger_holds_the_game() -> Option<String> {
 /// compile error both, and it is the engine's own prefix — a warning, an `at:` frame or an editor
 /// diagnostic is not one, and `last_session_errors` has already dropped the engine's epilogue and
 /// the editor's own chatter before this reads them.
-fn the_games_own_scripts_did_not_compile() -> Option<String> {
-    let printed = last_session_errors(CARRIED_ERROR_LINES);
-    if !printed.iter().any(|line| line.starts_with("SCRIPT ERROR:")) {
+fn the_games_own_scripts_did_not_compile(facts: &SessionFacts) -> Option<String> {
+    if !facts
+        .errors
+        .iter()
+        .any(|line| line.starts_with("SCRIPT ERROR:"))
+    {
         return None;
     }
     Some(
@@ -1626,9 +1693,8 @@ fn the_games_own_scripts_did_not_compile() -> Option<String> {
 /// Second, not first. [`the_debugger_holds_the_game`] is about a game the debugger *is* holding and
 /// says so more precisely; this is the other case, where the debugger has let go and the breakpoint
 /// has not.
-fn a_breakpoint_is_still_armed() -> Option<String> {
-    let armed = crate::debug::armed_breakpoints();
-    if armed.is_empty() {
+fn a_breakpoint_is_still_armed(facts: &SessionFacts) -> Option<String> {
+    if facts.armed_breakpoints.is_empty() {
         return None;
     }
     Some(format!(
@@ -1636,7 +1702,7 @@ fn a_breakpoint_is_still_armed() -> Option<String> {
          session, so it hands them to the next game it plays — including one godot_runtime run \
          starts — and a game stopped at one draws no frame. Clear it with godot_debug \
          set_breakpoints and an empty lines list for that file, then run again.",
-        armed.join(", ")
+        facts.armed_breakpoints.join(", ")
     ))
 }
 
@@ -1649,9 +1715,8 @@ fn a_breakpoint_is_still_armed() -> Option<String> {
 ///
 /// See [`crate::addon::runtime_helper_missing`] for what takes the autoload away under a session
 /// that is still running, and why the file rather than the editor is what gets read.
-fn the_helper_is_not_installed() -> Option<String> {
-    let worktree = current_info()?.worktree;
-    if !crate::addon::runtime_helper_missing(std::path::Path::new(&worktree)) {
+fn the_helper_is_not_installed(facts: &SessionFacts) -> Option<String> {
+    if !facts.helper_missing {
         return None;
     }
     Some(
@@ -2560,6 +2625,18 @@ mod tests {
         }
     }
 
+    /// A session with nothing wrong with it, so a test can vary the one fact it is about.
+    fn a_session_with_nothing_wrong() -> SessionFacts {
+        SessionFacts {
+            editor_is_running: true,
+            crash: None,
+            errors: Vec::new(),
+            debugger_holds_a_game: false,
+            armed_breakpoints: Vec::new(),
+            helper_missing: false,
+        }
+    }
+
     #[test]
     fn a_game_with_no_runtime_helper_is_told_that_and_not_to_wait() {
         let _test = session_test_lock();
@@ -3121,25 +3198,23 @@ mod tests {
     /// answer waiting at the breakpoint never collected.
     #[test]
     fn a_timeout_against_the_debuggers_own_game_names_the_call_that_frees_it() {
-        let _test = session_test_lock();
-        given_the_session_printed(&[(LogSource::Editor, "Godot Engine v4.7.2.stable")]);
-
-        crate::debug::pretend_it_holds_a_game(true);
-        let carried = carrying_the_error_that_ended_the_game(addon_failure(
-            "runtime_timeout",
-            "The game did not answer in time",
-        ));
-        crate::debug::pretend_it_holds_a_game(false);
+        let held = explaining(
+            &SessionFacts {
+                debugger_holds_a_game: true,
+                ..a_session_with_nothing_wrong()
+            },
+            addon_failure("runtime_timeout", "The game did not answer in time"),
+        );
         assert!(
-            carried.message.contains("godot_debug continue"),
+            held.message.contains("godot_debug continue"),
             "{}",
-            carried.message
+            held.message
         );
 
-        let alone = carrying_the_error_that_ended_the_game(addon_failure(
-            "runtime_timeout",
-            "The game did not answer in time",
-        ));
+        let alone = explaining(
+            &a_session_with_nothing_wrong(),
+            addon_failure("runtime_timeout", "The game did not answer in time"),
+        );
         assert_eq!(alone.message, "The game did not answer in time");
     }
 
@@ -3153,7 +3228,7 @@ mod tests {
         assert_eq!(
             *FRAME_AWAITING_OPS,
             vec!["input".to_owned(), "capture".to_owned(), "wait".to_owned()],
-            "plugin.gd's FRAME_AWAITING_OPS is what this reads, and the parse answered otherwise"
+            "runtime_queue.gd's FRAME_AWAITING_OPS is what this reads, and the parse answered otherwise"
         );
     }
 
@@ -3164,11 +3239,7 @@ mod tests {
     /// started and let run answers a frame like any other.
     #[test]
     fn a_frame_awaiting_call_against_a_halted_game_is_refused_at_once() {
-        let _test = session_test_lock();
-        crate::debug::pretend_it_holds_a_game(true);
-        crate::godot_dap::pretend_the_debuggee_is_stopped(true);
-
-        let refused = a_game_the_debugger_has_halted("input")
+        let refused = refusing_a_halted_game("input", true, true)
             .expect_err("a halted game cannot answer a call that waits for a frame");
         assert_eq!(refused.code, "game_halted");
         assert!(refused.retryable, "continue is what makes this call work");
@@ -3183,17 +3254,10 @@ mod tests {
             refused.message
         );
 
-        assert!(a_game_the_debugger_has_halted("inspect_node").is_ok());
-        assert!(a_game_the_debugger_has_halted("get_tree").is_ok());
-
-        crate::godot_dap::pretend_the_debuggee_is_stopped(false);
-        assert!(a_game_the_debugger_has_halted("input").is_ok());
-
-        crate::godot_dap::pretend_the_debuggee_is_stopped(true);
-        crate::debug::pretend_it_holds_a_game(false);
-        assert!(a_game_the_debugger_has_halted("input").is_ok());
-
-        crate::godot_dap::pretend_the_debuggee_is_stopped(false);
+        assert!(refusing_a_halted_game("inspect_node", true, true).is_ok());
+        assert!(refusing_a_halted_game("get_tree", true, true).is_ok());
+        assert!(refusing_a_halted_game("input", true, false).is_ok());
+        assert!(refusing_a_halted_game("input", false, true).is_ok());
     }
 
     /// A breakpoint the editor still holds is named when a runtime call cannot be answered.
@@ -3203,15 +3267,15 @@ mod tests {
     /// it to the next game it plays. `sol-35-hud-xhigh` spent twenty seconds there.
     #[test]
     fn a_timeout_with_a_breakpoint_still_set_names_the_file_holding_it() {
-        let _test = session_test_lock();
-        let _armed = crate::debug::breakpoint_test_lock();
-        given_the_session_printed(&[(LogSource::Editor, "Godot Engine v4.7.2.stable")]);
+        let armed = SessionFacts {
+            armed_breakpoints: vec!["scripts/hud.gd".to_owned()],
+            ..a_session_with_nothing_wrong()
+        };
 
-        crate::debug::pretend_a_breakpoint_is_armed(Some("scripts/hud.gd"));
-        let carried = carrying_the_error_that_ended_the_game(addon_failure(
-            "runtime_timeout",
-            "The game did not answer in time",
-        ));
+        let carried = explaining(
+            &armed,
+            addon_failure("runtime_timeout", "The game did not answer in time"),
+        );
         assert!(
             carried.message.contains("scripts/hud.gd"),
             "{}",
@@ -3223,12 +3287,13 @@ mod tests {
             carried.message
         );
 
-        crate::debug::pretend_it_holds_a_game(true);
-        let held = carrying_the_error_that_ended_the_game(addon_failure(
-            "runtime_timeout",
-            "The game did not answer in time",
-        ));
-        crate::debug::pretend_it_holds_a_game(false);
+        let held = explaining(
+            &SessionFacts {
+                debugger_holds_a_game: true,
+                ..armed
+            },
+            addon_failure("runtime_timeout", "The game did not answer in time"),
+        );
         assert!(
             held.message.contains("godot_debug continue"),
             "{}",
@@ -3240,11 +3305,10 @@ mod tests {
             held.message
         );
 
-        crate::debug::pretend_a_breakpoint_is_armed(None);
-        let alone = carrying_the_error_that_ended_the_game(addon_failure(
-            "runtime_timeout",
-            "The game did not answer in time",
-        ));
+        let alone = explaining(
+            &a_session_with_nothing_wrong(),
+            addon_failure("runtime_timeout", "The game did not answer in time"),
+        );
         assert_eq!(alone.message, "The game did not answer in time");
     }
 

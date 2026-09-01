@@ -21,6 +21,8 @@ func _initialize() -> void:
         _test_moved_from_the_editor(params, failures)
         _test_read_by_both_halves(params, failures)
         _test_node_decisions(params, failures)
+        _test_tileset_plan(params, failures)
+        _test_texture_plan(params, failures)
     if failures.is_empty():
         print("Gofer Godot command parameters passed")
         quit(0)
@@ -557,3 +559,101 @@ func _test_node_decisions(params: GDScript, failures: Array[String]) -> void:
 
     root.free()
 
+
+## What `resource.create_tileset` refuses, and what it cuts when it refuses nothing.
+##
+## Every one of these five used to sit inside `EditorPlugin`, where reaching one cost a real editor
+## boot — and four of them were reached by nothing at all.
+func _test_tileset_plan(params: GDScript, failures: Array[String]) -> void:
+    var atlas := Vector2i(32, 16)
+
+    var whole: Dictionary = params.call("tileset_plan", {"tileSize": 16}, "res://a.png", atlas)
+    var plan: Dictionary = whole.get("value", {})
+    if plan.get("grid") != Vector2i(2, 1):
+        failures.append("a 32x16 atlas cut at 16 is a 2x1 grid, not %s" % [plan.get("grid")])
+    if plan.get("tiles") != [Vector2i(0, 0), Vector2i(1, 0)]:
+        failures.append("naming no tiles cuts the whole grid, not %s" % [plan.get("tiles")])
+    if not (plan.get("solid") as Array).is_empty():
+        failures.append("naming no solid tiles gives collision to none of them")
+
+    var all_solid: Dictionary = params.call(
+        "tileset_plan", {"tileSize": 16, "solid": "all"}, "res://a.png", atlas
+    )
+    if all_solid["value"]["solid"] != all_solid["value"]["tiles"]:
+        failures.append("solid: all is every tile the plan cuts")
+
+    var too_big: Dictionary = params.call(
+        "tileset_plan", {"tileSize": 64}, "res://a.png", atlas
+    )
+    if _refusal(too_big) != "tile_size_too_large":
+        failures.append("an atlas that does not hold one tile is refused: %s" % [too_big])
+
+    var too_many: Dictionary = params.call(
+        "tileset_plan", {"tileSize": 1}, "res://a.png", Vector2i(4096, 4096)
+    )
+    if _refusal(too_many) != "too_many_tiles":
+        failures.append("a grid past the tile cap is refused: %s" % [too_many])
+
+    var undefined: Dictionary = params.call(
+        "tileset_plan",
+        {"tileSize": 16, "tiles": [[0, 0]], "solid": [[1, 0]]},
+        "res://a.png",
+        atlas
+    )
+    if _refusal(undefined) != "tile_not_defined":
+        failures.append("a solid tile that is not being created is refused: %s" % [undefined])
+
+    if _refusal(params.call("tileset_paths", {"texture": "res://a.png"})) != "invalid_params":
+        failures.append("a tileset with no path is refused")
+    if _refusal(
+        params.call("tileset_paths", {"path": "res://a.tscn", "texture": "res://a.png"})
+    ) != "invalid_params":
+        failures.append("a tileset written anywhere but a .tres is refused")
+
+
+## What `resource.create_texture` draws, and what it refuses to draw.
+func _test_texture_plan(params: GDScript, failures: Array[String]) -> void:
+    var drawn: Dictionary = params.call("texture_plan", {
+        "path": "res://tile.png",
+        "size": 8,
+        "background": "skyblue",
+        "rects": [{"x": 0, "y": 0, "width": 4, "height": 4, "color": "#8b5a2b"}],
+    })
+    var plan: Dictionary = drawn.get("value", {})
+    if plan.get("size") != Vector2i(8, 8):
+        failures.append("one number is both sides of the texture, not %s" % [plan.get("size")])
+    if plan.get("background") != Color.SKY_BLUE:
+        failures.append("a named background is that colour, not %s" % [plan.get("background")])
+    var rects: Array = plan.get("rects", [])
+    if rects.size() != 1 or rects[0]["area"] != Rect2i(0, 0, 4, 4):
+        failures.append("a rect inside the canvas is drawn as written: %s" % [rects])
+
+    var clipped: Dictionary = params.call("texture_plan", {
+        "path": "res://tile.png",
+        "size": 8,
+        "rects": [{"x": 6, "y": 6, "width": 8, "height": 8, "color": "red"}],
+    })
+    if clipped["value"]["rects"][0]["area"] != Rect2i(6, 6, 2, 2):
+        failures.append("a rect over the edge is clipped to the canvas")
+
+    if _refusal(params.call("texture_plan", {"path": "res://t.tres", "size": 8})) != "invalid_params":
+        failures.append("a texture written anywhere but a .png is refused")
+    if _refusal(params.call("texture_plan", {"path": "res://t.png", "size": 8, "background": "notacolour"})) != "unsupported_color":
+        failures.append("a background nobody can read is refused")
+
+    var runaway: Array = []
+    for _index in range(513):
+        runaway.append({"x": 0, "y": 0, "width": 1, "height": 1, "color": "red"})
+    var too_many: Dictionary = params.call(
+        "texture_plan", {"path": "res://t.png", "size": 8, "rects": runaway}
+    )
+    if _refusal(too_many) != "too_many_rects":
+        failures.append("a paint past the rect cap is refused: %s" % [too_many])
+
+    var outside: Dictionary = params.call("texture_plan", {
+        "path": "res://t.png",
+        "size": 8,
+        "rects": [{"x": 20, "y": 20, "width": 4, "height": 4, "color": "red"}],
+    })
+    if _refusal(outside) != "invalid_params":
+        failures.append("a rect entirely off the canvas is refused: %s" % [outside])

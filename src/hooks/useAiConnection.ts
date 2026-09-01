@@ -2,15 +2,9 @@ import {useCallback, useEffect, useRef, useState} from 'react'
 import {defer} from '../services/clock'
 import {invoke, isTauri, listen} from '../services/desktop'
 import {commandErrorMessage} from '../utils/command-error'
-import {
-    activeConnection,
-    adoptModelReasoning,
-    adoptSubagentReasoning,
-    applyModelSelection,
-    normalizeSettings,
-    withActiveConnection
-} from '../models/settings'
-import type {AiModelOption, AiSettings, GoferSettings, ThinkingLevel} from '../models/settings'
+import {applyModelSelection, normalizeSettings, withActiveConnection} from '../models/settings'
+import type {AiModelOption, GoferSettings, ThinkingLevel} from '../models/settings'
+import {catalogueKey, reconciled} from '../services/ai-catalogue'
 
 export type ConnectionState = 'connecting' | 'connected' | 'offline'
 
@@ -30,15 +24,9 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
 
     const listModels = useCallback(async (of: GoferSettings) => {
         const available = await invoke('list_ai_models', {
-            request: {
-                settings: of,
-                apiKey: {action: 'keep'},
-                braveApiKey: {action: 'keep'},
-                openrouterApiKey: {action: 'keep'},
-                cerebrasApiKey: {action: 'keep'}
-            }
+            request: {settings: of, secrets: {}}
         })
-        listedFor.current = catalogueOf(of.ai)
+        listedFor.current = catalogueKey(of.ai)
         setModels(available)
         return available
     }, [])
@@ -48,13 +36,7 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
             setSettings(nextSettings)
             try {
                 await invoke('save_settings', {
-                    request: {
-                        settings: nextSettings,
-                        apiKey: {action: 'keep'},
-                        braveApiKey: {action: 'keep'},
-                        openrouterApiKey: {action: 'keep'},
-                        cerebrasApiKey: {action: 'keep'}
-                    }
+                    request: {settings: nextSettings, secrets: {}}
                 })
                 onConnected()
             } catch (error) {
@@ -90,31 +72,11 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
 
     const reconcileModel = useCallback(
         async (available: readonly AiModelOption[], loaded: GoferSettings) => {
-            const chosen = activeConnection(loaded.ai)
-            const configured = available.find(model => model.id === chosen?.model.id)
-            const withChild = adoptSubagentReasoning(loaded.ai, loaded.ai.connectionType, available)
-            if (!configured || !chosen) {
-                const onlyModel = available.length === 1 ? available[0] : undefined
-                if (onlyModel) {
-                    await applyModel(onlyModel, {...loaded, ai: withChild})
-                    return
-                }
-                if (withChild === loaded.ai) return
-                await saveSettings(
-                    {...loaded, ai: withChild},
-                    "The model's reasoning support could not be saved"
-                )
-                return
-            }
-            const model = adoptModelReasoning(chosen.model, configured)
-            const ai =
-                model === chosen.model ?
-                    withChild
-                :   withActiveConnection(withChild, connection => ({...connection, model}))
-            if (ai === loaded.ai) return
-            await saveSettings({...loaded, ai}, "The model's reasoning support could not be saved")
+            const next = reconciled(available, loaded)
+            if (!next) return
+            await saveSettings(next, "The model's reasoning support could not be saved")
         },
-        [applyModel, saveSettings]
+        [saveSettings]
     )
 
     const connect = useCallback(async () => {
@@ -156,7 +118,7 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
             if (isCancelled) return
             const saved = normalizeSettings(event.payload.settings)
             setSettings(saved)
-            if (listedFor.current === catalogueOf(saved.ai)) return
+            if (listedFor.current === catalogueKey(saved.ai)) return
             void listModels(saved).catch((error: unknown) => {
                 onError(`The model list could not be read: ${commandErrorMessage(error)}`)
             })
@@ -171,8 +133,4 @@ export function useAiConnection({onError, onConnected}: AiConnectionOptions) {
     }, [listModels, onError])
 
     return {settings, models, connectionState, connect, applyModel, applyThinkingLevel}
-}
-
-function catalogueOf(ai: AiSettings) {
-    return `${ai.connectionType} ${activeConnection(ai)?.baseUrl ?? ''}`
 }

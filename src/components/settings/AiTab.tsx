@@ -1,4 +1,3 @@
-import {useEffect, useEffectEvent, useRef, useState} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {Divider} from '@astryxdesign/core/Divider'
 import {FormLayout} from '@astryxdesign/core/FormLayout'
@@ -16,15 +15,9 @@ import MagnifyingGlassIcon from '@heroicons/react/24/outline/MagnifyingGlassIcon
 import ServerStackIcon from '@heroicons/react/24/outline/ServerStackIcon'
 import {invoke} from '../../services/desktop'
 import {
-    cancelChatGptLogin,
-    loginChatGpt,
-    logoutChatGpt,
-    respondChatGptLogin
-} from '../../services/chatgpt-auth'
-import {commandErrorMessage} from '../../utils/command-error'
-import {
     activeConnection,
     thinkingLevelsFor,
+    TYPED_DRIVER_SECRETS,
     SEARCH_PROVIDERS,
     SEARCH_PROVIDERS_NEEDING_KEY,
     SEARCH_PROVIDER_LABELS,
@@ -36,7 +29,6 @@ import {
     minutesLabel,
     retriesLabel,
     secondsLabel,
-    selectAiDriver,
     stepsLabel
 } from '../../models/settings'
 import type {
@@ -50,27 +42,24 @@ import type {
 } from '../../models/settings'
 import {settingsRequest} from '../../models/settings-draft'
 import {StoredKeyField} from './StoredKeyField'
-import type {TypedSecret} from './StoredKeyField'
+import {useChatGptLogin} from './use-chatgpt-login'
+import {useModelCatalogue} from './use-model-catalogue'
 import {SETTINGS_GRID_COLUMNS, settingsBanner} from './settings-view'
 import type {SettingsTabView, SettingsView} from './settings-view'
 
 const SUBAGENT_INHERITS = 'inherit'
 
-const HOSTED_DRIVERS: Partial<
-    Record<
-        AiConnectionType,
-        Readonly<{
-            secret: TypedSecret
-            awaiting: string
-            listed: string
-            answered: string
-            ceiling: string
-            accepts: string
-        }>
-    >
-> = {
+/** What a hosted driver's own catalogue answers, in the words its page says it in. */
+type HostedDriverCopy = Readonly<{
+    awaiting: string
+    listed: string
+    answered: string
+    ceiling: string
+    accepts: string
+}>
+
+const HOSTED_DRIVERS: Partial<Record<AiConnectionType, HostedDriverCopy>> = {
     openrouter: {
-        secret: 'openrouter',
         awaiting: 'OpenRouter has not answered with its catalogue yet.',
         listed: 'Only models that can call tools are listed. The rest cannot run Gofer.',
         answered: "OpenRouter's catalogue answers this, so there is nothing to type.",
@@ -78,7 +67,6 @@ const HOSTED_DRIVERS: Partial<
         accepts: 'What this model takes as input, as OpenRouter describes it.'
     },
     cerebras: {
-        secret: 'cerebras',
         awaiting: 'Cerebras has not answered with its model list yet.',
         listed: 'Only models Gofer holds measured capabilities for are listed, because Cerebras publishes none.',
         answered: 'Measured against the live endpoint, so there is nothing to type.',
@@ -95,98 +83,17 @@ export function useAiTab(view: SettingsView): AiTabView {
     const draft = state.settings
     const connection = draft && activeConnection(draft.ai)
     const hosted = draft && HOSTED_DRIVERS[draft.ai.connectionType]
+    // Which key box a hosted driver shows is the pairing, and the pairing is one generated row.
+    // Absent for a driver that signs in, which is the same absence `hosted` already turns on.
+    const hostedSecret = draft && TYPED_DRIVER_SECRETS[draft.ai.connectionType]
     const needsSearchKey = SEARCH_PROVIDERS_NEEDING_KEY.includes(
         draft?.ai.web.searchProvider ?? 'exa'
     )
     const subagentConnection = draft?.ai.subagent.connection
-    const driver = draft?.ai.connectionType
-    const subagentDriver = subagentConnection?.connectionType
 
-    const modelsFor = useRef<string | undefined>(undefined)
-    const subagentModelsFor = useRef<string | undefined>(undefined)
-    const modelsRequest = useRef(0)
-    const subagentModelsRequest = useRef(0)
-
-    const [isAuthenticating, setIsAuthenticating] = useState(false)
-    const [loginMessage, setLoginMessage] = useState<string | undefined>(undefined)
-    const [manualCode, setManualCode] = useState('')
-    const [needsManualCode, setNeedsManualCode] = useState(false)
-
-    const loadModels = useEffectEvent((asked: AiConnectionType) => {
-        if (!draft) return
-        if (modelsFor.current === asked) return
-        const asking = modelsRequest.current + 1
-        modelsRequest.current = asking
-        modelsFor.current = asked
-        const request = settingsRequest(state)
-        if (!request) return
-        const isChatGpt = asked === 'openai-codex'
-        void invoke('list_ai_models', {request})
-            .then(models => {
-                if (modelsRequest.current !== asking) return
-                dispatch({type: 'models-listed', models})
-                const configured = models.find(
-                    model => model.id === activeConnection(draft.ai)?.model.id
-                )
-                if (configured) dispatch({type: 'model-reconciled', model: configured})
-                else if (isChatGpt && models[0]) dispatch({type: 'model-chosen', model: models[0]})
-            })
-            .catch((error: unknown) => {
-                if (modelsRequest.current !== asking) return
-                modelsFor.current = undefined
-                if (!isChatGpt) return
-                dispatch({
-                    type: 'noticed',
-                    tab: 'ai',
-                    notice: {
-                        status: 'error',
-                        title: 'ChatGPT models could not be loaded',
-                        description: commandErrorMessage(error)
-                    }
-                })
-            })
-    })
-
-    useEffect(() => {
-        if (!driver) return
-        loadModels(driver)
-    }, [driver])
-
-    const loadSubagentModels = useEffectEvent((asked: AiConnectionType) => {
-        if (!draft || !subagentConnection) return
-        if (subagentModelsFor.current === asked) return
-        const asking = subagentModelsRequest.current + 1
-        subagentModelsRequest.current = asking
-        subagentModelsFor.current = asked
-        const request = settingsRequest(state)
-        if (!request) return
-        const ai = selectAiDriver(draft.ai, asked)
-        void invoke('list_ai_models', {request: {...request, settings: {...draft, ai}}})
-            .then(models => {
-                if (subagentModelsRequest.current !== asking) return
-                dispatch({type: 'subagent-models-listed', models})
-                const chosen = models.find(model => model.id === subagentConnection.model.id)
-                if (chosen) dispatch({type: 'subagent-model-reconciled', model: chosen})
-            })
-            .catch((error: unknown) => {
-                if (subagentModelsRequest.current !== asking) return
-                subagentModelsFor.current = undefined
-                dispatch({
-                    type: 'noticed',
-                    tab: 'ai',
-                    notice: {
-                        status: 'error',
-                        title: "The sub-agent's models could not be loaded",
-                        description: commandErrorMessage(error)
-                    }
-                })
-            })
-    })
-
-    useEffect(() => {
-        if (!subagentDriver) return
-        loadSubagentModels(subagentDriver)
-    }, [subagentDriver])
+    useModelCatalogue(view, 'main')
+    useModelCatalogue(view, 'subagent')
+    const login = useChatGptLogin(view)
 
     const updateAi = (update: Partial<AiSettings>) => {
         dispatch({type: 'ai-changed', update})
@@ -233,82 +140,6 @@ export function useAiTab(view: SettingsView): AiTabView {
         dispatch({type: 'model-chosen', model})
     }
 
-    const startChatGptLogin = async (method: 'browser' | 'device_code') => {
-        setIsAuthenticating(true)
-        setNeedsManualCode(false)
-        setManualCode('')
-        setLoginMessage('Starting ChatGPT sign-in…')
-        try {
-            await loginChatGpt(method, {
-                onEvent: event => {
-                    if (event.type === 'info') setLoginMessage(event.message)
-                    if (event.type === 'auth_url') setLoginMessage(event.instructions)
-                    if (event.type === 'device_code')
-                        setLoginMessage(`Enter code ${event.userCode} in the opened browser.`)
-                    if (event.type === 'progress') setLoginMessage(event.message)
-                    if (event.type === 'manual-code-request') {
-                        setNeedsManualCode(true)
-                        setLoginMessage(
-                            'If the browser does not return to Gofer, paste its final redirect URL.'
-                        )
-                    }
-                    if (event.type === 'failed') setLoginMessage(event.message)
-                }
-            })
-            dispatch({type: 'chatgpt-auth-changed', isAuthenticated: true})
-            setNeedsManualCode(false)
-            setLoginMessage('Signed in with ChatGPT.')
-            dispatch({
-                type: 'noticed',
-                tab: 'ai',
-                notice: {
-                    status: 'success',
-                    title: 'ChatGPT connected',
-                    description: 'Your subscription can now drive Gofer.'
-                }
-            })
-        } catch (error) {
-            dispatch({
-                type: 'noticed',
-                tab: 'ai',
-                notice: {
-                    status: 'error',
-                    title: 'ChatGPT sign-in failed',
-                    description: commandErrorMessage(error)
-                }
-            })
-        } finally {
-            setIsAuthenticating(false)
-        }
-    }
-
-    const signOutChatGpt = async () => {
-        try {
-            await logoutChatGpt()
-            dispatch({type: 'chatgpt-auth-changed', isAuthenticated: false})
-            setLoginMessage(undefined)
-            dispatch({
-                type: 'noticed',
-                tab: 'ai',
-                notice: {
-                    status: 'success',
-                    title: 'Signed out of ChatGPT',
-                    description: 'The local model configuration is unchanged.'
-                }
-            })
-        } catch (error) {
-            dispatch({
-                type: 'noticed',
-                tab: 'ai',
-                notice: {
-                    status: 'error',
-                    title: 'ChatGPT sign-out failed',
-                    description: commandErrorMessage(error)
-                }
-            })
-        }
-    }
-
     return {
         body: (
             <VStack gap={8}>
@@ -345,7 +176,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                                     description='Your own server or a hosted provider. Only a driver that has somewhere to run is offered.'
                                     options={driverOptions(draft.ai)}
                                     onChange={connectionType => {
-                                        modelsFor.current = undefined
                                         dispatch({
                                             type: 'ai-driver-chosen',
                                             connectionType:
@@ -417,11 +247,13 @@ export function useAiTab(view: SettingsView): AiTabView {
                                     </>
                                 : hosted ?
                                     <>
-                                        <StoredKeyField
-                                            secret={hosted.secret}
-                                            draft={keys[hosted.secret]}
-                                            dispatch={dispatch}
-                                        />
+                                        {hostedSecret && (
+                                            <StoredKeyField
+                                                secret={hostedSecret}
+                                                draft={keys[hostedSecret]}
+                                                dispatch={dispatch}
+                                            />
+                                        )}
                                         <Selector
                                             label='Model'
                                             value={connection.model.id}
@@ -488,51 +320,46 @@ export function useAiTab(view: SettingsView): AiTabView {
                                                 <Button
                                                     label='Sign out of ChatGPT'
                                                     variant='secondary'
-                                                    isDisabled={isAuthenticating}
-                                                    clickAction={signOutChatGpt}
+                                                    isDisabled={login.isAuthenticating}
+                                                    clickAction={login.signOut}
                                                 />
                                             :   <>
                                                     <Button
                                                         label='Sign in with ChatGPT'
                                                         variant='secondary'
-                                                        isLoading={isAuthenticating}
-                                                        clickAction={() =>
-                                                            startChatGptLogin('browser')
-                                                        }
+                                                        isLoading={login.isAuthenticating}
+                                                        clickAction={() => login.signIn('browser')}
                                                     />
                                                     <Button
                                                         label='Use device code'
                                                         variant='ghost'
-                                                        isDisabled={isAuthenticating}
+                                                        isDisabled={login.isAuthenticating}
                                                         clickAction={() =>
-                                                            startChatGptLogin('device_code')
+                                                            login.signIn('device_code')
                                                         }
                                                     />
                                                 </>
                                             }
                                         </HStack>
-                                        {loginMessage && (
-                                            <Text color='secondary'>{loginMessage}</Text>
+                                        {login.message && (
+                                            <Text color='secondary'>{login.message}</Text>
                                         )}
-                                        {needsManualCode && (
+                                        {login.needsManualCode && (
                                             <HStack
                                                 gap={2}
                                                 vAlign='end'
                                             >
                                                 <TextInput
                                                     label='Redirect URL or authorization code'
-                                                    value={manualCode}
+                                                    value={login.manualCode}
                                                     description='Use this only when the browser could not return to Gofer automatically.'
-                                                    onChange={setManualCode}
+                                                    onChange={login.typeManualCode}
                                                 />
                                                 <Button
                                                     label='Complete sign-in'
                                                     variant='secondary'
-                                                    isDisabled={!manualCode.trim()}
-                                                    clickAction={async () => {
-                                                        await respondChatGptLogin(manualCode)
-                                                        setNeedsManualCode(false)
-                                                    }}
+                                                    isDisabled={!login.manualCode.trim()}
+                                                    clickAction={login.submitManualCode}
                                                 />
                                             </HStack>
                                         )}
@@ -672,7 +499,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         ...driverOptions(draft.ai)
                                     ]}
                                     onChange={connectionType => {
-                                        subagentModelsFor.current = undefined
                                         dispatch({
                                             type: 'subagent-driver-chosen',
                                             connectionType:
@@ -917,8 +743,6 @@ export function useAiTab(view: SettingsView): AiTabView {
                     </HStack>
                 </LayoutFooter>
             :   undefined,
-        cancelPendingLogin: () => {
-            if (isAuthenticating) void cancelChatGptLogin()
-        }
+        cancelPendingLogin: login.cancel
     }
 }

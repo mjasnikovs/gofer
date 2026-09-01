@@ -127,20 +127,41 @@ function checkKind(path, entry, param) {
     }
 }
 
+/** The addon script a `module` names, as a PascalCase preload constant. */
+function moduleConstant(module) {
+    return module.replace(/(^|_)([a-z])/gu, (_all, _sep, letter) => letter.toUpperCase())
+}
+
 async function catalogue() {
     const path = 'protocol/schemas/v2/commands.json'
-    const addon = await read('src-tauri/addon/plugin.gd')
     const {commands} = JSON.parse(await read(path))
     if (!Array.isArray(commands) || commands.length === 0)
         throw new Error(`${path} lists no commands`)
-    return commands.map(({command, handler}) => {
-        const signature = addon.match(new RegExp(`^func ${handler}\\(([^)]*)\\) ->`, 'mu'))?.[1]
-        if (signature === undefined)
-            throw new Error(
-                `${path} binds ${command} to ${handler}, which src-tauri/addon/plugin.gd does not define`
-            )
-        return {command, handler, takesParams: signature.trim().length > 0}
-    })
+    const sources = new Map()
+    const sourceOf = async module => {
+        const file = `src-tauri/addon/${module ?? 'plugin'}.gd`
+        if (!sources.has(file)) sources.set(file, await read(file))
+        return {file, source: sources.get(file)}
+    }
+    return await Promise.all(
+        commands.map(async ({command, handler, module}) => {
+            const {file, source} = await sourceOf(module)
+            const declared = module ? 'static func' : 'func'
+            const signature = source.match(
+                new RegExp(`^${declared} ${handler}\\(([^)]*)\\) ->`, 'mu')
+            )?.[1]
+            if (signature === undefined)
+                throw new Error(
+                    `${path} binds ${command} to ${handler}, which ${file} does not define`
+                )
+            return {
+                command,
+                handler,
+                module,
+                takesParams: signature.trim().length > 0
+            }
+        })
+    )
 }
 
 async function registeredDesktopCommands() {
@@ -183,9 +204,25 @@ function replaceRegion(text, path, comment, name, body) {
 
 async function driverCatalogue() {
     const path = 'protocol/drivers.json'
-    const {drivers} = JSON.parse(await read(path))
+    const {drivers, secrets} = JSON.parse(await read(path))
     if (!Array.isArray(drivers) || drivers.length === 0)
         throw new Error(`${path} declares no drivers`)
+    if (!Array.isArray(secrets) || secrets.length === 0)
+        throw new Error(`${path} declares no secrets`)
+    const slots = new Set()
+    for (const secret of secrets) {
+        for (const key of ['id', 'variant', 'username', 'noun'])
+            if (typeof secret[key] !== 'string' || secret[key].trim() === '')
+                throw new Error(`${path}: a secret has no ${key}`)
+        if (!['api-key', 'oauth'].includes(secret.kind))
+            throw new Error(`${path}: ${secret.id} is neither an api-key nor an oauth credential`)
+        if (!['refused', 'clears'].includes(secret.blank))
+            throw new Error(`${path}: ${secret.id} does not say what an empty box means`)
+        if (slots.has(secret.username))
+            throw new Error(`${path}: two secrets share the keyring slot ${secret.username}`)
+        slots.add(secret.username)
+    }
+    const known = new Set(secrets.map(secret => secret.id))
     const seen = new Map()
     for (const driver of drivers) {
         for (const key of ['id', 'variant', 'label', 'shortName', 'note'])
@@ -203,6 +240,8 @@ async function driverCatalogue() {
         }
         if (driver.providerId !== null && typeof driver.providerId !== 'string')
             throw new Error(`${path}: ${driver.id} has neither a provider id nor an honest null`)
+        if (!known.has(driver.secret))
+            throw new Error(`${path}: ${driver.id} authenticates with no secret this file lists`)
     }
     const shipped = drivers.filter(driver => driver.providerId === null)
     if (shipped.length !== 1 || shipped[0].id !== 'openai-codex')
@@ -211,7 +250,35 @@ async function driverCatalogue() {
                 shipped.map(one => one.id).join(', ') || 'nothing'
             } declines a provider id`
         )
-    return drivers
+    return {drivers, secrets}
+}
+
+async function turnRetryCatalogue() {
+    const path = 'protocol/turn-retry.json'
+    const {bounds} = JSON.parse(await read(path))
+    if (!Array.isArray(bounds) || bounds.length === 0) throw new Error(`${path} declares no bounds`)
+    for (const bound of bounds) {
+        if (typeof bound.name !== 'string' || !/^[a-zA-Z]+$/u.test(bound.name))
+            throw new Error(`${path}: a bound has no name`)
+        if (!Number.isInteger(bound.value) || bound.value < 0)
+            throw new Error(`${path}: ${bound.name} is not a whole number of its own unit`)
+        if (typeof bound.note !== 'string' || bound.note.trim() === '')
+            throw new Error(`${path}: ${bound.name} does not say why it is what it is`)
+    }
+    return bounds
+}
+
+function nodeTurnRetry(bounds) {
+    const rows = bounds
+        .map(
+            bound =>
+                `${wrapPrefixed(bound.note, '    // ', 100)}\n    ${bound.name}: ${grouped(bound.value)}`
+        )
+        .join(',\n')
+    return (
+        '/** What a parent turn does when the provider fails. Overridden per call, never per file. */\n'
+        + `export const TURN_RETRY = {\n${rows}\n}\n`
+    )
 }
 
 async function subagentBoundsCatalogue() {
@@ -295,8 +362,8 @@ function gdMutating(names) {
 function gdDispatch(commands) {
     const cases = commands
         .map(
-            ({command, handler, takesParams}) =>
-                `        "${command}":\n            return ${handler}(${takesParams ? 'params' : ''})\n`
+            ({command, handler, module, takesParams}) =>
+                `        "${command}":\n            return ${module ? `${moduleConstant(module)}.` : ''}${handler}(${takesParams ? 'params' : ''})\n`
         )
         .join('')
     return `    match command:\n${cases}    return Params.unknown_command_error(command)\n`
@@ -503,7 +570,74 @@ function rustDrivers(drivers) {
     )
 }
 
-function typescriptDrivers(drivers) {
+/// Everything about a stored secret that used to be a match per question, and the one pairing
+/// — which credential a driver authenticates with — that used to be written down five times.
+function rustSecrets(drivers, secrets) {
+    const arm = (of, to) => `        Self::${of} => ${to},\n`
+    const ids = secrets.map(secret => arm(secret.variant, rustString(secret.id))).join('')
+    const usernames = secrets
+        .map(secret => arm(secret.variant, rustString(secret.username)))
+        .join('')
+    const nouns = secrets.map(secret => arm(secret.variant, rustString(secret.noun))).join('')
+    const blanks = secrets
+        .map(secret =>
+            arm(secret.variant, `Blank::${secret.blank === 'clears' ? 'Clears' : 'Refused'}`)
+        )
+        .join('')
+    const keys = secrets.map(secret => arm(secret.variant, secret.kind === 'api-key')).join('')
+    const order = secrets.map(secret => `Self::${secret.variant}`).join(', ')
+    const froms = secrets
+        .map(secret => `            ${rustString(secret.id)} => Some(Self::${secret.variant}),\n`)
+        .join('')
+    const pairing = drivers
+        .map(driver => {
+            const secret = secrets.find(one => one.id === driver.secret)
+            return `        AiConnectionType::${driver.variant} => Secret::${secret.variant},\n`
+        })
+        .join('')
+    return (
+        'impl Secret {\n'
+        + '    /// The word a request and a response key this secret by.\n'
+        + "    pub(crate) const fn id(self) -> &'static str {\n"
+        + `        match self {\n${ids}        }\n`
+        + '    }\n\n'
+        + '    /// The username this secret is stored under, beneath the one service. A second\n'
+        + '    /// username is how one keyring holds more than one secret.\n'
+        + "    pub(super) const fn username(self) -> &'static str {\n"
+        + `        match self {\n${usernames}        }\n`
+        + '    }\n\n'
+        + '    /// What this secret is called in the one sentence a user ever reads about it.\n'
+        + "    pub(super) const fn noun(self) -> &'static str {\n"
+        + `        match self {\n${nouns}        }\n`
+        + '    }\n\n'
+        + '    /// What an empty box means, which is not the same answer for all of them.\n'
+        + '    pub(super) const fn blank(self) -> Blank {\n'
+        + `        match self {\n${blanks}        }\n`
+        + '    }\n\n'
+        + '    /// Whether a request carries a bearer token from this, or a login writes it.\n'
+        + '    pub(crate) const fn is_api_key(self) -> bool {\n'
+        + `        match self {\n${keys}        }\n`
+        + '    }\n\n'
+        + '    /// The secret one wire word names, or nothing when the word names none.\n'
+        + '    pub(crate) fn from_id(word: &str) -> Option<Self> {\n'
+        + `        match word {\n${froms}            _ => None,\n        }\n`
+        + '    }\n\n'
+        + '    /// Every secret Gofer keeps, in the order a save writes them.\n'
+        + `    pub(crate) const ORDER: [Self; ${secrets.length}] = [${order}];\n`
+        + '}\n\n'
+        + '/// The one credential a driver authenticates with.\n'
+        + '///\n'
+        + '/// A key sent to the wrong address is a key handed to a machine that was never meant to\n'
+        + '/// see it. This pairing was a match here, a second match in `catalogue.rs`, a table in a\n'
+        + '/// React file and two record literals in a hook; it is one row of `protocol/drivers.json`\n'
+        + '/// now, and every one of those is a lookup.\n'
+        + 'pub(crate) const fn driver_secret(driver: AiConnectionType) -> Secret {\n'
+        + `    match driver {\n${pairing}    }\n`
+        + '}\n'
+    )
+}
+
+function typescriptDrivers(drivers, secrets) {
     const union = drivers.map(driver => `'${driver.id}'`).join(' | ')
     const listed = drivers.map(driver => `    '${driver.id}'`).join(',\n')
     const labels = drivers
@@ -522,6 +656,57 @@ function typescriptDrivers(drivers) {
         + ' */\n'
         + 'export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = {\n'
         + `${labels}\n`
+        + '}\n\n'
+        + typescriptSecrets(drivers, secrets)
+    )
+}
+
+function typescriptSecrets(drivers, secrets) {
+    const key = id => (/^[a-z][a-z0-9]*$/u.test(id) ? id : `'${id}'`)
+    const union = secrets.map(secret => `'${secret.id}'`).join(' | ')
+    const listed = secrets.map(secret => `    '${secret.id}'`).join(',\n')
+    const typed = secrets.filter(secret => secret.kind === 'api-key')
+    const typedUnion = typed.map(secret => `'${secret.id}'`).join(' | ')
+    const typedListed = typed.map(secret => `    '${secret.id}'`).join(',\n')
+    const pairing = drivers.map(driver => `    ${key(driver.id)}: '${driver.secret}'`).join(',\n')
+    const typedNames = new Set(typed.map(secret => secret.id))
+    const typedPairing = drivers
+        .filter(driver => typedNames.has(driver.secret))
+        .map(driver => `    ${key(driver.id)}: '${driver.secret}'`)
+        .join(',\n')
+    return (
+        'export type SecretName = '
+        + union
+        + '\n\n'
+        + '/** Every secret Gofer keeps, in the order a save writes them. */\n'
+        + `export const SECRET_NAMES: readonly SecretName[] = [\n${listed}\n]\n\n`
+        + '/**\n'
+        + ' * The secrets a person types into a box, which is every one but the OAuth credential.\n'
+        + ' *\n'
+        + ' * A ChatGPT credential is written by its login, so a settings save that named it would\n'
+        + ' * be saying something the page cannot mean.\n'
+        + ' */\n'
+        + `export type TypedSecret = ${typedUnion}\n\n`
+        + `export const TYPED_SECRET_NAMES: readonly TypedSecret[] = [\n${typedListed}\n]\n\n`
+        + '/**\n'
+        + ' * The one credential each driver authenticates with.\n'
+        + ' *\n'
+        + ' * A key sent to the wrong address is a key handed to a machine that was never meant to\n'
+        + ' * see it, so this pairing is one row of `protocol/drivers.json` and every reader of it is\n'
+        + ' * a lookup. It used to be a match in Rust, a second match in another Rust file, a table in\n'
+        + ' * this renderer and two hand-written record literals in a hook.\n'
+        + ' */\n'
+        + 'export const AI_CONNECTION_SECRETS: Readonly<Record<AiConnectionType, SecretName>> = {\n'
+        + `${pairing}\n`
+        + '}\n\n'
+        + '/**\n'
+        + ' * The same pairing, narrowed to the drivers whose secret is typed into a box.\n'
+        + ' *\n'
+        + ' * A driver that signs in has no box, so it has no entry — and a page that draws one\n'
+        + ' * reads `undefined` rather than being handed a slot that belongs to another driver.\n'
+        + ' */\n'
+        + 'export const TYPED_DRIVER_SECRETS: Partial<Readonly<Record<AiConnectionType, TypedSecret>>> = {\n'
+        + `${typedPairing}\n`
         + '}\n'
     )
 }
@@ -535,6 +720,7 @@ function nodeDrivers(drivers) {
         .map(driver => `    ${key(driver.id)}: '${driver.providerId}'`)
         .join(',\n')
     const names = drivers.map(driver => `    ${key(driver.id)}: '${driver.shortName}'`).join(',\n')
+    const slots = drivers.map(driver => `    ${key(driver.id)}: '${driver.secret}'`).join(',\n')
     const hosted = drivers.filter(
         driver => driver.providerId !== null && driver.id !== 'openai-compatible'
     )
@@ -545,6 +731,15 @@ function nodeDrivers(drivers) {
         + `const PROVIDER_IDS = {\n${ids}\n}\n\n`
         + '/** What each driver is called in the one sentence a user reads about its connection. */\n'
         + `const DRIVER_NAMES = {\n${names}\n}\n\n`
+        + '/**\n'
+        + ' * Which stored secret each driver authenticates with.\n'
+        + ' *\n'
+        + ' * A key used to reach the worker as its own named field, so the name had to be spelt\n'
+        + ' * the same on both sides of the process boundary and a driver whose field nobody\n'
+        + ' * passed registered with no key at all. The request carries a map keyed by slot now,\n'
+        + ' * and this is the lookup into it.\n'
+        + ' */\n'
+        + `export const DRIVER_SECRETS = {\n${slots}\n}\n\n`
         + '/**\n'
         + ' * The hosted drivers `createModelContext` has to build a provider for, in order.\n'
         + ' *\n'
@@ -595,7 +790,8 @@ export async function generateSurfaces() {
     const {operations: parameters, vocabularies} = await parameterCatalogue()
     const subagentBounds = await subagentBoundsCatalogue()
     const cerebrasModels = await cerebrasModelCatalogue()
-    const drivers = await driverCatalogue()
+    const {drivers, secrets} = await driverCatalogue()
+    const turnRetry = await turnRetryCatalogue()
 
     const declared = new Set(commands.map(entry => entry.command))
     for (const name of mutating) {
@@ -659,11 +855,17 @@ export async function generateSurfaces() {
             ]
         },
         {
+            path: 'src-tauri/src/settings/secrets.rs',
+            comment: '//',
+            rustfmt: true,
+            regions: [{name: 'secrets', body: rustSecrets(drivers, secrets)}]
+        },
+        {
             path: 'src/models/settings.ts',
             comment: '//',
             regions: [
                 {name: 'subagent-bounds', body: typescriptSubagentBounds(subagentBounds)},
-                {name: 'drivers', body: typescriptDrivers(drivers)}
+                {name: 'drivers', body: typescriptDrivers(drivers, secrets)}
             ]
         },
         {
@@ -682,7 +884,10 @@ export async function generateSurfaces() {
         {
             path: 'scripts/ai-provider.mjs',
             comment: '//',
-            regions: [{name: 'drivers', body: nodeDrivers(drivers)}]
+            regions: [
+                {name: 'drivers', body: nodeDrivers(drivers)},
+                {name: 'turn-retry', body: nodeTurnRetry(turnRetry)}
+            ]
         },
         {
             path: 'src-tauri/permissions/main-window-commands.toml',

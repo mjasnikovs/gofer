@@ -19,6 +19,8 @@ const Protocol := preload("res://addons/gofer/protocol.gd")
 ## The decisions the commands make before they touch the editor. Needs no editor, so it is loadable
 ## without one — which is what puts every parameter refusal in the fast headless suite.
 const Params := preload("res://addons/gofer/params.gd")
+const ProjectConfig := preload("res://addons/gofer/project_config.gd")
+const RuntimeQueue := preload("res://addons/gofer/runtime_queue.gd")
 
 var _peer: StreamPeerTCP
 var _status: int = -1
@@ -177,12 +179,10 @@ static func _configured_request_timeout_ms() -> int:
 ## `frame_post_draw`, and waiting is all `wait` does. Every other operation answers straight out of
 ## the debugger message pump, which the main loop polls whether or not the game is drawing — which
 ## is why a halted game answers `inspect_node` in milliseconds and leaves these three to expire.
-const FRAME_AWAITING_OPS: Array[String] = ["input", "capture", "wait"]
 
 ## The pending kinds that are waiting on a game the editor has already been told to start, and so
 ## are ended by that game dying. `restart` is not one of them: it is waiting for the *previous*
 ## game to go, and a stopped editor is the thing it wants.
-const LAUNCH_KINDS: Array[String] = ["run", "run_frame"]
 
 ## The commands `_handle_request` routes to the runtime bridge instead of answering synchronously.
 # GENERATED-BEGIN runtime-commands sha256:b96ac9e0ddcf0feb
@@ -206,9 +206,9 @@ const RUNTIME_COMMANDS: Array[String] = [
 ## that carries it.
 const GOFER_PLUGIN_NAME := "gofer"
 ## The autoload Gofer stages; cleanup owns it, so configuration commands refuse to touch it.
-const GOFER_AUTOLOAD_NAME := "GoferRuntime"
+const GOFER_AUTOLOAD_NAME := ProjectConfig.GOFER_AUTOLOAD_NAME
 ## Search results are capped so a broad query cannot exceed the 1 MiB envelope limit.
-const MAX_SEARCH_RESULTS := 50
+const MAX_SEARCH_RESULTS := ProjectConfig.MAX_SEARCH_RESULTS
 
 ## The bounds of a scene-tree dump, and what a call that names none answers with.
 ##
@@ -233,12 +233,6 @@ const MAX_ICON_EDGE := 64
 ## A script class chain is walked this far towards an engine class before the icon lookup gives up.
 const MAX_ICON_BASE_DEPTH := 32
 
-
-## How many rectangles one texture is painted with. Enough for a sprite sheet drawn a tile at a
-## time; past it the caller wanted an image editor.
-const MAX_TEXTURE_RECTS := 512
-
-const MAX_TILESET_TILES := 4096
 const MAX_PAINTED_CELLS := 20000
 ## How many entries one batching command takes. A batch is a single blocking pass over the editor's
 ## main loop, and the reply names every entry, so this is what keeps a runaway list from freezing the
@@ -434,17 +428,14 @@ func _process(_delta: float) -> void:
         else:
             _ready_notified = false
             _playing = false
-            _set_readiness("unavailable")
+            _refresh_readiness()
         return
     if status != StreamPeerTCP.STATUS_CONNECTED:
         return
 
-    if not _ready_notified:
-        if _editor_finished_starting():
-            _ready_notified = true
-            _set_readiness("ready")
-        elif _readiness != "importing":
-            _set_readiness("importing")
+    if not _ready_notified and _editor_finished_starting():
+        _ready_notified = true
+    _refresh_readiness()
 
     _track_play_state()
     _track_edited_scene()
@@ -613,7 +604,7 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
     if declared.has("_gofer_error"):
         return declared
 
-# GENERATED-BEGIN dispatch-table sha256:ba6373f2fd253112
+# GENERATED-BEGIN dispatch-table sha256:7764e25b24871b1f
     match command:
         "session.get_state":
             return _session_state()
@@ -632,29 +623,29 @@ func _dispatch_command(command: String, params: Dictionary, expected_revision: V
         "session.save_all_scenes":
             return _session_save_all_scenes()
         "project.get_settings":
-            return _project_settings()
+            return ProjectConfig.settings()
         "project.search_settings":
-            return _project_search_settings(params)
+            return ProjectConfig.search_settings(params)
         "project.get_setting":
-            return _project_get_setting(params)
+            return ProjectConfig.get_setting(params)
         "project.set_setting":
-            return _project_set_setting(params)
+            return ProjectConfig.set_setting(params)
         "project.reset_setting":
-            return _project_reset_setting(params)
+            return ProjectConfig.reset_setting(params)
         "project.list_autoloads":
-            return _project_list_autoloads()
+            return ProjectConfig.list_autoloads()
         "project.set_autoload":
             return _project_set_autoload(params)
         "project.remove_autoload":
-            return _project_remove_autoload(params)
+            return ProjectConfig.remove_autoload(params)
         "project.list_input_actions":
-            return _project_list_input_actions(params)
+            return ProjectConfig.list_input_actions(params)
         "project.set_input_action":
-            return _project_set_input_action(params)
+            return ProjectConfig.set_input_action(params)
         "project.remove_input_action":
-            return _project_remove_input_action(params)
+            return ProjectConfig.remove_input_action(params)
         "project.reset_input_action":
-            return _project_reset_input_action(params)
+            return ProjectConfig.reset_input_action(params)
         "project.list_plugins":
             return _project_list_plugins()
         "project.set_plugin_enabled":
@@ -820,9 +811,26 @@ func _editor_finished_starting() -> bool:
     _startup_open_settled_frames += 1
     return _startup_open_settled_frames > STARTUP_OPEN_SETTLED_FRAMES
 
-func _set_readiness(readiness: String) -> void:
-    _readiness = readiness
-    _send_event("session.%s" % readiness, {"readiness": readiness})
+## What the session is, from the three things that decide it.
+##
+## Derived rather than assigned. `_scene_create` used to set `importing` and restore `ready` by hand
+## on seven error paths; an eighth early return added without the restore leaves the editor refusing
+## every mutating command `not_ready` for as long as it lives. The acceptance suite has caught that
+## exact wedge once already, from another cause.
+func _derived_readiness() -> String:
+    if _peer == null or _peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+        return "unavailable"
+    if not _ready_notified or not _scene_pending.is_empty():
+        return "importing"
+    return "ready"
+
+## Recomputes readiness and announces it, when it moved.
+func _refresh_readiness() -> void:
+    var derived := _derived_readiness()
+    if derived == _readiness:
+        return
+    _readiness = derived
+    _send_event("session.%s" % derived, {"readiness": derived})
 
 ## Follows the scene the editor opens for itself.
 ##
@@ -1156,63 +1164,38 @@ func _complete_runtime_response(payload: Dictionary) -> void:
             )
         return
 
-## Moves the launch state machine and fails whatever outlived its deadline. This runs even while
-## the RPC link is down: a restart must still start the new game once the old one has stopped.
+## Answers every pending call the game has run out of time for, and starts the one a restart wants.
 ##
-## A launch also ends when the game it started dies. A game that cannot boot — a main scene whose
-## script does not parse is the everyday one — runs for a moment and exits, and the helper that
-## would have answered never loads. Nothing used to notice: the launch sat here on its deadline
-## alone and then answered `runtime_timeout`, "The game did not answer in time", about a game that
-## had been gone for half a minute. That reads as a slow machine, so the agent waits, and the
-## parse error that caused it is never mentioned.
-##
-## The opposite case is answered apart from both. A launch whose deadline passes while the editor is
-## still playing is a game that started and is late, not one that failed, and a caller told it timed
-## out stops the game and starts another — which is the one action that turns a slow start into a
-## lost one.
+## Runs even while the RPC link is down: a restart must still start the new game once the old one
+## has stopped. The two editor reads are here and the arithmetic is not — which of six things a
+## silence means is `RuntimeQueue.sweep`.
 func _sweep_runtime_pending() -> void:
     if _runtime_pending.is_empty():
         return
-    var now := Time.get_ticks_msec()
     var playing := EditorInterface.is_playing_scene()
-    var kept: Array[Dictionary] = []
-    var asking: Variant = null if playing else _editor_dialog()
-    for pending in _runtime_pending:
-        var launching: bool = LAUNCH_KINDS.has(pending["kind"])
-        if launching and playing:
-            pending["seen_playing"] = true
-        if launching and asking != null and not pending.get("seen_playing", false):
-            _respond_dialog_open(pending["id"], asking, true)
-        elif int(pending["deadline"]) < now:
-            if launching and playing:
+    var swept := RuntimeQueue.sweep(
+        _runtime_pending,
+        Time.get_ticks_msec(),
+        playing,
+        null if playing else _editor_dialog()
+    )
+    _runtime_pending.assign(swept["kept"])
+    for answer in swept["answers"]:
+        match str(answer["kind"]):
+            "dialog":
+                _respond_dialog_open(answer["id"], answer["dialog"], true)
+            "result":
+                _respond_result(answer["id"], answer["result"])
+            _:
                 _respond_error(
-                    pending["id"],
-                    "runtime_slow_start",
-                    "The game is running and its helper has not answered yet. Read godot_runtime get_state rather than running it again; stopping it now would throw away a game that is still starting",
-                    true,
-                    {"running": true}
+                    answer["id"],
+                    answer["code"],
+                    answer["message"],
+                    answer["retryable"],
+                    answer["details"]
                 )
-            elif FRAME_AWAITING_OPS.has(str(pending.get("op", ""))):
-                _respond_error(
-                    pending["id"],
-                    "runtime_timeout",
-                    "The game did not answer in time. This call cannot answer until the game draws a frame, and a game can be alive and drawing nothing - godot_runtime inspect_node and get_tree need no frame, so ask one of those: the tree itself means the game is alive and not drawing, and a runtime_broke means the debugger is holding it. If the debugger is holding it, godot_debug stack_trace says where it is stopped",
-                    true
-                )
-            else:
-                _respond_error(pending["id"], "runtime_timeout", "The game did not answer in time", true)
-        elif launching and not playing and pending.get("seen_playing", false):
-            _respond_error(pending["id"], "runtime_not_running", "The game started and then stopped before it was ready; check the editor output for the error that ended it", true)
-        elif pending["kind"] == "stop" and not playing:
-            _respond_result(pending["id"], {"running": false})
-        elif pending["kind"] == "restart" and not playing:
-            _runtime_play()
-            pending["kind"] = "run"
-            pending["seen_playing"] = false
-            kept.append(pending)
-        else:
-            kept.append(pending)
-    _runtime_pending = kept
+    if swept["play"]:
+        _runtime_play()
 
 ## Captures the editor's own viewport, with the windows standing over it drawn back on. A headless
 ## editor has no pixels to read, which is an environment fact rather than a transient failure, so
@@ -1430,8 +1413,7 @@ func _session_cancel(params: Dictionary) -> Dictionary:
         else:
             kept_scenes.append(pending)
     _scene_pending = kept_scenes
-    if cancelled and _scene_pending.is_empty():
-        _set_readiness("ready")
+    _refresh_readiness()
 
     var kept_runtime: Array[Dictionary] = []
     for pending in _runtime_pending:
@@ -1465,7 +1447,7 @@ func _undo() -> Dictionary:
     if not history.undo():
         return _history_error("undo_unavailable", "The editor refused to undo the last action")
     if history.get_version() == before:
-        return _readback_error(
+        return Params.readback_error(
             "session.undo", "a step back through the history", "version %d, unmoved" % before
         )
     _after_history_step()
@@ -1481,7 +1463,7 @@ func _redo() -> Dictionary:
     if not history.redo():
         return _history_error("redo_unavailable", "The editor refused to redo the next action")
     if history.get_version() == before:
-        return _readback_error(
+        return Params.readback_error(
             "session.redo", "a step forward through the history", "version %d, unmoved" % before
         )
     _after_history_step()
@@ -1547,68 +1529,6 @@ func _begin_action(name: String) -> EditorUndoRedoManager:
     manager.force_fixed_history()
     return manager
 
-func _project_settings() -> Dictionary:
-    return {
-        "projectName": ProjectSettings.get_setting_with_override("application/config/name"),
-        "mainScene": ProjectSettings.get_setting_with_override("application/run/main_scene"),
-        "renderingMethod": ProjectSettings.get_setting_with_override("rendering/renderer/rendering_method")
-    }
-
-## Persists project.godot after a configuration change. Returns an error dictionary on failure and
-## an empty one on success, matching the `_gofer_error` convention.
-func _save_project_or_error() -> Dictionary:
-    var error := ProjectSettings.save()
-    if error != OK:
-        return Params.error("project_save_failed", "Could not save project.godot (error %d)" % error)
-    return {}
-
-## The error a mutating command answers when Godot does not hold what the command just wrote.
-##
-## Every mutating command ends by asking Godot for the thing it named — the setting, the node, the
-## file — and reports that answer rather than the value it still holds in a local variable. A write
-## the engine took and dropped is otherwise indistinguishable from one that worked: `saved: true`
-## came back for a setting Godot never had, and a node reported created was one the scene did not
-## keep. Both values are named here, because knowing only that they differ is not actionable.
-func _readback_error(
-    what: String, wanted: Variant, found: Variant, details: Dictionary = {}
-) -> Dictionary:
-    var described := details.duplicate()
-    described["wanted"] = str(wanted)
-    described["found"] = str(found)
-    return Params.error(
-        "readback_mismatch",
-        (
-            "%s: the write asked for %s and Godot holds %s%s"
-            % [
-                what,
-                str(wanted),
-                str(found),
-                (
-                    Params.instead_of(
-                        String(details.get("property", "")),
-                        wanted,
-                        found,
-                        String(details.get("enumValues", ""))
-                    )
-                    + Params.made_unique(wanted, found)
-                )
-            ]
-        ),
-        described
-    )
-
-## The nodes a save writes: the scene root and every node it owns, by the path the file records.
-##
-## A node the root does not own is not saved at all, so this is also the list a caller's work has to
-## appear in for it to have happened.
-func _owned_paths(root: Node) -> Array[String]:
-    var paths: Array[String] = ["."]
-    for node in root.find_children("*", "", true, false):
-        if node.owner == root:
-            paths.append(String(root.get_path_to(node)))
-    paths.sort()
-    return paths
-
 ## Checks that the file at `path` really holds the tree the editor is editing.
 ##
 ## `EditorInterface.save_scene` answers OK for a save that wrote nothing, and the reply that follows
@@ -1628,9 +1548,9 @@ func _saved_scene_holds(path: String, root: Node) -> Dictionary:
     for index in range(state.get_node_count()):
         stored.append(String(state.get_node_path(index)).trim_prefix("./"))
     stored.sort()
-    var editing := _owned_paths(root)
+    var editing := Params.owned_paths(root)
     if stored != editing:
-        return _readback_error(
+        return Params.readback_error(
             "the scene saved to %s" % path,
             ", ".join(editing),
             ", ".join(stored),
@@ -1639,420 +1559,12 @@ func _saved_scene_holds(path: String, root: Node) -> Dictionary:
     return {}
 
 
-## Whether the editor asks for a restart after this setting changes. Custom settings carry no
-## property info and are therefore never restart-required.
-func _restart_required(name: String) -> bool:
-    for info in ProjectSettings.get_property_list():
-        if str(info.get("name", "")) == name:
-            return (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
-    return false
 
-## The Variant type the engine declared a setting with, or `TYPE_NIL` when nothing declared it.
-##
-## Only a declared setting has a default to revert to; a setting the project or Gofer invented
-## reverts to null, which is how the two are told apart. Writing a value of the wrong type into a
-## declared setting is what puts `config/name=5` in project.godot, so the write path refuses it.
-func _declared_setting_type(name: String) -> int:
-    if not ProjectSettings.property_can_revert(name):
-        return TYPE_NIL
-    return typeof(ProjectSettings.property_get_revert(name))
 
-func _project_search_settings(params: Dictionary) -> Dictionary:
-    var wanted := Params.words_of(str(params.get("query", "")))
-    var matches: Array = []
-    var total := 0
-    for info in ProjectSettings.get_property_list():
-        var name := str(info.get("name", ""))
-        if name.is_empty() or not ProjectSettings.has_setting(name):
-            continue
-        if not Params.name_holds_every_word(name, wanted):
-            continue
-        total += 1
-        if matches.size() < MAX_SEARCH_RESULTS:
-            matches.append(
-                {
-                    "name": name,
-                    "value": Protocol.encode(ProjectSettings.get_setting(name)),
-                    "restartRequired": (int(info.get("usage", 0)) & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0
-                }
-            )
-    return {"settings": matches, "totalMatches": total, "truncated": total > matches.size()}
-
-func _project_get_setting(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    if name.is_empty():
-        return Params.error("invalid_params", "project.get_setting requires name")
-    if not ProjectSettings.has_setting(name):
-        return Params.error(
-            "setting_not_found",
-            (
-                "Project setting '%s' does not exist. project.search_settings takes the words you "
-                + "would say — every one of them has to be in the name, in any order — and answers "
-                + "the names that are really there."
-            ) % name,
-            {"name": name}
-        )
-    return {
-        "name": name,
-        "value": Protocol.encode(ProjectSettings.get_setting(name)),
-        "restartRequired": _restart_required(name)
-    }
-
-func _project_set_setting(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    if name.is_empty() or not params.has("value"):
-        return Params.error("invalid_params", "project.set_setting requires name and value")
-    var typed := Params.reserved_setting_command(name)
-    if not typed.is_empty():
-        return Params.error(
-            "reserved_setting",
-            "'%s' has a typed command; use %s instead" % [name, typed],
-            {"name": name, "command": typed}
-        )
-    var decoded := Protocol.decode(params["value"])
-    if not decoded["ok"]:
-        return Params.error("unsupported_value", decoded["message"], {"name": name})
-    var declared := _declared_setting_type(name)
-    var fitted := Protocol.fit_to_declared_type(decoded["value"], declared)
-    if not fitted["ok"]:
-        return Params.error(
-            "type_mismatch",
-            "Project setting '%s': %s" % [name, fitted["message"]],
-            {"name": name, "expected": type_string(declared)}
-        )
-    var existed := ProjectSettings.has_setting(name)
-    if not existed:
-        var meant := _setting_meant(name)
-        if not meant.is_empty():
-            return Params.error(
-                "setting_not_found",
-                "There is no project setting '%s'. Did you mean '%s'?" % [name, meant],
-                {"name": name, "didYouMean": meant}
-            )
-    ProjectSettings.set_setting(name, fitted["value"])
-    var failure := _save_project_or_error()
-    if not failure.is_empty():
-        return failure
-    var stored: Variant = ProjectSettings.get_setting(name)
-    if not Params.same_value(fitted["value"], stored):
-        return _readback_error("project.set_setting %s" % name, fitted["value"], stored, {"name": name})
-    return {
-        "name": name,
-        "saved": true,
-        "created": not existed,
-        "restartRequired": _restart_required(name)
-    }
-
-## The setting a name was probably meant to be, or "" when there is nothing close.
-##
-## Godot names its settings `section/key`, and a caller that writes them with dots gets a brand-new
-## custom setting instead of the built-in one — accepted, saved, and read back, while the setting
-## that governs anything stays untouched. Custom settings are legitimate, so an unknown name is not
-## refused on its own; it is refused only when swapping the separator finds a real one.
-func _setting_meant(name: String) -> String:
-    if not name.contains("."):
-        return ""
-    var candidate := name.replace(".", "/")
-    return candidate if ProjectSettings.has_setting(candidate) else ""
-
-## Restores a setting's default when it has one and removes it otherwise. An autoload, input
-## action, or plugin entry must go through its own removal command.
-func _project_reset_setting(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    if name.is_empty():
-        return Params.error("invalid_params", "project.reset_setting requires name")
-    if not ProjectSettings.has_setting(name):
-        return Params.error(
-            "setting_not_found",
-            (
-                "Project setting '%s' does not exist. project.search_settings takes the words you "
-                + "would say — every one of them has to be in the name, in any order — and answers "
-                + "the names that are really there."
-            ) % name,
-            {"name": name}
-        )
-    var typed := Params.reserved_setting_command(name)
-    if not typed.is_empty():
-        return Params.error(
-            "reserved_setting",
-            "'%s' has a typed command; use %s instead" % [name, typed],
-            {"name": name, "command": typed}
-        )
-    var before: Variant = ProjectSettings.get_setting(name)
-    var wanted: Variant = null
-    if ProjectSettings.property_can_revert(name):
-        wanted = ProjectSettings.property_get_revert(name)
-    ProjectSettings.set_setting(name, wanted)
-    var failure := _save_project_or_error()
-    if not failure.is_empty():
-        return failure
-    var stored: Variant = ProjectSettings.get_setting(name)
-    if not Params.same_value(wanted, stored):
-        return _readback_error("project.reset_setting %s" % name, wanted, stored, {"name": name})
-    return {
-        "name": name,
-        "value": Protocol.encode(stored),
-        "previous": Protocol.encode(before),
-        "changed": not Params.same_value(before, stored),
-        "restartRequired": _restart_required(name)
-    }
-
-func _project_list_autoloads() -> Dictionary:
-    var autoloads: Array = []
-    for info in ProjectSettings.get_property_list():
-        var setting := str(info.get("name", ""))
-        if not setting.begins_with("autoload/"):
-            continue
-        var raw := str(ProjectSettings.get_setting(setting))
-        var enabled := raw.begins_with("*")
-        autoloads.append(
-            {
-                "name": setting.trim_prefix("autoload/"),
-                "path": raw.substr(1) if enabled else raw,
-                "enabled": enabled,
-                "goferManaged": setting == "autoload/" + GOFER_AUTOLOAD_NAME
-            }
-        )
-    return {"autoloads": autoloads}
-
+## The one `project.*` handler the plugin still owns, because the list it appends to is the
+## plugin's: what Gofer added is what Gofer takes back when the session ends.
 func _project_set_autoload(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    var path := str(params.get("path", ""))
-    var enabled := bool(params.get("enabled", true))
-    if name.is_empty() or path.is_empty():
-        return Params.error("invalid_params", "project.set_autoload requires name and path")
-    if not name.is_valid_identifier():
-        return Params.error(
-            "invalid_params", "Autoload name '%s' is not a valid identifier" % name, {"name": name}
-        )
-    if name == GOFER_AUTOLOAD_NAME:
-        return Params.error(
-            "gofer_managed",
-            "The GoferRuntime autoload is managed by Gofer and cleaned up when the session stops"
-        )
-    if not path.begins_with("res://"):
-        return Params.error(
-            "invalid_params", "Autoload path '%s' must start with res://" % path, {"path": path}
-        )
-    if not FileAccess.file_exists(path):
-        return Params.error(
-            "autoload_path_not_found", "No file at '%s'" % path, {"name": name, "path": path}
-        )
-    var entry := ("*" if enabled else "") + path
-    ProjectSettings.set_setting("autoload/" + name, entry)
-    if not _autoloads_added_here.has(name):
-        _autoloads_added_here.append(name)
-    var failure := _save_project_or_error()
-    if not failure.is_empty():
-        return failure
-    var stored := str(ProjectSettings.get_setting("autoload/" + name, ""))
-    if stored != entry:
-        return _readback_error("project.set_autoload %s" % name, entry, stored, {"name": name})
-    return {"name": name, "path": path, "enabled": enabled}
-
-func _project_remove_autoload(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    if name.is_empty():
-        return Params.error("invalid_params", "project.remove_autoload requires name")
-    if name == GOFER_AUTOLOAD_NAME:
-        return Params.error(
-            "gofer_managed",
-            "The GoferRuntime autoload is managed by Gofer and cleaned up when the session stops"
-        )
-    var setting := "autoload/" + name
-    if not ProjectSettings.has_setting(setting):
-        return Params.error("autoload_not_found", "No autoload named '%s'" % name, {"name": name})
-    ProjectSettings.set_setting(setting, null)
-    var failure := _save_project_or_error()
-    if not failure.is_empty():
-        return failure
-    if ProjectSettings.has_setting(setting):
-        return _readback_error(
-            "project.remove_autoload %s" % name,
-            "no autoload",
-            ProjectSettings.get_setting(setting),
-            {"name": name}
-        )
-    return {"name": name, "removed": true}
-
-## The Input Map, with the actions this project chose written out and the engine's own named.
-##
-## Godot registers all 72 of its `ui_*` actions as project settings, events and all, so the whole
-## list is 8,909 characters. Four recorded live runs asked for it and **every one of them got 72
-## actions of which none was the project's** — about 2,200 tokens each of a constant table, for the
-## one fact that the project had declared nothing.
-##
-## What tells them apart is the settings inspector's own revert arrow, and unlike `Node`'s it works:
-## measured on the pinned 4.7.2 against a project declaring `move_left` and overriding `ui_accept`,
-## `property_can_revert` with a value differing from `property_get_revert` named exactly those two
-## of 73. So an overridden built-in is one the project chose and is written out with the rest.
-##
-## `names` answers exactly what it lists, chosen or not, which is how the events of an untouched
-## built-in are read. A name that is not there is refused rather than left out, the rule
-## `node.inspect` and `runtime.inspect_node` both follow.
-func _project_list_input_actions(params: Dictionary) -> Dictionary:
-    var wanted: Array[String] = []
-    for name in params.get("names", []) as Array:
-        wanted.append(str(name))
-    var actions: Array = []
-    var untouched: Array[String] = []
-    for info in ProjectSettings.get_property_list():
-        var setting := str(info.get("name", ""))
-        if not setting.begins_with("input/"):
-            continue
-        if setting.contains("."):
-            continue
-        var data: Variant = ProjectSettings.get_setting(setting)
-        if typeof(data) != TYPE_DICTIONARY:
-            continue
-        var name := setting.trim_prefix("input/")
-        if not wanted.is_empty():
-            if not wanted.has(name):
-                continue
-        elif _is_at_its_engine_default(setting):
-            untouched.append(name)
-            continue
-        actions.append(
-            {
-                "name": name,
-                "deadzone": data.get("deadzone", 0.5),
-                "events": Params.encode_input_events(data.get("events", [])),
-                "builtIn": name.begins_with("ui_")
-            }
-        )
-    if not wanted.is_empty():
-        var answered: Array[String] = []
-        for action in actions:
-            answered.append(str((action as Dictionary)["name"]))
-        for name in wanted:
-            if not answered.has(name):
-                return Params.error(
-                    "action_not_found",
-                    "There is no input action named '%s'. list_input_actions with no names says "
-                    % name
-                    + "which there are.",
-                    {"name": name}
-                )
-    return {"actions": actions, "atEngineDefault": untouched}
-
-## Whether a setting still holds what Godot ships it with.
-func _is_at_its_engine_default(setting: String) -> bool:
-    if not ProjectSettings.property_can_revert(setting):
-        return false
-    return ProjectSettings.get_setting(setting) == ProjectSettings.property_get_revert(setting)
-
-func _project_set_input_action(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    if name.is_empty() or name.contains("/"):
-        return Params.error("invalid_params", "project.set_input_action requires a plain action name")
-    var setting := "input/" + name
-    var existing: Variant = ProjectSettings.get_setting(setting)
-    var current: Dictionary = existing if typeof(existing) == TYPE_DICTIONARY else {}
-    var deadzone := float(params.get("deadzone", current.get("deadzone", 0.5)))
-    var events: Array[InputEvent] = []
-    if params.has("events"):
-        var decoded := Params.decode_input_events(params["events"])
-        if not decoded["ok"]:
-            return Params.error("unsupported_value", decoded["message"], {"name": name})
-        events = decoded["events"]
-    else:
-        events.assign(current.get("events", []))
-    ProjectSettings.set_setting(setting, {"deadzone": deadzone, "events": events})
-    var failure := _save_project_or_error()
-    if not failure.is_empty():
-        return failure
-    var stored: Variant = ProjectSettings.get_setting(setting)
-    if typeof(stored) != TYPE_DICTIONARY:
-        return _readback_error(
-            "project.set_input_action %s" % name, "an action", stored, {"name": name}
-        )
-    var held: Dictionary = stored
-    var held_events: Array = held.get("events", [])
-    if not Params.same_value(deadzone, float(held.get("deadzone", -1.0))):
-        return _readback_error(
-            "project.set_input_action %s deadzone" % name,
-            deadzone,
-            held.get("deadzone", null),
-            {"name": name}
-        )
-    if held_events.size() != events.size():
-        return _readback_error(
-            "project.set_input_action %s events" % name,
-            "%d events" % events.size(),
-            "%d events" % held_events.size(),
-            {"name": name}
-        )
-    return {
-        "name": name,
-        "deadzone": float(held.get("deadzone", deadzone)),
-        "events": Params.encode_input_events(held_events)
-    }
-
-
-
-## Removes an input action from project.godot. A built-in ui_ action cannot be deleted; its
-## binding is changed with `project.set_input_action` and given back with
-## `project.reset_input_action`.
-func _project_remove_input_action(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    if name.is_empty():
-        return Params.error("invalid_params", "project.remove_input_action requires name")
-    var setting := "input/" + name
-    if not ProjectSettings.has_setting(setting):
-        return Params.error(
-            "input_action_not_found", "No input action named '%s'" % name, {"name": name}
-        )
-    if name.begins_with("ui_"):
-        return Params.error(
-            "builtin_input_action",
-            "'%s' is a built-in action; change its binding, or reset it with %s"
-            % [name, "project.reset_input_action"],
-            {"name": name, "command": "project.reset_input_action"}
-        )
-    ProjectSettings.set_setting(setting, null)
-    var failure := _save_project_or_error()
-    if not failure.is_empty():
-        return failure
-    if ProjectSettings.has_setting(setting):
-        return _readback_error(
-            "project.remove_input_action %s" % name,
-            "no action",
-            ProjectSettings.get_setting(setting),
-            {"name": name}
-        )
-    return {"name": name, "removed": true}
-
-## Drops an action's entry from project.godot. A built-in action keeps working on the bindings
-## `InputMap` ships, which is what makes this a revert; a custom action simply disappears, so
-## `remove` is the honest name for it and this command refuses it.
-func _project_reset_input_action(params: Dictionary) -> Dictionary:
-    var name := str(params.get("name", ""))
-    if name.is_empty():
-        return Params.error("invalid_params", "project.reset_input_action requires name")
-    if not name.begins_with("ui_"):
-        return Params.error(
-            "custom_input_action",
-            "'%s' has no built-in binding to return to; remove it with %s"
-            % [name, "project.remove_input_action"],
-            {"name": name, "command": "project.remove_input_action"}
-        )
-    var setting := "input/" + name
-    if not ProjectSettings.has_setting(setting):
-        return Params.error(
-            "input_action_not_found", "No input action named '%s'" % name, {"name": name}
-        )
-    ProjectSettings.set_setting(setting, null)
-    var failure := _save_project_or_error()
-    if not failure.is_empty():
-        return failure
-    if ProjectSettings.has_setting(setting):
-        return _readback_error(
-            "project.reset_input_action %s" % name,
-            "no override",
-            ProjectSettings.get_setting(setting),
-            {"name": name}
-        )
-    return {"name": name, "reset": true, "restartRequired": true}
+    return ProjectConfig.set_autoload(params, _autoloads_added_here)
 
 func _project_list_plugins() -> Dictionary:
     var plugins: Array = []
@@ -2084,12 +1596,12 @@ func _project_set_plugin_enabled(params: Dictionary) -> Dictionary:
     if EditorInterface.is_plugin_enabled(plugin) == enabled:
         return {"plugin": plugin, "enabled": enabled, "changed": false}
     EditorInterface.set_plugin_enabled(plugin, enabled)
-    var failure := _save_project_or_error()
+    var failure := ProjectConfig.save_project_or_error()
     if not failure.is_empty():
         return failure
     var actual := EditorInterface.is_plugin_enabled(plugin)
     if actual != enabled:
-        return _readback_error(
+        return Params.readback_error(
             "project.set_plugin_enabled %s" % plugin, enabled, actual, {"plugin": plugin}
         )
     return {"plugin": plugin, "enabled": actual, "changed": true}
@@ -2150,7 +1662,7 @@ func _editor_set_setting(params: Dictionary) -> Dictionary:
     settings.set_setting(name, decoded["value"])
     var stored: Variant = settings.get_setting(name)
     if not Params.same_value(decoded["value"], stored):
-        return _readback_error("editor.set_setting %s" % name, decoded["value"], stored, {"name": name})
+        return Params.readback_error("editor.set_setting %s" % name, decoded["value"], stored, {"name": name})
     return {"name": name, "machineWide": true, "value": Protocol.encode(stored)}
 
 ## The icons the editor draws beside nodes.
@@ -2562,19 +2074,11 @@ func _import_batch(paths: Array) -> bool:
 ## one node per block, because this was the missing step — and a tileset written by hand is exactly
 ## the file the editor opens as an empty resource with no tiles in it.
 func _resource_create_tileset(params: Dictionary) -> Dictionary:
-    var path := Params.as_resource_path(params.get("path", ""))
-    var texture_path := Params.as_resource_path(params.get("texture", ""))
-    if path.is_empty() or texture_path.is_empty():
-        return Params.error(
-            "invalid_params",
-            "resource.create_tileset requires path and texture",
-        )
-    if not path.ends_with(".tres"):
-        return Params.error(
-            "invalid_params",
-            "A TileSet is saved as a .tres resource, and %s is not one" % path,
-            {"path": path}
-        )
+    var targets := Params.tileset_paths(params)
+    if targets.has("_gofer_error"):
+        return targets
+    var path: String = targets["value"]["path"]
+    var texture_path: String = targets["value"]["texture"]
     if not ResourceLoader.exists(texture_path):
         return Params.error(
             "texture_not_found",
@@ -2593,56 +2097,14 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
             {"texture": texture_path}
         )
 
-    var size_result := Params.tile_size(params)
-    if size_result.has("_gofer_error"):
-        return size_result
-    var tile_size: Vector2i = size_result["value"]
-    var image_size: Vector2i = (texture as Texture2D).get_size()
-    var grid := Vector2i(image_size.x / tile_size.x, image_size.y / tile_size.y)
-    if grid.x < 1 or grid.y < 1:
-        return Params.error(
-            "tile_size_too_large",
-            (
-                "%s is %dx%d, which does not hold one %dx%d tile"
-                % [texture_path, image_size.x, image_size.y, tile_size.x, tile_size.y]
-            ),
-            {"texture": [image_size.x, image_size.y], "tileSize": [tile_size.x, tile_size.y]}
-        )
-
-    var wanted := Params.atlas_coords(params, "tiles", grid)
-    if wanted.has("_gofer_error"):
-        return wanted
-    var tiles: Array = wanted["value"]
-    if tiles.is_empty():
-        for row in range(grid.y):
-            for column in range(grid.x):
-                tiles.append(Vector2i(column, row))
-    if tiles.size() > MAX_TILESET_TILES:
-        return Params.error(
-            "too_many_tiles",
-            "A tileset takes at most %d tiles, and this one asks for %d"
-            % [MAX_TILESET_TILES, tiles.size()],
-            {"limit": MAX_TILESET_TILES}
-        )
-    var solid_param: Variant = params.get("solid", null)
-    var solid: Array = []
-    if typeof(solid_param) == TYPE_STRING and str(solid_param) == "all":
-        solid = tiles.duplicate()
-    elif solid_param != null:
-        var chosen := Params.atlas_coords(params, "solid", grid)
-        if chosen.has("_gofer_error"):
-            return chosen
-        solid = chosen["value"]
-    for coords in solid:
-        if not tiles.has(coords):
-            return Params.error(
-                "tile_not_defined",
-                (
-                    "Tile (%d, %d) is listed as solid but is not one of the tiles being created"
-                    % [coords.x, coords.y]
-                ),
-                {"tile": [coords.x, coords.y]}
-            )
+    var planned := Params.tileset_plan(params, texture_path, (texture as Texture2D).get_size())
+    if planned.has("_gofer_error"):
+        return planned
+    var plan: Dictionary = planned["value"]
+    var tile_size: Vector2i = plan["tileSize"]
+    var grid: Vector2i = plan["grid"]
+    var tiles: Array = plan["tiles"]
+    var solid: Array = plan["solid"]
 
     var tile_set := TileSet.new()
     tile_set.tile_size = tile_size
@@ -2699,16 +2161,16 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
         )
     var saved_set: TileSet = written
     if saved_set.tile_size != tile_size:
-        return _readback_error(
+        return Params.readback_error(
             "resource.create_tileset tileSize", tile_size, saved_set.tile_size, {"path": path}
         )
     if not saved_set.has_source(source_id):
-        return _readback_error(
+        return Params.readback_error(
             "resource.create_tileset source", source_id, "no source", {"path": path}
         )
     var saved_source := saved_set.get_source(source_id)
     if not (saved_source is TileSetAtlasSource):
-        return _readback_error(
+        return Params.readback_error(
             "resource.create_tileset source",
             "an atlas source",
             saved_source.get_class(),
@@ -2717,7 +2179,7 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
     var saved_atlas: TileSetAtlasSource = saved_source
     for coords in tiles:
         if not saved_atlas.has_tile(coords):
-            return _readback_error(
+            return Params.readback_error(
                 "resource.create_tileset tile",
                 "a tile at (%d, %d)" % [coords.x, coords.y],
                 "nothing",
@@ -2725,7 +2187,7 @@ func _resource_create_tileset(params: Dictionary) -> Dictionary:
             )
     for coords in solid:
         if saved_atlas.get_tile_data(coords, 0).get_collision_polygons_count(0) == 0:
-            return _readback_error(
+            return Params.readback_error(
                 "resource.create_tileset collision",
                 "a collision polygon on (%d, %d)" % [coords.x, coords.y],
                 "none",
@@ -2807,7 +2269,7 @@ func _resource_create_shape(params: Dictionary) -> Dictionary:
         )
     var saved_type := (written as Resource).get_class()
     if saved_type != shape_type:
-        return _readback_error("resource.create_shape", shape_type, saved_type, {"path": path})
+        return Params.readback_error("resource.create_shape", shape_type, saved_type, {"path": path})
 
     var answer := {
         "path": path,
@@ -2832,28 +2294,17 @@ func _resource_create_shape(params: Dictionary) -> Dictionary:
 ## has to remember a second call to make the first one mean anything will forget — one live turn
 ## did, and `create_tileset` told it the texture does not exist.
 func _resource_create_texture(params: Dictionary) -> Dictionary:
-    var path := Params.as_resource_path(params.get("path", ""))
-    if path.is_empty():
-        return Params.error("invalid_params", "resource.create_texture requires path and size")
-    if not path.ends_with(".png"):
-        return Params.error(
-            "invalid_params",
-            "A texture is saved as a .png, and %s is not one" % path,
-            {"path": path}
-        )
-    var measured := Params.texture_size(params.get("size", null))
-    if measured.has("_gofer_error"):
-        return measured
-    var size: Vector2i = measured["value"]
-    var ground := _texture_background(params)
-    if ground.has("_gofer_error"):
-        return ground
+    var planned := Params.texture_plan(params)
+    if planned.has("_gofer_error"):
+        return planned
+    var plan: Dictionary = planned["value"]
+    var path: String = plan["path"]
+    var size: Vector2i = plan["size"]
 
     var image := Image.create(size.x, size.y, false, Image.FORMAT_RGBA8)
-    image.fill(ground["value"])
-    var painted := _paint_texture_rects(image, size, params.get("rects", null))
-    if painted.has("_gofer_error"):
-        return painted
+    image.fill(plan["background"])
+    for rect: Dictionary in plan["rects"]:
+        image.fill_rect(rect["area"], rect["color"])
 
     var folder := path.get_base_dir()
     if not DirAccess.dir_exists_absolute(folder):
@@ -2888,95 +2339,6 @@ func _resource_create_texture(params: Dictionary) -> Dictionary:
         },
     }}
 
-
-## What the image starts as. Transparent without a `background`, so a sprite has no square round it.
-func _texture_background(params: Dictionary) -> Dictionary:
-    if not params.has("background") or params["background"] == null:
-        return {"value": Color(0.0, 0.0, 0.0, 0.0)}
-    return _as_color(params["background"])
-
-## Fills each named rectangle over the background, in the order they were named.
-func _paint_texture_rects(image: Image, size: Vector2i, raw: Variant) -> Dictionary:
-    if raw == null:
-        return {}
-    if typeof(raw) != TYPE_ARRAY:
-        return Params.error(
-            "invalid_params",
-            "resource.create_texture takes rects as a list, and %s is not one" % str(raw)
-        )
-    var listed: Array = raw
-    if listed.size() > MAX_TEXTURE_RECTS:
-        return Params.error(
-            "too_many_rects",
-            (
-                "One texture is painted with at most %d rects, and this one names %d"
-                % [MAX_TEXTURE_RECTS, listed.size()]
-            ),
-            {"limit": MAX_TEXTURE_RECTS}
-        )
-    var canvas := Rect2i(Vector2i.ZERO, size)
-    for entry: Variant in listed:
-        if typeof(entry) != TYPE_DICTIONARY:
-            return Params.error(
-                "invalid_params",
-                "Each rects entry is an object, and %s is not one" % str(entry)
-            )
-        var rect: Dictionary = entry
-        for key in ["x", "y", "width", "height", "color"]:
-            if not rect.has(key):
-                return Params.error(
-                    "invalid_params",
-                    "Each rects entry requires x, y, width, height and color"
-                )
-        var colour := _as_color(rect["color"])
-        if colour.has("_gofer_error"):
-            return colour
-        var area := Rect2i(
-            int(rect["x"]), int(rect["y"]), int(rect["width"]), int(rect["height"])
-        )
-        if area.size.x < 1 or area.size.y < 1:
-            return Params.error(
-                "invalid_params",
-                (
-                    "A rects entry covers at least one pixel, and %dx%d covers none"
-                    % [area.size.x, area.size.y]
-                )
-            )
-        var drawn := area.intersection(canvas)
-        if drawn.size.x < 1 or drawn.size.y < 1:
-            return Params.error(
-                "invalid_params",
-                (
-                    "A rects entry at %d,%d %dx%d falls entirely outside a %dx%d texture"
-                    % [area.position.x, area.position.y, area.size.x, area.size.y, size.x, size.y]
-                )
-            )
-        image.fill_rect(drawn, colour["value"])
-    return {}
-
-## One colour, written as a name or as a hex string.
-##
-## `Color.from_string` answers its fallback for anything it cannot read, so the fallback here is a
-## colour nobody can write. Measured against the pinned editor: "red", "skyblue", "8b5a2b",
-## "#8b5a2b" and "#8b5a2bff" all read, "notacolour" and "" do not.
-func _as_color(raw: Variant) -> Dictionary:
-    if typeof(raw) != TYPE_STRING and typeof(raw) != TYPE_STRING_NAME:
-        return Params.error(
-            "invalid_params",
-            "A colour is a name or a hex string, and %s is neither" % str(raw)
-        )
-    var unreadable := Color(-1.0, -2.0, -3.0, -4.0)
-    var parsed := Color.from_string(str(raw).strip_edges(), unreadable)
-    if parsed == unreadable:
-        return Params.error(
-            "unsupported_color",
-            (
-                "%s is not a colour. Write a name like skyblue or a hex string like #8b5a2b"
-                % str(raw)
-            ),
-            {"color": str(raw)}
-        )
-    return {"value": parsed}
 
 ## Reports what a saved TileSet holds, so a caller painting with it can name tiles that exist.
 func _resource_describe_tileset(params: Dictionary) -> Dictionary:
@@ -3070,10 +2432,8 @@ func _scene_create(params: Dictionary) -> Dictionary:
             ),
             {"path": path}
         )
-    _set_readiness("importing")
     var root: Node = ClassDB.instantiate(root_type) as Node
     if root == null:
-        _set_readiness("ready")
         return {
             "_gofer_error": {
                 "code": "invalid_node_type",
@@ -3092,7 +2452,6 @@ func _scene_create(params: Dictionary) -> Dictionary:
     var scene := PackedScene.new()
     var pack_error := scene.pack(root)
     if pack_error != OK:
-        _set_readiness("ready")
         root.queue_free()
         return {
             "_gofer_error": {
@@ -3107,7 +2466,6 @@ func _scene_create(params: Dictionary) -> Dictionary:
     if not DirAccess.dir_exists_absolute(folder):
         var made := DirAccess.make_dir_recursive_absolute(folder)
         if made != OK:
-            _set_readiness("ready")
             root.queue_free()
             return {
                 "_gofer_error": {
@@ -3122,7 +2480,6 @@ func _scene_create(params: Dictionary) -> Dictionary:
             }
     var save_error := ResourceSaver.save(scene, path)
     if save_error != OK:
-        _set_readiness("ready")
         root.queue_free()
         return {
             "_gofer_error": {
@@ -3139,7 +2496,6 @@ func _scene_create(params: Dictionary) -> Dictionary:
 
     var written := ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)
     if written == null or not (written is PackedScene):
-        _set_readiness("ready")
         return Params.error(
             "scene_save_failed",
             "%s was reported saved but does not load back as a scene" % path,
@@ -3148,12 +2504,10 @@ func _scene_create(params: Dictionary) -> Dictionary:
     var state := (written as PackedScene).get_state()
     var saved_name := "" if state.get_node_count() == 0 else String(state.get_node_name(0))
     if saved_name != named:
-        _set_readiness("ready")
-        return _readback_error("scene.create root", named, saved_name, {"path": path})
+        return Params.readback_error("scene.create root", named, saved_name, {"path": path})
     var saved_type := "" if state.get_node_count() == 0 else String(state.get_node_type(0))
     if saved_type != root_type:
-        _set_readiness("ready")
-        return _readback_error("scene.create rootType", root_type, saved_type, {"path": path})
+        return Params.readback_error("scene.create rootType", root_type, saved_type, {"path": path})
 
     EditorInterface.get_resource_filesystem().update_file(path)
     return _switch_edited_scene(path)
@@ -3254,7 +2608,7 @@ func _scene_save_as(params: Dictionary) -> Dictionary:
         return verified
     var owned := String(root.scene_file_path)
     if owned != path:
-        return _readback_error(
+        return Params.readback_error(
             "scene.save_as", path, owned if not owned.is_empty() else "no file", {"path": path}
         )
     _current_scene_path = owned
@@ -3287,7 +2641,6 @@ func _reload_edited_scene(path: String) -> Dictionary:
     return _pending_scene_switch("reload", path, replaced)
 
 func _pending_scene_switch(mode: String, path: String, replaced: int) -> Dictionary:
-    _set_readiness("importing")
     var pending := {
         "mode": mode,
         "path": path,
@@ -3303,6 +2656,7 @@ func _defer_scene_switch(id: String, command: String, pending: Dictionary) -> vo
     pending["id"] = id
     pending["mutating"] = MUTATING_COMMANDS.has(command)
     _scene_pending.append(pending)
+    _refresh_readiness()
 
 func _ask_editor_to_switch(pending: Dictionary) -> void:
     if pending["mode"] == "reload":
@@ -3342,35 +2696,42 @@ func _sweep_scene_pending() -> void:
         return
     var now := Time.get_ticks_msec()
     var kept: Array[Dictionary] = []
+    var switched: Array[Dictionary] = []
+    var timed_out: Array[Dictionary] = []
     for pending in _scene_pending:
         if _edited_scene_switched(pending):
-            _current_scene_path = pending["path"]
-            _scene_revision = 0
-            _set_readiness("ready")
-            var result := {
-                "scene": _current_scene_path,
-                "revision": _scene_revision,
-                "dirty": _scene_is_dirty(),
-            }
-            if pending["mutating"]:
-                _respond_result(pending["id"], result, _scene_revision)
-            else:
-                _respond_result(pending["id"], result)
+            switched.append(pending)
         elif int(pending["deadline"]) < now:
-            _set_readiness("ready")
-            _respond_error(
-                pending["id"],
-                "scene_switch_timeout",
-                _scene_switch_failure(String(pending["path"])),
-                true,
-                {"path": pending["path"]}
-            )
+            timed_out.append(pending)
         else:
             if int(pending["next_ask"]) <= now:
                 pending["next_ask"] = now + SCENE_SWITCH_RETRY_MS
                 _ask_editor_to_switch(pending)
             kept.append(pending)
+    # Readiness is derived from this list, and a refusal carries readiness, so the list is what it
+    # will be before anything is answered out of it.
     _scene_pending = kept
+    _refresh_readiness()
+    for pending in switched:
+        _current_scene_path = pending["path"]
+        _scene_revision = 0
+        var result := {
+            "scene": _current_scene_path,
+            "revision": _scene_revision,
+            "dirty": _scene_is_dirty(),
+        }
+        if pending["mutating"]:
+            _respond_result(pending["id"], result, _scene_revision)
+        else:
+            _respond_result(pending["id"], result)
+    for pending in timed_out:
+        _respond_error(
+            pending["id"],
+            "scene_switch_timeout",
+            _scene_switch_failure(String(pending["path"])),
+            true,
+            {"path": pending["path"]}
+        )
 
 ## The edited hierarchy and the revision it is at.
 ##
@@ -3573,11 +2934,11 @@ func _attached_node(
 ) -> Dictionary:
     var found := parent.get_node_or_null(NodePath(String(node.name)))
     if found != node:
-        return _readback_error(
+        return Params.readback_error(
             command, "%s under %s" % [node.name, _node_path(parent)], "nothing", details
         )
     if node.owner != root:
-        return _readback_error(
+        return Params.readback_error(
             "%s owner" % command,
             root.name,
             "nothing" if node.owner == null else node.owner.name,
@@ -3677,7 +3038,7 @@ func _node_instantiate(params: Dictionary) -> Dictionary:
         return attached
     var instanced := String(node.scene_file_path)
     if instanced != path:
-        return _readback_error(
+        return Params.readback_error(
             "node.instantiate",
             path,
             instanced if not instanced.is_empty() else "a plain copy",
@@ -3775,7 +3136,7 @@ func _node_rename(params: Dictionary) -> Dictionary:
     var named := String(node.name)
     if named != new_name:
         _take_back_the_last_action()
-        return _readback_error("node.rename", new_name, named, {"node": node_path_str})
+        return Params.readback_error("node.rename", new_name, named, {"node": node_path_str})
 
     _bump_revision()
     return {"node": _node_path(node)}
@@ -3927,7 +3288,7 @@ func _node_change_type(params: Dictionary) -> Dictionary:
     if attached.has("_gofer_error"):
         return attached
     if replacement.get_class() != node_type:
-        return _readback_error(
+        return Params.readback_error(
             "node.change_type", node_type, replacement.get_class(), {"node": node_path_str}
         )
 
@@ -3979,7 +3340,7 @@ func _node_delete(params: Dictionary) -> Dictionary:
 
     var lingering := _find_node(node_path_str)
     if lingering != null:
-        return _readback_error(
+        return Params.readback_error(
             "node.delete", "nothing at %s" % node_path_str, lingering.name, {"node": node_path_str}
         )
 
@@ -4044,7 +3405,7 @@ func _node_set_property(params: Dictionary) -> Dictionary:
 
     var stored: Variant = node.get(property)
     if not Params.same_value(new_value, stored):
-        return _readback_error(
+        return Params.readback_error(
             "node.set_property %s.%s" % [node_path_str, property],
             new_value,
             stored,
@@ -4140,7 +3501,7 @@ func _node_set_properties(params: Dictionary) -> Dictionary:
         var property: String = wanted[2]
         var stored: Variant = node.get(property)
         if not Params.same_value(wanted[3], stored):
-            return _readback_error(
+            return Params.readback_error(
                 "node.set_properties %s.%s" % [wanted[1], property],
                 wanted[3],
                 stored,
@@ -4180,7 +3541,7 @@ func _node_add_to_group(params: Dictionary) -> Dictionary:
     undo.commit_action()
 
     if not node.is_in_group(group):
-        return _readback_error(
+        return Params.readback_error(
             "node.add_to_group", group, ", ".join(Params.authored_groups(node)), {"group": group}
         )
 
@@ -4210,7 +3571,7 @@ func _node_remove_from_group(params: Dictionary) -> Dictionary:
     undo.commit_action()
 
     if node.is_in_group(group):
-        return _readback_error(
+        return Params.readback_error(
             "node.remove_from_group",
             "no %s" % group,
             ", ".join(Params.authored_groups(node)),
@@ -4337,7 +3698,7 @@ func _node_set_cells(params: Dictionary) -> Dictionary:
         var wanted: Array = expected[at]
         var source := layer.get_cell_source_id(coords)
         if source != int(wanted[0]):
-            return _readback_error(
+            return Params.readback_error(
                 "node.set_cells source at (%d, %d)" % [coords.x, coords.y],
                 wanted[0],
                 source,
@@ -4347,7 +3708,7 @@ func _node_set_cells(params: Dictionary) -> Dictionary:
             continue
         var drawn := layer.get_cell_atlas_coords(coords)
         if drawn != wanted[1]:
-            return _readback_error(
+            return Params.readback_error(
                 "node.set_cells atlas at (%d, %d)" % [coords.x, coords.y],
                 wanted[1],
                 drawn,
@@ -4524,7 +3885,7 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
     undo.commit_action()
 
     if not node.is_connected(signal_name, callable):
-        return _readback_error(
+        return Params.readback_error(
             "node.connect_signal",
             "%s.%s connected to %s" % [_node_path(node), signal_name, method],
             "not connected",
@@ -4532,7 +3893,7 @@ func _node_connect_signal(params: Dictionary) -> Dictionary:
         )
     var recorded := Params.connection_flags(node, signal_name, callable)
     if recorded != flags:
-        return _readback_error(
+        return Params.readback_error(
             "node.connect_signal flags", flags, recorded, {"signal": signal_name}
         )
 
@@ -4579,7 +3940,7 @@ func _node_disconnect_signal(params: Dictionary) -> Dictionary:
 
     var connected := node.is_connected(signal_name, callable)
     if connected:
-        return _readback_error(
+        return Params.readback_error(
             "node.disconnect_signal",
             "%s.%s disconnected from %s" % [_node_path(node), signal_name, method],
             "still connected",

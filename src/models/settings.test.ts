@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest'
+import corpus from '../../fixtures/thinking-levels.json'
 import {
     adoptModelReasoning,
     adoptSubagentReasoning,
@@ -243,7 +244,44 @@ describe('adoptSubagentReasoning', () => {
     })
 })
 
+/** One model's thinking facts, as `fixtures/thinking-levels.json` writes them down. */
+type ThinkingLevelModel = Readonly<{
+    reasoning: boolean
+    supportsReasoningEffort: boolean
+    reasoningMandatory: boolean
+    thinkingLevels: readonly ThinkingLevel[]
+}>
+
+type ThinkingLevelRow = Readonly<{
+    name: string
+    model: ThinkingLevelModel
+    offered: readonly ThinkingLevel[]
+    kept: readonly Readonly<{stored: ThinkingLevel; is: ThinkingLevel}>[]
+}>
+
+const THINKING_LEVEL_ROWS = corpus.rows as readonly ThinkingLevelRow[]
+
 describe('thinkingLevelsFor', () => {
+    /**
+     * One rule in two languages, held to the corpus both of them read.
+     *
+     * `keep_level` and `thinking_levels` in `src-tauri/src/settings/mod.rs` are the Rust copies,
+     * and the two used to be held together by a prose comment in each saying the other agreed.
+     * Rust asserts every row of this file too, so a divergence fails a test rather than quietly
+     * downgrading a stored setting on the next save.
+     */
+    it('answers every row of the corpus Rust reads', () => {
+        expect(THINKING_LEVEL_ROWS.length).toBeGreaterThan(5)
+        for (const row of THINKING_LEVEL_ROWS) {
+            expect(thinkingLevelsFor(row.model), row.name).toEqual(row.offered)
+            for (const kept of row.kept)
+                expect(
+                    keepThinkingLevel(row.model, kept.stored),
+                    `${row.name}: ${kept.stored}`
+                ).toBe(kept.is)
+        }
+    })
+
     it('offers exactly what the server named, and off', () => {
         expect(
             thinkingLevelsFor({

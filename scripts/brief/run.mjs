@@ -72,10 +72,7 @@ export const LIVE_WORLD = {createModelContext, createChildTools, probeTools, run
 
 export async function runBrief({
     settings,
-    apiKey,
-    openrouterApiKey,
-    cerebrasApiKey,
-    braveApiKey,
+    secrets = {},
     oauthCredential,
     sessionId,
     workspacePath,
@@ -98,9 +95,7 @@ export async function runBrief({
     }
     const {models, model, subagent, streamOptions} = world.createModelContext({
         settings,
-        apiKey,
-        openrouterApiKey,
-        cerebrasApiKey,
+        secrets,
         oauthCredential,
         credentialHost,
         sessionId,
@@ -116,8 +111,13 @@ export async function runBrief({
             )
         )
     }
-    const canSearch = searchConfigured(settings, braveApiKey)
-    const childDeps = {domains, host, braveApiKey, searchProvider: settings?.web?.searchProvider}
+    const canSearch = searchConfigured(settings, secrets.brave)
+    const childDeps = {
+        domains,
+        host,
+        braveApiKey: secrets.brave,
+        searchProvider: settings?.web?.searchProvider
+    }
 
     let spend = {input: 0, output: 0}
     let waitedOnTheUser = 0

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import {readdir, rm} from 'node:fs/promises'
+import {readFile, readdir, rm} from 'node:fs/promises'
 import {createServer} from 'node:http'
 import test from 'node:test'
 import {createToolHost} from './ai-host.mjs'
@@ -8,6 +8,7 @@ import {
     createAgentTools,
     createModelContext,
     DRIVERS,
+    DRIVER_SECRETS,
     outOfRoom,
     readableProviderError,
     retryDelay,
@@ -68,7 +69,7 @@ test('streams a Pi AI completion through the configured local provider', async c
     try {
         const completion = await runAgent({
             settings: servedBy(`http://127.0.0.1:${String(address.port)}/v1`),
-            apiKey: 'secret',
+            secrets: {'ai-default': 'secret'},
             messages: [{sender: 'user', text: 'Say hello', timestamp: 1}],
             workspacePath: workspace.path,
             emit: event => events.push(event)
@@ -1201,7 +1202,8 @@ test('a turn gives up once its retry budget is spent', async context => {
 
     await assert.rejects(
         runAgent({
-            settings: servedBy(url, {...impatient, retryAttempts: 2}),
+            settings: servedBy(url, impatient),
+            retry: {attempts: 2},
             messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
             agentMessages: [],
             workspacePath: workspace.path,
@@ -1313,7 +1315,8 @@ test('a spent rate-limit budget ends the turn in a sentence, not in JSON', async
 
     await assert.rejects(
         runAgent({
-            settings: servedBy(url, {...impatient, retryAttempts: 1}),
+            settings: servedBy(url, impatient),
+            retry: {attempts: 1},
             messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
             agentMessages: [],
             workspacePath: workspace.path,
@@ -1456,7 +1459,8 @@ test('a turn that only ever stops without saying anything gives up loudly', asyn
 
     await assert.rejects(
         runAgent({
-            settings: servedBy(url, {...impatient, retryAttempts: 2}),
+            settings: servedBy(url, impatient),
+            retry: {attempts: 2},
             messages: [{sender: 'user', text: 'Build the level', timestamp: 1}],
             agentMessages: [],
             workspacePath: workspace.path,
@@ -1754,7 +1758,7 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
         connectionType: 'openai-compatible',
         connections: {'openai-compatible': connection}
     })
-    const {model} = createModelContext({settings: on(template), apiKey: 'local'})
+    const {model} = createModelContext({settings: on(template), secrets: {'ai-default': 'local'}})
 
     assert.equal(model.compat.thinkingFormat, 'chat-template')
     assert.deepEqual(model.compat.chatTemplateKwargs, {
@@ -1767,7 +1771,7 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
             ...template,
             model: {...template.model, supportsReasoningEffort: true, thinkingLevel: 'medium'}
         }),
-        apiKey: 'local'
+        secrets: {'ai-default': 'local'}
     })
     assert.deepEqual(withEfforts.compat.chatTemplateKwargs.reasoning_effort, {
         $var: 'thinking.effort',
@@ -1776,7 +1780,7 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
 
     const {model: plain} = createModelContext({
         settings: on({...template, chatTemplateThinking: false}),
-        apiKey: 'local'
+        secrets: {'ai-default': 'local'}
     })
     assert.equal(plain.compat.thinkingFormat, undefined)
     assert.equal(plain.compat.chatTemplateKwargs, undefined)
@@ -2229,7 +2233,7 @@ test('a driver this build has no provider for is refused by name', () => {
         () =>
             createModelContext({
                 settings: {connectionType: 'anthropic', connections: {anthropic: profile}},
-                apiKey: 'local'
+                secrets: {'ai-default': 'local'}
             }),
         /No pi-ai provider is registered for the 'anthropic' connection/u
     )
@@ -2283,7 +2287,7 @@ test('a sub-agent driver this build has no provider for is refused by name', () 
                     connections: {'openai-compatible': connection},
                     subagent: {connection: {connectionType: 'anthropic', model: {id: 'a-model'}}}
                 },
-                apiKey: 'local'
+                secrets: {'ai-default': 'local'}
             }),
         /No pi-ai provider is registered for the 'anthropic' connection/u
     )
@@ -2316,11 +2320,59 @@ test('every hosted driver the catalogue declares has a key that reaches it', () 
             () =>
                 createModelContext({
                     settings: {connectionType: driver, connections: {[driver]: profile(driver)}},
-                    apiKey: 'local',
-                    openrouterApiKey: 'k',
-                    cerebrasApiKey: 'k'
+                    secrets: Object.fromEntries(
+                        Object.values(DRIVER_SECRETS).map(slot => [slot, 'k'])
+                    )
                 }),
             `${driver} is declared but no key reaches it`
         )
     }
+})
+
+test('a provider is sent the key of its own slot, whichever seat pointed at it', async () => {
+    const profile = name => ({
+        name,
+        baseUrl: 'https://example.invalid/v1',
+        api: 'openai-completions',
+        chatTemplateThinking: false,
+        model: {
+            id: 'a-model',
+            name: 'A model',
+            contextWindow: 128_000,
+            maxTokens: 8_000,
+            reasoning: false,
+            supportsReasoningEffort: false,
+            thinkingLevels: [],
+            input: ['text'],
+            thinkingLevel: 'off'
+        }
+    })
+    // The parent is hosted and only the sub-agent is local, which is the arrangement that used to
+    // put the hosted key on the address the user typed into Base URL.
+    const {models} = createModelContext({
+        settings: {
+            connectionType: 'openrouter',
+            connections: {
+                'openai-compatible': profile('Local AI'),
+                openrouter: profile('OpenRouter')
+            },
+            subagent: {connection: {connectionType: 'openai-compatible', model: {id: 'a-model'}}}
+        },
+        secrets: {'ai-default': 'local-key', openrouter: 'hosted-key'}
+    })
+    const catalogue = JSON.parse(await readFile('protocol/drivers.json', 'utf8'))
+    const stored = {'ai-default': 'local-key', openrouter: 'hosted-key'}
+    let checked = 0
+    for (const {id, providerId} of catalogue.drivers) {
+        const provider = providerId && models.getProvider(providerId)
+        if (!provider?.auth?.apiKey) continue
+        const resolved = await provider.auth.apiKey.resolve()
+        assert.equal(
+            resolved.auth.apiKey,
+            stored[DRIVER_SECRETS[id]],
+            `the ${id} provider must be sent the key stored in its own slot`
+        )
+        checked += 1
+    }
+    assert.equal(checked, 2, 'both seats registered a provider to check')
 })

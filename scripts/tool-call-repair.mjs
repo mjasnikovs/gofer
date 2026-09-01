@@ -1,3 +1,15 @@
+/**
+ * The repairs the router will never get the chance to make.
+ *
+ * A call is validated against the generated schema between `prepareArguments` and the router, so a
+ * shape the schema refuses never reaches `tool_repair.rs` and has to be repaired here. Everything
+ * the schema accepts is the router's, and a second copy of one of those repairs is drift waiting to
+ * happen — a fix for the double-wrapped tag once existed only here while both suites stayed green.
+ *
+ * The line is not a preference and is no longer a comment: `tool-call-repair.test.mjs` runs every
+ * row of `fixtures/tool-call-repairs.json` through pi-ai's own `validateToolArguments` and refuses
+ * a row this file repairs that the schema would have let through.
+ */
 const PARAM_KEYS = ['params', 'parameters', 'arguments', 'args', 'input']
 
 const OP_KEYS = ['op', 'operation', 'action']
@@ -227,51 +239,6 @@ function parsedOrNothing(text) {
     }
 }
 
-export function splitKeyThatCarriesItsValue(params, entry) {
-    if (!Array.isArray(params) || !isObject(entry)) return entry
-    const shaped = Object.fromEntries(
-        Object.entries(entry).flatMap(([key, held]) => {
-            const param = params.find(
-                one =>
-                    key.length > one.name.length
-                    && key.toLowerCase().startsWith(one.name.toLowerCase())
-                    && !params.some(other => other.name === key)
-                    && !(one.name in entry)
-            )
-            if (!param) return [[key, held]]
-            const rest = key.slice(param.name.length)
-            const tail = rest.trim()
-            if (tail === '') return [[key, held]]
-            const detached = rest !== tail
-            const carried =
-                (held === null || held === undefined) && detached ? tail
-                : typeof held === 'string' && held.toLowerCase() === tail.toLowerCase() ? held
-                : undefined
-            if (carried === undefined) return [[key, held]]
-            const shape = param.kind === 'int' ? /^-?\d+$/u : /^-?\d+(?:\.\d+)?$/u
-            const numeric =
-                (param.kind === 'int' || param.kind === 'number')
-                && typeof carried === 'string'
-                && shape.test(carried)
-            if (!numeric && (param.kind === 'int' || param.kind === 'number')) return [[key, held]]
-            return [[param.name, numeric ? Number(carried) : carried]]
-        })
-    )
-    return params.reduce((walked, param) => {
-        const held = walked[param.name]
-        if (held === undefined || !Array.isArray(param.entry) || param.entry.length === 0)
-            return walked
-        if (param.kind === 'list' && Array.isArray(held))
-            return {
-                ...walked,
-                [param.name]: held.map(one => splitKeyThatCarriesItsValue(param.entry, one))
-            }
-        if (param.kind === 'object')
-            return {...walked, [param.name]: splitKeyThatCarriesItsValue(param.entry, held)}
-        return walked
-    }, shaped)
-}
-
 export function wrapBareResource(params, entry) {
     if (!Array.isArray(params) || !isObject(entry)) return entry
     return params.reduce((walked, param) => {
@@ -409,10 +376,7 @@ export function normalizeToolCalls(operations, args, elsewhere) {
                         params,
                         readAValueWrittenAsAString(
                             params,
-                            splitKeyThatCarriesItsValue(
-                                params,
-                                unquoteATaggedKey(params, trimPaddedKeys(params, entry))
-                            )
+                            unquoteATaggedKey(params, trimPaddedKeys(params, entry))
                         )
                     )
                     refuseSiblingParameter(operations, shaped)

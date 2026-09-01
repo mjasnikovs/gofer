@@ -6,7 +6,9 @@ import {
     apiKeyUpdate,
     applyModelSelection,
     normalizeSettings,
+    SECRET_NAMES,
     selectAiDriver,
+    TYPED_SECRET_NAMES,
     startSubagentConnection,
     withActiveConnection
 } from './settings'
@@ -17,6 +19,7 @@ import type {
     AiModelOption,
     AiSettings,
     ApiKeyIntent,
+    ApiKeyUpdate,
     CacheStatus,
     GodotSettings,
     GoferSettings,
@@ -66,6 +69,15 @@ const NO_KEY: KeyDraft = {isStored: false, typed: '', intent: 'keep'}
 
 export type SettingsDraft = Readonly<{
     settings?: GoferSettings | undefined
+    /**
+     * The settings as the backend last confirmed them, which is a different thing from the draft.
+     *
+     * What a model catalogue is asked about: a driver at an address. The address of the local
+     * driver is a text field, so keying the question on the draft asks a server once per keystroke,
+     * and keying it on the driver alone never asks again when the address changes. This is the
+     * question the answer is really about, and it moves when the backend says it did.
+     */
+    savedSettings?: GoferSettings | undefined
     keys: Readonly<Record<SecretName, KeyDraft>>
     tab: SettingsTab
     cache?: CacheStatus | undefined
@@ -87,6 +99,7 @@ export type SettingsTaskAction =
     | Readonly<{type: 'failed'; task: SettingsTask; notice: Notice}>
 
 export type SettingsAction =
+    | Readonly<{type: 'announced'; settings: GoferSettings}>
     | Readonly<{
           type: 'loaded'
           response: SettingsResponse
@@ -179,49 +192,56 @@ function withKey(state: SettingsDraft, secret: SecretName, key: Partial<KeyDraft
     return {...state, keys: {...state.keys, [secret]: {...state.keys[secret], ...key}}}
 }
 
+/** Every key box, folded over one at a time. A sixth secret joins these three by arriving. */
+function overEveryKey(
+    keys: SettingsDraft['keys'],
+    change: (draft: KeyDraft, secret: SecretName) => KeyDraft
+): SettingsDraft['keys'] {
+    const folded = {...keys}
+    for (const secret of SECRET_NAMES) folded[secret] = change(keys[secret], secret)
+    return folded
+}
+
 function withStoredKeys(state: SettingsDraft, response: SettingsResponse): SettingsDraft {
     return {
         ...state,
-        keys: {
-            'ai-default': {...state.keys['ai-default'], isStored: response.hasApiKey},
-            brave: {...state.keys.brave, isStored: response.hasBraveApiKey ?? false},
-            openrouter: {
-                ...state.keys.openrouter,
-                isStored: response.hasOpenrouterApiKey ?? false
-            },
-            cerebras: {...state.keys.cerebras, isStored: response.hasCerebrasApiKey ?? false},
-            'chat-gpt': {
-                ...state.keys['chat-gpt'],
-                isStored: response.hasChatGptCredential ?? false
-            }
-        }
+        keys: overEveryKey(state.keys, (draft, secret) => ({
+            ...draft,
+            isStored: response.storedSecrets[secret] ?? false
+        }))
     }
 }
 
 function forgottenKeys(keys: SettingsDraft['keys']): SettingsDraft['keys'] {
-    return {
-        'ai-default': {...keys['ai-default'], typed: '', intent: 'keep'},
-        brave: {...keys.brave, typed: '', intent: 'keep'},
-        openrouter: {...keys.openrouter, typed: '', intent: 'keep'},
-        cerebras: {...keys.cerebras, typed: '', intent: 'keep'},
-        'chat-gpt': {...keys['chat-gpt'], typed: '', intent: 'keep'}
-    }
+    return overEveryKey(keys, draft => ({...draft, typed: '', intent: 'keep'}))
 }
 
 function noticedOn(notices: SettingsNotices, tab: SettingsTab, notice?: Notice): SettingsNotices {
     return {...notices, [tab]: notice}
 }
 
+/**
+ * Whether the page holds an edit of its own, which is what another writer must not overwrite.
+ *
+ * Derived rather than tracked: `loaded`, `saved` and `announced` set the draft and the confirmed
+ * copy from one value, so any action that changes either makes them differ. A typed or cleared key
+ * is an edit too, and it lives beside the settings rather than in them.
+ */
+export function hasUnsavedEdits(state: SettingsDraft): boolean {
+    if (state.settings !== state.savedSettings) return true
+    return SECRET_NAMES.some(
+        secret => state.keys[secret].intent !== 'keep' || state.keys[secret].typed !== ''
+    )
+}
+
 export function settingsRequest(state: SettingsDraft): SettingsRequest | undefined {
     if (!state.settings) return undefined
-    const {'ai-default': ai, brave, openrouter, cerebras} = state.keys
-    return {
-        settings: state.settings,
-        apiKey: apiKeyUpdate(ai.intent, ai.typed),
-        braveApiKey: apiKeyUpdate(brave.intent, brave.typed),
-        openrouterApiKey: apiKeyUpdate(openrouter.intent, openrouter.typed),
-        cerebrasApiKey: apiKeyUpdate(cerebras.intent, cerebras.typed)
+    const secrets: Record<string, ApiKeyUpdate> = {}
+    for (const secret of TYPED_SECRET_NAMES) {
+        const draft = state.keys[secret]
+        secrets[secret] = apiKeyUpdate(draft.intent, draft.typed)
     }
+    return {settings: state.settings, secrets}
 }
 
 function savedNotice(response: SettingsResponse): Notice {
@@ -260,10 +280,12 @@ export function reduce(
     action: SettingsAction | SettingsTaskAction
 ): SettingsDraft {
     switch (action.type) {
-        case 'loaded':
+        case 'loaded': {
+            const loaded = normalizeSettings(action.response.settings)
             return {
                 ...withStoredKeys(state, action.response),
-                settings: normalizeSettings(action.response.settings),
+                settings: loaded,
+                savedSettings: loaded,
                 cache: action.cache,
                 agentPrompt: action.prompt.prompt,
                 savedAgentPrompt: action.prompt.prompt,
@@ -281,6 +303,20 @@ export function reduce(
                         }
                     :   state.notices
             }
+        }
+
+        /**
+         * What another writer of the settings file saved, adopted unless the page holds an edit.
+         *
+         * The composer reconciles a model in the background and saves it. Without this the page's
+         * draft is a snapshot taken at mount, and pressing Save sends the whole object — so the
+         * reconcile is silently written back to what the file held when the dialog opened.
+         */
+        case 'announced': {
+            const announced = normalizeSettings(action.settings)
+            if (hasUnsavedEdits(state)) return {...state, savedSettings: announced}
+            return {...state, settings: announced, savedSettings: announced}
+        }
 
         case 'unavailable':
             return {...state, isLoading: false, notices: {...state.notices, ai: action.notice}}
@@ -439,13 +475,16 @@ export function reduce(
         case 'chatgpt-auth-changed':
             return withKey(state, 'chat-gpt', {isStored: action.isAuthenticated})
 
-        case 'saved':
+        case 'saved': {
+            const saved = normalizeSettings(action.response.settings)
             return {
                 ...withStoredKeys({...state, keys: forgottenKeys(state.keys)}, action.response),
-                settings: normalizeSettings(action.response.settings),
+                settings: saved,
+                savedSettings: saved,
                 busy: busyWith(state.busy, 'saving', false),
                 notices: noticedOn(state.notices, 'ai', savedNotice(action.response))
             }
+        }
 
         case 'prompt-typed':
             return {...state, agentPrompt: action.value}
@@ -473,10 +512,12 @@ export function reduce(
                 settings: {...state.settings, godot: {...state.settings.godot, ...action.update}}
             }
 
-        case 'godot-saved':
+        case 'godot-saved': {
+            const saved = normalizeSettings(action.response.settings)
             return {
                 ...state,
-                settings: normalizeSettings(action.response.settings),
+                settings: saved,
+                savedSettings: saved,
                 busy: busyWith(state.busy, 'savingGodot', false),
                 notices: noticedOn(state.notices, 'godot', {
                     status: 'success',
@@ -484,6 +525,7 @@ export function reduce(
                     description: 'They are applied the next time a Godot session starts.'
                 })
             }
+        }
 
         case 'noticed':
             return {...state, notices: noticedOn(state.notices, action.tab, action.notice)}

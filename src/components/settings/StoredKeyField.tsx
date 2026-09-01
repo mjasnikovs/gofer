@@ -1,10 +1,8 @@
 import {Button} from '@astryxdesign/core/Button'
 import {TextInput} from '@astryxdesign/core/TextInput'
 import KeyIcon from '@heroicons/react/24/outline/KeyIcon'
-import type {SecretName} from '../../models/settings'
+import type {TypedSecret} from '../../models/settings'
 import type {KeyDraft, SettingsAction} from '../../models/settings-draft'
-
-export type TypedSecret = Exclude<SecretName, 'chat-gpt'>
 
 type StoredKeyCopy = Readonly<{
     label: string

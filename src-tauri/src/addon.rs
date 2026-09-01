@@ -39,13 +39,21 @@ const EXCLUDE_MARKER: &str = "# Gofer: the managed Godot addon is never part of 
 
 /// The addon as shipped. `include_str!` keeps the files in the binary, so staging needs no
 /// installation directory and cannot be tampered with between releases.
-const ADDON_FILES: [(&str, &str); 5] = [
+const ADDON_FILES: [(&str, &str); 7] = [
     (
         "addons/gofer/plugin.cfg",
         include_str!("../addon/plugin.cfg"),
     ),
     ("addons/gofer/plugin.gd", include_str!("../addon/plugin.gd")),
     ("addons/gofer/params.gd", include_str!("../addon/params.gd")),
+    (
+        "addons/gofer/project_config.gd",
+        include_str!("../addon/project_config.gd"),
+    ),
+    (
+        "addons/gofer/runtime_queue.gd",
+        include_str!("../addon/runtime_queue.gd"),
+    ),
     (
         "addons/gofer/protocol.gd",
         include_str!("../addon/protocol.gd"),
@@ -1142,6 +1150,8 @@ mod tests {
         for sidecar in [
             "addons/gofer/plugin.gd.uid",
             "addons/gofer/params.gd.uid",
+            "addons/gofer/project_config.gd.uid",
+            "addons/gofer/runtime_queue.gd.uid",
             "addons/gofer/protocol.gd.uid",
             "addons/gofer/runtime.gd.uid",
         ] {
@@ -1636,6 +1646,8 @@ mod tests {
                 "addons/gofer/plugin.cfg".to_owned(),
                 "addons/gofer/plugin.gd".to_owned(),
                 "addons/gofer/params.gd".to_owned(),
+                "addons/gofer/project_config.gd".to_owned(),
+                "addons/gofer/runtime_queue.gd".to_owned(),
                 "addons/gofer/protocol.gd".to_owned(),
                 "addons/gofer/runtime.gd".to_owned(),
                 MANIFEST_PATH.to_owned(),

@@ -60,7 +60,7 @@ const settingsResponse = {
             }
         }
     },
-    hasApiKey: true
+    storedSecrets: {'ai-default': true}
 } as const
 
 const agentPrompt = {
@@ -212,7 +212,9 @@ describe('SettingsPage', () => {
         expect(screen.getByDisplayValue('Local AI')).toBeInTheDocument()
         await user.click(screen.getByRole('button', {name: 'Test connection'}))
         const keepRequest = tauri.invoke.mock.calls.find(call => call[0] === 'test_ai_connection')
-        expect(keepRequest?.[1]).toMatchObject({request: {apiKey: {action: 'keep'}}})
+        expect(keepRequest?.[1]).toMatchObject({
+            request: {secrets: {'ai-default': {action: 'keep'}}}
+        })
 
         await user.type(screen.getByLabelText(/^API key/), ' new-secret ')
         await flush()
@@ -223,7 +225,7 @@ describe('SettingsPage', () => {
             .filter(call => call[0] === 'test_ai_connection')
             .at(-1)
         expect(setRequest?.[1]).toMatchObject({
-            request: {apiKey: {action: 'set', value: ' new-secret '}}
+            request: {secrets: {'ai-default': {action: 'set', value: ' new-secret '}}}
         })
 
         await user.click(screen.getByRole('button', {name: 'Remove stored API key'}))
@@ -233,7 +235,9 @@ describe('SettingsPage', () => {
         const clearRequest = tauri.invoke.mock.calls
             .filter(call => call[0] === 'test_ai_connection')
             .at(-1)
-        expect(clearRequest?.[1]).toMatchObject({request: {apiKey: {action: 'clear'}}})
+        expect(clearRequest?.[1]).toMatchObject({
+            request: {secrets: {'ai-default': {action: 'clear'}}}
+        })
     })
 
     it('reports model listener failures and restores the cache state', async () => {

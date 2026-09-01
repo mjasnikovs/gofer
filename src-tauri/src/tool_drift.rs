@@ -72,13 +72,14 @@ mod fixtures {
 
     #[test]
     fn a_gdscript_dispatch_table_is_read_as_command_to_handler() {
-        let body = "\tmatch command:\n\t\t\"scene.save\":\n\t\t\treturn _scene_save(params)\n\t\t\"scene.open\":\n\t\t\treturn _scene_open(params)\n";
+        let body = "\tmatch command:\n\t\t\"scene.save\":\n\t\t\treturn _scene_save(params)\n\t\t\"project.get_setting\":\n\t\t\treturn ProjectConfig.get_setting(params)\n";
         assert_eq!(
             dispatch_pairs(body, "return "),
             vec![
                 ("scene.save".to_owned(), "_scene_save".to_owned()),
-                ("scene.open".to_owned(), "_scene_open".to_owned())
-            ]
+                ("project.get_setting".to_owned(), "get_setting".to_owned())
+            ],
+            "a handler in another addon script is read by the name that script defines it under"
         );
     }
 
@@ -222,12 +223,20 @@ const EDITOR_ADDON: &str = include_str!("../addon/plugin.gd");
 /// parameter refusal in the one-second headless suite instead of the fifty-second one. To these
 /// drift checks the two are one source, because to a command they are.
 const PARAMS_ADDON: &str = include_str!("../addon/params.gd");
+/// The editor half's third file: everything the `project.*` commands decide, which is also
+/// nothing an editor has to be open for.
+const PROJECT_ADDON: &str = include_str!("../addon/project_config.gd");
+/// The editor half's fourth file: what a call to the running game is told when it runs out of
+/// time, which is arithmetic over a queue and not something an editor answers.
+const RUNTIME_QUEUE_ADDON: &str = include_str!("../addon/runtime_queue.gd");
 const RUNTIME_ADDON: &str = include_str!("../addon/runtime.gd");
 
-/// Every function of the editor half, whichever of its two files it lives in.
+/// Every function of the editor half, whichever of its four files it lives in.
 fn editor_functions() -> HashMap<&'static str, String> {
     let mut functions = gd_functions(EDITOR_ADDON);
     functions.extend(gd_functions(PARAMS_ADDON));
+    functions.extend(gd_functions(PROJECT_ADDON));
+    functions.extend(gd_functions(RUNTIME_QUEUE_ADDON));
     functions
 }
 
@@ -284,7 +293,15 @@ fn hands_on_the_parameters(arguments: &str) -> bool {
 
 /// The helper calls a body passes its parameters to, with their argument text. Callee first,
 /// so a key the helper reads is found by following it.
-fn calls_taking_params(body: &str) -> Vec<(&str, &str)> {
+///
+/// A call is followed when it names a function of the addon. Matching on the leading underscore
+/// and the `Params.` prefix alone missed the calls `params.gd` makes to its own siblings, which
+/// are written unqualified — so a decision moved out of a handler into a plan function took its
+/// parameters out of this scan with it.
+fn calls_taking_params<'a>(
+    body: &'a str,
+    functions: &HashMap<&str, String>,
+) -> Vec<(&'a str, &'a str)> {
     let mut found = Vec::new();
     for (at, _) in body.match_indices('(') {
         let before = &body[..at];
@@ -296,7 +313,9 @@ fn calls_taking_params(body: &str) -> Vec<(&str, &str)> {
             continue;
         };
         let arguments = &body[at + 1..at + length];
-        let is_helper = name.starts_with('_') || before[..start].ends_with("Params.");
+        let is_helper = name.starts_with('_')
+            || before[..start].ends_with("Params.")
+            || functions.contains_key(name);
         if is_helper && hands_on_the_parameters(arguments) {
             found.push((name, arguments));
         }
@@ -330,7 +349,7 @@ fn params_a_handler_reads(
     for needle in ["params.get(\"", "params.has(\"", "params[\""] {
         keys.extend(quoted_after(body, needle).into_iter().map(str::to_owned));
     }
-    for (callee, arguments) in calls_taking_params(body) {
+    for (callee, arguments) in calls_taking_params(body, functions) {
         keys.extend(
             quoted_after(arguments, "\"")
                 .into_iter()
@@ -356,13 +375,17 @@ fn dispatch_pairs(body: &str, answers_with: &str) -> Vec<(String, String)> {
         } else if let (Some(named), Some(rest)) =
             (command, trimmed.strip_prefix(answers_with).map(str::trim))
         {
-            let handler = rest
+            let called = rest
                 .strip_prefix("await ")
                 .unwrap_or(rest)
                 .split('(')
                 .next()
                 .unwrap_or_default();
-            if handler.starts_with('_') {
+            // A handler outside the plugin class is reached through the preload constant of its
+            // script, and `gd_functions` keys every function by its bare name.
+            let (module, handler) = called.rsplit_once('.').unwrap_or(("", called));
+            let through_a_module = module.starts_with(char::is_uppercase);
+            if handler.starts_with('_') || through_a_module {
                 pairs.push((named.to_owned(), handler.to_owned()));
                 command = None;
             }
@@ -924,7 +947,7 @@ fn decodes_a_value(
     if body.contains("Protocol.decode(") || body.contains("Protocol.decode_items(") {
         return true;
     }
-    calls_taking_params(body)
+    calls_taking_params(body, functions)
         .into_iter()
         .any(|(callee, _)| decodes_a_value(callee, functions, seen))
 }

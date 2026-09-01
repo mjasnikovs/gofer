@@ -81,7 +81,7 @@ use ai_turn::{
 };
 use process::SystemProcessSpawner;
 use settings::{
-    AI_HEALTH_TIMEOUT, AI_REQUEST_TIMEOUT, AiModelOption, ApiKeyUpdate, ConnectionTestResult,
+    AI_HEALTH_TIMEOUT, AI_REQUEST_TIMEOUT, AiModelOption, ConnectionTestResult,
     ConnectionTestStatus, GodotSettings, SettingsRequest, SettingsResponse, apply_saved_secrets,
     clear_chatgpt_credential, list_ai_models_with, read_settings, restore_saved_secrets,
     run_connection_test, save_godot_settings as store_godot_settings, settings_response,
@@ -1192,10 +1192,7 @@ async fn ai_health(app: &AppHandle) -> health::AiHealth {
     let result = run_connection_test(
         SettingsRequest {
             settings,
-            api_key: ApiKeyUpdate::Keep,
-            brave_api_key: ApiKeyUpdate::Keep,
-            openrouter_api_key: ApiKeyUpdate::Keep,
-            cerebras_api_key: ApiKeyUpdate::Keep,
+            secrets: std::collections::BTreeMap::new(),
         },
         AI_HEALTH_TIMEOUT,
     )

@@ -4,7 +4,6 @@
 //! coalesced warmup that downloads them. Tauri commands stay in `lib.rs` and call in here.
 
 use crate::process::{ProcessSpawner, SystemProcessSpawner};
-use crate::settings::{Secret, Secrets};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -614,16 +613,10 @@ struct RetrieveWorkerResponse {
 /// question its expansion and nothing else, so neither is reported as a failure.
 pub fn expansion_connection<R: Runtime>(app: &AppHandle<R>) -> Option<RetrieveConnection> {
     let settings = crate::settings::read_settings(app).ok()?;
-    let secrets = crate::settings::SystemSecrets;
-    let key = secrets.read(Secret::AiDefault).ok().flatten();
-    let openrouter_key = secrets.read(Secret::OpenRouter).ok().flatten();
-    let cerebras_key = secrets.read(Secret::Cerebras).ok().flatten();
     let credential = crate::settings::stored_chatgpt_credential().ok().flatten();
     crate::settings::docs_expansion_connection(
         &settings.ai,
-        key,
-        openrouter_key,
-        cerebras_key,
+        &crate::settings::stored_api_keys(&crate::settings::SystemSecrets),
         credential,
     )
 }

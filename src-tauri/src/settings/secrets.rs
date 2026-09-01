@@ -14,6 +14,118 @@
 
 use super::*;
 
+// GENERATED-BEGIN secrets sha256:634582cff522bced
+impl Secret {
+    /// The word a request and a response key this secret by.
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::AiDefault => "ai-default",
+            Self::Brave => "brave",
+            Self::OpenRouter => "openrouter",
+            Self::Cerebras => "cerebras",
+            Self::ChatGpt => "chat-gpt",
+        }
+    }
+
+    /// The username this secret is stored under, beneath the one service. A second
+    /// username is how one keyring holds more than one secret.
+    pub(super) const fn username(self) -> &'static str {
+        match self {
+            Self::AiDefault => "ai-default",
+            Self::Brave => "web-brave-search",
+            Self::OpenRouter => "ai-openrouter",
+            Self::Cerebras => "ai-cerebras",
+            Self::ChatGpt => "ai-openai-codex",
+        }
+    }
+
+    /// What this secret is called in the one sentence a user ever reads about it.
+    pub(super) const fn noun(self) -> &'static str {
+        match self {
+            Self::AiDefault => "AI API key",
+            Self::Brave => "Brave Search key",
+            Self::OpenRouter => "OpenRouter API key",
+            Self::Cerebras => "Cerebras API key",
+            Self::ChatGpt => "ChatGPT credential",
+        }
+    }
+
+    /// What an empty box means, which is not the same answer for all of them.
+    pub(super) const fn blank(self) -> Blank {
+        match self {
+            Self::AiDefault => Blank::Refused,
+            Self::Brave => Blank::Clears,
+            Self::OpenRouter => Blank::Clears,
+            Self::Cerebras => Blank::Clears,
+            Self::ChatGpt => Blank::Refused,
+        }
+    }
+
+    /// Whether a request carries a bearer token from this, or a login writes it.
+    pub(crate) const fn is_api_key(self) -> bool {
+        match self {
+            Self::AiDefault => true,
+            Self::Brave => true,
+            Self::OpenRouter => true,
+            Self::Cerebras => true,
+            Self::ChatGpt => false,
+        }
+    }
+
+    /// The secret one wire word names, or nothing when the word names none.
+    pub(crate) fn from_id(word: &str) -> Option<Self> {
+        match word {
+            "ai-default" => Some(Self::AiDefault),
+            "brave" => Some(Self::Brave),
+            "openrouter" => Some(Self::OpenRouter),
+            "cerebras" => Some(Self::Cerebras),
+            "chat-gpt" => Some(Self::ChatGpt),
+            _ => None,
+        }
+    }
+
+    /// Every secret Gofer keeps, in the order a save writes them.
+    pub(crate) const ORDER: [Self; 5] = [
+        Self::AiDefault,
+        Self::Brave,
+        Self::OpenRouter,
+        Self::Cerebras,
+        Self::ChatGpt,
+    ];
+}
+
+/// The one credential a driver authenticates with.
+///
+/// A key sent to the wrong address is a key handed to a machine that was never meant to
+/// see it. This pairing was a match here, a second match in `catalogue.rs`, a table in a
+/// React file and two record literals in a hook; it is one row of `protocol/drivers.json`
+/// now, and every one of those is a lookup.
+pub(crate) const fn driver_secret(driver: AiConnectionType) -> Secret {
+    match driver {
+        AiConnectionType::OpenaiCompatible => Secret::AiDefault,
+        AiConnectionType::OpenaiCodex => Secret::ChatGpt,
+        AiConnectionType::Openrouter => Secret::OpenRouter,
+        AiConnectionType::Cerebras => Secret::Cerebras,
+    }
+}
+// GENERATED-END secrets
+
+/// One spelling on the wire, and it is the generated one — so a key sent in a request and a slot
+/// reported in a response are the same word as the row they both come from.
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, out: S) -> Result<S::Ok, S::Error> {
+        out.serialize_str(self.id())
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(input)?;
+        Self::from_id(&word)
+            .ok_or_else(|| serde::de::Error::custom(format!("{word} names no secret Gofer keeps")))
+    }
+}
+
 pub(super) fn required_value(name: &str, value: String) -> Result<String, String> {
     let value = value.trim().to_owned();
     if value.is_empty() {
@@ -65,7 +177,7 @@ pub(super) const NO_CREDENTIAL_STORE: &str = "This machine has no credential sto
 /// the sentence a failure is reported in, and what an empty box means. Only one of them went
 /// through a seam a test could drive, so the two with the *other* blank rule were the two nothing
 /// held to it. This carries the three differences, and everything else is written once.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Secret {
     /// The AI key of the local, OpenAI-compatible driver.
     AiDefault,
@@ -90,38 +202,6 @@ pub(super) enum Blank {
     /// they typed, and an empty entry left behind reads as a configured key every request is then
     /// rejected for.
     Clears,
-}
-
-impl Secret {
-    /// The username this secret is stored under, beneath the one service. A second username is how
-    /// this keyring holds more than one secret.
-    pub(super) const fn username(self) -> &'static str {
-        match self {
-            Self::AiDefault => "ai-default",
-            Self::OpenRouter => "ai-openrouter",
-            Self::Cerebras => "ai-cerebras",
-            Self::ChatGpt => "ai-openai-codex",
-            Self::Brave => "web-brave-search",
-        }
-    }
-
-    /// What this secret is called in the one sentence a user ever reads about it.
-    const fn noun(self) -> &'static str {
-        match self {
-            Self::AiDefault => "AI API key",
-            Self::OpenRouter => "OpenRouter API key",
-            Self::Cerebras => "Cerebras API key",
-            Self::ChatGpt => "ChatGPT credential",
-            Self::Brave => "Brave Search key",
-        }
-    }
-
-    const fn blank(self) -> Blank {
-        match self {
-            Self::AiDefault | Self::ChatGpt => Blank::Refused,
-            Self::Brave | Self::OpenRouter | Self::Cerebras => Blank::Clears,
-        }
-    }
 }
 
 /// Where the five secrets are kept. The seam, and it takes the slot.
@@ -247,11 +327,7 @@ pub(crate) fn settings_response(settings: GoferSettings) -> SettingsResponse {
     if std::env::var_os("GOFER_WEBDRIVER_RAG_READY").is_some() {
         return SettingsResponse {
             settings,
-            has_api_key: false,
-            has_chat_gpt_credential: false,
-            has_brave_api_key: false,
-            has_openrouter_api_key: false,
-            has_cerebras_api_key: false,
+            stored_secrets: nothing_is_held(),
             credential_store_error: None,
         };
     }
@@ -266,26 +342,52 @@ pub(super) fn settings_response_with(
     secrets: &impl Secrets,
     settings: GoferSettings,
 ) -> SettingsResponse {
-    match secrets.read(Secret::AiDefault) {
-        Ok(api_key) => SettingsResponse {
-            settings,
-            has_api_key: api_key.is_some(),
-            has_chat_gpt_credential: chatgpt_credential_in(secrets).ok().flatten().is_some(),
-            has_brave_api_key: secrets.read(Secret::Brave).ok().flatten().is_some(),
-            has_openrouter_api_key: secrets.read(Secret::OpenRouter).ok().flatten().is_some(),
-            has_cerebras_api_key: secrets.read(Secret::Cerebras).ok().flatten().is_some(),
-            credential_store_error: None,
-        },
-        Err(error) => SettingsResponse {
-            settings,
-            has_api_key: false,
-            has_chat_gpt_credential: false,
-            has_brave_api_key: false,
-            has_openrouter_api_key: false,
-            has_cerebras_api_key: false,
-            credential_store_error: Some(error),
-        },
+    let ai_default = match secrets.read(Secret::AiDefault) {
+        Err(error) => {
+            return SettingsResponse {
+                settings,
+                stored_secrets: nothing_is_held(),
+                credential_store_error: Some(error),
+            };
+        }
+        Ok(held) => held.is_some(),
+    };
+    SettingsResponse {
+        settings,
+        stored_secrets: Secret::ORDER
+            .into_iter()
+            .map(|secret| {
+                let held = match secret {
+                    Secret::ChatGpt => chatgpt_credential_in(secrets).ok().flatten().is_some(),
+                    Secret::AiDefault => ai_default,
+                    _ => secrets.read(secret).ok().flatten().is_some(),
+                };
+                (secret, held)
+            })
+            .collect(),
+        credential_store_error: None,
     }
+}
+
+/// Every slot reported empty, which is what a machine with no credential store can honestly say.
+fn nothing_is_held() -> BTreeMap<Secret, bool> {
+    Secret::ORDER
+        .into_iter()
+        .map(|secret| (secret, false))
+        .collect()
+}
+
+/// Every API key the machine is holding, keyed by its slot.
+///
+/// A caller that needs one asks the pairing which, rather than reading three named keys and
+/// handing all three to a function that picks. A slot the store cannot answer for is absent, which
+/// is the same thing as empty to everything that reads this.
+pub(crate) fn stored_api_keys(secrets: &impl Secrets) -> BTreeMap<Secret, String> {
+    Secret::ORDER
+        .into_iter()
+        .filter(|secret| secret.is_api_key())
+        .filter_map(|secret| Some((secret, secrets.read(secret).ok().flatten()?)))
+        .collect()
 }
 
 /// One slot a save wrote, and what was in it beforehand. See [`apply_saved_secrets`].
@@ -294,14 +396,16 @@ pub(crate) struct WrittenSecret {
     previous: Option<String>,
 }
 
-/// The three secrets a settings save carries, in the order they are written.
-pub(super) fn saved_secrets(request: &SettingsRequest) -> [(Secret, &ApiKeyUpdate); 4] {
-    [
-        (Secret::AiDefault, &request.api_key),
-        (Secret::Brave, &request.brave_api_key),
-        (Secret::OpenRouter, &request.openrouter_api_key),
-        (Secret::Cerebras, &request.cerebras_api_key),
-    ]
+/// The secrets a settings save carries, in the order they are written.
+///
+/// Every slot but the OAuth one: a ChatGPT credential is written by its login rather than typed
+/// into a box, so a save that named it would be saying something the settings page cannot mean.
+pub(super) fn saved_secrets(request: &SettingsRequest) -> Vec<(Secret, &ApiKeyUpdate)> {
+    Secret::ORDER
+        .into_iter()
+        .filter(|secret| secret.is_api_key())
+        .map(|secret| (secret, request.update(secret)))
+        .collect()
 }
 
 /// Writes every secret a save carries, and answers with the slots it actually wrote.

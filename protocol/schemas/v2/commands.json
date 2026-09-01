@@ -16,61 +16,241 @@
         "runtime.resume"
     ],
     "commands": [
-        {"command": "session.get_state", "handler": "_session_state"},
-        {"command": "session.cancel", "handler": "_session_cancel"},
-        {"command": "session.quit", "handler": "_session_quit"},
-        {"command": "session.undo", "handler": "_undo"},
-        {"command": "session.redo", "handler": "_redo"},
-        {"command": "session.answer_dialog", "handler": "_session_answer_dialog"},
-        {"command": "session.get_unsaved_scenes", "handler": "_session_unsaved_scenes"},
-        {"command": "session.save_all_scenes", "handler": "_session_save_all_scenes"},
-        {"command": "project.get_settings", "handler": "_project_settings"},
-        {"command": "project.search_settings", "handler": "_project_search_settings"},
-        {"command": "project.get_setting", "handler": "_project_get_setting"},
-        {"command": "project.set_setting", "handler": "_project_set_setting"},
-        {"command": "project.reset_setting", "handler": "_project_reset_setting"},
-        {"command": "project.list_autoloads", "handler": "_project_list_autoloads"},
-        {"command": "project.set_autoload", "handler": "_project_set_autoload"},
-        {"command": "project.remove_autoload", "handler": "_project_remove_autoload"},
-        {"command": "project.list_input_actions", "handler": "_project_list_input_actions"},
-        {"command": "project.set_input_action", "handler": "_project_set_input_action"},
-        {"command": "project.remove_input_action", "handler": "_project_remove_input_action"},
-        {"command": "project.reset_input_action", "handler": "_project_reset_input_action"},
-        {"command": "project.list_plugins", "handler": "_project_list_plugins"},
-        {"command": "project.set_plugin_enabled", "handler": "_project_set_plugin_enabled"},
-        {"command": "editor.search_settings", "handler": "_editor_search_settings"},
-        {"command": "editor.get_setting", "handler": "_editor_get_setting"},
-        {"command": "editor.set_setting", "handler": "_editor_set_setting"},
-        {"command": "editor.get_class_icons", "handler": "_editor_class_icons"},
-        {"command": "scene.list", "handler": "_scene_list"},
-        {"command": "scene.open", "handler": "_scene_open"},
-        {"command": "scene.create", "handler": "_scene_create"},
-        {"command": "scene.save", "handler": "_scene_save"},
-        {"command": "scene.save_as", "handler": "_scene_save_as"},
-        {"command": "scene.reload", "handler": "_scene_reload"},
-        {"command": "scene.get_tree", "handler": "_scene_tree"},
-        {"command": "node.create", "handler": "_node_create"},
-        {"command": "node.create_nodes", "handler": "_node_create_nodes"},
-        {"command": "node.instantiate", "handler": "_node_instantiate"},
-        {"command": "node.duplicate", "handler": "_node_duplicate"},
-        {"command": "node.rename", "handler": "_node_rename"},
-        {"command": "node.reparent", "handler": "_node_reparent"},
-        {"command": "node.change_type", "handler": "_node_change_type"},
-        {"command": "node.delete", "handler": "_node_delete"},
-        {"command": "node.set_property", "handler": "_node_set_property"},
-        {"command": "node.set_properties", "handler": "_node_set_properties"},
-        {"command": "node.add_to_group", "handler": "_node_add_to_group"},
-        {"command": "node.remove_from_group", "handler": "_node_remove_from_group"},
-        {"command": "node.connect_signal", "handler": "_node_connect_signal"},
-        {"command": "node.disconnect_signal", "handler": "_node_disconnect_signal"},
-        {"command": "node.set_cells", "handler": "_node_set_cells"},
-        {"command": "node.get_cells", "handler": "_node_get_cells"},
-        {"command": "node.inspect", "handler": "_node_inspect"},
-        {"command": "resource.rescan", "handler": "_resource_rescan"},
-        {"command": "resource.create_tileset", "handler": "_resource_create_tileset"},
-        {"command": "resource.create_texture", "handler": "_resource_create_texture"},
-        {"command": "resource.create_shape", "handler": "_resource_create_shape"},
-        {"command": "resource.describe_tileset", "handler": "_resource_describe_tileset"},
-        {"command": "session.heartbeat", "handler": "_session_heartbeat"}
-    ]
+        {
+            "command": "session.get_state",
+            "handler": "_session_state"
+        },
+        {
+            "command": "session.cancel",
+            "handler": "_session_cancel"
+        },
+        {
+            "command": "session.quit",
+            "handler": "_session_quit"
+        },
+        {
+            "command": "session.undo",
+            "handler": "_undo"
+        },
+        {
+            "command": "session.redo",
+            "handler": "_redo"
+        },
+        {
+            "command": "session.answer_dialog",
+            "handler": "_session_answer_dialog"
+        },
+        {
+            "command": "session.get_unsaved_scenes",
+            "handler": "_session_unsaved_scenes"
+        },
+        {
+            "command": "session.save_all_scenes",
+            "handler": "_session_save_all_scenes"
+        },
+        {
+            "command": "project.get_settings",
+            "handler": "settings",
+            "module": "project_config"
+        },
+        {
+            "command": "project.search_settings",
+            "handler": "search_settings",
+            "module": "project_config"
+        },
+        {
+            "command": "project.get_setting",
+            "handler": "get_setting",
+            "module": "project_config"
+        },
+        {
+            "command": "project.set_setting",
+            "handler": "set_setting",
+            "module": "project_config"
+        },
+        {
+            "command": "project.reset_setting",
+            "handler": "reset_setting",
+            "module": "project_config"
+        },
+        {
+            "command": "project.list_autoloads",
+            "handler": "list_autoloads",
+            "module": "project_config"
+        },
+        {
+            "command": "project.set_autoload",
+            "handler": "_project_set_autoload"
+        },
+        {
+            "command": "project.remove_autoload",
+            "handler": "remove_autoload",
+            "module": "project_config"
+        },
+        {
+            "command": "project.list_input_actions",
+            "handler": "list_input_actions",
+            "module": "project_config"
+        },
+        {
+            "command": "project.set_input_action",
+            "handler": "set_input_action",
+            "module": "project_config"
+        },
+        {
+            "command": "project.remove_input_action",
+            "handler": "remove_input_action",
+            "module": "project_config"
+        },
+        {
+            "command": "project.reset_input_action",
+            "handler": "reset_input_action",
+            "module": "project_config"
+        },
+        {
+            "command": "project.list_plugins",
+            "handler": "_project_list_plugins"
+        },
+        {
+            "command": "project.set_plugin_enabled",
+            "handler": "_project_set_plugin_enabled"
+        },
+        {
+            "command": "editor.search_settings",
+            "handler": "_editor_search_settings"
+        },
+        {
+            "command": "editor.get_setting",
+            "handler": "_editor_get_setting"
+        },
+        {
+            "command": "editor.set_setting",
+            "handler": "_editor_set_setting"
+        },
+        {
+            "command": "editor.get_class_icons",
+            "handler": "_editor_class_icons"
+        },
+        {
+            "command": "scene.list",
+            "handler": "_scene_list"
+        },
+        {
+            "command": "scene.open",
+            "handler": "_scene_open"
+        },
+        {
+            "command": "scene.create",
+            "handler": "_scene_create"
+        },
+        {
+            "command": "scene.save",
+            "handler": "_scene_save"
+        },
+        {
+            "command": "scene.save_as",
+            "handler": "_scene_save_as"
+        },
+        {
+            "command": "scene.reload",
+            "handler": "_scene_reload"
+        },
+        {
+            "command": "scene.get_tree",
+            "handler": "_scene_tree"
+        },
+        {
+            "command": "node.create",
+            "handler": "_node_create"
+        },
+        {
+            "command": "node.create_nodes",
+            "handler": "_node_create_nodes"
+        },
+        {
+            "command": "node.instantiate",
+            "handler": "_node_instantiate"
+        },
+        {
+            "command": "node.duplicate",
+            "handler": "_node_duplicate"
+        },
+        {
+            "command": "node.rename",
+            "handler": "_node_rename"
+        },
+        {
+            "command": "node.reparent",
+            "handler": "_node_reparent"
+        },
+        {
+            "command": "node.change_type",
+            "handler": "_node_change_type"
+        },
+        {
+            "command": "node.delete",
+            "handler": "_node_delete"
+        },
+        {
+            "command": "node.set_property",
+            "handler": "_node_set_property"
+        },
+        {
+            "command": "node.set_properties",
+            "handler": "_node_set_properties"
+        },
+        {
+            "command": "node.add_to_group",
+            "handler": "_node_add_to_group"
+        },
+        {
+            "command": "node.remove_from_group",
+            "handler": "_node_remove_from_group"
+        },
+        {
+            "command": "node.connect_signal",
+            "handler": "_node_connect_signal"
+        },
+        {
+            "command": "node.disconnect_signal",
+            "handler": "_node_disconnect_signal"
+        },
+        {
+            "command": "node.set_cells",
+            "handler": "_node_set_cells"
+        },
+        {
+            "command": "node.get_cells",
+            "handler": "_node_get_cells"
+        },
+        {
+            "command": "node.inspect",
+            "handler": "_node_inspect"
+        },
+        {
+            "command": "resource.rescan",
+            "handler": "_resource_rescan"
+        },
+        {
+            "command": "resource.create_tileset",
+            "handler": "_resource_create_tileset"
+        },
+        {
+            "command": "resource.create_texture",
+            "handler": "_resource_create_texture"
+        },
+        {
+            "command": "resource.create_shape",
+            "handler": "_resource_create_shape"
+        },
+        {
+            "command": "resource.describe_tileset",
+            "handler": "_resource_describe_tileset"
+        },
+        {
+            "command": "session.heartbeat",
+            "handler": "_session_heartbeat"
+        }
+    ],
+    "$moduleComment": "`module` names the addon script a handler lives in, and its absence means `plugin.gd`. A handler outside the plugin class is a `static func` in a preloadable script, which is what puts it in the one-second headless suite rather than behind an editor boot; the dispatch table calls it through the preload constant of the same name."
 }

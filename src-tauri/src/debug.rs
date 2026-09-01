@@ -295,13 +295,11 @@ fn note_the_armed_breakpoints(path: &str, lines: &[i64]) {
     }
 }
 
-/// Serializes the tests that share the one armed-breakpoint map.
-///
-/// Two of them, in two modules — what a runtime failure says while a break is set, and what a wait
-/// that ran out says — and each seeds the map before reading it. A poisoned lock is taken anyway,
-/// for the reason `session_test_lock` gives: every holder seeds from scratch.
+/// Serializes this module's tests, which share the one armed-breakpoint map and each seed it before
+/// reading it. A poisoned lock is taken anyway, for the reason `session_test_lock` gives: every
+/// holder seeds from scratch.
 #[cfg(test)]
-pub(crate) fn breakpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
+fn breakpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -309,7 +307,7 @@ pub(crate) fn breakpoint_test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Sets the armed breakpoints for a test about what a runtime failure says while one is set.
 #[cfg(test)]
-pub(crate) fn pretend_a_breakpoint_is_armed(path: Option<&str>) {
+fn pretend_a_breakpoint_is_armed(path: Option<&str>) {
     let Ok(mut armed) = ARMED_BREAKPOINTS.lock() else {
         return;
     };
@@ -337,13 +335,6 @@ static DEBUGGER_HOLDS_A_GAME: AtomicBool = AtomicBool::new(false);
 /// Whether the debugger has a game of its own running right now.
 pub fn holds_a_game() -> bool {
     DEBUGGER_HOLDS_A_GAME.load(Ordering::Relaxed)
-}
-
-/// Sets that flag for a test about what the router says when the debugger is holding a game.
-/// Nothing else may write it: every real path goes through a launch, a terminate or a disconnect.
-#[cfg(test)]
-pub fn pretend_it_holds_a_game(holds: bool) {
-    DEBUGGER_HOLDS_A_GAME.store(holds, Ordering::Relaxed);
 }
 
 /// What an empty stack means, said where the empty list is.

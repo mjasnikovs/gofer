@@ -63,12 +63,12 @@ function catalogued(model: Partial<AiModelOption>): AiModelOption {
 function connectedTo(settings: GoferSettings, models: readonly AiModelOption[]) {
     backend = (command, args) => {
         if (command === 'load_settings') {
-            return Promise.resolve({settings, hasApiKey: false} as SettingsResponse)
+            return Promise.resolve({settings, storedSecrets: {}} as SettingsResponse)
         }
         if (command === 'list_ai_models') return Promise.resolve(models)
         if (command === 'save_settings') {
             saved.push((args as {request: {settings: GoferSettings}}).request.settings)
-            return Promise.resolve({settings: saved.at(-1), hasApiKey: false})
+            return Promise.resolve({settings: saved.at(-1), storedSecrets: {}})
         }
         return Promise.resolve(undefined)
     }

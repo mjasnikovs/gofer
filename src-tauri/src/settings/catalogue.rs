@@ -31,6 +31,23 @@ pub(crate) const AI_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// server that is simply not running yet must not hold the window blank while it is waited for.
 pub(crate) const AI_HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// The bearer a driver's catalogue read sends, which is nothing at all for an OAuth one.
+///
+/// It used to fall through to the local driver's slot, which would have put this machine's key on
+/// a hosted endpoint. Two callers returning early forty lines away were the only thing that made
+/// that unreachable, and neither of them says so. The pairing decides it here instead.
+pub(super) fn listing_bearer(
+    driver: AiConnectionType,
+    request: &SettingsRequest,
+    store: &impl Secrets,
+) -> Result<Option<String>, String> {
+    let secret = driver_secret(driver);
+    if !secret.is_api_key() {
+        return Ok(None);
+    }
+    resolve(request.update(secret), secret, store)
+}
+
 /// Validates settings, resolves the credential, and builds the models-endpoint request.
 ///
 /// Sending is left to the caller because the two commands classify transport failures
@@ -41,18 +58,8 @@ async fn prepare_models_request(
     path: &str,
 ) -> Result<ModelsRequest, String> {
     let (settings, api_key) = tauri::async_runtime::spawn_blocking(move || {
-        let settings = validate_settings(request.settings)?;
-        let api_key = match settings.ai.connection_type {
-            AiConnectionType::Openrouter => resolve(
-                &request.openrouter_api_key,
-                Secret::OpenRouter,
-                &SystemSecrets,
-            )?,
-            AiConnectionType::Cerebras => {
-                resolve(&request.cerebras_api_key, Secret::Cerebras, &SystemSecrets)?
-            }
-            _ => resolve(&request.api_key, Secret::AiDefault, &SystemSecrets)?,
-        };
+        let settings = validate_settings(request.settings.clone())?;
+        let api_key = listing_bearer(settings.ai.connection_type, &request, &SystemSecrets)?;
         Ok::<_, String>((settings, api_key))
     })
     .await

@@ -65,7 +65,7 @@ import {DEFAULT_SEARCH_PROVIDER, TUNING_DEFAULTS} from './tuning-defaults.mjs'
 
 export {readableProviderError, outOfRoom}
 
-// GENERATED-BEGIN drivers sha256:91516ff3c944f6c4
+// GENERATED-BEGIN drivers sha256:a3401cf8c945dbf1
 /** Every driver a build knows, in the order the pickers offer them. */
 export const DRIVERS = ['openai-compatible', 'openai-codex', 'openrouter', 'cerebras']
 
@@ -85,6 +85,21 @@ const DRIVER_NAMES = {
 }
 
 /**
+ * Which stored secret each driver authenticates with.
+ *
+ * A key used to reach the worker as its own named field, so the name had to be spelt
+ * the same on both sides of the process boundary and a driver whose field nobody
+ * passed registered with no key at all. The request carries a map keyed by slot now,
+ * and this is the lookup into it.
+ */
+export const DRIVER_SECRETS = {
+    'openai-compatible': 'ai-default',
+    'openai-codex': 'chat-gpt',
+    openrouter: 'openrouter',
+    cerebras: 'cerebras'
+}
+
+/**
  * The hosted drivers `createModelContext` has to build a provider for, in order.
  *
  * Not every driver. pi-ai ships the ChatGPT provider, and the local one is registered
@@ -100,9 +115,23 @@ const PROVIDER_ID = PROVIDER_IDS['openai-compatible']
 
 const KEEP_RECENT_TOKENS = 20_000
 
-const DEFAULT_RETRY_ATTEMPTS = 10
-const DEFAULT_RETRY_BASE_DELAY_MS = 5_000
-const DEFAULT_RETRY_MAX_DELAY_MS = 60_000
+// GENERATED-BEGIN turn-retry sha256:507be9930d939882
+/** What a parent turn does when the provider fails. Overridden per call, never per file. */
+export const TURN_RETRY = {
+    // How many times one turn is put to the provider again after a failure worth retrying. High
+    // because the failures this exists for are a local server being reloaded and a hosted one
+    // rate-limiting: both clear on their own, and both take longer than two attempts to clear. A
+    // failure that is not worth retrying does not reach this.
+    attempts: 10,
+    // The first wait, doubled on every attempt after it. Five seconds is what a llama.cpp host
+    // takes to finish loading a model it has just been handed, which is the failure the retry is
+    // most often waiting out.
+    baseDelayMs: 5_000,
+    // The ceiling the doubling stops at, so ten attempts are minutes rather than hours. A provider
+    // still refusing after a minute of backoff is not going to answer this turn.
+    maxDelayMs: 60_000
+}
+// GENERATED-END turn-retry
 
 const RATE_LIMIT_BASE_DELAY_MS = 1_000
 
@@ -346,15 +375,15 @@ function retryEntry(messages, prompt) {
 
 export function createModelContext({
     settings,
-    apiKey,
-    openrouterApiKey,
-    cerebrasApiKey,
+    secrets = {},
     oauthCredential,
     credentialHost,
     sessionId,
     signal
 }) {
     const isChatGpt = settings.connectionType === 'openai-codex'
+    /** The key a driver sends, out of the slots this request carries. */
+    const keyFor = driver => secrets[DRIVER_SECRETS[driver]]
     const drivers = new Set([
         settings.connectionType,
         settings.subagent?.connection?.connectionType
@@ -380,7 +409,12 @@ export function createModelContext({
                 auth: {
                     apiKey: {
                         name: localProfile.name,
-                        resolve: async () => ({auth: {apiKey: apiKey || 'local'}})
+                        // This provider's own slot, not the turn's driver: the local server is
+                        // registered whenever either seat points at it, and keying on the turn
+                        // sent a hosted key to whatever address the user typed.
+                        resolve: async () => ({
+                            auth: {apiKey: keyFor('openai-compatible') || 'local'}
+                        })
                     }
                 },
                 models: [modelFor(localProfile)],
@@ -388,16 +422,15 @@ export function createModelContext({
             })
         )
     }
-    const keySlots = {openrouter: openrouterApiKey, cerebras: cerebrasApiKey}
     for (const driver of HOSTED_DRIVERS) {
         const profile = connectionProfile(settings, driver)
         if (!drivers.has(driver) || !profile) continue
-        if (!(driver in keySlots))
+        if (!(driver in DRIVER_SECRETS))
             throw new Error(
                 `No API key reaches the '${driver}' connection. It is declared in`
-                    + ' protocol/drivers.json and nothing passes its key to createModelContext.'
+                    + ' protocol/drivers.json and nothing pairs it with a secret.'
             )
-        const key = keySlots[driver]
+        const key = keyFor(driver)
         models.setProvider(
             createProvider({
                 id: PROVIDER_IDS[driver],
@@ -435,10 +468,7 @@ export const LIVE_WORLD = {createModelContext}
 export async function runAgent({
     settings,
     systemPrompt = '',
-    apiKey,
-    openrouterApiKey,
-    cerebrasApiKey,
-    braveApiKey,
+    secrets = {},
     oauthCredential,
     messages,
     agentMessages,
@@ -456,13 +486,12 @@ export async function runAgent({
     signal,
     steering,
     timers = realTimers,
+    retry: retryOverride,
     world = LIVE_WORLD
 }) {
     const {isChatGpt, models, model, subagent, streamOptions} = world.createModelContext({
         settings,
-        apiKey,
-        openrouterApiKey,
-        cerebrasApiKey,
+        secrets,
         oauthCredential,
         credentialHost,
         sessionId,
@@ -483,7 +512,7 @@ export async function runAgent({
             }),
             createWebSearchTool({
                 provider: settings.web?.searchProvider ?? DEFAULT_SEARCH_PROVIDER,
-                apiKey: braveApiKey
+                apiKey: secrets.brave
             }),
             createWebFetchTool({
                 workspacePath,
@@ -534,11 +563,7 @@ export async function runAgent({
         :   rolledBack
     if (isRebuilt) emit(contextRebuilt(previousMessages.length))
 
-    const retry = {
-        attempts: settings.retryAttempts ?? DEFAULT_RETRY_ATTEMPTS,
-        baseDelayMs: settings.retryBaseDelayMs ?? DEFAULT_RETRY_BASE_DELAY_MS,
-        maxDelayMs: settings.retryMaxDelayMs ?? DEFAULT_RETRY_MAX_DELAY_MS
-    }
+    const retry = {...TURN_RETRY, ...retryOverride}
 
     const compaction = compactionSettings(
         settings.compactionPercent ?? TUNING_DEFAULTS.compactionPercent,
@@ -772,24 +797,38 @@ export async function runAgent({
         return attemptState
     }
 
+    /**
+     * How one attempt at the Turn ended, and therefore what happens next.
+     *
+     * Six things decide when a Turn ends — a steer to drain, a verify point to answer, a context
+     * overflow to recover from, a provider failure to back off from, an abort, and an answer that
+     * stands — and each of them is a closure over one shared record. The order they are asked in is
+     * the whole contract, and it used to be stated nowhere but the shape of the loop's body. It is
+     * one value with three names now, and the loop is the fold over it.
+     */
+    const nextStep = async () => {
+        await recoverOverflow(state)
+        const verdict = await gateOnVerifyPoints(
+            state,
+            agent.hasQueuedMessages() && !signal?.aborted
+        )
+        if (verdict === 'again') return 'again'
+        if (verdict === 'answered') {
+            if (!agent.hasQueuedMessages() || signal?.aborted) return 'answered'
+            // Typed while the last turn was ending, so the loop's own drain point had gone.
+            state.resume = () => agent.continue()
+            return 'again'
+        }
+        if (wasStopped(state)) return 'stopped'
+        await classifyAndBackoff(state)
+        return wasStopped(state) ? 'stopped' : 'again'
+    }
+
     try {
         for (;;) {
             await state.resume()
-            await recoverOverflow(state)
-            const verdict = await gateOnVerifyPoints(
-                state,
-                agent.hasQueuedMessages() && !signal?.aborted
-            )
-            if (verdict === 'again') continue
-            if (verdict === 'answered') {
-                if (!agent.hasQueuedMessages() || signal?.aborted) break
-                // Typed while the last turn was ending, so the loop's own drain point had gone.
-                state.resume = () => agent.continue()
-                continue
-            }
-            if (wasStopped(state)) break
-            await classifyAndBackoff(state)
-            if (wasStopped(state)) break
+            const step = await nextStep()
+            if (step === 'answered' || step === 'stopped') break
         }
         const {finalMessage, verifyResults} = state
         if (finalMessage.stopReason === 'length') throw new Error(outOfRoom(finalMessage, model))

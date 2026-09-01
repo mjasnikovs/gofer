@@ -44,7 +44,7 @@ describe('renderer desktop journey', () => {
                     timeoutMs: 5_000
                 }
             },
-            hasApiKey: true
+            storedSecrets: {'ai-default': true}
         })
 
         await browser.$('button=Try again').click()

@@ -68,13 +68,15 @@ the state of. What they share is an order — clients before the process, the ru
 addon out last — and that order is `end_session`, not a habit two functions have.
 
 **Addon** — the GDScript plugin Gofer stages into the project, which answers protocol commands from
-inside the editor. Four scripts: `plugin.gd` in the editor, `runtime.gd` in the running game, and
-`protocol.gd` and `params.gd` beside both.
+inside the editor. Six scripts: `plugin.gd` in the editor, `runtime.gd` in the running game, and
+`protocol.gd`, `params.gd`, `project_config.gd` and `runtime_queue.gd` beside both.
 
 `plugin.gd` extends `EditorPlugin`, and that one line is the addon's testability seam: nothing in
 that class can be reached without booting a real editor under xvfb, whether it touches the editor or
-not. `protocol.gd` and `params.gd` are on the other side of it — preloadable, so
-`fixtures/godot-project/tests` drives them from source in about a second each.
+not. The other four are on the other side of it — preloadable, so `fixtures/godot-project/tests`
+drives them from source in about a second each. A command whose handler lives in one of them says so
+with `module` in `protocol/schemas/v2/commands.json`, and the generated dispatch table calls it
+through the preload constant of the same name.
 
 What lives there is what an editor cannot answer better: `protocol.gd`'s codec, where `encode` and
 `decode` are one round trip and live together; and in `params.gd`, everything the commands decide
@@ -83,6 +85,12 @@ against a path that climbs out of the project, the tile and atlas arithmetic, th
 the texture and rescan limits, the reserved setting names, the settings-search matcher, and the
 readback comparison that knows a 32-bit float drifts and a cleared object property is not
 `TYPE_NIL`. Each of those was measured on a real editor once and is re-proved from source since.
+
+`project_config.gd` is everything the `project.*` commands decide, which is `ProjectSettings`,
+`InputMap` and `FileAccess` and never `EditorInterface`. `runtime_queue.gd` is what a call to the
+running game is told when it runs out of time: six diagnoses over a queue, behind two editor values
+the plugin reads and passes in. Both were inside `plugin.gd`, and reaching any of it cost a booted
+editor — a real game as well, for the queue.
 
 Two of them are read by both halves at once — `authored_groups` and `icon_class` take a `Node` and
 never ask whether it is being edited or played. Each existed twice, byte for byte, once on each side
@@ -149,6 +157,13 @@ assert both halves of every row: the owner repairs it, the other leaves it exact
 wrote it. Before that corpus the line was written down in two prose comments and checked by nothing,
 which is how a fix for the double-wrapped tag came to exist only in JavaScript while both suites
 stayed green.
+
+**Secret** — a slot in the one keyring, and the thing a driver authenticates with. Which slot that
+is is one row of `protocol/drivers.json`: `driver_secret` in Rust, `AI_CONNECTION_SECRETS` and
+`TYPED_DRIVER_SECRETS` in the renderer, `DRIVER_SECRETS` in the worker. A worker request carries
+every stored key under its slot rather than one named field per key, because a field name had to be
+spelt the same on both sides of a process boundary and a driver whose field nobody passed registered
+with no key at all. A secret that is not an API key sends no bearer, whatever is stored.
 
 **Driver** — which model service a turn is put to: `openai-compatible`, `openai-codex`, `openrouter`
 or `cerebras`. A closed set of four, spelt as a Rust enum with `driver_id` for the wire word, as a

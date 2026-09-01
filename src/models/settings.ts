@@ -94,11 +94,8 @@ export type GoferSettings = Readonly<{
 
 export type SettingsResponse = Readonly<{
     settings: GoferSettings
-    hasApiKey: boolean
-    hasChatGptCredential?: boolean | undefined
-    hasBraveApiKey?: boolean | undefined
-    hasOpenrouterApiKey?: boolean | undefined
-    hasCerebrasApiKey?: boolean | undefined
+    /** Which slots the machine is holding something in. A slot it says nothing about is empty. */
+    storedSecrets: Partial<Readonly<Record<SecretName, boolean>>>
     credentialStoreError?: string
 }>
 
@@ -125,10 +122,8 @@ export type ApiKeyUpdate =
 
 export type SettingsRequest = Readonly<{
     settings: GoferSettings
-    apiKey: ApiKeyUpdate
-    braveApiKey: ApiKeyUpdate
-    openrouterApiKey: ApiKeyUpdate
-    cerebrasApiKey: ApiKeyUpdate
+    /** What the save does to each slot it names. A slot it does not name is left alone. */
+    secrets: Partial<Readonly<Record<SecretName, ApiKeyUpdate>>>
 }>
 
 export type CacheStatus = Readonly<{
@@ -150,8 +145,6 @@ export type Notice = Readonly<{
 }>
 
 export type ApiKeyIntent = 'keep' | 'set' | 'clear'
-
-export type SecretName = 'ai-default' | 'brave' | 'openrouter' | 'cerebras' | 'chat-gpt'
 
 export type StorageMaintenanceResult = Readonly<{
     attachmentsRemoved: number
@@ -342,7 +335,7 @@ export function withActiveConnection(
     return withConnection(ai, ai.connectionType, change(connection))
 }
 
-// GENERATED-BEGIN drivers sha256:5fc29fea0e2f7ada
+// GENERATED-BEGIN drivers sha256:a51faf9638f210bc
 export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openrouter' | 'cerebras'
 
 /** Every driver a build knows, in the order the pickers offer them. */
@@ -370,6 +363,59 @@ export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = 
     // A fixed host whose endpoint publishes no capabilities at all, which is why what Gofer knows
     // about its models is a table shipped in this directory rather than something asked for.
     cerebras: 'Cerebras'
+}
+
+export type SecretName = 'ai-default' | 'brave' | 'openrouter' | 'cerebras' | 'chat-gpt'
+
+/** Every secret Gofer keeps, in the order a save writes them. */
+export const SECRET_NAMES: readonly SecretName[] = [
+    'ai-default',
+    'brave',
+    'openrouter',
+    'cerebras',
+    'chat-gpt'
+]
+
+/**
+ * The secrets a person types into a box, which is every one but the OAuth credential.
+ *
+ * A ChatGPT credential is written by its login, so a settings save that named it would
+ * be saying something the page cannot mean.
+ */
+export type TypedSecret = 'ai-default' | 'brave' | 'openrouter' | 'cerebras'
+
+export const TYPED_SECRET_NAMES: readonly TypedSecret[] = [
+    'ai-default',
+    'brave',
+    'openrouter',
+    'cerebras'
+]
+
+/**
+ * The one credential each driver authenticates with.
+ *
+ * A key sent to the wrong address is a key handed to a machine that was never meant to
+ * see it, so this pairing is one row of `protocol/drivers.json` and every reader of it is
+ * a lookup. It used to be a match in Rust, a second match in another Rust file, a table in
+ * this renderer and two hand-written record literals in a hook.
+ */
+export const AI_CONNECTION_SECRETS: Readonly<Record<AiConnectionType, SecretName>> = {
+    'openai-compatible': 'ai-default',
+    'openai-codex': 'chat-gpt',
+    openrouter: 'openrouter',
+    cerebras: 'cerebras'
+}
+
+/**
+ * The same pairing, narrowed to the drivers whose secret is typed into a box.
+ *
+ * A driver that signs in has no box, so it has no entry — and a page that draws one
+ * reads `undefined` rather than being handed a slot that belongs to another driver.
+ */
+export const TYPED_DRIVER_SECRETS: Partial<Readonly<Record<AiConnectionType, TypedSecret>>> = {
+    'openai-compatible': 'ai-default',
+    openrouter: 'openrouter',
+    cerebras: 'cerebras'
 }
 // GENERATED-END drivers
 

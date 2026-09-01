@@ -7,6 +7,7 @@ import {
     cacheIsBusy,
     reduce,
     runSettingsTask,
+    hasUnsavedEdits,
     settingsRequest
 } from './settings-draft'
 import type {SettingsAction, SettingsDraft, SettingsTaskAction} from './settings-draft'
@@ -67,7 +68,7 @@ const CACHE: CacheStatus = {path: '/cache', sizeBytes: 1024, state: 'installed'}
 const SHIPPED_PROMPT = 'You are Gofer.'
 const PROMPT: AgentPrompt = {prompt: SHIPPED_PROMPT, defaultPrompt: SHIPPED_PROMPT}
 
-const RESPONSE: SettingsResponse = {settings: SETTINGS, hasApiKey: false}
+const RESPONSE: SettingsResponse = {settings: SETTINGS, storedSecrets: {}}
 
 function apply(...actions: readonly (SettingsAction | SettingsTaskAction)[]): SettingsDraft {
     return actions.reduce(reduce, INITIAL_SETTINGS_DRAFT)
@@ -89,7 +90,7 @@ describe('loading', () => {
         const state = apply({
             type: 'loaded',
             prompt: PROMPT,
-            response: {settings: sparse, hasApiKey: false},
+            response: {settings: sparse, storedSecrets: {}},
             cache: CACHE
         })
         expect(state.settings?.ai.compactionPercent).toBe(86)
@@ -102,7 +103,7 @@ describe('loading', () => {
         const state = apply({
             type: 'loaded',
             prompt: PROMPT,
-            response: {settings: sparse, hasApiKey: false},
+            response: {settings: sparse, storedSecrets: {}},
             cache: CACHE
         })
         expect(state.settings?.godot).toEqual({strictTyping: true, embedGameWindow: true})
@@ -132,17 +133,52 @@ describe('loading', () => {
 })
 
 describe('the request the page would send', () => {
+    it('adopts what another writer saved while the page has changed nothing', () => {
+        const announced = {
+            ...SETTINGS,
+            ai: {...SETTINGS.ai, timeoutMs: SETTINGS.ai.timeoutMs + 1000}
+        }
+        const state = reduce(loaded, {type: 'announced', settings: announced})
+        expect(state.settings?.ai.timeoutMs).toBe(announced.ai.timeoutMs)
+        expect(hasUnsavedEdits(state)).toBe(false)
+    })
+
+    it("keeps the page's own edit when another writer saves underneath it", () => {
+        const edited = reduce(loaded, {type: 'ai-changed', update: {timeoutMs: 4000}})
+        expect(hasUnsavedEdits(edited)).toBe(true)
+
+        const announced = {
+            ...SETTINGS,
+            ai: {...SETTINGS.ai, timeoutMs: 9000}
+        }
+        const state = reduce(edited, {type: 'announced', settings: announced})
+        expect(state.settings?.ai.timeoutMs).toBe(4000)
+        expect(state.savedSettings?.ai.timeoutMs).toBe(9000)
+    })
+
+    it('counts a typed key as an edit, though it lives beside the settings', () => {
+        const typed = reduce(loaded, {type: 'key-typed', secret: 'brave', value: 'b-1'})
+        expect(hasUnsavedEdits(typed)).toBe(true)
+        const announced = {...SETTINGS, ai: {...SETTINGS.ai, timeoutMs: 9000}}
+        expect(reduce(typed, {type: 'announced', settings: announced}).settings?.ai.timeoutMs).toBe(
+            SETTINGS.ai.timeoutMs
+        )
+    })
+
     it('is nothing at all until settings have loaded', () => {
         expect(settingsRequest(INITIAL_SETTINGS_DRAFT)).toBeUndefined()
     })
 
     it('keeps the stored key when the field was left empty', () => {
-        expect(settingsRequest(loaded)?.apiKey).toEqual({action: 'keep'})
+        expect(settingsRequest(loaded)?.secrets['ai-default']).toEqual({action: 'keep'})
     })
 
     it('sets the key the user typed', () => {
         const state = reduce(loaded, {type: 'key-typed', secret: 'ai-default', value: 'sk-1'})
-        expect(settingsRequest(state)?.apiKey).toEqual({action: 'set', value: 'sk-1'})
+        expect(settingsRequest(state)?.secrets['ai-default']).toEqual({
+            action: 'set',
+            value: 'sk-1'
+        })
     })
 
     it('keeps rather than clears when the typed key is erased again', () => {
@@ -151,38 +187,35 @@ describe('the request the page would send', () => {
             {type: 'key-typed', secret: 'ai-default', value: 'sk-1'},
             {type: 'key-typed', secret: 'ai-default', value: '   '}
         )
-        expect(settingsRequest(state)?.apiKey).toEqual({action: 'keep'})
+        expect(settingsRequest(state)?.secrets['ai-default']).toEqual({action: 'keep'})
     })
 
     it('clears only when the removal button was pressed, and un-clears on a second press', () => {
         const cleared = reduce(loaded, {type: 'key-removal-toggled', secret: 'ai-default'})
-        expect(settingsRequest(cleared)?.apiKey).toEqual({action: 'clear'})
+        expect(settingsRequest(cleared)?.secrets['ai-default']).toEqual({action: 'clear'})
         const kept = reduce(cleared, {type: 'key-removal-toggled', secret: 'ai-default'})
-        expect(settingsRequest(kept)?.apiKey).toEqual({action: 'keep'})
+        expect(settingsRequest(kept)?.secrets['ai-default']).toEqual({action: 'keep'})
     })
 
     it('holds every secret by the same three rules, in its own field of the request', () => {
-        const fields = [
-            {secret: 'brave', field: 'braveApiKey'},
-            {secret: 'openrouter', field: 'openrouterApiKey'},
-            {secret: 'cerebras', field: 'cerebrasApiKey'}
-        ] as const
-        for (const {secret, field} of fields) {
-            expect(settingsRequest(loaded)?.[field]).toEqual({action: 'keep'})
+        for (const secret of ['brave', 'openrouter', 'cerebras'] as const) {
+            expect(settingsRequest(loaded)?.secrets[secret]).toEqual({action: 'keep'})
 
             const typed = reduce(loaded, {type: 'key-typed', secret, value: `${secret}-1`})
-            expect(settingsRequest(typed)?.[field]).toEqual({
+            expect(settingsRequest(typed)?.secrets[secret]).toEqual({
                 action: 'set',
                 value: `${secret}-1`
             })
 
             const erased = reduce(typed, {type: 'key-typed', secret, value: '   '})
-            expect(settingsRequest(erased)?.[field]).toEqual({action: 'keep'})
+            expect(settingsRequest(erased)?.secrets[secret]).toEqual({action: 'keep'})
 
             const cleared = reduce(loaded, {type: 'key-removal-toggled', secret})
-            expect(settingsRequest(cleared)?.[field]).toEqual({action: 'clear'})
+            expect(settingsRequest(cleared)?.secrets[secret]).toEqual({action: 'clear'})
             expect(
-                settingsRequest(reduce(cleared, {type: 'key-removal-toggled', secret}))?.[field]
+                settingsRequest(reduce(cleared, {type: 'key-removal-toggled', secret}))?.secrets[
+                    secret
+                ]
             ).toEqual({action: 'keep'})
         }
     })
@@ -192,14 +225,14 @@ describe('the request the page would send', () => {
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'key-typed', secret: 'brave', value: 'brave-1'}
         )
-        expect(settingsRequest(state)?.apiKey).toEqual({action: 'keep'})
-        expect(settingsRequest(state)?.openrouterApiKey).toEqual({action: 'keep'})
-        expect(settingsRequest(state)?.braveApiKey).toEqual({action: 'set', value: 'brave-1'})
+        expect(settingsRequest(state)?.secrets['ai-default']).toEqual({action: 'keep'})
+        expect(settingsRequest(state)?.secrets.openrouter).toEqual({action: 'keep'})
+        expect(settingsRequest(state)?.secrets.brave).toEqual({action: 'set', value: 'brave-1'})
 
         const removed = reduce(state, {type: 'key-removal-toggled', secret: 'ai-default'})
-        expect(settingsRequest(removed)?.apiKey).toEqual({action: 'clear'})
-        expect(settingsRequest(removed)?.openrouterApiKey).toEqual({action: 'keep'})
-        expect(settingsRequest(removed)?.braveApiKey).toEqual({action: 'set', value: 'brave-1'})
+        expect(settingsRequest(removed)?.secrets['ai-default']).toEqual({action: 'clear'})
+        expect(settingsRequest(removed)?.secrets.openrouter).toEqual({action: 'keep'})
+        expect(settingsRequest(removed)?.secrets.brave).toEqual({action: 'set', value: 'brave-1'})
     })
 
     it('discards a typed key when removal is chosen', () => {
@@ -216,10 +249,12 @@ describe('the request the page would send', () => {
             type: 'loaded',
             response: {
                 settings: SETTINGS,
-                hasApiKey: true,
-                hasBraveApiKey: true,
-                hasOpenrouterApiKey: false,
-                hasChatGptCredential: true
+                storedSecrets: {
+                    'ai-default': true,
+                    brave: true,
+                    openrouter: false,
+                    'chat-gpt': true
+                }
             },
             cache: CACHE,
             prompt: PROMPT
@@ -492,7 +527,10 @@ describe('saving', () => {
             {type: 'key-typed', secret: 'brave', value: 'brave-1'},
             {type: 'key-removal-toggled', secret: 'openrouter'},
             {type: 'began', task: 'saving'},
-            {type: 'saved', response: {settings: SETTINGS, hasApiKey: true, hasBraveApiKey: true}}
+            {
+                type: 'saved',
+                response: {settings: SETTINGS, storedSecrets: {'ai-default': true, brave: true}}
+            }
         )
         expect(state.keys['ai-default'].isStored).toBe(true)
         expect(state.keys.brave.isStored).toBe(true)
@@ -507,7 +545,7 @@ describe('saving', () => {
     it('warns rather than celebrates when the key could not be stored', () => {
         const state = reduce(loaded, {
             type: 'saved',
-            response: {settings: SETTINGS, hasApiKey: false, credentialStoreError: 'locked'}
+            response: {settings: SETTINGS, storedSecrets: {}, credentialStoreError: 'locked'}
         })
         expect(state.notices.ai).toEqual({
             status: 'warning',
@@ -538,7 +576,7 @@ describe('the Godot rules', () => {
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
             {type: 'godot-changed', update: {strictTyping: false}},
             {type: 'began', task: 'savingGodot'},
-            {type: 'godot-saved', response: {settings: stored, hasApiKey: false}}
+            {type: 'godot-saved', response: {settings: stored, storedSecrets: {}}}
         )
         expect(state.settings?.godot).toEqual({strictTyping: false, embedGameWindow: true})
         expect(state.busy.savingGodot).toBe(false)
@@ -547,6 +585,21 @@ describe('the Godot rules', () => {
             title: 'Godot rules saved',
             description: 'They are applied the next time a Godot session starts.'
         })
+    })
+
+    it('leaves the page unedited, so another writer is still adopted after it', () => {
+        const stored = {...SETTINGS, godot: {strictTyping: false, embedGameWindow: true}}
+        const saved = apply(
+            {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
+            {type: 'godot-changed', update: {strictTyping: false}},
+            {type: 'began', task: 'savingGodot'},
+            {type: 'godot-saved', response: {settings: stored, storedSecrets: {}}}
+        )
+        expect(hasUnsavedEdits(saved)).toBe(false)
+
+        const announced = {...stored, ai: {...stored.ai, timeoutMs: stored.ai.timeoutMs + 1000}}
+        const state = reduce(saved, {type: 'announced', settings: announced})
+        expect(state.settings?.ai.timeoutMs).toBe(announced.ai.timeoutMs)
     })
 
     it('reports a failed write on its own tab', () => {

@@ -710,6 +710,11 @@ const MAX_RESCAN_PATHS := 256
 ## cap refused first was the most ordinary one there is.
 const MAX_TEXTURE_EDGE := 4096
 
+## The most tiles one atlas source is cut into, and the most rectangles one paint writes.
+const MAX_TILESET_TILES := 4096
+
+const MAX_TEXTURE_RECTS := 512
+
 const MAX_TEXTURE_PIXELS := 1048576
 
 static func unknown_command_error(command: String) -> Dictionary:
@@ -1291,3 +1296,244 @@ static func give_them_back_their_owners(node: Node, owners: Dictionary, prefix: 
         if owners.has(path):
             child.set_owner(owners[path])
         give_them_back_their_owners(child, owners, path)
+
+
+## The error a mutating command answers when Godot does not hold what the command just wrote.
+##
+## Every mutating command ends by asking Godot for the thing it named — the setting, the node, the
+## file — and reports that answer rather than the value it still holds in a local variable. A write
+## the engine took and dropped is otherwise indistinguishable from one that worked: `saved: true`
+## came back for a setting Godot never had, and a node reported created was one the scene did not
+## keep. Both values are named here, because knowing only that they differ is not actionable.
+static func readback_error(
+    what: String, wanted: Variant, found: Variant, details: Dictionary = {}
+) -> Dictionary:
+    var described := details.duplicate()
+    described["wanted"] = str(wanted)
+    described["found"] = str(found)
+    return error(
+        "readback_mismatch",
+        (
+            "%s: the write asked for %s and Godot holds %s%s"
+            % [
+                what,
+                str(wanted),
+                str(found),
+                (
+                    instead_of(
+                        String(details.get("property", "")),
+                        wanted,
+                        found,
+                        String(details.get("enumValues", ""))
+                    )
+                    + made_unique(wanted, found)
+                )
+            ]
+        ),
+        described
+    )
+
+## The nodes a save writes: the scene root and every node it owns, by the path the file records.
+##
+## A node the root does not own is not saved at all, so this is also the list a caller's work has to
+## appear in for it to have happened.
+static func owned_paths(root: Node) -> Array[String]:
+    var paths: Array[String] = ["."]
+    for node in root.find_children("*", "", true, false):
+        if node.owner == root:
+            paths.append(String(root.get_path_to(node)))
+    paths.sort()
+    return paths
+
+## One colour, written as a name or as a hex string.
+##
+## `Color.from_string` answers its fallback for anything it cannot read, so the fallback here is a
+## colour nobody can write. Measured against the pinned editor: "red", "skyblue", "8b5a2b",
+## "#8b5a2b" and "#8b5a2bff" all read, "notacolour" and "" do not.
+static func as_color(raw: Variant) -> Dictionary:
+    if typeof(raw) != TYPE_STRING and typeof(raw) != TYPE_STRING_NAME:
+        return error(
+            "invalid_params",
+            "A colour is a name or a hex string, and %s is neither" % str(raw)
+        )
+    var unreadable := Color(-1.0, -2.0, -3.0, -4.0)
+    var parsed := Color.from_string(str(raw).strip_edges(), unreadable)
+    if parsed == unreadable:
+        return error(
+            "unsupported_color",
+            (
+                "%s is not a colour. Write a name like skyblue or a hex string like #8b5a2b"
+                % str(raw)
+            ),
+            {"color": str(raw)}
+        )
+    return {"value": parsed}
+
+## What the image starts as. Transparent without a `background`, so a sprite has no square round it.
+static func texture_background(params: Dictionary) -> Dictionary:
+    if not params.has("background") or params["background"] == null:
+        return {"value": Color(0.0, 0.0, 0.0, 0.0)}
+    return as_color(params["background"])
+
+## Each rectangle a texture is painted with, clipped to the canvas, in the order they were named.
+static func texture_rects(raw: Variant, size: Vector2i) -> Dictionary:
+    var drawn: Array[Dictionary] = []
+    if raw == null:
+        return {"value": drawn}
+    if typeof(raw) != TYPE_ARRAY:
+        return error(
+            "invalid_params",
+            "resource.create_texture takes rects as a list, and %s is not one" % str(raw)
+        )
+    var listed: Array = raw
+    if listed.size() > MAX_TEXTURE_RECTS:
+        return error(
+            "too_many_rects",
+            (
+                "One texture is painted with at most %d rects, and this one names %d"
+                % [MAX_TEXTURE_RECTS, listed.size()]
+            ),
+            {"limit": MAX_TEXTURE_RECTS}
+        )
+    var canvas := Rect2i(Vector2i.ZERO, size)
+    for entry: Variant in listed:
+        if typeof(entry) != TYPE_DICTIONARY:
+            return error(
+                "invalid_params",
+                "Each rects entry is an object, and %s is not one" % str(entry)
+            )
+        var rect: Dictionary = entry
+        for key in ["x", "y", "width", "height", "color"]:
+            if not rect.has(key):
+                return error(
+                    "invalid_params",
+                    "Each rects entry requires x, y, width, height and color"
+                )
+        var colour := as_color(rect["color"])
+        if colour.has("_gofer_error"):
+            return colour
+        var area := Rect2i(
+            int(rect["x"]), int(rect["y"]), int(rect["width"]), int(rect["height"])
+        )
+        if area.size.x < 1 or area.size.y < 1:
+            return error(
+                "invalid_params",
+                (
+                    "A rects entry covers at least one pixel, and %dx%d covers none"
+                    % [area.size.x, area.size.y]
+                )
+            )
+        var clipped := area.intersection(canvas)
+        if clipped.size.x < 1 or clipped.size.y < 1:
+            return error(
+                "invalid_params",
+                (
+                    "A rects entry at %d,%d %dx%d falls entirely outside a %dx%d texture"
+                    % [area.position.x, area.position.y, area.size.x, area.size.y, size.x, size.y]
+                )
+            )
+        drawn.append({"area": clipped, "color": colour["value"]})
+    return {"value": drawn}
+
+## The whole of what `resource.create_texture` draws, before there is an Image to draw it on.
+static func texture_plan(params: Dictionary) -> Dictionary:
+    var path := as_resource_path(params.get("path", ""))
+    if path.is_empty():
+        return error("invalid_params", "resource.create_texture requires path and size")
+    if not path.ends_with(".png"):
+        return error(
+            "invalid_params",
+            "A texture is saved as a .png, and %s is not one" % path,
+            {"path": path}
+        )
+    var measured := texture_size(params.get("size", null))
+    if measured.has("_gofer_error"):
+        return measured
+    var size: Vector2i = measured["value"]
+    var ground := texture_background(params)
+    if ground.has("_gofer_error"):
+        return ground
+    var painted := texture_rects(params.get("rects", null), size)
+    if painted.has("_gofer_error"):
+        return painted
+    return {"value": {
+        "path": path,
+        "size": size,
+        "background": ground["value"],
+        "rects": painted["value"],
+    }}
+
+## Where a tileset is written and what it is cut from, decided before an editor is asked for either.
+static func tileset_paths(params: Dictionary) -> Dictionary:
+    var path := as_resource_path(params.get("path", ""))
+    var texture_path := as_resource_path(params.get("texture", ""))
+    if path.is_empty() or texture_path.is_empty():
+        return error("invalid_params", "resource.create_tileset requires path and texture")
+    if not path.ends_with(".tres"):
+        return error(
+            "invalid_params",
+            "A TileSet is saved as a .tres resource, and %s is not one" % path,
+            {"path": path}
+        )
+    return {"value": {"path": path, "texture": texture_path}}
+
+## Every tile `resource.create_tileset` will cut, and which of them carry collision.
+##
+## The atlas size is the one thing here an editor has to answer, so it arrives as an argument and
+## everything after it is arithmetic. All five of these refusals used to sit inside `EditorPlugin`,
+## where reaching one cost a real editor boot — and four of them had no test at all.
+static func tileset_plan(
+    params: Dictionary, texture_path: String, image_size: Vector2i
+) -> Dictionary:
+    var size_result := tile_size(params)
+    if size_result.has("_gofer_error"):
+        return size_result
+    var size: Vector2i = size_result["value"]
+    var grid := Vector2i(image_size.x / size.x, image_size.y / size.y)
+    if grid.x < 1 or grid.y < 1:
+        return error(
+            "tile_size_too_large",
+            (
+                "%s is %dx%d, which does not hold one %dx%d tile"
+                % [texture_path, image_size.x, image_size.y, size.x, size.y]
+            ),
+            {"texture": [image_size.x, image_size.y], "tileSize": [size.x, size.y]}
+        )
+
+    var wanted := atlas_coords(params, "tiles", grid)
+    if wanted.has("_gofer_error"):
+        return wanted
+    var tiles: Array = wanted["value"]
+    var tile_count: int = tiles.size() if not tiles.is_empty() else grid.x * grid.y
+    if tile_count > MAX_TILESET_TILES:
+        return error(
+            "too_many_tiles",
+            "A tileset takes at most %d tiles, and this one asks for %d"
+            % [MAX_TILESET_TILES, tile_count],
+            {"limit": MAX_TILESET_TILES}
+        )
+    if tiles.is_empty():
+        for row in range(grid.y):
+            for column in range(grid.x):
+                tiles.append(Vector2i(column, row))
+
+    var solid_param: Variant = params.get("solid", null)
+    var solid: Array = []
+    if typeof(solid_param) == TYPE_STRING and str(solid_param) == "all":
+        solid = tiles.duplicate()
+    elif solid_param != null:
+        var chosen := atlas_coords(params, "solid", grid)
+        if chosen.has("_gofer_error"):
+            return chosen
+        solid = chosen["value"]
+    for coords in solid:
+        if not tiles.has(coords):
+            return error(
+                "tile_not_defined",
+                (
+                    "Tile (%d, %d) is listed as solid but is not one of the tiles being created"
+                    % [coords.x, coords.y]
+                ),
+                {"tile": [coords.x, coords.y]}
+            )
+    return {"value": {"tileSize": size, "grid": grid, "tiles": tiles, "solid": solid}}

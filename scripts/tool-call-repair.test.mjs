@@ -4,6 +4,7 @@ import test from 'node:test'
 import {createGodotTools} from './godot-tools.mjs'
 import {normalizeToolCalls} from './tool-call-repair.mjs'
 import {declaredDomains} from './declared-domains.mjs'
+import {validateToolArguments} from '@earendil-works/pi-ai'
 
 const catalog = [
     {
@@ -89,6 +90,60 @@ function theLeastEntry(operation) {
         }
     }
     return entry
+}
+
+/**
+ * The line between the two engines is the schema's, and this computes it rather than reading it.
+ *
+ * The agent loop validates a call against the generated schema between `prepareArguments` and the
+ * router, with this very function. A shape the schema refuses never reaches `tool_repair.rs`, so
+ * only the worker can answer it. A shape it accepts is the router's, and a second copy of that
+ * repair here is drift waiting to happen — which is exactly how a fix for the double-wrapped tag
+ * came to exist only in JavaScript while both suites stayed green.
+ *
+ * Four rows were `both` when this was written. Every one of them was a pass in this file
+ * reimplementing a repair the router already owned, and deleting it is what made them `router`.
+ */
+test("the line between the two engines is the schema's, not a column in the fixture", async () => {
+    const fixture = JSON.parse(
+        await readFile(new URL('../fixtures/tool-call-repairs.json', import.meta.url), 'utf8')
+    )
+    const domains = await declaredDomains()
+    const tools = createGodotTools(domains, {call: async () => ({})})
+    assert.ok(fixture.repairs.length > 10, 'the corpus lost its repairs')
+    for (const row of fixture.repairs) {
+        const tool = tools.find(one => one.name === row.tool)
+        assert.ok(tool, `${row.tool} is in the corpus and is not advertised`)
+        const accepted = schemaAccepts(tool, {ops: [{op: row.op, ...row.wrote}]})
+        if (accepted) {
+            assert.notEqual(
+                row.repairedBy,
+                'worker',
+                `${row.why}: the schema lets this reach the router, so the router has to own it`
+            )
+            assert.notEqual(
+                row.repairedBy,
+                'both',
+                `${row.why}: the router already repairs this, so the worker's copy is drift`
+            )
+            continue
+        }
+        assert.notEqual(
+            row.repairedBy,
+            'router',
+            `${row.why}: the schema refuses this, so the router never sees it to repair it`
+        )
+    }
+})
+
+/** Whether the loop's own validator would let a call through to the router. */
+function schemaAccepts(tool, args) {
+    try {
+        validateToolArguments(tool, {id: 'one', name: tool.name, arguments: args})
+        return true
+    } catch {
+        return false
+    }
 }
 
 test('a call the router would accept is never rewritten, for every operation', async () => {
@@ -855,62 +910,14 @@ test('an entry written as an operation name, and one written as its own list ent
     })
 })
 
-test('a key that swallowed its own value is split back into the two the model meant', () => {
-    const logs = [
-        {
-            op: 'read',
-            params: [
-                {name: 'after', kind: 'int'},
-                {name: 'minSeverity', kind: 'choice'},
-                {name: 'source', kind: 'choice'},
-                {name: 'contains', kind: 'text'},
-                {name: 'limit', kind: 'int'}
-            ]
-        }
-    ]
-    assert.deepEqual(
-        normalizeToolCalls(logs, {
-            ops: [
-                {
-                    'limit 50': null,
-                    minSeverityWarning: 'warning',
-                    op: 'read',
-                    source: 'editorError'
-                }
-            ]
-        }),
-        {ops: [{limit: 50, minSeverity: 'warning', op: 'read', source: 'editorError'}]}
-    )
-
-    assert.equal(
-        typeof normalizeToolCalls(logs, {ops: [{'limit 50': null, op: 'read'}]}).ops[0].limit,
-        'number'
-    )
-
-    assert.deepEqual(normalizeToolCalls(logs, {ops: [{afterCursor: 37, op: 'read'}]}), {
-        ops: [{afterCursor: 37, op: 'read'}]
-    })
-
-    assert.deepEqual(normalizeToolCalls(logs, {ops: [{afterCursor: null, op: 'read'}]}), {
-        ops: [{afterCursor: null, op: 'read'}]
-    })
-
-    assert.deepEqual(normalizeToolCalls(logs, {ops: [{'limit 3.7': null, op: 'read'}]}), {
-        ops: [{'limit 3.7': null, op: 'read'}]
-    })
-
-    assert.deepEqual(normalizeToolCalls(logs, {ops: [{'limit lots': null, op: 'read'}]}), {
-        ops: [{'limit lots': null, op: 'read'}]
-    })
-
-    const torn = {'contains": "x"}, {"op": "read"': 'read', op: 'read'}
-    assert.deepEqual(normalizeToolCalls(logs, {ops: [{...torn}]}).ops[0], torn)
-
-    assert.deepEqual(normalizeToolCalls(logs, {ops: [{limit: 50, op: 'read'}]}), {
-        ops: [{limit: 50, op: 'read'}]
-    })
-})
-
+/**
+ * A torn key that swallowed its own value is the router's, and the corpus proves it is left alone.
+ *
+ * This file used to split it too. The schema accepts a key no operation declares, so the call
+ * reaches `tool_repair.rs` with the tear intact and the router repairs it there; a second
+ * implementation here was a repair that could only drift. The four corpus rows it answered say
+ * `router` now, and `the line between the two engines is the schema's` refuses a fifth.
+ */
 test('a list written as the text of itself is read as the list', () => {
     const resource = [
         {

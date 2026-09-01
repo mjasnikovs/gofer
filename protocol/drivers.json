@@ -3,6 +3,49 @@
     "$orderComment": "The order is the order the pickers offer them in, which is why it is a list rather than an object. `AI_CONNECTION_TYPES` is emitted in it and `checkOrder` in `check-command-surface.mjs` holds the emitted copies to it.",
     "$variantComment": "`variant` is the Rust enum variant, and the enum stays hand-written. The generated `driver_id` match is what holds the two together: a variant with no row makes the match non-exhaustive, and a row with no variant names something that does not exist. Both are compile errors, in the direction the mistake was made.",
     "$providerComment": "`providerId` is the pi-ai provider a driver's models are registered under. It is `null` only for ChatGPT, whose provider pi-ai ships — so that one is set rather than built, and asking `PROVIDER_IDS` for it is a question with no answer rather than a miss to be papered over.",
+    "$secretComment": "Every secret Gofer keeps, and everything particular to one: the wire word a request and a response key it by, the Rust enum variant, the keyring slot it lives in beneath the one service, the noun the single sentence a user reads about it uses, and what an empty box means, and whether it is a key a request carries a bearer token from or an OAuth credential a login writes. `blank` is `refused` where emptying the field would silently take the key off a server that needs one, and `clears` where emptying it is how a person removes a key they typed. A driver's `secret` above points at one of these by id — that pairing used to be a match in `settings/mod.rs`, a second match in `settings/catalogue.rs` forty lines into another file, a table in a React file, and two hand-written record literals in a hook, with the first of them carrying a doc comment claiming to be the only place it was written down.",
+    "secrets": [
+        {
+            "id": "ai-default",
+            "variant": "AiDefault",
+            "kind": "api-key",
+            "username": "ai-default",
+            "noun": "AI API key",
+            "blank": "refused"
+        },
+        {
+            "id": "brave",
+            "variant": "Brave",
+            "kind": "api-key",
+            "username": "web-brave-search",
+            "noun": "Brave Search key",
+            "blank": "clears"
+        },
+        {
+            "id": "openrouter",
+            "variant": "OpenRouter",
+            "kind": "api-key",
+            "username": "ai-openrouter",
+            "noun": "OpenRouter API key",
+            "blank": "clears"
+        },
+        {
+            "id": "cerebras",
+            "variant": "Cerebras",
+            "kind": "api-key",
+            "username": "ai-cerebras",
+            "noun": "Cerebras API key",
+            "blank": "clears"
+        },
+        {
+            "id": "chat-gpt",
+            "variant": "ChatGpt",
+            "kind": "oauth",
+            "username": "ai-openai-codex",
+            "noun": "ChatGPT credential",
+            "blank": "refused"
+        }
+    ],
     "drivers": [
         {
             "id": "openai-compatible",
@@ -10,6 +53,7 @@
             "label": "Local model",
             "shortName": "local",
             "providerId": "local",
+            "secret": "ai-default",
             "note": "A llama.cpp or any other server speaking OpenAI completions, on an address the user types. The only driver whose key never leaves this machine."
         },
         {
@@ -18,6 +62,7 @@
             "label": "ChatGPT subscription",
             "shortName": "ChatGPT",
             "providerId": null,
+            "secret": "chat-gpt",
             "note": "Authenticates with an OAuth credential rather than a key, which is why a missing one reads as \"Sign in with ChatGPT\" rather than as an error. pi-ai ships the provider."
         },
         {
@@ -26,6 +71,7 @@
             "label": "OpenRouter",
             "shortName": "OpenRouter",
             "providerId": "openrouter",
+            "secret": "openrouter",
             "note": "A fixed host whose catalogue answers every question the local server cannot. Billed, and it reserves credit for the ceiling before it generates a token."
         },
         {
@@ -34,6 +80,7 @@
             "label": "Cerebras",
             "shortName": "Cerebras",
             "providerId": "cerebras",
+            "secret": "cerebras",
             "note": "A fixed host whose endpoint publishes no capabilities at all, which is why what Gofer knows about its models is a table shipped in this directory rather than something asked for."
         }
     ]

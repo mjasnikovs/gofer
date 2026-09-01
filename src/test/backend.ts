@@ -1,7 +1,8 @@
 import {
     DEFAULT_GODOT_SETTINGS,
     DEFAULT_SUBAGENT_SETTINGS,
-    DEFAULT_WEB_SETTINGS
+    DEFAULT_WEB_SETTINGS,
+    SECRET_NAMES
 } from '../models/settings'
 import {draftKey} from '../services/ui-state'
 import type {DesktopCommand, DesktopCommandMap} from '../services/desktop'
@@ -217,7 +218,7 @@ const STORED_SETTINGS: GoferSettings = {
     godot: DEFAULT_GODOT_SETTINGS
 }
 
-export const SETTINGS: SettingsResponse = {settings: STORED_SETTINGS, hasApiKey: false}
+export const SETTINGS: SettingsResponse = {settings: STORED_SETTINGS, storedSecrets: {}}
 
 export const DEFAULT_TASK: TaskSummary = {
     id: 'task-1',
@@ -422,19 +423,13 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
                 return state.settings
             case 'save_settings': {
                 const sent = payload['request'] as SettingsRequest
+                const held = {...state.settings.storedSecrets}
+                for (const secret of SECRET_NAMES)
+                    held[secret] = keyAfter(sent.secrets[secret], held[secret]) ?? false
                 state.settings = {
                     ...state.settings,
                     settings: sent.settings,
-                    hasApiKey: keyAfter(sent.apiKey, state.settings.hasApiKey) ?? false,
-                    hasBraveApiKey: keyAfter(sent.braveApiKey, state.settings.hasBraveApiKey),
-                    hasOpenrouterApiKey: keyAfter(
-                        sent.openrouterApiKey,
-                        state.settings.hasOpenrouterApiKey
-                    ),
-                    hasCerebrasApiKey: keyAfter(
-                        sent.cerebrasApiKey,
-                        state.settings.hasCerebrasApiKey
-                    )
+                    storedSecrets: held
                 }
                 return state.settings
             }

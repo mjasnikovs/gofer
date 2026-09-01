@@ -4,13 +4,18 @@
         "`repairedBy` names which one owns it, and both suites assert both halves of that:",
         "`worker` means scripts/tool-call-repair.mjs turns `wrote` into `becomes` and",
         "src-tauri/src/tool_repair.rs leaves it alone; `router` is the other way round; `both`",
-        "means each engine makes it. The split is not a preference: the agent loop validates a",
-        "call against the generated schema between `prepareArguments` and the router, and the",
-        "schema for a nested entry and for a tagged value is closed, so a shape it refuses never",
-        "reaches the table. The entry's own schema is open, so a key no operation declares does.",
-        "Written down in two prose comments and checked by nothing, that line already drifted:",
-        "a fix for the double-wrapped tag came to exist only in JavaScript while both suites",
-        "stayed green. A repair that migrates now fails on the side it left."
+        "means each engine makes it.",
+        "The split is not a preference and is no longer a prose comment either. The agent loop",
+        "validates a call against the generated schema between `prepareArguments` and the router,",
+        "so a shape the schema refuses never reaches the table and only the worker can answer it,",
+        "and a shape it accepts is the router's. `the line between the two engines is the schema's`",
+        "in tool-call-repair.test.mjs computes that for every row here with pi-ai's own",
+        "`validateToolArguments` \u2014 the function the loop calls \u2014 and refuses a row the worker",
+        "repairs that the schema would have let through. Four rows were `both` until it did:",
+        "one JavaScript pass reimplementing a repair the router already owned.",
+        "Written down and checked by nothing, that line had already drifted once: a fix for the",
+        "double-wrapped tag came to exist only in JavaScript while both suites stayed green.",
+        "A repair that migrates now fails on the side it left."
     ],
     "repairs": [
         {
@@ -23,7 +28,7 @@
             "becomes": {
                 "limit": 50
             },
-            "repairedBy": "both"
+            "repairedBy": "router"
         },
         {
             "why": "a key that swallowed its own value, concatenated and said twice",
@@ -35,7 +40,7 @@
             "becomes": {
                 "minSeverity": "warning"
             },
-            "repairedBy": "both"
+            "repairedBy": "router"
         },
         {
             "why": "a key that swallowed a whole JSON value",
@@ -51,7 +56,7 @@
                 "shapeType": "RectangleShape2D",
                 "size": [16, 16]
             },
-            "repairedBy": "both"
+            "repairedBy": "router"
         },
         {
             "why": "the same pair torn twice, the second one saying nothing new",
@@ -67,7 +72,7 @@
                 "shapeType": "RectangleShape2D",
                 "size": [640, 16]
             },
-            "repairedBy": "both"
+            "repairedBy": "router"
         },
         {
             "why": "a torn key whose tail is a value with the tear's trailing comma behind it",

@@ -30,8 +30,9 @@ mod secrets;
 use legacy::*;
 use secrets::*;
 pub(crate) use secrets::{
-    Secret, Secrets, SystemSecrets, apply_saved_secrets, clear_chatgpt_credential,
-    restore_saved_secrets, settings_response, store_chatgpt_credential, stored_chatgpt_credential,
+    Secret, SystemSecrets, apply_saved_secrets, clear_chatgpt_credential, driver_secret,
+    restore_saved_secrets, settings_response, store_chatgpt_credential, stored_api_keys,
+    stored_chatgpt_credential,
 };
 
 /// The one service every secret is kept under. Which of them a slot holds is `Secret::username`.
@@ -408,27 +409,19 @@ pub(crate) enum AiConnectionType {
 }
 
 impl AiConnectionType {
-    /// The one stored key this driver authenticates with, or `None` when it takes none.
+    /// The one stored key this driver authenticates with, out of the keys a caller has read.
     ///
-    /// A key sent to the wrong address is a key handed to a machine that was never meant to see
-    /// it, so this is the only place the pairing is written down. ChatGPT is the `None`: it
-    /// authenticates with an OAuth credential and reads no key at all, which is why a missing
-    /// credential there reads as "Sign in with ChatGPT" rather than as an error.
+    /// `None` for ChatGPT, whose credential is an OAuth one rather than a key — which is why a
+    /// missing one there reads as "Sign in with ChatGPT" rather than as an error.
     ///
     /// `Credentials::for_driver` is this rule inverted — one key placed into the slot its driver
     /// reads — and the acceptance suites are what hold the two to each other.
-    pub(crate) fn key_from(
-        self,
-        api_key: Option<String>,
-        openrouter_api_key: Option<String>,
-        cerebras_api_key: Option<String>,
-    ) -> Option<String> {
-        match self {
-            Self::OpenaiCodex => None,
-            Self::OpenaiCompatible => api_key,
-            Self::Openrouter => openrouter_api_key,
-            Self::Cerebras => cerebras_api_key,
+    pub(crate) fn api_key_from(self, keys: &BTreeMap<Secret, String>) -> Option<String> {
+        let secret = driver_secret(self);
+        if !secret.is_api_key() {
+            return None;
         }
+        keys.get(&secret).cloned()
     }
 }
 
@@ -443,11 +436,9 @@ pub(crate) enum ApiDialect {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsResponse {
     settings: GoferSettings,
-    has_api_key: bool,
-    has_chat_gpt_credential: bool,
-    has_brave_api_key: bool,
-    has_openrouter_api_key: bool,
-    has_cerebras_api_key: bool,
+    /// Which slots the machine is holding something in, keyed by the secret rather than by five
+    /// named booleans a fifth secret would have had to be added to in three languages.
+    stored_secrets: BTreeMap<Secret, bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     credential_store_error: Option<String>,
 }
@@ -456,17 +447,18 @@ pub(crate) struct SettingsResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsRequest {
     pub(crate) settings: GoferSettings,
-    pub(crate) api_key: ApiKeyUpdate,
-    /// The Brave Search key, updated by the same three-way rule as the AI key: a page that never
-    /// shows a stored secret cannot send one back, so "leave it alone" has to be sayable.
+    /// What the save does to each slot it names, by the same three-way rule for all of them: a
+    /// page that never shows a stored secret cannot send one back, so "leave it alone" has to be
+    /// sayable, and a slot the request says nothing about is left alone.
     #[serde(default)]
-    pub(crate) brave_api_key: ApiKeyUpdate,
-    /// OpenRouter's key, by the same three-way rule, into its own keyring slot.
-    #[serde(default)]
-    pub(crate) openrouter_api_key: ApiKeyUpdate,
-    /// Cerebras' key, by the same three-way rule, into its own keyring slot again.
-    #[serde(default)]
-    pub(crate) cerebras_api_key: ApiKeyUpdate,
+    pub(crate) secrets: BTreeMap<Secret, ApiKeyUpdate>,
+}
+
+impl SettingsRequest {
+    /// What this save does to one slot.
+    pub(crate) fn update(&self, secret: Secret) -> &ApiKeyUpdate {
+        self.secrets.get(&secret).unwrap_or(&ApiKeyUpdate::Keep)
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -1060,9 +1052,7 @@ fn cerebras_model_options(remote: &[Model]) -> Vec<AiModelOption> {
 /// which is what gofer-rag does by itself when it can reach nothing.
 pub(crate) fn docs_expansion_connection(
     settings: &AiSettings,
-    api_key: Option<String>,
-    openrouter_api_key: Option<String>,
-    cerebras_api_key: Option<String>,
+    keys: &BTreeMap<Secret, String>,
     oauth_credential: Option<serde_json::Value>,
 ) -> Option<crate::rag::RetrieveConnection> {
     let chosen = settings.subagent.connection.as_ref();
@@ -1079,7 +1069,7 @@ pub(crate) fn docs_expansion_connection(
         base_url: connection.base_url.clone(),
         model: model.id.clone(),
         model_name: model.name.clone(),
-        api_key: driver.key_from(api_key, openrouter_api_key, cerebras_api_key),
+        api_key: driver.api_key_from(keys),
         thinking_level: model.thinking_level.clone(),
         context_window: model.context_window,
         max_tokens: model.max_tokens,
@@ -1354,18 +1344,9 @@ fn read_settings_unprobed_from_path(path: &Path) -> Result<GoferSettings, String
 
 fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
     let pi = pi_models_path().ok();
-    let settings = read_settings_from_paths(path, pi.as_deref())?;
+    let mut settings = stored_settings(path, pi.as_deref())?;
     let served = ask_servers(&settings.ai);
-    if served.is_empty() {
-        return Ok(settings);
-    }
-    let mut settings = settings;
-    resolve_model_facts(
-        &mut settings.ai,
-        &pi.and_then(|path| pi_catalog_from_path(&path).ok())
-            .unwrap_or_default(),
-        &served,
-    );
+    resolve_model_facts(&mut settings.ai, &catalog_at(pi.as_deref()), &served);
     Ok(settings)
 }
 
@@ -1394,6 +1375,20 @@ fn ask_servers(ai: &AiSettings) -> HashMap<String, ServedModel> {
 /// models.json` got the Pi-derived ones instead. Both are correct answers to different questions,
 /// so the question is the parameter.
 fn read_settings_from_paths(path: &Path, pi: Option<&Path>) -> Result<GoferSettings, String> {
+    let mut settings = stored_settings(path, pi)?;
+    resolve_model_facts(&mut settings.ai, &catalog_at(pi), &HashMap::new());
+    Ok(settings)
+}
+
+/// The file as it is on disk, parsed and validated, with nothing model-owned re-derived yet.
+///
+/// Split out because the re-derivation has to happen once, after the server has been asked. It ran
+/// twice: once against the catalogue alone and again with the server's answer. `keep_level` runs at
+/// the end of it, so a stored `high` on a model the catalogue calls non-reasoning collapsed to
+/// `off` in the first pass — and the second pass, being handed `off`, kept it. With the server
+/// unreachable the first pass was the answer, the renderer was given the collapsed level, and the
+/// next save wrote it to disk.
+fn stored_settings(path: &Path, pi: Option<&Path>) -> Result<GoferSettings, String> {
     if !path.exists() {
         return Ok(pi
             .and_then(default_settings_from_pi_path)
@@ -1403,14 +1398,13 @@ fn read_settings_from_paths(path: &Path, pi: Option<&Path>) -> Result<GoferSetti
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
     let settings = serde_json::from_str(&contents)
         .map_err(|error| format!("Gofer settings in {} are invalid: {error}", path.display()))?;
-    let mut settings = validate_settings(settings)?;
-    resolve_model_facts(
-        &mut settings.ai,
-        &pi.and_then(|path| pi_catalog_from_path(path).ok())
-            .unwrap_or_default(),
-        &HashMap::new(),
-    );
-    Ok(settings)
+    validate_settings(settings)
+}
+
+/// The Pi catalogue at a path, or an empty one when there is none to read.
+fn catalog_at(pi: Option<&Path>) -> PiCatalog {
+    pi.and_then(|path| pi_catalog_from_path(path).ok())
+        .unwrap_or_default()
 }
 
 fn pi_models_path() -> Result<PathBuf, String> {
@@ -1907,17 +1901,12 @@ mod tests {
     /// adding a fifth driver has to say which key it reads rather than silently reading none.
     #[test]
     fn a_driver_reads_the_key_its_own_slot_holds() {
-        let keys = || {
-            (
-                Some("local".to_owned()),
-                Some("openrouter".to_owned()),
-                Some("cerebras".to_owned()),
-            )
-        };
-        let read = |driver: AiConnectionType| {
-            let (api, openrouter, cerebras) = keys();
-            driver.key_from(api, openrouter, cerebras)
-        };
+        let keys = BTreeMap::from([
+            (Secret::AiDefault, "local".to_owned()),
+            (Secret::OpenRouter, "openrouter".to_owned()),
+            (Secret::Cerebras, "cerebras".to_owned()),
+        ]);
+        let read = |driver: AiConnectionType| driver.api_key_from(&keys);
         assert_eq!(
             read(AiConnectionType::OpenaiCompatible),
             Some("local".to_owned())
@@ -2046,13 +2035,40 @@ mod tests {
     fn request(base_url: impl Into<String>, model: impl Into<String>) -> SettingsRequest {
         SettingsRequest {
             settings: settings(base_url, model),
-            api_key: ApiKeyUpdate::Set {
-                value: " secret-token ".to_owned(),
-            },
-            brave_api_key: ApiKeyUpdate::Keep,
-            openrouter_api_key: ApiKeyUpdate::Keep,
-            cerebras_api_key: ApiKeyUpdate::Keep,
+            secrets: BTreeMap::from([(
+                Secret::AiDefault,
+                ApiKeyUpdate::Set {
+                    value: " secret-token ".to_owned(),
+                },
+            )]),
         }
+    }
+
+    /// A driver that signs in rather than typing a key sends no bearer, whatever is in the slots.
+    ///
+    /// The decision used to fall through to the local driver's slot for anything that was not an
+    /// API key, and only two callers returning early kept this machine's key off a hosted
+    /// endpoint. Nothing asserted either guard, and neither of them is near the decision.
+    #[test]
+    fn a_driver_that_signs_in_sends_no_bearer_with_its_catalogue_read() {
+        let store = FakeSecrets::default();
+        store.put(Secret::AiDefault, "the-local-key");
+        store.put(Secret::ChatGpt, "an-oauth-blob");
+        let mut asking = request("http://127.0.0.1:8080/v1", "a-model");
+        asking.secrets = BTreeMap::new();
+
+        assert_eq!(
+            listing_bearer(AiConnectionType::OpenaiCodex, &asking, &store)
+                .expect("a bearer decision"),
+            None
+        );
+        assert_eq!(
+            listing_bearer(AiConnectionType::OpenaiCompatible, &asking, &store)
+                .expect("a bearer decision")
+                .as_deref(),
+            Some("the-local-key"),
+            "a key-based driver still reads its own slot"
+        );
     }
 
     /// A response may not be as long as the whole conversation.
@@ -2337,11 +2353,11 @@ mod tests {
     fn the_response_reports_all_five_secrets_through_the_one_store() {
         let store = FakeSecrets::default();
         let empty = settings_response_with(&store, settings("http://localhost", "model"));
-        assert!(!empty.has_api_key);
-        assert!(!empty.has_brave_api_key);
-        assert!(!empty.has_openrouter_api_key);
-        assert!(!empty.has_cerebras_api_key);
-        assert!(!empty.has_chat_gpt_credential);
+        assert!(!empty.stored_secrets[&Secret::AiDefault]);
+        assert!(!empty.stored_secrets[&Secret::Brave]);
+        assert!(!empty.stored_secrets[&Secret::OpenRouter]);
+        assert!(!empty.stored_secrets[&Secret::Cerebras]);
+        assert!(!empty.stored_secrets[&Secret::ChatGpt]);
 
         store.put(Secret::AiDefault, "sk-1");
         store.put(Secret::Brave, "brave-1");
@@ -2349,11 +2365,11 @@ mod tests {
         store.put(Secret::Cerebras, "csk-1");
         store.put(Secret::ChatGpt, "not json");
         let partial = settings_response_with(&store, settings("http://localhost", "model"));
-        assert!(partial.has_api_key);
-        assert!(partial.has_brave_api_key);
-        assert!(partial.has_openrouter_api_key);
-        assert!(partial.has_cerebras_api_key);
-        assert!(!partial.has_chat_gpt_credential);
+        assert!(partial.stored_secrets[&Secret::AiDefault]);
+        assert!(partial.stored_secrets[&Secret::Brave]);
+        assert!(partial.stored_secrets[&Secret::OpenRouter]);
+        assert!(partial.stored_secrets[&Secret::Cerebras]);
+        assert!(!partial.stored_secrets[&Secret::ChatGpt]);
 
         store.put(
             Secret::ChatGpt,
@@ -2361,7 +2377,7 @@ mod tests {
                 .to_string(),
         );
         let full = settings_response_with(&store, settings("http://localhost", "model"));
-        assert!(full.has_chat_gpt_credential);
+        assert!(full.stored_secrets[&Secret::ChatGpt]);
     }
 
     /// The rollback window, which now holds every slot a save wrote rather than the AI key alone.
@@ -2378,12 +2394,15 @@ mod tests {
 
         let request = SettingsRequest {
             settings: settings("http://localhost", "model"),
-            api_key: ApiKeyUpdate::Set {
-                value: "new-ai".to_owned(),
-            },
-            brave_api_key: ApiKeyUpdate::Clear,
-            openrouter_api_key: ApiKeyUpdate::Keep,
-            cerebras_api_key: ApiKeyUpdate::Keep,
+            secrets: BTreeMap::from([
+                (
+                    Secret::AiDefault,
+                    ApiKeyUpdate::Set {
+                        value: "new-ai".to_owned(),
+                    },
+                ),
+                (Secret::Brave, ApiKeyUpdate::Clear),
+            ]),
         };
         let written = apply_saved_secrets_with(&store, &request).expect("write the save's secrets");
         assert_eq!(written.len(), 2);
@@ -2420,12 +2439,15 @@ mod tests {
 
         let request = SettingsRequest {
             settings: settings("http://localhost", "model"),
-            api_key: ApiKeyUpdate::Set {
-                value: "new-ai".to_owned(),
-            },
-            brave_api_key: ApiKeyUpdate::Clear,
-            openrouter_api_key: ApiKeyUpdate::Keep,
-            cerebras_api_key: ApiKeyUpdate::Keep,
+            secrets: BTreeMap::from([
+                (
+                    Secret::AiDefault,
+                    ApiKeyUpdate::Set {
+                        value: "new-ai".to_owned(),
+                    },
+                ),
+                (Secret::Brave, ApiKeyUpdate::Clear),
+            ]),
         };
 
         assert_eq!(
@@ -2450,10 +2472,7 @@ mod tests {
         };
         let request = SettingsRequest {
             settings: settings("http://localhost", "model"),
-            api_key: ApiKeyUpdate::Keep,
-            brave_api_key: ApiKeyUpdate::Keep,
-            openrouter_api_key: ApiKeyUpdate::Keep,
-            cerebras_api_key: ApiKeyUpdate::Keep,
+            secrets: BTreeMap::new(),
         };
         let written = apply_saved_secrets_with(&unreadable, &request).expect("nothing to write");
         assert!(written.is_empty());
@@ -2544,7 +2563,7 @@ mod tests {
             ..Default::default()
         };
         let response = settings_response_with(&load_failure, settings("http://localhost", "model"));
-        assert!(!response.has_api_key);
+        assert!(!response.stored_secrets[&Secret::AiDefault]);
         assert_eq!(
             response.credential_store_error.as_deref(),
             Some("fake load failure")
@@ -2659,7 +2678,7 @@ mod tests {
         }))
         .expect("a request with no brave key parses");
 
-        assert!(matches!(request.brave_api_key, ApiKeyUpdate::Keep));
+        assert!(matches!(request.update(Secret::Brave), ApiKeyUpdate::Keep));
     }
 
     /// The documentation search's model calls follow the sub-agent wherever it is pointed,
@@ -2668,9 +2687,7 @@ mod tests {
     fn the_docs_expansion_connection_follows_the_subagent() {
         let borrowed = docs_expansion_connection(
             &AiSettings::default(),
-            Some("k".to_owned()),
-            None,
-            None,
+            &BTreeMap::from([(Secret::AiDefault, "k".to_owned())]),
             None,
         )
         .expect("a local parent with no sub-agent connection lends its own");
@@ -2698,7 +2715,7 @@ mod tests {
         };
         let mut own = AiSettings::default();
         own.subagent.connection = Some(local_child.clone());
-        let child = docs_expansion_connection(&own, None, None, None, None)
+        let child = docs_expansion_connection(&own, &BTreeMap::new(), None)
             .expect("a local sub-agent is reachable");
         assert_eq!(child.base_url, default_local_profile().base_url);
         assert_eq!(child.model, "small.gguf");
@@ -2716,9 +2733,7 @@ mod tests {
         let credential = serde_json::json!({"type": "oauth", "refresh": "r"});
         let followed = docs_expansion_connection(
             &chatgpt,
-            Some("k".to_owned()),
-            None,
-            None,
+            &BTreeMap::from([(Secret::AiDefault, "k".to_owned())]),
             Some(credential.clone()),
         )
         .expect("a ChatGPT sub-agent is followed to ChatGPT");
@@ -2729,7 +2744,7 @@ mod tests {
         assert_eq!(followed.api_key, None);
 
         assert_eq!(
-            docs_expansion_connection(&chatgpt, None, None, None, None),
+            docs_expansion_connection(&chatgpt, &BTreeMap::new(), None),
             None,
             "a ChatGPT sub-agent with no stored credential has nothing to authenticate with"
         );
@@ -2737,7 +2752,7 @@ mod tests {
         let codex_only =
             settings_only_on(AiConnectionType::OpenaiCodex, default_chatgpt_profile()).ai;
         assert_eq!(
-            docs_expansion_connection(&codex_only, None, None, None, None),
+            docs_expansion_connection(&codex_only, &BTreeMap::new(), None),
             None,
             "a ChatGPT-only install with no credential has no model to reach"
         );
@@ -3344,38 +3359,76 @@ mod tests {
         );
     }
 
-    /// One rule in three languages, held to itself here.
+    /// One rule in two languages, held to the corpus both of them read.
     ///
     /// `thinking_levels` and `keep_level` are the Rust copies of `thinkingLevelsFor` and
     /// `keepThinkingLevel` in `src/models/settings.ts`, and they run on every read and every save.
     /// Left un-taught about `reasoning_mandatory`, this copy went on offering `off` for a model
     /// that answers HTTP 400 to it and went on preserving a stored `off` the settings page would
-    /// no longer show — three copies of one rule, one of them quietly disagreeing.
+    /// no longer show — two copies of one rule, one of them quietly disagreeing, with a prose
+    /// comment in each saying the other agreed. `fixtures/thinking-levels.json` is that sentence
+    /// made executable: `settings.test.ts` asserts every row of it too.
     #[test]
-    fn a_model_that_cannot_stop_thinking_is_never_offered_off() {
-        let named = ["max".to_owned(), "high".to_owned(), "low".to_owned()];
+    fn every_thinking_level_row_is_answered_the_way_the_corpus_says() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Model {
+            reasoning: bool,
+            supports_reasoning_effort: bool,
+            reasoning_mandatory: bool,
+            thinking_levels: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Kept {
+            stored: String,
+            is: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Row {
+            name: String,
+            model: Model,
+            offered: Vec<String>,
+            kept: Vec<Kept>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Corpus {
+            rows: Vec<Row>,
+        }
 
-        assert_eq!(
-            thinking_levels(true, true, false, &named),
-            ["off", "max", "high", "low"]
-        );
-        assert_eq!(
-            thinking_levels(true, true, true, &named),
-            ["max", "high", "low"]
-        );
-        assert!(
-            !thinking_levels(true, true, true, &[])
-                .iter()
-                .any(|l| l == "off")
-        );
-        assert_eq!(thinking_levels(true, false, true, &[]), ["on"]);
-        assert_eq!(thinking_levels(false, true, true, &named), ["off"]);
-
-        assert_eq!(keep_level("off", true, true, true, &named), "low");
-        assert_eq!(keep_level("medium", true, true, true, &named), "low");
-        assert_eq!(keep_level("high", true, true, true, &named), "high");
-        assert_eq!(keep_level("medium", true, true, false, &named), "off");
-        assert_eq!(keep_level("off", true, true, false, &named), "off");
+        let corpus: Corpus =
+            serde_json::from_str(include_str!("../../../fixtures/thinking-levels.json"))
+                .expect("the thinking-level corpus parses");
+        assert!(corpus.rows.len() > 5, "a corpus this small proves little");
+        for row in &corpus.rows {
+            let model = &row.model;
+            assert_eq!(
+                thinking_levels(
+                    model.reasoning,
+                    model.supports_reasoning_effort,
+                    model.reasoning_mandatory,
+                    &model.thinking_levels,
+                ),
+                row.offered,
+                "{}",
+                row.name
+            );
+            for kept in &row.kept {
+                assert_eq!(
+                    keep_level(
+                        &kept.stored,
+                        model.reasoning,
+                        model.supports_reasoning_effort,
+                        model.reasoning_mandatory,
+                        &model.thinking_levels,
+                    ),
+                    kept.is,
+                    "{}: a stored {} against {:?}",
+                    row.name,
+                    kept.stored,
+                    row.offered
+                );
+            }
+        }
     }
 
     /// Every rule in `openrouter_model_options`, against the shapes the live catalogue really has.
@@ -3722,9 +3775,10 @@ mod tests {
 
         let connection = docs_expansion_connection(
             &settings,
-            Some("local-key".to_owned()),
-            Some("openrouter-key".to_owned()),
-            None,
+            &BTreeMap::from([
+                (Secret::AiDefault, "local-key".to_owned()),
+                (Secret::OpenRouter, "openrouter-key".to_owned()),
+            ]),
             None,
         )
         .expect("an OpenRouter child is reachable");

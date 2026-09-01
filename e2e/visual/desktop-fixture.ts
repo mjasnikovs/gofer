@@ -445,7 +445,10 @@ export async function installDesktop(
                         })
                         return {messages: stored, agentMessages: []}
                     }
-                    if (command === 'load_settings') return {settings, hasApiKey: true}
+                    // `storedSecrets` is not optional to the reducer: a response without it
+                    // throws, and only the CI-rendered visual run opens this page.
+                    if (command === 'load_settings')
+                        return {settings, storedSecrets: {'ai-default': true}}
                     if (command === 'read_agent_prompt' || command === 'save_agent_prompt')
                         return {
                             prompt: 'You are Gofer, a capable local coding agent. Work autonomously toward the user’s goal.',
