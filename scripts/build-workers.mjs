@@ -1,12 +1,51 @@
 import {spawnSync} from 'node:child_process'
+import {createHash} from 'node:crypto'
 import {existsSync, readFileSync, rmSync, writeFileSync} from 'node:fs'
-import {cp, mkdir, readFile, readdir, rm, writeFile} from 'node:fs/promises'
+import {cp, mkdir, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises'
 import {dirname, join, relative, resolve, sep} from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {build} from 'esbuild'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const outputDirectory = join(root, 'src-tauri/workers')
+
+// Everything under src-tauri/workers is a Tauri `resources` entry, so Cargo reruns the build
+// script and relinks the release binary whenever a file in it gets a new mtime. Copying the same
+// bytes back therefore costs a minute of rebuild, which is why every write here is conditional.
+const stampDirectory = join(root, 'node_modules/.cache/gofer')
+
+async function writeWhenChanged(path, contents) {
+    const existing = await readFile(path).catch(() => undefined)
+    if (existing && Buffer.from(contents).equals(existing)) return false
+    await mkdir(dirname(path), {recursive: true})
+    await writeFile(path, contents)
+    return true
+}
+
+async function hashTree(hash, directory, skip) {
+    const entries = await readdir(directory, {withFileTypes: true})
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+        const path = join(directory, entry.name)
+        if (skip?.(path)) continue
+        if (entry.isDirectory()) {
+            await hashTree(hash, path, skip)
+            continue
+        }
+        const {size, mtimeMs} = await stat(path)
+        hash.update(`${path}\0${size}\0${mtimeMs}\n`)
+    }
+}
+
+async function upToDate(name, target, stamp) {
+    if (!existsSync(target)) return false
+    const path = join(stampDirectory, name)
+    return (await readFile(path, 'utf8').catch(() => undefined)) === stamp
+}
+
+async function recordStamp(name, stamp) {
+    await mkdir(stampDirectory, {recursive: true})
+    await writeFile(join(stampDirectory, name), stamp)
+}
 
 const REQUIRE_BANNER =
     "import {createRequire as __createRequire} from 'node:module'\nconst require = __createRequire(import.meta.url)\n"
@@ -58,7 +97,7 @@ const ENTRIES = [
 const REGISTERS_OAUTH_FLOWS = 'registerBunOAuthFlows()'
 
 async function bundle(entry) {
-    await build({
+    const built = await build({
         entryPoints: [join(root, 'scripts', entry.name)],
         outfile: join(outputDirectory, entry.name),
         bundle: true,
@@ -67,8 +106,11 @@ async function bundle(entry) {
         target: 'node22',
         external: entry.external ?? [],
         banner: {js: REQUIRE_BANNER},
-        logLevel: 'warning'
+        logLevel: 'warning',
+        write: false
     })
+    const [output] = built.outputFiles
+    return writeWhenChanged(join(outputDirectory, entry.name), output.contents)
 }
 
 function probe(entry, expected) {
@@ -171,14 +213,27 @@ async function copyDocumentationDatabase() {
         )
     }
     const target = join(outputDirectory, DATABASE_DIRECTORY)
+    const hash = createHash('sha256')
+    await hashTree(hash, source)
+    const stamp = hash.digest('hex')
+    if (await upToDate('documentation-table', target, stamp)) return undefined
     await rm(target, {recursive: true, force: true})
     await cp(source, target, {recursive: true, dereference: true})
+    await recordStamp('documentation-table', stamp)
     return target
 }
 
 async function copyNativePackages() {
-    await rm(nativeDirectory, {recursive: true, force: true})
     const closure = nativeClosure()
+    const hash = createHash('sha256')
+    for (const [name, directory] of closure) {
+        hash.update(`${name}\0${directory}\n`)
+        await hashTree(hash, directory, path => path.endsWith(`${sep}node_modules`))
+    }
+    const stamp = hash.digest('hex')
+    if (await upToDate('native-packages', nativeDirectory, stamp)) return undefined
+
+    await rm(nativeDirectory, {recursive: true, force: true})
     for (const [name, directory] of closure) {
         const target = join(nativeDirectory, name)
         await mkdir(dirname(target), {recursive: true})
@@ -189,6 +244,7 @@ async function copyNativePackages() {
         })
     }
     await pruneOnnxRuntime()
+    await recordStamp('native-packages', stamp)
     return closure.length
 }
 
@@ -212,10 +268,7 @@ function probeNativePackages() {
 }
 
 await mkdir(outputDirectory, {recursive: true})
-for (const entry of ENTRIES) {
-    await rm(join(outputDirectory, entry.name), {force: true})
-}
-await writeFile(
+await writeWhenChanged(
     join(outputDirectory, 'package.json'),
     `${JSON.stringify({type: 'module'}, null, 4)}\n`
 )
@@ -233,7 +286,16 @@ for (const entry of ENTRIES) {
 }
 
 const copied = await copyNativePackages()
-process.stdout.write(`copied ${copied} native package(s) for ${HOST}\n`)
-process.stdout.write(`copied the documentation table to ${await copyDocumentationDatabase()}\n`)
+process.stdout.write(
+    copied === undefined ?
+        `the native packages for ${HOST} are already beside the workers\n`
+    :   `copied ${copied} native package(s) for ${HOST}\n`
+)
+const table = await copyDocumentationDatabase()
+process.stdout.write(
+    table === undefined ?
+        'the documentation table is already beside the workers\n'
+    :   `copied the documentation table to ${table}\n`
+)
 probeNativePackages()
 process.stdout.write(`${NATIVE_PACKAGES.join(', ')} load from the workers directory\n`)

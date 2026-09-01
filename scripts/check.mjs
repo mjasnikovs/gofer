@@ -26,10 +26,13 @@ const CARGO_LANE = [
 ]
 
 // The only gate that drives the real engine, so it needs the release binary. That
-// build rewrites the worker bundle and locks the cargo target directory, and other
-// lanes read both, so it runs alone once they are done.
+// build locks the cargo target directory, which every other lane reads, so it runs
+// alone once they are done.
 const AFTER_THE_LANES = [
-    ['test:layout', 'npm run --silent build:desktop:test && npm run --silent test:layout']
+    ['test:layout', 'npm run --silent build:desktop:test && npm run --silent test:layout'],
+    // Cargo never reclaims a build variant it stops needing, so the tree grows with every
+    // dependency bump and feature combination. Sweeping last means no lane is compiling into it.
+    ['sweep:target', 'npm run --silent sweep']
 ]
 
 const NODE_COVERAGE_EXCLUDES = [
