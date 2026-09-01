@@ -507,6 +507,12 @@ export const goferTheme = {
                 paddingInline: '8px'
             }
         },
+        'chat-composer': {
+            base: {
+                '--color-error-muted': 'var(--color-background-red)',
+                '--color-warning-muted': 'var(--color-background-yellow)'
+            }
+        },
         code: {
             'color:primary': {
                 backgroundColor: 'transparent',

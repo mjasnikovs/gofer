@@ -41,6 +41,13 @@ export const goferTheme = defineTheme({
         // Stone rounds buttons to a full pill, which fights a dense tool workspace.
         button: {base: {borderRadius: 'var(--radius-element)'}},
         tab: {base: {paddingInline: '8px'}},
+        // Stone remaps the muted status fills for Banner and FieldStatus but not here.
+        'chat-composer': {
+            base: {
+                '--color-error-muted': 'var(--color-background-red)',
+                '--color-warning-muted': 'var(--color-background-yellow)'
+            }
+        },
         // A filled chip on each of a reply's five paths turned the sentence into blocks.
         // Scoped to the default colour, or it would beat `Code color='inherit'` too.
         code: {

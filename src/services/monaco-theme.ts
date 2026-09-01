@@ -51,9 +51,9 @@ export function goferEditorTheme(): Monaco.editor.IStandaloneThemeData {
             'editorSuggestWidget.background': popover,
             'editorHoverWidget.background': popover,
             'editorError.foreground': dark('--color-error'),
-            'editorWarning.foreground': dark('--color-warning'),
-            'diffEditor.insertedTextBackground': dark('--color-success-muted'),
-            'diffEditor.removedTextBackground': dark('--color-error-muted')
+            'editorWarning.foreground': dark('--color-warning')
+            // The diff fills are left to vs-dark: it paints them over the code, so they
+            // have to be translucent, and no theme token is.
         }
     }
 }

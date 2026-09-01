@@ -612,6 +612,11 @@
             padding-inline: 8px;
         }
 
+        .astryx-chat-composer {
+            --color-error-muted: var(--color-background-red);
+            --color-warning-muted: var(--color-background-yellow);
+        }
+
         .astryx-code.primary {
             background-color: transparent;
             padding-inline: 0;
