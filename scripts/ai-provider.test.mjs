@@ -1754,10 +1754,7 @@ test('a chat-template server is sent the argument that turns thinking on', () =>
             thinkingLevel: 'on'
         }
     }
-    const on = connection => ({
-        connectionType: 'openai-compatible',
-        connections: {'openai-compatible': connection}
-    })
+    const on = connection => ({connectionType: 'local', connections: {local: connection}})
     const {model} = createModelContext({settings: on(template), secrets: {'ai-default': 'local'}})
 
     assert.equal(model.compat.thinkingFormat, 'chat-template')
@@ -2242,9 +2239,11 @@ test('a driver this build has no provider for is refused by name', () => {
 test('every driver but ChatGPT has a pi-ai provider registered for it', () => {
     assert.deepEqual([...DRIVERS].sort(), [
         'cerebras',
+        'local',
         'openai-codex',
         'openai-compatible',
-        'openrouter'
+        'openrouter',
+        'qwen'
     ])
     for (const driver of DRIVERS) {
         if (driver === 'openai-codex') continue
@@ -2283,8 +2282,8 @@ test('a sub-agent driver this build has no provider for is refused by name', () 
         () =>
             createModelContext({
                 settings: {
-                    connectionType: 'openai-compatible',
-                    connections: {'openai-compatible': connection},
+                    connectionType: 'local',
+                    connections: {local: connection},
                     subagent: {connection: {connectionType: 'anthropic', model: {id: 'a-model'}}}
                 },
                 secrets: {'ai-default': 'local'}
@@ -2311,9 +2310,7 @@ test('every hosted driver the catalogue declares has a key that reaches it', () 
             thinkingLevel: 'off'
         }
     })
-    const hosted = DRIVERS.filter(
-        driver => driver !== 'openai-compatible' && driver !== 'openai-codex'
-    )
+    const hosted = DRIVERS.filter(driver => driver !== 'local' && driver !== 'openai-codex')
     assert.ok(hosted.length > 0, 'the catalogue declares no hosted driver')
     for (const driver of hosted) {
         assert.doesNotThrow(
@@ -2352,11 +2349,8 @@ test('a provider is sent the key of its own slot, whichever seat pointed at it',
     const {models} = createModelContext({
         settings: {
             connectionType: 'openrouter',
-            connections: {
-                'openai-compatible': profile('Local AI'),
-                openrouter: profile('OpenRouter')
-            },
-            subagent: {connection: {connectionType: 'openai-compatible', model: {id: 'a-model'}}}
+            connections: {local: profile('Local AI'), openrouter: profile('OpenRouter')},
+            subagent: {connection: {connectionType: 'local', model: {id: 'a-model'}}}
         },
         secrets: {'ai-default': 'local-key', openrouter: 'hosted-key'}
     })

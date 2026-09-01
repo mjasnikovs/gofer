@@ -118,6 +118,7 @@ pub(crate) async fn run_connection_test(
         request.settings.ai.connection_type,
         AiConnectionType::Cerebras
     );
+    let qwen = matches!(request.settings.ai.connection_type, AiConnectionType::Qwen);
     let path = if openrouter { "key" } else { "models" };
     let ModelsRequest { settings, builder } =
         prepare_models_request(request, timeout, path).await?;
@@ -173,6 +174,26 @@ pub(crate) async fn run_connection_test(
                     status: ConnectionTestStatus::ModelUnavailable,
                     message: format!(
                         "Connected to Cerebras, but model '{chosen}' is not one Gofer holds capabilities for."
+                    ),
+                }
+            },
+        );
+    }
+    if qwen {
+        return Ok(
+            if qwen_model_options(&models.data)
+                .iter()
+                .any(|option| option.id == chosen)
+            {
+                ConnectionTestResult {
+                    status: ConnectionTestStatus::Connected,
+                    message: format!("Connected to Qwen. Model '{chosen}' is available."),
+                }
+            } else {
+                ConnectionTestResult {
+                    status: ConnectionTestStatus::ModelUnavailable,
+                    message: format!(
+                        "Connected to Qwen, but model '{chosen}' is not one Gofer holds capabilities for."
                     ),
                 }
             },
@@ -244,6 +265,7 @@ pub(crate) async fn list_ai_models_with(
         request.settings.ai.connection_type,
         AiConnectionType::Cerebras
     );
+    let qwen = matches!(request.settings.ai.connection_type, AiConnectionType::Qwen);
     let ModelsRequest { settings, builder } =
         prepare_models_request(request, AI_REQUEST_TIMEOUT, "models").await?;
     let response = builder
@@ -269,16 +291,62 @@ pub(crate) async fn list_ai_models_with(
     if cerebras {
         return Ok(cerebras_model_options(&models.data));
     }
+    if qwen {
+        return Ok(qwen_model_options(&models.data));
+    }
     let connection = settings
         .ai
         .connection()
         .ok_or_else(|| "The chosen AI driver has no connection configured".to_owned())?;
+    if matches!(
+        settings.ai.connection_type,
+        AiConnectionType::OpenaiCompatible
+    ) {
+        return Ok(typed_model_options(models.data, connection));
+    }
     Ok(local_model_options(
         models.data,
         &pi_catalog().unwrap_or_default(),
         connection,
         crate::model_server::served_model(&connection.base_url).as_ref(),
     ))
+}
+
+/// What a hosted OpenAI-compatible server's models endpoint means, which is only which ids exist.
+///
+/// A plain `/models` answer is `{id, object, created, owned_by}` and nothing else, and the two
+/// sources `local_model_options` reads instead of guessing are both unavailable: `/props` is
+/// llama.cpp's, and Pi's catalogue is keyed by a server this one is not. So every fact but the id
+/// is the connection's own, which is what the user typed on the settings page.
+///
+/// Carrying them rather than defaulting is the whole point. Falling through to `local_model_options`
+/// would have answered `reasoning: false` for every model on every such host — its `server_reasoning`
+/// is what an unknown address resolves to — so picking a model out of the list would have silently
+/// emptied the reasoning menu the user had just filled in.
+pub(super) fn typed_model_options(
+    remote: Vec<Model>,
+    connection: &AiConnectionProfile,
+) -> Vec<AiModelOption> {
+    remote
+        .into_iter()
+        .map(|remote| AiModelOption {
+            name: if remote.id == connection.model.id {
+                connection.model.name.clone()
+            } else {
+                remote.id.clone()
+            },
+            id: remote.id,
+            context_window: connection.model.context_window,
+            max_tokens: connection.model.max_tokens,
+            reasoning: connection.model.reasoning,
+            supports_reasoning_effort: connection.model.supports_reasoning_effort,
+            reasoning_mandatory: connection.model.reasoning_mandatory,
+            thinking_levels: connection.model.thinking_levels.clone(),
+            input: connection.model.input.clone(),
+            off_effort: connection.model.off_effort.clone(),
+            names_only: true,
+        })
+        .collect()
 }
 
 /// What a local server's models endpoint means, read through Pi's catalogue.
@@ -336,6 +404,7 @@ pub(super) fn local_model_options(
                     .or_else(|| known.map(|model| model.input.clone()))
                     .unwrap_or_else(|| connection.model.input.clone()),
                 off_effort: None,
+                names_only: false,
             }
         })
         .collect()
@@ -413,6 +482,7 @@ pub(super) fn openrouter_model_options(remote: Vec<OpenrouterModel>) -> Vec<AiMo
                     input
                 },
                 off_effort: None,
+                names_only: false,
             }
         })
         .collect()
@@ -462,6 +532,7 @@ pub(super) fn chatgpt_models() -> Result<Vec<AiModelOption>, String> {
                     thinking_levels: Vec::new(),
                     input: model.input,
                     off_effort: None,
+                    names_only: false,
                 })
                 .collect()
         })

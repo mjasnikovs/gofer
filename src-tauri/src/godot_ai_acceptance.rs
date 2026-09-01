@@ -435,7 +435,7 @@ fn an_ai_turn_edits_a_scene_fixes_a_diagnostic_debugs_and_captures_the_game() {
     let context = JobContext::for_suite(
         app.handle(),
         AiSettings::served_by(
-            crate::settings::AiConnectionType::OpenaiCompatible,
+            crate::settings::AiConnectionType::Local,
             Some(base_url),
             "gofer-acceptance".to_owned(),
             None,
@@ -833,13 +833,8 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         refused.message
     );
     assert!(
-        refused.message.contains("runtime_broke"),
-        "the sentence must name what a frame-free call really answers here: {}",
-        refused.message
-    );
-    assert!(
-        !refused.message.contains("answer while it is halted"),
-        "and must not promise the data instead: {}",
+        refused.message.contains("capture") && refused.message.contains("get_tree"),
+        "the sentence must name what a halted game still answers: {}",
         refused.message
     );
     assert!(
@@ -847,27 +842,12 @@ fn a_frame_awaiting_call_against_a_halted_game_is_refused_before_it_waits() {
         "the refusal is the point and it took {waited:?}"
     );
 
-    if let Err(failure) = call("godot_runtime", json!({"ops": [{"op": "get_tree"}]})) {
-        assert_ne!(
-            failure.code, "game_halted",
-            "a call that needs no frame must reach the game: {}",
-            failure.message
-        );
-        assert_eq!(failure.code, "runtime_broke", "{}", failure.message);
-        assert!(
-            failure.message.contains("godot_debug continue")
-                && failure.message.contains("godot_debug stack_trace"),
-            "the paused-game answer must name the way out: {}",
-            failure.message
-        );
-        assert!(
-            !failure
-                .message
-                .starts_with("The game is paused at an error"),
-            "and must not call a breakpoint an error: {}",
-            failure.message
-        );
-    }
+    let tree = call("godot_runtime", json!({"ops": [{"op": "get_tree"}]}))
+        .expect("a read reaches a halted game off the debugger message pump");
+    assert!(
+        !tree["ops"][0]["result"]["root"].is_null(),
+        "a halted game still answers a read: {tree}"
+    );
 
     call("godot_debug", json!({"ops": [{"op": "step_in"}]}))
         .expect("step_in answers on a stopped debuggee");

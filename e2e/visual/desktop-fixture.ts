@@ -27,11 +27,11 @@ export async function installDesktop(
                     'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQAgMAAABinRfyAAAADFBMVEUAAABa1X5a1X5a1X5tBuVgAAAAA3RSTlMAKLP1Q4hCAAAAKUlEQVQI12NggAPG/f8cGNj//7/AwP3//wMG/v//P+AmwErAisHa4AAAKswhZ5Fmo6UAAAAASUVORK5CYII='
             }
             const settings = {
-                version: 1,
+                version: 2,
                 ai: {
-                    connectionType: 'openai-compatible',
+                    connectionType: 'local',
                     connections: {
-                        'openai-compatible': {
+                        local: {
                             name: 'Local AI',
                             baseUrl: 'http://127.0.0.1:8080/v1',
                             api: 'openai-completions',

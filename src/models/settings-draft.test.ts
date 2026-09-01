@@ -27,11 +27,11 @@ import type {
 } from './settings'
 
 const SETTINGS: GoferSettings = {
-    version: 1,
+    version: 2,
     ai: {
-        connectionType: 'openai-compatible',
+        connectionType: 'local',
         connections: {
-            'openai-compatible': {
+            local: {
                 name: 'Local',
                 baseUrl: 'http://127.0.0.1:8080/v1',
                 api: 'openai-completions',
@@ -407,11 +407,11 @@ describe('choosing the model the sub-agent answers with', () => {
     it('starts the child on the chosen connection own model', () => {
         const state = reduce(loaded, {
             type: 'subagent-driver-chosen',
-            connectionType: 'openai-compatible'
+            connectionType: 'local'
         })
 
         expect(state.settings?.ai.subagent.connection).toMatchObject({
-            connectionType: 'openai-compatible',
+            connectionType: 'local',
             model: {id: 'qwen', contextWindow: 32_768}
         })
         expect(chosen(state)?.id).toBe('qwen')
@@ -420,7 +420,7 @@ describe('choosing the model the sub-agent answers with', () => {
     it('gives the child a model and a level of its own', () => {
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'subagent-driver-chosen', connectionType: 'openai-compatible'},
+            {type: 'subagent-driver-chosen', connectionType: 'local'},
             {type: 'subagent-model-chosen', model: smaller}
         )
 
@@ -437,7 +437,7 @@ describe('choosing the model the sub-agent answers with', () => {
     it('empties the model list when the driver changes, so nothing stale can be picked', () => {
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'subagent-driver-chosen', connectionType: 'openai-compatible'},
+            {type: 'subagent-driver-chosen', connectionType: 'local'},
             {type: 'subagent-models-listed', models: [smaller]},
             {type: 'subagent-driver-chosen', connectionType: undefined}
         )
@@ -465,7 +465,7 @@ describe('choosing the model the sub-agent answers with', () => {
     it('sets the level the child is asked at', () => {
         const state = apply(
             {type: 'loaded', response: RESPONSE, cache: CACHE, prompt: PROMPT},
-            {type: 'subagent-driver-chosen', connectionType: 'openai-compatible'},
+            {type: 'subagent-driver-chosen', connectionType: 'local'},
             {type: 'subagent-thinking-chosen', thinkingLevel: 'low'}
         )
 

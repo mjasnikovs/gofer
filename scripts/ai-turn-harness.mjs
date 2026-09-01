@@ -6,9 +6,9 @@ import {join} from 'node:path'
 export const MODEL_ID = 'Qwen3.6-27B-UD-Q4_K_XL.gguf'
 
 export const settings = {
-    connectionType: 'openai-compatible',
+    connectionType: 'local',
     connections: {
-        'openai-compatible': {
+        local: {
             name: 'Local AI',
             baseUrl: '',
             api: 'openai-completions',
@@ -19,12 +19,12 @@ export const settings = {
 }
 
 export function servedBy(baseUrl, {model = {}, connection = {}, ...tuning} = {}) {
-    const live = settings.connections['openai-compatible']
+    const live = settings.connections['local']
     return {
         ...settings,
         ...tuning,
         connections: {
-            'openai-compatible': {...live, ...connection, baseUrl, model: {...live.model, ...model}}
+            local: {...live, ...connection, baseUrl, model: {...live.model, ...model}}
         }
     }
 }
@@ -350,7 +350,7 @@ export function instantTimers() {
 }
 
 export const SMALL_MODEL = {
-    connectionType: 'openai-compatible',
+    connectionType: 'local',
     model: {
         id: 'small.gguf',
         name: 'Small',

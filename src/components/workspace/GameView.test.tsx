@@ -86,6 +86,20 @@ describe('the game surface', () => {
         expect(screen.getByText('Game · 320×180')).toBeInTheDocument()
     })
 
+    it('leaves every other control alive while a capture spends its deadline', async () => {
+        const user = userEvent.setup()
+        const call = surface('playing')
+        call.mockImplementation(() => new Promise(() => undefined))
+        await user.click(screen.getByRole('button', {name: 'Capture game'}))
+
+        await waitFor(() => {
+            expect(isRefused('Capture game')).toBe(true)
+        })
+        expect(isRefused('Stop')).toBe(false)
+        expect(isRefused('Restart')).toBe(false)
+        expect(isRefused('Capture editor')).toBe(false)
+    })
+
     it('takes the picture down with the game a restart is ending', async () => {
         const user = userEvent.setup()
         const call = surface('playing')

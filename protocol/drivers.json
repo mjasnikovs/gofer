@@ -38,6 +38,22 @@
             "blank": "clears"
         },
         {
+            "id": "openai-compatible",
+            "variant": "OpenaiCompatible",
+            "kind": "api-key",
+            "username": "ai-openai-compatible",
+            "noun": "OpenAI-compatible API key",
+            "blank": "clears"
+        },
+        {
+            "id": "qwen",
+            "variant": "Qwen",
+            "kind": "api-key",
+            "username": "ai-qwen",
+            "noun": "Qwen API key",
+            "blank": "clears"
+        },
+        {
             "id": "chat-gpt",
             "variant": "ChatGpt",
             "kind": "oauth",
@@ -48,13 +64,22 @@
     ],
     "drivers": [
         {
-            "id": "openai-compatible",
-            "variant": "OpenaiCompatible",
+            "id": "local",
+            "variant": "Local",
             "label": "Local model",
             "shortName": "local",
             "providerId": "local",
             "secret": "ai-default",
-            "note": "A llama.cpp or any other server speaking OpenAI completions, on an address the user types. The only driver whose key never leaves this machine."
+            "note": "A llama.cpp server on an address the user types. The only driver whose key never leaves this machine, and the only one that is asked what it is serving: its `/props` answer outranks everything written down about the model."
+        },
+        {
+            "id": "openai-compatible",
+            "variant": "OpenaiCompatible",
+            "label": "OpenAI-compatible",
+            "shortName": "OpenAI-compatible",
+            "providerId": "openai-compatible",
+            "secret": "openai-compatible",
+            "note": "Any host speaking OpenAI completions, on an address the user types. It is asked nothing beyond its model list, because a hosted endpoint answers no `/props` and Pi's catalogue has never heard of it — so what its model can do is typed rather than derived. This word named the local driver before settings version 2."
         },
         {
             "id": "openai-codex",
@@ -73,6 +98,15 @@
             "providerId": "openrouter",
             "secret": "openrouter",
             "note": "A fixed host whose catalogue answers every question the local server cannot. Billed, and it reserves credit for the ceiling before it generates a token."
+        },
+        {
+            "id": "qwen",
+            "variant": "Qwen",
+            "label": "Qwen",
+            "shortName": "Qwen",
+            "providerId": "qwen",
+            "secret": "qwen",
+            "note": "The Qwen token plan, on a fixed host. Its endpoint publishes no capabilities either, so what Gofer knows about its models is a second table shipped in this directory — and its live list carries image and audio models that cannot call a tool, which naming the ones that can is the filter for."
         },
         {
             "id": "cerebras",

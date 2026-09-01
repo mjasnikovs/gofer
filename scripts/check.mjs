@@ -76,7 +76,9 @@ const OTHER_LANE = [
     ['test:coverage:frontend', `vitest run --coverage --maxWorkers=${OTHER_JOBS}`],
     [
         'test:coverage:node',
-        `c8 --all --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=${coverage('node')}/tmp --reports-dir=${coverage('node')} --reporter=text --check-coverage --lines 90 --branches 80 npm run --silent test:worker`
+        // --src keeps c8's --all walk inside scripts/; without it the walk is the whole
+        // working tree, and src-tauri/target alone costs three minutes of readdir.
+        `c8 --all --src=scripts --include='scripts/*.mjs' ${NODE_COVERAGE_EXCLUDES} --temp-directory=${coverage('node')}/tmp --reports-dir=${coverage('node')} --reporter=text --check-coverage --lines 90 --branches 80 npm run --silent test:worker`
     ],
     [
         'test:coverage:node-critical',

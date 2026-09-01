@@ -25,6 +25,14 @@ type Capture = Readonly<{
 
 type GameControl = 'runtime.run' | 'runtime.restart' | 'runtime.stop' | 'runtime.capture'
 
+const EMPTY: ReadonlySet<string> = new Set()
+
+// A call is in flight per button, not per panel: a capture that spends its whole deadline used to
+// disable Stop, which is the control that ends the wait.
+function controlOf(command: GameControl, source: 'game' | 'editor'): string {
+    return command === 'runtime.capture' ? `${command}:${source}` : command
+}
+
 const REPLACES_THE_GAME: ReadonlySet<GameControl> = new Set<GameControl>([
     'runtime.run',
     'runtime.restart',
@@ -39,11 +47,15 @@ export function GameView() {
     const {call, session, state} = useEditorSession()
     const [taken, setTaken] = useState<Capture>()
     const [error, setError] = useState<GodotError>()
-    const [isBusy, setIsBusy] = useState(false)
+    const [busy, setBusy] = useState<ReadonlySet<string>>(EMPTY)
     const isOffline = isSessionOffline(state)
     const isPlaying = isSessionPlaying(state)
 
     const live = useRef(session?.sessionId)
+    // Two captures can be in flight at once, and the slow one is the stale one: a game capture
+    // that spends its whole deadline must not land on top of an editor capture taken after it.
+    const issued = useRef(0)
+    const shown = useRef(0)
 
     useEffect(() => {
         live.current = session?.sessionId
@@ -52,7 +64,9 @@ export function GameView() {
     const run = useCallback(
         (command: GameControl, source: 'game' | 'editor' = 'game') => {
             const stamp = live.current
-            setIsBusy(true)
+            const control = controlOf(command, source)
+            const order = ++issued.current
+            setBusy(previous => new Set(previous).add(control))
             if (REPLACES_THE_GAME.has(command)) setTaken(undefined)
             void call(command === 'runtime.capture' ? 'runtime.capture' : command, {
                 ...(command === 'runtime.capture' && source === 'editor' && {source})
@@ -60,14 +74,21 @@ export function GameView() {
                 .then(result => {
                     setError(undefined)
                     const frame = 'frame' in result ? asFrame(result.frame) : undefined
-                    if (frame) setTaken({frame, source, at: Date.now(), sessionId: stamp})
+                    if (frame && order > shown.current) {
+                        shown.current = order
+                        setTaken({frame, source, at: Date.now(), sessionId: stamp})
+                    }
                     if (command === 'runtime.stop') setTaken(undefined)
                 })
                 .catch((failure: unknown) => {
                     setError(toGodotError(failure))
                 })
                 .finally(() => {
-                    setIsBusy(false)
+                    setBusy(previous => {
+                        const rest = new Set(previous)
+                        rest.delete(control)
+                        return rest
+                    })
                 })
         },
         [call]
@@ -105,7 +126,7 @@ export function GameView() {
                         <Button
                             label='Run'
                             size='sm'
-                            isDisabled={isOffline || isBusy || isPlaying}
+                            isDisabled={isOffline || isPlaying || busy.has('runtime.run')}
                             clickAction={() => {
                                 run('runtime.run')
                             }}
@@ -117,7 +138,7 @@ export function GameView() {
                             isIconOnly
                             icon={<Icon icon={ArrowPathIcon} />}
                             tooltip='Restart'
-                            isDisabled={isOffline || isBusy}
+                            isDisabled={isOffline || busy.has('runtime.restart')}
                             clickAction={() => {
                                 run('runtime.restart')
                             }}
@@ -129,7 +150,7 @@ export function GameView() {
                             isIconOnly
                             icon={<Icon icon={StopIcon} />}
                             tooltip='Stop'
-                            isDisabled={isOffline || isBusy}
+                            isDisabled={isOffline || busy.has('runtime.stop')}
                             clickAction={() => {
                                 run('runtime.stop')
                             }}
@@ -141,7 +162,7 @@ export function GameView() {
                             isIconOnly
                             icon={<Icon icon={CameraIcon} />}
                             tooltip='Capture game'
-                            isDisabled={isOffline || isBusy}
+                            isDisabled={isOffline || busy.has('runtime.capture:game')}
                             clickAction={() => {
                                 run('runtime.capture')
                             }}
@@ -153,7 +174,7 @@ export function GameView() {
                             isIconOnly
                             icon={<Icon icon={ViewfinderCircleIcon} />}
                             tooltip='Capture editor'
-                            isDisabled={isOffline || isBusy}
+                            isDisabled={isOffline || busy.has('runtime.capture:editor')}
                             clickAction={() => {
                                 run('runtime.capture', 'editor')
                             }}
@@ -167,7 +188,7 @@ export function GameView() {
             >
                 <PanelState
                     label='game frame'
-                    isLoading={isBusy && !capture}
+                    isLoading={busy.size > 0 && !capture}
                     error={error}
                     isEmpty={!capture}
                     emptyTitle='No frame yet'

@@ -1523,24 +1523,23 @@ fn explaining(facts: &SessionFacts, mut failure: ToolFailure) -> ToolFailure {
     failure
 }
 
-/// The runtime operations that cannot answer until the game draws a frame.
+/// The runtime operations a game halted in the debugger cannot answer.
 ///
-/// Read out of the addon rather than written again here. `FRAME_AWAITING_OPS` in
-/// `runtime_queue.gd` is what decides which timeout a caller gets and it is where the wait
-/// actually happens, so a second copy in Rust would be a second thing to keep in step — and the
-/// one that drifted would refuse the wrong calls, silently, in the direction that costs a working
-/// call.
+/// Read out of the addon rather than written again here. `PROCESS_AWAITING_OPS` in
+/// `runtime_queue.gd` is where the wait actually happens, so a second copy in Rust would be a
+/// second thing to keep in step — and the one that drifted would refuse the wrong calls, silently,
+/// in the direction that costs a working call.
 ///
 /// A parse that finds nothing panics rather than answering with an empty list. It used to answer
 /// with one, and moving the constant into its own script turned this guard off without failing
 /// anything but the one acceptance test that watches a halted game.
-static FRAME_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
+static PROCESS_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let source = include_str!("../addon/runtime_queue.gd");
     let list = source
-        .split_once("FRAME_AWAITING_OPS: Array[String] = [")
+        .split_once("PROCESS_AWAITING_OPS: Array[String] = [")
         .and_then(|(_, rest)| rest.split_once(']'))
         .map(|(list, _)| list)
-        .expect("runtime_queue.gd declares FRAME_AWAITING_OPS as a literal array");
+        .expect("runtime_queue.gd declares PROCESS_AWAITING_OPS as a literal array");
     let ops: Vec<String> = list
         .split(',')
         .filter_map(|word| word.trim().strip_prefix('"')?.strip_suffix('"'))
@@ -1548,27 +1547,29 @@ static FRAME_AWAITING_OPS: LazyLock<Vec<String>> = LazyLock::new(|| {
         .collect();
     assert!(
         !ops.is_empty(),
-        "runtime_queue.gd's FRAME_AWAITING_OPS parsed as empty, which refuses nothing"
+        "runtime_queue.gd's PROCESS_AWAITING_OPS parsed as empty, which refuses nothing"
     );
     ops
 });
 
-/// Refuses a frame-awaiting runtime call against a game the debugger has halted.
+/// Refuses a runtime call that waits on the scene tree against a game the debugger has halted.
 ///
 /// The whole point is the twenty seconds it does not spend. A game stopped at a breakpoint is
-/// halted, not slow: `runtime.input`, `wait` and `capture` all wait on a frame it will never draw,
-/// and the addon can only answer them when their deadline runs out. Counted across every recorded
-/// live trace: **21 of those, 20 seconds each, 420 seconds** — one seventh of the time every tool
-/// call in the corpus took, in one percent of the calls. `R01-backwards` spent eight in a row
-/// against a breakpoint it had set itself, then tried to run the game again three times.
+/// halted, not slow: `runtime.input` and `wait` sit on a process frame it will never run, and the
+/// addon can only answer them when their deadline runs out. Counted across every recorded live
+/// trace: **21 of those, 20 seconds each, 420 seconds** — one seventh of the time every tool call
+/// in the corpus took, in one percent of the calls. `R01-backwards` spent eight in a row against a
+/// breakpoint it had set itself, then tried to run the game again three times.
 ///
 /// Both facts are needed and neither is enough. `holds_a_game` says the debugger started this game
 /// and not whether it is halted; `debuggee_is_stopped` says the adapter's last word was a stop and
 /// not whose game it was about. Together they are the one case where waiting cannot help.
 ///
-/// `inspect_node` and `get_tree` are deliberately not refused: they answer off the debugger message
-/// pump, which a halted game still runs, and trying one is how a caller tells a halted game from a
-/// wedged one. That asymmetry is `godot_runtime_acceptance`'s
+/// `capture` was in this list and should never have been. A break stops the scene tree, not the
+/// renderer: measured at a live breakpoint on 4.7.2, a capture answered in 140ms with a real PNG,
+/// and `get_tree`, `inspect_node` and `get_monitors` answered too — they all run off the debugger
+/// message pump, which a halted game still pumps. Refusing them cost the caller the frozen frame a
+/// breakpoint exists to show. That asymmetry is `godot_runtime_acceptance`'s
 /// `a_game_that_cannot_draw_answers_the_call_that_needs_no_frame`, on a real game.
 ///
 /// Retryable, because it is: the call is right and the game is in the wrong state for it, which is
@@ -1591,7 +1592,7 @@ fn refusing_a_halted_game(
     if !debugger_holds_a_game || !debuggee_is_stopped {
         return Ok(());
     }
-    if !FRAME_AWAITING_OPS.iter().any(|frame_op| frame_op == op) {
+    if !PROCESS_AWAITING_OPS.iter().any(|held_op| held_op == op) {
         return Ok(());
     }
     Err(ToolFailure {
@@ -1599,12 +1600,12 @@ fn refusing_a_halted_game(
         ..ToolFailure::new(
             "game_halted",
             format!(
-                "The game is stopped in the debugger, so it draws no frame and godot_runtime {op} \
+                "The game is stopped in the debugger, so it runs no frame and godot_runtime {op} \
                  cannot be answered. Waiting will not change that. godot_debug continue lets it \
                  run on, and godot_debug stack_trace says where it is stopped. godot_runtime \
-                 inspect_node and get_tree need no frame and are not refused here — they reach the \
-                 game, and while the debugger holds it they come back runtime_broke naming it, \
-                 which is how a stopped game is told apart from a wedged one."
+                 capture, get_tree, inspect_node and get_monitors are not refused here — a break \
+                 stops the scene tree and not the renderer, so a stopped game still photographs \
+                 and still answers a read."
             ),
         )
     })
@@ -3218,17 +3219,17 @@ mod tests {
         assert_eq!(alone.message, "The game did not answer in time");
     }
 
-    /// The three operations that wait for a frame are the addon's list, not a second copy of it.
+    /// The two operations a halted game cannot serve are the addon's list, not a second copy of it.
     ///
     /// A drift here is silent and costs a working call: an operation this list gained that Rust
     /// never heard of would go on spending its deadline, and one Rust invented would be refused
     /// against a game that could have answered it.
     #[test]
-    fn the_frame_awaiting_operations_are_the_addons_own() {
+    fn the_process_awaiting_operations_are_the_addons_own() {
         assert_eq!(
-            *FRAME_AWAITING_OPS,
-            vec!["input".to_owned(), "capture".to_owned(), "wait".to_owned()],
-            "runtime_queue.gd's FRAME_AWAITING_OPS is what this reads, and the parse answered otherwise"
+            *PROCESS_AWAITING_OPS,
+            vec!["input".to_owned(), "wait".to_owned()],
+            "runtime_queue.gd's PROCESS_AWAITING_OPS is what this reads, and the parse answered otherwise"
         );
     }
 

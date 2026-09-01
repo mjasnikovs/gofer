@@ -524,8 +524,9 @@ impl GodotDocsResponse {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetrieveConnection {
-    /// `openai-compatible` or `openai-codex`. ChatGPT is addressed by provider, not by URL, so the
-    /// sidecar has to be told which of the two it is holding rather than inferring it.
+    /// A driver id — `openai-codex`, or any of the ones that are reached by URL. ChatGPT is
+    /// addressed by provider rather than by address, so the sidecar has to be told which of the two
+    /// it is holding rather than inferring it.
     pub connection_type: String,
     /// The ChatGPT credential, for a codex connection only. It rotates when it is used, which is
     /// what the credential channel below exists to carry back.

@@ -7,7 +7,7 @@ const STORED: GoferSettings = SETTINGS.settings
 
 /** The local connection the fixture settings are built around. */
 function local(of: GoferSettings): AiConnectionProfile {
-    const connection = of.ai.connections['openai-compatible']
+    const connection = of.ai.connections.local
     if (!connection) throw new Error('the fixture settings have a local connection')
     return connection
 }
@@ -35,7 +35,7 @@ describe('catalogueKey', () => {
                 ...STORED.ai,
                 connections: {
                     ...STORED.ai.connections,
-                    'openai-compatible': {...local(STORED), baseUrl: 'http://elsewhere:8080/v1'}
+                    local: {...local(STORED), baseUrl: 'http://elsewhere:8080/v1'}
                 }
             }
         }
@@ -52,7 +52,7 @@ describe('reconciled', () => {
 
     it('adopts a sole model when the chosen one is not served', () => {
         const next = reconciled([model('only-one')], STORED)
-        expect(next?.ai.connections['openai-compatible']?.model.id).toBe('only-one')
+        expect(next?.ai.connections.local?.model.id).toBe('only-one')
     })
 
     it('leaves a choice alone when the server offers several and none is the chosen one', () => {

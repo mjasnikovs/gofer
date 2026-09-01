@@ -14,6 +14,10 @@
 const LAUNCH_KINDS: Array[String] = ["run", "run_frame"]
 ## The operations that cannot answer until the game draws, which is why their timeout says more.
 const FRAME_AWAITING_OPS: Array[String] = ["input", "capture", "wait"]
+## The operations a paused game cannot serve. A debugger break stops the scene tree, and only
+## these two wait on it; the renderer keeps drawing through a break, so a capture answers from a
+## breakpoint in about a tenth of a second, and every read - tree, node, monitors - answers too.
+const PROCESS_AWAITING_OPS: Array[String] = ["input", "wait"]
 
 ## What one sweep of the queue decided.
 ##

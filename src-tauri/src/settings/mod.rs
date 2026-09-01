@@ -42,9 +42,20 @@ const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// Cerebras' address, which the user never types. Mirrors `CEREBRAS_BASE_URL` in settings.ts.
 const CEREBRAS_BASE_URL: &str = "https://api.cerebras.ai/v1";
 
+/// The Qwen token plan's address, region and all.
+///
+/// The region is in the host, so this pins one. It is the address a token-plan key answers on:
+/// `dashscope-intl.aliyuncs.com` and `dashscope.aliyuncs.com` are the pay-as-you-go product and
+/// refuse the same key. A plan in another region is what the OpenAI-compatible driver is for.
+const QWEN_BASE_URL: &str =
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
-const SETTINGS_VERSION: u32 = 1;
+/// Version 2 renamed one driver. `openai-compatible` named the local llama.cpp connection until
+/// this version and names any hosted endpoint from it on, so a file has to say which it meant.
+/// `migrate_settings` in `legacy.rs` is the whole of the answer.
+const SETTINGS_VERSION: u32 = 2;
 
 /// The levels a model with named efforts can be asked at. The menu, not the validation set: it is
 /// `EFFORT_LEVELS` in `settings.ts` too, and neither of them holds `on`.
@@ -198,7 +209,7 @@ pub(crate) struct ModelChoice {
     #[serde(default = "default_model_input")]
     input: Vec<String>,
     /// The word this model answers to for "stop thinking", where it has one. See
-    /// `CerebrasModel::off_effort`.
+    /// `ShippedModel::off_effort`.
     ///
     /// Defaulted and skipped when absent, so every settings file written before this field — and
     /// every model on every other driver — reads as "no such word", which sends no effort field at
@@ -225,7 +236,7 @@ impl AiSettings {
     /// think is all an acceptance run chooses; the rest of the turn is the one the application
     /// composes. A failed request is never asked again, because a suite counts errors.
     ///
-    /// `base_url` is optional because only one of the three drivers has an address a run picks.
+    /// `base_url` is optional because only two of the five drivers have an address a run picks.
     /// ChatGPT's is a constant and OpenRouter's is a constant; overwriting either from a default
     /// meant for a local server is how a run ends up asking `127.0.0.1` for a subscription model.
     #[cfg(all(test, feature = "godot-acceptance"))]
@@ -258,7 +269,7 @@ impl AiSettings {
             }
             connection.model.id = model;
             if let Some(level) = thinking_level {
-                connection.chat_template_thinking = driver == AiConnectionType::OpenaiCompatible;
+                connection.chat_template_thinking = driver == AiConnectionType::Local;
                 connection.model.reasoning = true;
                 connection.model.supports_reasoning_effort = true;
                 if NAMED_EFFORTS.contains(&level.as_str()) {
@@ -402,9 +413,11 @@ pub(crate) struct SubagentConnection {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum AiConnectionType {
+    Local,
     OpenaiCompatible,
     OpenaiCodex,
     Openrouter,
+    Qwen,
     Cerebras,
 }
 
@@ -511,9 +524,18 @@ pub(crate) struct AiModelOption {
     ///
     /// Absent for every driver but Cerebras, whose shipped table is the only catalogue that carries
     /// it — so `off` keeps meaning "send no effort field" everywhere it always did. See
-    /// `CerebrasModel::off_effort`.
+    /// `ShippedModel::off_effort`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     off_effort: Option<String>,
+    /// Whether this row names a model and nothing more, because its catalogue answered nothing more.
+    ///
+    /// A plain OpenAI `/models` body is `{id, object, created, owned_by}`. Every other field above
+    /// is then the connection's own — what the user typed — and handing it back as though the
+    /// server had said it lets a listing overwrite the page it came from. The renderer reads this
+    /// and keeps what it has: see `applyModelSelection`, which a listing in flight would otherwise
+    /// use to revert a window and a reasoning level the user typed while it was on the wire.
+    #[serde(default)]
+    names_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -743,7 +765,7 @@ impl Default for GoferSettings {
 impl Default for AiSettings {
     fn default() -> Self {
         Self {
-            connection_type: AiConnectionType::OpenaiCompatible,
+            connection_type: AiConnectionType::Local,
             connections: default_connections(default_local_profile()),
             max_retries: default_max_retries(),
             timeout_ms: default_timeout_ms(),
@@ -754,21 +776,59 @@ impl Default for AiSettings {
     }
 }
 
-/// The four connections a settings file starts life with, around whichever local one is known.
+/// The five connections a settings file starts life with, around whichever local one is known.
 ///
-/// The three hosted ones are always there for a reason the local one used to have to earn: a
-/// driver with no connection is not offered in the picker, and a driver that is not offered can
-/// never be selected in order to be configured. Every one of their addresses and dialects is a
-/// constant, so there is nothing to wait for.
+/// The other four are always there for a reason the local one used to have to earn: a driver with
+/// no connection is not offered in the picker, and a driver that is not offered can never be
+/// selected in order to be configured.
 fn default_connections(
     local: AiConnectionProfile,
 ) -> BTreeMap<AiConnectionType, AiConnectionProfile> {
     BTreeMap::from([
-        (AiConnectionType::OpenaiCompatible, local),
+        (AiConnectionType::Local, local),
+        (
+            AiConnectionType::OpenaiCompatible,
+            default_openai_compatible_profile(),
+        ),
         (AiConnectionType::OpenaiCodex, default_chatgpt_profile()),
         (AiConnectionType::Openrouter, default_openrouter_profile()),
+        (AiConnectionType::Qwen, default_qwen_profile()),
         (AiConnectionType::Cerebras, default_cerebras_profile()),
     ])
+}
+
+/// What an OpenAI-compatible connection is before the user has typed anything.
+///
+/// An address rather than a blank, because `validate_connection` refuses a blank one and a driver
+/// that will not validate cannot be saved in order to be configured. OpenAI's own is the address
+/// the dialect is named after, so it is the one that explains the field it sits in.
+///
+/// Every capability here is the cautious answer. Nothing asks a hosted endpoint what its model can
+/// do — `/props` is llama.cpp's and Pi's catalogue has never heard of the address — so these are
+/// what the user edits, not what a later read overwrites.
+fn default_openai_compatible_profile() -> AiConnectionProfile {
+    AiConnectionProfile {
+        name: "OpenAI-compatible".to_owned(),
+        base_url: "https://api.openai.com/v1".to_owned(),
+        api: ApiDialect::OpenaiCompletions,
+        chat_template_thinking: false,
+        model: ModelChoice {
+            id: "gpt-5".to_owned(),
+            name: "gpt-5".to_owned(),
+            context_window: default_context_window(),
+            max_tokens: default_max_tokens(),
+            reasoning: false,
+            supports_reasoning_effort: false,
+            reasoning_mandatory: false,
+            thinking_levels: Vec::new(),
+            // Text alone, unlike every other driver's default. Nothing ever corrects this one, so
+            // a claim of vision here stands until someone unticks it — and a host that refuses a
+            // picture refuses the whole turn rather than the picture.
+            input: vec!["text".to_owned()],
+            off_effort: None,
+            thinking_level: default_thinking_level(),
+        },
+    }
 }
 
 /// What a local connection is before Pi's catalogue or the server itself has said anything.
@@ -821,16 +881,18 @@ fn default_chatgpt_profile() -> AiConnectionProfile {
     }
 }
 
-// GENERATED-BEGIN drivers sha256:f77507ddfffd3ea8
+// GENERATED-BEGIN drivers sha256:4902f9a12ee7a6a6
 /// The word a driver is written down as, on the wire and in the settings file.
 ///
 /// Never the display label: a file holding `OpenRouter` matches no driver this build
 /// knows.
 fn driver_id(driver: AiConnectionType) -> &'static str {
     match driver {
+        AiConnectionType::Local => "local",
         AiConnectionType::OpenaiCompatible => "openai-compatible",
         AiConnectionType::OpenaiCodex => "openai-codex",
         AiConnectionType::Openrouter => "openrouter",
+        AiConnectionType::Qwen => "qwen",
         AiConnectionType::Cerebras => "cerebras",
     }
 }
@@ -841,10 +903,12 @@ fn driver_id(driver: AiConnectionType) -> &'static str {
 /// `driver_id`. Rust itself needs no list: the enum is the list, and the match above is
 /// exhaustive over it.
 #[cfg(test)]
-const DRIVER_IDS: [&str; 4] = [
+const DRIVER_IDS: [&str; 6] = [
+    "local",
     "openai-compatible",
     "openai-codex",
     "openrouter",
+    "qwen",
     "cerebras",
 ];
 // GENERATED-END drivers
@@ -882,10 +946,23 @@ fn default_openrouter_profile() -> AiConnectionProfile {
 /// live endpoint rather than assumed. The model seed is the one of the two shipped models that
 /// takes no image, because a seed that promises a modality is a seed that can be believed.
 fn default_cerebras_profile() -> AiConnectionProfile {
-    let seed = &CEREBRAS_MODELS[0];
+    shipped_profile("Cerebras", CEREBRAS_BASE_URL, &CEREBRAS_MODELS[0])
+}
+
+/// What a Qwen connection is, before the user has picked anything.
+fn default_qwen_profile() -> AiConnectionProfile {
+    shipped_profile("Qwen", QWEN_BASE_URL, &QWEN_MODELS[0])
+}
+
+/// A fixed-address connection seeded from the first row of its own shipped table.
+///
+/// One function for the two drivers that have one, because the seed is the same act: a driver with
+/// no connection is never offered, so it needs a model before the user has chosen one, and the only
+/// model it may claim is one the table has measured.
+fn shipped_profile(name: &str, base_url: &str, seed: &ShippedModel) -> AiConnectionProfile {
     AiConnectionProfile {
-        name: "Cerebras".to_owned(),
-        base_url: CEREBRAS_BASE_URL.to_owned(),
+        name: name.to_owned(),
+        base_url: base_url.to_owned(),
         api: ApiDialect::OpenaiCompletions,
         chat_template_thinking: false,
         model: ModelChoice {
@@ -909,13 +986,17 @@ fn default_cerebras_profile() -> AiConnectionProfile {
     }
 }
 
-/// What Gofer knows about one Cerebras model, which is everything its endpoint declines to say.
+/// What Gofer knows about one model on a host that will not say, measured and shipped.
 ///
-/// `GET /v1/models` there answers `{id, object, created, owned_by}` and no more — no window, no
-/// output ceiling, no tool support, no reasoning. Every other driver reads those facts off a
-/// catalogue. This one has none to read, so they are measured by hand and shipped, and the row is
-/// emitted from `protocol/cerebras-models.json` rather than typed here.
-struct CerebrasModel {
+/// Two drivers need this and for the same reason. `GET /v1/models` on Cerebras and on Qwen answers
+/// `{id, object, created, owned_by}` and no more — no window, no output ceiling, no tool support,
+/// no reasoning. Every other driver reads those facts off a catalogue; these two have none to read,
+/// so the rows are measured by hand and emitted from `protocol/cerebras-models.json` and
+/// `protocol/qwen-models.json` rather than typed here.
+///
+/// One type rather than two, because the facts are the same facts. What differs is which file
+/// names them and which live id list they are intersected against.
+struct ShippedModel {
     id: &'static str,
     name: &'static str,
     context_window: u64,
@@ -933,8 +1014,8 @@ struct CerebrasModel {
     off_effort: Option<&'static str>,
 }
 
-// GENERATED-BEGIN cerebras-models sha256:67ea66a53c1f1124
-const CEREBRAS_MODELS: [CerebrasModel; 2] = [
+// GENERATED-BEGIN cerebras-models sha256:a018c17014b5e24b
+const CEREBRAS_MODELS: [ShippedModel; 2] = [
     // Measured on 2026-08-27. The window is the number the endpoint names itself: a 300,000-token
     // prompt answers HTTP 400 `context_length_exceeded`, "Current length is 300068 while limit is
     // 131000". Not 131,072 — the two models on this endpoint do not share a window. Output has no
@@ -944,7 +1025,7 @@ const CEREBRAS_MODELS: [CerebrasModel; 2] = [
     // "none"` and the chat template then refuses it with "Unsupported reasoning effort: none.
     // Supported values are 'low', 'medium', and 'high'." So this model has no word for stopping and
     // carries no `offEffort`.
-    CerebrasModel {
+    ShippedModel {
         id: "gpt-oss-120b",
         name: "GPT OSS 120B",
         context_window: 131_000,
@@ -959,7 +1040,7 @@ const CEREBRAS_MODELS: [CerebrasModel; 2] = [
     // accepted by both the validator and the template, and the reply comes back with no `reasoning`
     // field at all — so unlike its neighbour this model has a real word for stopping, and `off`
     // sends it rather than sending nothing.
-    CerebrasModel {
+    ShippedModel {
         id: "gemma-4-31b",
         name: "Gemma 4 31B IT",
         context_window: 131_072,
@@ -972,8 +1053,124 @@ const CEREBRAS_MODELS: [CerebrasModel; 2] = [
 ];
 // GENERATED-END cerebras-models
 
+// GENERATED-BEGIN qwen-models sha256:ace6fff290b84fc8
+const QWEN_MODELS: [ShippedModel; 8] = [
+    // Measured on 2026-09-01. `max_tokens: 99999999` is refused with "Range of max_tokens should be
+    // [1, 131072]", which is the ceiling. Tools are called, `strict` and all. An `image_url` part
+    // is accepted. All six named efforts are accepted, and `reasoning_effort: "none"` comes back
+    // with no `reasoning_content` at all, so `off` sends that word rather than sending nothing —
+    // without it the model thinks on every turn, which is what sending no effort field does here.
+    // The window is pi-ai's figure for the 3.8 family; this model is newer than pi-ai's shipped
+    // table and is not in it, so nothing has measured its window and the body limit stops this file
+    // from being the first.
+    ShippedModel {
+        id: "qwen3.8-flash",
+        name: "Qwen3.8 Flash",
+        context_window: 1_000_000,
+        max_tokens: 131_072,
+        input: &["text", "image"],
+        thinking_levels: &["minimal", "low", "medium", "high", "xhigh", "max"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+    // Measured on 2026-09-01, and it answers exactly as `qwen3.8-flash` does: a 131,072 output
+    // ceiling named in its own refusal, tools, images, all six efforts, and `none` for no thinking.
+    // Window from pi-ai's table.
+    ShippedModel {
+        id: "qwen3.8-max",
+        name: "Qwen3.8 Max",
+        context_window: 1_000_000,
+        max_tokens: 131_072,
+        input: &["text", "image"],
+        thinking_levels: &["minimal", "low", "medium", "high", "xhigh", "max"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+    // Measured on 2026-09-01. Ceiling 131,072, named in its own refusal. Text only: an `image_url`
+    // part answers "The provided messages input is invalid", which is the one model of these that
+    // refuses a picture. `max` is refused where the other five efforts are accepted, so the menu
+    // stops at `xhigh`. Window from pi-ai's table.
+    ShippedModel {
+        id: "qwen3.7-max",
+        name: "Qwen3.7 Max",
+        context_window: 1_000_000,
+        max_tokens: 131_072,
+        input: &["text"],
+        thinking_levels: &["minimal", "low", "medium", "high", "xhigh"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+    // Measured on 2026-09-01. Ceiling 131,072 — pi-ai's table says 65,536 for this model, and the
+    // endpoint's own refusal is the one that counts. Tools and images both work. `max` is refused,
+    // as on `qwen3.7-max`. Window from pi-ai's table.
+    ShippedModel {
+        id: "qwen3.7-plus",
+        name: "Qwen3.7 Plus",
+        context_window: 1_000_000,
+        max_tokens: 131_072,
+        input: &["text", "image"],
+        thinking_levels: &["minimal", "low", "medium", "high", "xhigh"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+    // Measured on 2026-09-01. The only ceiling here that is not 131,072: its refusal names 65,536.
+    // Tools and images work, `max` is refused. Window from pi-ai's table.
+    ShippedModel {
+        id: "qwen3.6-flash",
+        name: "Qwen3.6 Flash",
+        context_window: 1_000_000,
+        max_tokens: 65_536,
+        input: &["text", "image"],
+        thinking_levels: &["minimal", "low", "medium", "high", "xhigh"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+    // Measured on 2026-09-01. Ceiling 131,072, tools, images, all six efforts, and `none` stops it
+    // thinking. Window from pi-ai's table.
+    ShippedModel {
+        id: "glm-5.2",
+        name: "GLM-5.2",
+        context_window: 1_000_000,
+        max_tokens: 131_072,
+        input: &["text", "image"],
+        thinking_levels: &["minimal", "low", "medium", "high", "xhigh", "max"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+    // Measured on 2026-09-01. Tools, images, all six efforts, and `none` stops it thinking. It is
+    // one of two models here that accepts `max_tokens: 99999999` without complaint, so the ceiling
+    // is not its own answer — 384,000 is pi-ai's figure, and so is the window.
+    ShippedModel {
+        id: "deepseek-v4-flash-0731",
+        name: "DeepSeek V4 Flash",
+        context_window: 1_000_000,
+        max_tokens: 384_000,
+        input: &["text", "image"],
+        thinking_levels: &["minimal", "low", "medium", "high", "xhigh", "max"],
+        reasoning_mandatory: false,
+        off_effort: Some("none"),
+    },
+    // Measured on 2026-09-01, and the one model here that cannot be told to stop.
+    // `reasoning_effort: "none"` is accepted and the reply still carries `reasoning_content`, so
+    // there is no word for off and the row carries none — the reasoning menu offers levels only.
+    // `minimal` is refused where the other five efforts are accepted. Tools and images work. Like
+    // its Flash sibling it accepts any `max_tokens`, so the ceiling and the window are both pi-ai's
+    // figures.
+    ShippedModel {
+        id: "deepseek-v4-pro",
+        name: "DeepSeek V4 Pro",
+        context_window: 1_000_000,
+        max_tokens: 384_000,
+        input: &["text", "image"],
+        thinking_levels: &["low", "medium", "high", "xhigh", "max"],
+        reasoning_mandatory: true,
+        off_effort: None,
+    },
+];
+// GENERATED-END qwen-models
+
 /// One row of the shipped table, as the rest of Gofer states a model.
-fn cerebras_model_option(model: &CerebrasModel) -> AiModelOption {
+fn shipped_model_option(model: &ShippedModel) -> AiModelOption {
     AiModelOption {
         id: model.id.to_owned(),
         name: model.name.to_owned(),
@@ -989,6 +1186,7 @@ fn cerebras_model_option(model: &CerebrasModel) -> AiModelOption {
             .collect(),
         input: model.input.iter().map(|&s| s.to_owned()).collect(),
         off_effort: model.off_effort.map(str::to_owned),
+        names_only: false,
     }
 }
 
@@ -1006,18 +1204,20 @@ fn cerebras_model_option(model: &CerebrasModel) -> AiModelOption {
 /// `[a image/png you cannot see: this model takes text only]`, and `off` sent no effort field
 /// where that model has a word for it.
 ///
-/// Cerebras is the only driver with an answer here, and that is the point rather than an omission:
-/// its endpoint publishes no capabilities, so the table in this file is the catalogue. The other
-/// three read theirs off the wire, which an offline `served_by` cannot do.
+/// The two drivers with a shipped table are the two with an answer here, and that is the point
+/// rather than an omission: their endpoints publish no capabilities, so the tables in this file are
+/// the catalogue. The rest read theirs off the wire, which an offline `served_by` cannot do.
 #[cfg(all(test, feature = "godot-acceptance"))]
 fn shipped_model_facts(driver: AiConnectionType, id: &str) -> Option<AiModelOption> {
-    if driver != AiConnectionType::Cerebras {
-        return None;
-    }
-    CEREBRAS_MODELS
+    let table: &[ShippedModel] = match driver {
+        AiConnectionType::Cerebras => &CEREBRAS_MODELS,
+        AiConnectionType::Qwen => &QWEN_MODELS,
+        _ => return None,
+    };
+    table
         .iter()
         .find(|known| known.id == id)
-        .map(cerebras_model_option)
+        .map(shipped_model_option)
 }
 
 /// The Cerebras models this key can reach, which is the live list narrowed to the ones Gofer knows.
@@ -1030,10 +1230,26 @@ fn shipped_model_facts(driver: AiConnectionType, id: &str) -> Option<AiModelOpti
 /// would have to be guessed, and a guessed ceiling is a connection whose every request fails on a
 /// number nobody checked.
 fn cerebras_model_options(remote: &[Model]) -> Vec<AiModelOption> {
-    CEREBRAS_MODELS
+    shipped_model_options(&CEREBRAS_MODELS, remote)
+}
+
+/// The Qwen models this key can reach, by the same intersection and for one reason more.
+///
+/// Cerebras lists only models that can hold a conversation. This host does not: `wan2.7-image` and
+/// `wan2.7-image-pro` answer a chat request and return no tool call, and `qwen-audio-3.0-realtime-plus`
+/// refuses the endpoint outright. A model that cannot call a tool cannot run Gofer, and unlike
+/// OpenRouter there is no `supported_parameters` to read that off — so naming the eight that work
+/// is the filter, and the table is where that naming lives.
+fn qwen_model_options(remote: &[Model]) -> Vec<AiModelOption> {
+    shipped_model_options(&QWEN_MODELS, remote)
+}
+
+/// One shipped table narrowed to what a key can actually reach.
+fn shipped_model_options(known: &'static [ShippedModel], remote: &[Model]) -> Vec<AiModelOption> {
+    known
         .iter()
         .filter(|known| remote.iter().any(|model| model.id == known.id))
-        .map(cerebras_model_option)
+        .map(shipped_model_option)
         .collect()
 }
 
@@ -1191,11 +1407,15 @@ fn keep_level(
 /// Called on every read and every save, so what is on disk is never the authority — it is a copy
 /// the next load overwrites. The local driver's connection, and no other. Both sources describe
 /// servers on this machine: Pi's `models.json` is a file naming local providers, and `served` is
-/// what a llama.cpp host answered when it was asked. ChatGPT, OpenRouter and Cerebras keep what
-/// they have and are refreshed by the model lister instead, which is the only other writer of these
-/// fields. They are excluded by construction rather than by a filter: this names the local driver.
+/// what a llama.cpp host answered when it was asked. Every other driver keeps what it has and is
+/// refreshed by the model lister instead, which is the only other writer of these fields. They are
+/// excluded by construction rather than by a filter: this names the local driver.
 ///
-/// Offering the other two would not merely be useless. Both sources are keyed by address alone, and
+/// The OpenAI-compatible driver is excluded for a plainer reason than the hosted ones: a remote
+/// host answers no `/props` at all, and its models are not in a file describing local providers.
+/// What its model can do is typed, and a resolver reaching it would erase that on the next read.
+///
+/// Offering the hosted ones would not merely be useless. Both sources are keyed by address alone, and
 /// nothing stops a `~/.pi/agent/models.json` from naming a provider at OpenRouter's — which
 /// `validate_settings` has just pinned to a constant, so the collision is exact and permanent. Pi's
 /// answers would then be written over the user's OpenRouter model on every read and every save,
@@ -1212,16 +1432,13 @@ fn resolve_model_facts(
     served: &HashMap<String, ServedModel>,
 ) {
     let local_base_url = settings
-        .connection_for(AiConnectionType::OpenaiCompatible)
+        .connection_for(AiConnectionType::Local)
         .map(|local| local.base_url.clone());
-    if let Some(local) = settings
-        .connections
-        .get_mut(&AiConnectionType::OpenaiCompatible)
-    {
+    if let Some(local) = settings.connections.get_mut(&AiConnectionType::Local) {
         resolve_connection(local, catalog, served);
     }
     if let Some(child) = settings.subagent.connection.as_mut()
-        && matches!(child.connection_type, AiConnectionType::OpenaiCompatible)
+        && matches!(child.connection_type, AiConnectionType::Local)
         && let Some(base_url) = local_base_url
     {
         resolve_model(&mut child.model, &base_url, None, catalog, served);
@@ -1358,7 +1575,7 @@ fn read_settings_from_path(path: &Path) -> Result<GoferSettings, String> {
 /// have no `/props` and are not asked.
 fn ask_servers(ai: &AiSettings) -> HashMap<String, ServedModel> {
     let mut served = HashMap::new();
-    let Some(local) = ai.connection_for(AiConnectionType::OpenaiCompatible) else {
+    let Some(local) = ai.connection_for(AiConnectionType::Local) else {
         return served;
     };
     if let Some(model) = crate::model_server::served_model(&local.base_url) {
@@ -1396,7 +1613,9 @@ fn stored_settings(path: &Path, pi: Option<&Path>) -> Result<GoferSettings, Stri
     }
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("Could not read {}: {error}", path.display()))?;
-    let settings = serde_json::from_str(&contents)
+    let stored = serde_json::from_str(&contents)
+        .map_err(|error| format!("Gofer settings in {} are invalid: {error}", path.display()))?;
+    let settings = serde_json::from_value(migrate_settings(stored))
         .map_err(|error| format!("Gofer settings in {} are invalid: {error}", path.display()))?;
     validate_settings(settings)
 }
@@ -1467,6 +1686,7 @@ fn pi_model_option(provider: &PiProvider, model: &PiModel) -> AiModelOption {
         thinking_levels: Vec::new(),
         input: model.input.clone(),
         off_effort: None,
+        names_only: false,
     }
 }
 
@@ -1484,7 +1704,7 @@ fn default_settings_from_pi_path(path: &Path) -> Option<GoferSettings> {
     Some(GoferSettings {
         version: SETTINGS_VERSION,
         ai: AiSettings {
-            connection_type: AiConnectionType::OpenaiCompatible,
+            connection_type: AiConnectionType::Local,
             connections: default_connections(AiConnectionProfile {
                 name: "Local AI".to_owned(),
                 base_url: provider.base_url.clone(),
@@ -1561,6 +1781,7 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     }
     for (driver, address) in [
         (AiConnectionType::Openrouter, OPENROUTER_BASE_URL),
+        (AiConnectionType::Qwen, QWEN_BASE_URL),
         (AiConnectionType::Cerebras, CEREBRAS_BASE_URL),
     ] {
         if let Some(pinned) = settings.ai.connections.get_mut(&driver) {
@@ -1587,7 +1808,7 @@ pub(crate) fn validate_settings(mut settings: GoferSettings) -> Result<GoferSett
     validate_subagent_bounds(&settings.ai.subagent)?;
     let has_local = settings
         .ai
-        .connection_for(AiConnectionType::OpenaiCompatible)
+        .connection_for(AiConnectionType::Local)
         .is_some();
     if let Some(connection) = settings.ai.subagent.connection.take() {
         settings.ai.subagent.connection =
@@ -1797,11 +2018,7 @@ fn validate_subagent_connection(
     mut connection: SubagentConnection,
     has_local: bool,
 ) -> Result<SubagentConnection, String> {
-    if matches!(
-        connection.connection_type,
-        AiConnectionType::OpenaiCompatible
-    ) && !has_local
-    {
+    if matches!(connection.connection_type, AiConnectionType::Local) && !has_local {
         return Err(
             "The sub-agent cannot use the local connection until one is configured".to_owned(),
         );
@@ -1903,13 +2120,16 @@ mod tests {
     fn a_driver_reads_the_key_its_own_slot_holds() {
         let keys = BTreeMap::from([
             (Secret::AiDefault, "local".to_owned()),
+            (Secret::OpenaiCompatible, "compatible".to_owned()),
             (Secret::OpenRouter, "openrouter".to_owned()),
             (Secret::Cerebras, "cerebras".to_owned()),
+            (Secret::Qwen, "qwen".to_owned()),
         ]);
         let read = |driver: AiConnectionType| driver.api_key_from(&keys);
+        assert_eq!(read(AiConnectionType::Local), Some("local".to_owned()));
         assert_eq!(
             read(AiConnectionType::OpenaiCompatible),
-            Some("local".to_owned())
+            Some("compatible".to_owned())
         );
         assert_eq!(
             read(AiConnectionType::Openrouter),
@@ -1919,6 +2139,7 @@ mod tests {
             read(AiConnectionType::Cerebras),
             Some("cerebras".to_owned())
         );
+        assert_eq!(read(AiConnectionType::Qwen), Some("qwen".to_owned()));
         assert_eq!(read(AiConnectionType::OpenaiCodex), None);
     }
     use crate::{list_ai_models, test_ai_connection};
@@ -1989,10 +2210,7 @@ mod tests {
     }
 
     fn settings(base_url: impl Into<String>, model: impl Into<String>) -> GoferSettings {
-        settings_on(
-            AiConnectionType::OpenaiCompatible,
-            connection(base_url, model),
-        )
+        settings_on(AiConnectionType::Local, connection(base_url, model))
     }
 
     /// The shipped settings with one driver live and one connection under it.
@@ -2063,7 +2281,7 @@ mod tests {
             None
         );
         assert_eq!(
-            listing_bearer(AiConnectionType::OpenaiCompatible, &asking, &store)
+            listing_bearer(AiConnectionType::Local, &asking, &store)
                 .expect("a bearer decision")
                 .as_deref(),
             Some("the-local-key"),
@@ -2175,7 +2393,7 @@ mod tests {
         let local = settings
             .ai
             .connections
-            .get_mut(&AiConnectionType::OpenaiCompatible)
+            .get_mut(&AiConnectionType::Local)
             .expect("the local connection");
         local.model.context_window = 120_064;
         local.model.max_tokens = 32_768;
@@ -2195,7 +2413,7 @@ mod tests {
         assert_eq!(
             saved
                 .ai
-                .connection_for(AiConnectionType::OpenaiCompatible)
+                .connection_for(AiConnectionType::Local)
                 .expect("local")
                 .model
                 .max_tokens,
@@ -2691,14 +2909,14 @@ mod tests {
             None,
         )
         .expect("a local parent with no sub-agent connection lends its own");
-        assert_eq!(borrowed.connection_type, "openai-compatible");
+        assert_eq!(borrowed.connection_type, "local");
         assert_eq!(borrowed.base_url, default_local_profile().base_url);
         assert_eq!(borrowed.model, default_local_profile().model.id);
         assert_eq!(borrowed.api_key.as_deref(), Some("k"));
         assert_eq!(borrowed.oauth_credential, None);
 
         let local_child = SubagentConnection {
-            connection_type: AiConnectionType::OpenaiCompatible,
+            connection_type: AiConnectionType::Local,
             model: ModelChoice {
                 id: "small.gguf".to_owned(),
                 name: "Small".to_owned(),
@@ -2769,12 +2987,12 @@ mod tests {
     #[test]
     fn a_suite_can_be_pointed_at_any_of_the_three_connections() {
         let local = AiSettings::served_by(
-            AiConnectionType::OpenaiCompatible,
+            AiConnectionType::Local,
             Some("http://127.0.0.1:9099/v1".to_owned()),
             "local".to_owned(),
             None,
         );
-        assert_eq!(local.connection_type, AiConnectionType::OpenaiCompatible);
+        assert_eq!(local.connection_type, AiConnectionType::Local);
         let profile = local.connection().expect("the local connection is live");
         assert_eq!(profile.base_url, "http://127.0.0.1:9099/v1");
         assert_eq!(profile.model.id, "local");
@@ -2782,7 +3000,7 @@ mod tests {
         assert!(!profile.model.reasoning);
 
         let asked = AiSettings::served_by(
-            AiConnectionType::OpenaiCompatible,
+            AiConnectionType::Local,
             Some("http://127.0.0.1:9099/v1".to_owned()),
             "local".to_owned(),
             Some("medium".to_owned()),
@@ -2795,7 +3013,7 @@ mod tests {
         assert_eq!(profile.model.thinking_levels, vec!["medium".to_owned()]);
 
         let switched = AiSettings::served_by(
-            AiConnectionType::OpenaiCompatible,
+            AiConnectionType::Local,
             None,
             "local".to_owned(),
             Some("on".to_owned()),
@@ -3025,7 +3243,7 @@ mod tests {
     #[test]
     fn a_subagent_on_a_local_connection_that_does_not_exist_is_refused() {
         let local = SubagentConnection {
-            connection_type: AiConnectionType::OpenaiCompatible,
+            connection_type: AiConnectionType::Local,
             model: ModelChoice {
                 id: "Qwen3.6-27B-UD-Q4_K_XL.gguf".to_owned(),
                 name: String::new(),
@@ -3312,6 +3530,115 @@ mod tests {
         );
     }
 
+    /// A settings file that spelled the local driver `openai-compatible` still opens on it.
+    ///
+    /// The rename this pins: until version 2 that word was the local llama.cpp connection, and from
+    /// version 2 it is any host the user names. A file cannot say which it meant, so the version
+    /// says it — and reading a version 1 file as though the word meant what it means now would
+    /// point somebody's saved local address at a driver with a hosted key slot.
+    #[test]
+    fn a_version_one_file_names_the_local_driver_by_its_old_word() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "ai": {
+                    "connectionType": "openai-compatible",
+                    "connections": {
+                        "openai-compatible": {
+                            "name": "My server",
+                            "baseUrl": "http://127.0.0.1:9999/v1",
+                            "api": "openai-completions",
+                            "chatTemplateThinking": false,
+                            "model": {"id": "mine", "contextWindow": 8192, "maxTokens": 1024}
+                        }
+                    },
+                    "subagent": {
+                        "connection": {
+                            "connectionType": "openai-compatible",
+                            "model": {"id": "mine", "contextWindow": 8192, "maxTokens": 1024}
+                        }
+                    }
+                },
+                "godot": {}
+            }"#,
+        )
+        .expect("write a version 1 settings file");
+
+        let loaded = read_settings_from_paths(&path, None).expect("a version 1 file opens");
+        assert_eq!(loaded.version, SETTINGS_VERSION);
+        assert_eq!(loaded.ai.connection_type, AiConnectionType::Local);
+        let local = loaded
+            .ai
+            .connection_for(AiConnectionType::Local)
+            .expect("the address the file was written with");
+        assert_eq!(local.base_url, "http://127.0.0.1:9999/v1");
+        assert_eq!(local.model.id, "mine");
+        assert_eq!(
+            loaded
+                .ai
+                .subagent
+                .connection
+                .as_ref()
+                .expect("the sub-agent connection")
+                .connection_type,
+            AiConnectionType::Local
+        );
+        assert_eq!(
+            loaded.ai.connection_for(AiConnectionType::OpenaiCompatible),
+            Some(&default_openai_compatible_profile()),
+            "the driver the word now names is offered, and empty"
+        );
+    }
+
+    /// The same word in a version 2 file is the driver it names now, and is left alone.
+    ///
+    /// Version-gated rather than word-gated. Without the version check the migration would rewrite
+    /// a hosted connection into the local slot on every read, and it would do it forever.
+    #[test]
+    fn a_version_two_file_naming_the_word_keeps_its_hosted_connection() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "version": 2,
+                "ai": {
+                    "connectionType": "openai-compatible",
+                    "connections": {
+                        "openai-compatible": {
+                            "name": "A host",
+                            "baseUrl": "https://example.invalid/v1",
+                            "api": "openai-completions",
+                            "chatTemplateThinking": false,
+                            "model": {"id": "a-model", "contextWindow": 8192, "maxTokens": 1024}
+                        }
+                    }
+                },
+                "godot": {}
+            }"#,
+        )
+        .expect("write a version 2 settings file");
+
+        let loaded = read_settings_from_paths(&path, None).expect("a version 2 file opens");
+        assert_eq!(
+            loaded.ai.connection_type,
+            AiConnectionType::OpenaiCompatible
+        );
+        let hosted = loaded
+            .ai
+            .connection_for(AiConnectionType::OpenaiCompatible)
+            .expect("the hosted connection the file names");
+        assert_eq!(hosted.base_url, "https://example.invalid/v1");
+        assert_eq!(
+            loaded.ai.connection_for(AiConnectionType::Local),
+            None,
+            "a file that names no local server is not given a guessed one"
+        );
+    }
+
     #[test]
     fn invalid_settings_are_rejected() {
         let mut unsupported = settings("http://localhost/v1", "model");
@@ -3326,7 +3653,7 @@ mod tests {
         blank_name
             .ai
             .connections
-            .get_mut(&AiConnectionType::OpenaiCompatible)
+            .get_mut(&AiConnectionType::Local)
             .expect("the local connection")
             .name = "  ".to_owned();
         assert_eq!(
@@ -3557,7 +3884,7 @@ mod tests {
         assert!(!live(&saved).chat_template_thinking);
         assert_eq!(live(&saved).model.id, "nvidia/nemotron-3.5-lightning:free");
         assert_eq!(
-            saved.ai.connection_for(AiConnectionType::OpenaiCompatible),
+            saved.ai.connection_for(AiConnectionType::Local),
             Some(&default_local_profile())
         );
         assert_eq!(
@@ -3628,13 +3955,13 @@ mod tests {
     /// Cerebras existed loaded three connections, `driverOptions` offered three drivers, and the
     /// fourth could never be selected in order to be configured — invisible on every machine that
     /// had ever saved settings, and visible only on a fresh one. Measured against the developer's
-    /// own file, which held exactly `openai-compatible`, `openai-codex` and `openrouter`.
+    /// own file, which held exactly `local`, `openai-codex` and `openrouter`.
     #[test]
     fn a_settings_file_written_before_a_driver_existed_still_offers_it() {
         let older = serde_json::json!({
-            "connectionType": "openai-compatible",
+            "connectionType": "local",
             "connections": {
-                "openai-compatible": {
+                "local": {
                     "name": "My server",
                     "baseUrl": "http://127.0.0.1:9999/v1",
                     "api": "openai-completions",
@@ -3662,8 +3989,16 @@ mod tests {
             ai.connection_for(AiConnectionType::Openrouter),
             Some(&default_openrouter_profile())
         );
+        assert_eq!(
+            ai.connection_for(AiConnectionType::OpenaiCompatible),
+            Some(&default_openai_compatible_profile())
+        );
+        assert_eq!(
+            ai.connection_for(AiConnectionType::Qwen),
+            Some(&default_qwen_profile())
+        );
         let local = ai
-            .connection_for(AiConnectionType::OpenaiCompatible)
+            .connection_for(AiConnectionType::Local)
             .expect("the file's own local connection");
         assert_eq!(local.name, "My server");
         assert_eq!(local.base_url, "http://127.0.0.1:9999/v1");
@@ -3695,7 +4030,7 @@ mod tests {
         assert_eq!(live(&saved).api, ApiDialect::OpenaiCompletions);
         assert!(!live(&saved).chat_template_thinking);
         assert_eq!(
-            saved.ai.connection_for(AiConnectionType::OpenaiCompatible),
+            saved.ai.connection_for(AiConnectionType::Local),
             Some(&default_local_profile())
         );
         assert_eq!(
@@ -3955,6 +4290,65 @@ mod tests {
         assert!(!unknown[0].supports_reasoning_effort);
     }
 
+    /// A hosted OpenAI-compatible listing carries the facts the user typed, model by model.
+    ///
+    /// The bug this pins is silent. Every option the lister returns is a whole `ModelChoice` the
+    /// renderer may adopt — `applyModelSelection` replaces the model outright — and the listing
+    /// fires on mount and on every keystroke in Base URL. Falling through to `local_model_options`
+    /// answers `reasoning: false` for an address Pi's catalogue has never named, so a user who
+    /// typed a window and switched reasoning on would watch both revert without touching either.
+    ///
+    /// Nothing is filtered out. The endpoint measured for this answers `/models` with image and
+    /// audio models beside the chat ones and gives no field to tell them apart; OpenRouter's
+    /// `supported_parameters` has no counterpart here.
+    #[test]
+    fn a_hosted_compatible_listing_keeps_what_the_user_typed() {
+        let mut hosted = default_openai_compatible_profile();
+        hosted.base_url = "https://example.invalid/compatible-mode/v1".to_owned();
+        hosted.model.id = "qwen3.8-flash".to_owned();
+        hosted.model.name = "Qwen3.8 Flash".to_owned();
+        hosted.model.context_window = 262_144;
+        hosted.model.max_tokens = 32_768;
+        hosted.model.reasoning = true;
+        hosted.model.supports_reasoning_effort = true;
+        hosted.model.thinking_levels = vec!["low".to_owned(), "medium".to_owned()];
+        hosted.model.off_effort = Some("none".to_owned());
+
+        let offered = catalogue::typed_model_options(
+            vec![
+                Model {
+                    id: "qwen3.8-flash".to_owned(),
+                    meta: None,
+                },
+                Model {
+                    id: "wan2.7-image".to_owned(),
+                    meta: None,
+                },
+            ],
+            &hosted,
+        );
+
+        assert_eq!(offered.len(), 2, "nothing answers which of these can chat");
+        assert!(
+            offered.iter().all(|option| option.names_only),
+            "a row the server answered nothing about must say so, or the page it came from \
+             overwrites itself with it"
+        );
+        assert_eq!(offered[0].name, "Qwen3.8 Flash");
+        assert_eq!(
+            offered[1].name, "wan2.7-image",
+            "an unchosen id names itself"
+        );
+        for option in &offered {
+            assert_eq!(option.context_window, 262_144);
+            assert_eq!(option.max_tokens, 32_768);
+            assert!(option.reasoning);
+            assert!(option.supports_reasoning_effort);
+            assert_eq!(option.thinking_levels, ["low", "medium"]);
+            assert_eq!(option.off_effort.as_deref(), Some("none"));
+        }
+    }
+
     /// The server outranks the catalogue, in every copy, including the one the user picked.
     ///
     /// This is the shape the user hit. The catalogue names one `.gguf`; the host was restarted with
@@ -3969,9 +4363,9 @@ mod tests {
         local.model.supports_reasoning_effort = true;
         local.model.thinking_level = "medium".to_owned();
         local.model.max_tokens = 200_000;
-        let mut ai = settings_on(AiConnectionType::OpenaiCompatible, local).ai;
+        let mut ai = settings_on(AiConnectionType::Local, local).ai;
         ai.subagent.connection = Some(SubagentConnection {
-            connection_type: AiConnectionType::OpenaiCompatible,
+            connection_type: AiConnectionType::Local,
             model: ModelChoice {
                 id: "old.gguf".to_owned(),
                 name: "Old Model".to_owned(),
@@ -4001,7 +4395,7 @@ mod tests {
         resolve_model_facts(&mut ai, &PiCatalog::default(), &served);
 
         let local = ai
-            .connection_for(AiConnectionType::OpenaiCompatible)
+            .connection_for(AiConnectionType::Local)
             .expect("the local connection");
         let child = ai.subagent.connection.as_ref().expect("the sub-agent");
         for model in [&local.model, &child.model] {
@@ -4042,7 +4436,7 @@ mod tests {
         chosen.model.reasoning = true;
         chosen.model.supports_reasoning_effort = true;
         chosen.model.thinking_level = "medium".to_owned();
-        let mut ai = settings_on(AiConnectionType::OpenaiCompatible, chosen).ai;
+        let mut ai = settings_on(AiConnectionType::Local, chosen).ai;
         let before = ai.clone();
         let served = HashMap::from([(
             "http://127.0.0.1:8080/v1".to_owned(),
@@ -4105,7 +4499,7 @@ mod tests {
         stale.model.reasoning = true;
         stale.model.supports_reasoning_effort = true;
         stale.model.thinking_level = "medium".to_owned();
-        let mut ai = settings_on(AiConnectionType::OpenaiCompatible, stale).ai;
+        let mut ai = settings_on(AiConnectionType::Local, stale).ai;
         let before = ai.clone();
         resolve_model_facts(&mut ai, &PiCatalog::default(), &HashMap::new());
         assert_eq!(ai, before);
@@ -4144,7 +4538,7 @@ mod tests {
         stored.model.thinking_level = "off".to_owned();
         let stored = stored.model.clone();
         stale.ai.subagent.connection = Some(SubagentConnection {
-            connection_type: AiConnectionType::OpenaiCompatible,
+            connection_type: AiConnectionType::Local,
             model: ModelChoice {
                 name: "/models/served.gguf".to_owned(),
                 context_window: 120_064,
@@ -4558,11 +4952,11 @@ mod probe_cost_tests {
     fn settings_at(directory: &TempDir, base_url: &str) -> PathBuf {
         let path = directory.path().join("settings.json");
         let mut settings = GoferSettings::default();
-        settings.ai.connection_type = AiConnectionType::OpenaiCompatible;
+        settings.ai.connection_type = AiConnectionType::Local;
         settings
             .ai
             .connections
-            .get_mut(&AiConnectionType::OpenaiCompatible)
+            .get_mut(&AiConnectionType::Local)
             .expect("the local connection")
             .base_url = base_url.to_owned();
         fs::write(

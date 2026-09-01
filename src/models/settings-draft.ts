@@ -153,6 +153,8 @@ export const INITIAL_SETTINGS_DRAFT: SettingsDraft = {
         brave: NO_KEY,
         openrouter: NO_KEY,
         cerebras: NO_KEY,
+        qwen: NO_KEY,
+        'openai-compatible': NO_KEY,
         'chat-gpt': NO_KEY
     },
     tab: 'ai',

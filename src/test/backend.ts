@@ -186,11 +186,11 @@ export const SCENE_TREE = {
 }
 
 const STORED_SETTINGS: GoferSettings = {
-    version: 1,
+    version: 2,
     ai: {
-        connectionType: 'openai-compatible',
+        connectionType: 'local',
         connections: {
-            'openai-compatible': {
+            local: {
                 name: 'Local AI',
                 baseUrl: 'http://127.0.0.1:8080/v1',
                 api: 'openai-completions',

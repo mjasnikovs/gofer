@@ -65,22 +65,33 @@ import {DEFAULT_SEARCH_PROVIDER, TUNING_DEFAULTS} from './tuning-defaults.mjs'
 
 export {readableProviderError, outOfRoom}
 
-// GENERATED-BEGIN drivers sha256:a3401cf8c945dbf1
+// GENERATED-BEGIN drivers sha256:d35c4544ffb31ba1
 /** Every driver a build knows, in the order the pickers offer them. */
-export const DRIVERS = ['openai-compatible', 'openai-codex', 'openrouter', 'cerebras']
+export const DRIVERS = [
+    'local',
+    'openai-compatible',
+    'openai-codex',
+    'openrouter',
+    'qwen',
+    'cerebras'
+]
 
 /** Which pi-ai provider answers each driver. ChatGPT has none: pi-ai ships its own. */
 const PROVIDER_IDS = {
-    'openai-compatible': 'local',
+    local: 'local',
+    'openai-compatible': 'openai-compatible',
     openrouter: 'openrouter',
+    qwen: 'qwen',
     cerebras: 'cerebras'
 }
 
 /** What each driver is called in the one sentence a user reads about its connection. */
 const DRIVER_NAMES = {
-    'openai-compatible': 'local',
+    local: 'local',
+    'openai-compatible': 'OpenAI-compatible',
     'openai-codex': 'ChatGPT',
     openrouter: 'OpenRouter',
+    qwen: 'Qwen',
     cerebras: 'Cerebras'
 }
 
@@ -93,9 +104,11 @@ const DRIVER_NAMES = {
  * and this is the lookup into it.
  */
 export const DRIVER_SECRETS = {
-    'openai-compatible': 'ai-default',
+    local: 'ai-default',
+    'openai-compatible': 'openai-compatible',
     'openai-codex': 'chat-gpt',
     openrouter: 'openrouter',
+    qwen: 'qwen',
     cerebras: 'cerebras'
 }
 
@@ -108,10 +121,10 @@ export const DRIVER_SECRETS = {
  * fifth hosted driver passed `providerIdOf`, was never registered, and failed inside
  * pi-ai under a provider id nothing had created.
  */
-const HOSTED_DRIVERS = ['openrouter', 'cerebras']
+const HOSTED_DRIVERS = ['openai-compatible', 'openrouter', 'qwen', 'cerebras']
 // GENERATED-END drivers
 
-const PROVIDER_ID = PROVIDER_IDS['openai-compatible']
+const LOCAL_PROVIDER_ID = PROVIDER_IDS.local
 
 const KEEP_RECENT_TOKENS = 20_000
 
@@ -243,10 +256,10 @@ async function compactMessages(messages, models, model, settings, thinkingLevel,
     ]
 }
 
-function modelFor(connection, providerId = PROVIDER_ID) {
+function modelFor(connection, providerId = LOCAL_PROVIDER_ID) {
     return piModel(connection, {
         providerId,
-        sessionAffinity: providerId === PROVIDER_ID
+        sessionAffinity: providerId === LOCAL_PROVIDER_ID
     })
 }
 
@@ -399,11 +412,11 @@ export function createModelContext({
             :   undefined
     })
     if (drivers.has('openai-codex')) models.setProvider(openaiCodexProvider())
-    const localProfile = connectionProfile(settings, 'openai-compatible')
-    if (drivers.has('openai-compatible') && localProfile) {
+    const localProfile = connectionProfile(settings, 'local')
+    if (drivers.has('local') && localProfile) {
         models.setProvider(
             createProvider({
-                id: PROVIDER_ID,
+                id: LOCAL_PROVIDER_ID,
                 name: localProfile.name,
                 baseUrl: localProfile.baseUrl,
                 auth: {
@@ -413,7 +426,7 @@ export function createModelContext({
                         // registered whenever either seat points at it, and keying on the turn
                         // sent a hosted key to whatever address the user typed.
                         resolve: async () => ({
-                            auth: {apiKey: keyFor('openai-compatible') || 'local'}
+                            auth: {apiKey: keyFor('local') || 'local'}
                         })
                     }
                 },

@@ -20,6 +20,10 @@ export function piModel(connection, {providerId, sessionAffinity, maxTokens}) {
         maxTokens: maxTokens ?? chosen.maxTokens ?? chosen.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         ...(thinkingLevelMap ? {thinkingLevelMap} : {}),
         compat: {
+            // False for every driver, deliberately. pi-ai reads this off the base URL when nothing
+            // sets it, and answers true for any host it does not recognise; one measured endpoint
+            // answers HTTP 400 to the `developer` role and it is not a host pi-ai knows. No server
+            // refuses `system`, so false is safe everywhere and required somewhere.
             supportsDeveloperRole: false,
             supportsReasoningEffort: chosen.supportsReasoningEffort ?? false,
             ...(connection.chatTemplateThinking ?

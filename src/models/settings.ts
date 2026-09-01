@@ -79,6 +79,8 @@ export type AiModelOption = Readonly<{
     thinkingLevels: readonly ThinkingLevel[]
     input: readonly string[]
     offEffort?: string | undefined
+    /** Whether this row names a model and nothing more. See `AiModelOption::names_only` in Rust. */
+    namesOnly?: boolean
 }>
 
 export type GodotSettings = Readonly<{
@@ -87,7 +89,7 @@ export type GodotSettings = Readonly<{
 }>
 
 export type GoferSettings = Readonly<{
-    version: 1
+    version: 2
     ai: AiSettings
     godot: GodotSettings
 }>
@@ -265,11 +267,21 @@ export function selectAiDriver(ai: AiSettings, connectionType: AiConnectionType)
     return {...ai, connectionType}
 }
 
+/**
+ * Picking a model out of a listing, which does not always mean adopting what the listing says.
+ *
+ * A `namesOnly` row is one whose catalogue answered an id and nothing else — every other field on
+ * it is a copy of what is already configured, sent back so the page has something to show. Writing
+ * that copy over the draft reverts whatever the user typed while the listing was on the wire, and
+ * on the OpenAI-compatible driver the typing is the only source those facts have.
+ */
 export function applyModelSelection(choice: ModelChoice, model: AiModelOption): ModelChoice {
+    if (model.namesOnly) return {...choice, id: model.id, name: model.name}
     return {...model, thinkingLevel: keepThinkingLevel(model, choice.thinkingLevel)}
 }
 
 export function adoptModelReasoning(choice: ModelChoice, model: AiModelOption): ModelChoice {
+    if (model.namesOnly) return choice
     if (
         choice.reasoning === model.reasoning
         && choice.supportsReasoningEffort === model.supportsReasoningEffort
@@ -335,14 +347,17 @@ export function withActiveConnection(
     return withConnection(ai, ai.connectionType, change(connection))
 }
 
-// GENERATED-BEGIN drivers sha256:a51faf9638f210bc
-export type AiConnectionType = 'openai-compatible' | 'openai-codex' | 'openrouter' | 'cerebras'
+// GENERATED-BEGIN drivers sha256:df55177993d2c39c
+export type AiConnectionType =
+    'local' | 'openai-compatible' | 'openai-codex' | 'openrouter' | 'qwen' | 'cerebras'
 
 /** Every driver a build knows, in the order the pickers offer them. */
 export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [
+    'local',
     'openai-compatible',
     'openai-codex',
     'openrouter',
+    'qwen',
     'cerebras'
 ]
 
@@ -351,21 +366,33 @@ export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [
  * a label must never be written to the settings file. Same rule as `SEARCH_PROVIDER_LABELS`.
  */
 export const AI_CONNECTION_LABELS: Readonly<Record<AiConnectionType, string>> = {
-    // A llama.cpp or any other server speaking OpenAI completions, on an address the user types.
-    // The only driver whose key never leaves this machine.
-    'openai-compatible': 'Local model',
+    // A llama.cpp server on an address the user types. The only driver whose key never leaves this
+    // machine, and the only one that is asked what it is serving: its `/props` answer outranks
+    // everything written down about the model.
+    local: 'Local model',
+    // Any host speaking OpenAI completions, on an address the user types. It is asked nothing
+    // beyond its model list, because a hosted endpoint answers no `/props` and Pi's catalogue has
+    // never heard of it — so what its model can do is typed rather than derived. This word named
+    // the local driver before settings version 2.
+    'openai-compatible': 'OpenAI-compatible',
     // Authenticates with an OAuth credential rather than a key, which is why a missing one reads as
     // "Sign in with ChatGPT" rather than as an error. pi-ai ships the provider.
     'openai-codex': 'ChatGPT subscription',
     // A fixed host whose catalogue answers every question the local server cannot. Billed, and it
     // reserves credit for the ceiling before it generates a token.
     openrouter: 'OpenRouter',
+    // The Qwen token plan, on a fixed host. Its endpoint publishes no capabilities either, so what
+    // Gofer knows about its models is a second table shipped in this directory — and its live list
+    // carries image and audio models that cannot call a tool, which naming the ones that can is the
+    // filter for.
+    qwen: 'Qwen',
     // A fixed host whose endpoint publishes no capabilities at all, which is why what Gofer knows
     // about its models is a table shipped in this directory rather than something asked for.
     cerebras: 'Cerebras'
 }
 
-export type SecretName = 'ai-default' | 'brave' | 'openrouter' | 'cerebras' | 'chat-gpt'
+export type SecretName =
+    'ai-default' | 'brave' | 'openrouter' | 'cerebras' | 'openai-compatible' | 'qwen' | 'chat-gpt'
 
 /** Every secret Gofer keeps, in the order a save writes them. */
 export const SECRET_NAMES: readonly SecretName[] = [
@@ -373,6 +400,8 @@ export const SECRET_NAMES: readonly SecretName[] = [
     'brave',
     'openrouter',
     'cerebras',
+    'openai-compatible',
+    'qwen',
     'chat-gpt'
 ]
 
@@ -382,13 +411,16 @@ export const SECRET_NAMES: readonly SecretName[] = [
  * A ChatGPT credential is written by its login, so a settings save that named it would
  * be saying something the page cannot mean.
  */
-export type TypedSecret = 'ai-default' | 'brave' | 'openrouter' | 'cerebras'
+export type TypedSecret =
+    'ai-default' | 'brave' | 'openrouter' | 'cerebras' | 'openai-compatible' | 'qwen'
 
 export const TYPED_SECRET_NAMES: readonly TypedSecret[] = [
     'ai-default',
     'brave',
     'openrouter',
-    'cerebras'
+    'cerebras',
+    'openai-compatible',
+    'qwen'
 ]
 
 /**
@@ -400,9 +432,11 @@ export const TYPED_SECRET_NAMES: readonly TypedSecret[] = [
  * this renderer and two hand-written record literals in a hook.
  */
 export const AI_CONNECTION_SECRETS: Readonly<Record<AiConnectionType, SecretName>> = {
-    'openai-compatible': 'ai-default',
+    local: 'ai-default',
+    'openai-compatible': 'openai-compatible',
     'openai-codex': 'chat-gpt',
     openrouter: 'openrouter',
+    qwen: 'qwen',
     cerebras: 'cerebras'
 }
 
@@ -413,8 +447,10 @@ export const AI_CONNECTION_SECRETS: Readonly<Record<AiConnectionType, SecretName
  * reads `undefined` rather than being handed a slot that belongs to another driver.
  */
 export const TYPED_DRIVER_SECRETS: Partial<Readonly<Record<AiConnectionType, TypedSecret>>> = {
-    'openai-compatible': 'ai-default',
+    local: 'ai-default',
+    'openai-compatible': 'openai-compatible',
     openrouter: 'openrouter',
+    qwen: 'qwen',
     cerebras: 'cerebras'
 }
 // GENERATED-END drivers

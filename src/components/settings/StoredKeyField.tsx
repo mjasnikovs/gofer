@@ -25,10 +25,29 @@ const STORED_KEY_COPY: Readonly<Record<TypedSecret, StoredKeyCopy>> = {
         isRequired: false,
         isOptional: true
     },
+    'openai-compatible': {
+        label: 'API key',
+        placeholder: '',
+        description:
+            'The bearer token this host expects. Sent to the address above and nowhere else.',
+        removeLabel: 'Remove stored API key',
+        keepLabel: 'Keep stored API key',
+        isRequired: true,
+        isOptional: false
+    },
     openrouter: {
         label: 'API key',
         placeholder: 'sk-or-v1-…',
         description: 'Create one at openrouter.ai under Keys.',
+        removeLabel: 'Remove stored API key',
+        keepLabel: 'Keep stored API key',
+        isRequired: true,
+        isOptional: false
+    },
+    qwen: {
+        label: 'API key',
+        placeholder: 'sk-…',
+        description: 'From the Qwen Cloud console, under API keys.',
         removeLabel: 'Remove stored API key',
         keepLabel: 'Keep stored API key',
         isRequired: true,

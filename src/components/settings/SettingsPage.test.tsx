@@ -20,6 +20,24 @@ const settingsResponse: SettingsResponse = {
             ...SETTINGS.settings.ai,
             connections: {
                 ...SETTINGS.settings.ai.connections,
+                'openai-compatible': {
+                    name: 'OpenAI-compatible',
+                    baseUrl: 'https://api.openai.com/v1',
+                    api: 'openai-completions',
+                    chatTemplateThinking: false,
+                    model: {
+                        id: 'gpt-5',
+                        name: 'gpt-5',
+                        contextWindow: 120_064,
+                        maxTokens: 16_384,
+                        reasoning: false,
+                        supportsReasoningEffort: false,
+                        reasoningMandatory: false,
+                        thinkingLevels: [],
+                        input: ['text', 'image'],
+                        thinkingLevel: 'off'
+                    }
+                },
                 'openai-codex': {
                     name: 'ChatGPT subscription',
                     baseUrl: 'https://chatgpt.com/backend-api',
@@ -173,7 +191,7 @@ describe('the AI connection form', () => {
 
         expect(server.state.settings.settings.ai).toMatchObject({
             connections: {
-                'openai-compatible': {
+                local: {
                     name: 'Studio box',
                     baseUrl: 'https://ai.example.com/v1',
                     model: {id: 'big-model', contextWindow: 32_768, maxTokens: 4096}
@@ -182,6 +200,27 @@ describe('the AI connection form', () => {
             timeoutMs: 90_000,
             maxRetries: 5
         })
+    })
+
+    /// A key box belongs to the address beside it, and never to another driver's.
+    it('gives the local driver and the compatible one a key box each', async () => {
+        answer({list_ai_models: serverModels})
+        const user = userEvent.setup()
+        await open()
+
+        expect(screen.getByText(/Not required by local servers/)).toBeInTheDocument()
+
+        await user.click(screen.getByRole('combobox', {name: 'AI driver'}))
+        await user.click(screen.getByRole('option', {name: 'OpenAI-compatible'}))
+        await flush()
+
+        expect(screen.getByLabelText(/Base URL/)).toHaveValue('https://api.openai.com/v1')
+        expect(screen.getByText(/bearer token this host expects/)).toBeInTheDocument()
+        expect(screen.queryByText(/Not required by local servers/)).not.toBeInTheDocument()
+        expect(screen.getByLabelText(/This model reasons/)).toBeInTheDocument()
+        expect(
+            screen.getByLabelText(/Thinking is switched by the chat template/)
+        ).toBeInTheDocument()
     })
 
     it('asks a driver for its catalogue once, however much is typed afterwards', async () => {
@@ -282,12 +321,10 @@ describe('the AI connection form', () => {
         await flush()
 
         expect(savedRequest()?.settings.ai.subagent.connection).toMatchObject({
-            connectionType: 'openai-compatible',
+            connectionType: 'local',
             model: {id: 'qwen3-coder', contextWindow: 262_144}
         })
-        expect(savedRequest()?.settings.ai.connections['openai-compatible']?.model.id).toBe(
-            'local-model'
-        )
+        expect(savedRequest()?.settings.ai.connections.local?.model.id).toBe('local-model')
     })
 
     it('reports a connection test that never reached the server', async () => {

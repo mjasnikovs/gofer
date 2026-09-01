@@ -95,6 +95,10 @@ export const config: WebdriverIO.Config = {
                 settingsPath,
                 `${JSON.stringify(
                     {
+                        // Deliberately version 1, spelling the local driver by its pre-version-2
+                        // word. The packaged journey is the one gate that drives a real binary
+                        // against a real settings file, so it is where the migration gets
+                        // exercised for free. Move it to 2 only when version 1 stops being read.
                         version: 1,
                         ai: {
                             connectionType: 'openai-compatible',

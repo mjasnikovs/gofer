@@ -491,11 +491,11 @@ describe('Workspace game screenshots', () => {
     const readsImages: BackendAnswers = {
         load_settings: () => ({
             settings: {
-                version: 1,
+                version: 2,
                 ai: {
-                    connectionType: 'openai-compatible',
+                    connectionType: 'local',
                     connections: {
-                        'openai-compatible': {
+                        local: {
                             name: 'Local AI',
                             baseUrl: 'http://127.0.0.1:8080/v1',
                             api: 'openai-completions',
@@ -517,6 +517,16 @@ describe('Workspace game screenshots', () => {
         return screen.getByRole('button', {name: 'Attach a game screenshot'})
     }
 
+    function captureItem(name: RegExp) {
+        return screen.getByRole('menuitem', {name})
+    }
+
+    async function captureThe(user: ReturnType<typeof userEvent.setup>, source: 'game' | 'editor') {
+        await user.click(captureButton())
+        await user.click(captureItem(new RegExp(`Screenshot the ${source}`, 'u')))
+        await flush()
+    }
+
     beforeEach(() => {
         server = installBackend(tauri, {answers: {...readsImages, send_ai_message: runTurn}})
     })
@@ -525,11 +535,49 @@ describe('Workspace game screenshots', () => {
         render(<Workspace />)
         await flush()
 
-        expect(captureButton()).toHaveAttribute('aria-disabled', 'true')
-        expect(captureButton()).toHaveAccessibleDescription(
-            'The game is not running. Run it, then take a screenshot of it.'
+        act(() => {
+            server.publishSessionState('ready')
+        })
+        await flush()
+
+        await userEvent.setup().click(captureButton())
+        expect(captureItem(/Screenshot the game/u)).toHaveAttribute('aria-disabled', 'true')
+        expect(captureItem(/Screenshot the game/u)).toHaveTextContent(
+            'The game is not running. Run it first.'
         )
         expect(server.log.calls).not.toContain('runtime.capture')
+    })
+
+    it('offers nothing to photograph while there is no editor at all', async () => {
+        render(<Workspace />)
+        await flush()
+
+        expect(captureButton()).toHaveAttribute('aria-disabled', 'true')
+        expect(captureButton()).toHaveAccessibleDescription(
+            'The editor is not running. Start a session, then take a screenshot.'
+        )
+    })
+
+    // The 2D and 3D canvases live in the editor, and asking for them used to mean running a game.
+    it('photographs the editor with no game running, so a 2D screen can be attached', async () => {
+        const user = userEvent.setup()
+        render(<Workspace />)
+        await flush()
+
+        // Start a session and then end its game, which is the state a 2D screen is read in.
+        await user.click(screen.getByRole('button', {name: 'Run Game'}))
+        await flush()
+        act(() => {
+            server.publishSessionState('ready')
+        })
+        await flush()
+
+        await captureThe(user, 'editor')
+
+        expect(server.log.calls).toContain('runtime.capture')
+        expect(
+            await screen.findByAltText('Attached image: editor-screenshot.png')
+        ).toBeInTheDocument()
     })
 
     it('attaches the running game’s own frame to the draft', async () => {
@@ -540,9 +588,7 @@ describe('Workspace game screenshots', () => {
         await user.click(screen.getByRole('button', {name: 'Run Game'}))
         await flush()
 
-        expect(captureButton()).not.toHaveAttribute('aria-disabled')
-        await user.click(captureButton())
-        await flush()
+        await captureThe(user, 'game')
 
         expect(server.log.calls).toContain('runtime.capture')
         expect(screen.getByAltText('Attached image: game-screenshot.png')).toBeInTheDocument()
@@ -555,8 +601,7 @@ describe('Workspace game screenshots', () => {
 
         await user.click(screen.getByRole('button', {name: 'Run Game'}))
         await flush()
-        await user.click(captureButton())
-        await flush()
+        await captureThe(user, 'game')
 
         await user.click(screen.getByRole('button', {name: /^Open game-screenshot\.png/u}))
         expect(
@@ -577,14 +622,17 @@ describe('Workspace game screenshots', () => {
 
         await user.click(screen.getByRole('button', {name: 'Run Game'}))
         await flush()
-        expect(captureButton()).not.toHaveAttribute('aria-disabled')
+        await user.click(captureButton())
+        expect(captureItem(/Screenshot the game/u)).not.toHaveAttribute('aria-disabled')
+        await user.keyboard('{Escape}')
 
         act(() => {
             server.publishSessionState('ready')
         })
         await flush()
 
-        expect(captureButton()).toHaveAttribute('aria-disabled', 'true')
+        await user.click(captureButton())
+        expect(captureItem(/Screenshot the game/u)).toHaveAttribute('aria-disabled', 'true')
     })
 })
 
@@ -592,11 +640,11 @@ describe('Workspace planning with a picture attached', () => {
     const readsImages: BackendAnswers = {
         load_settings: () => ({
             settings: {
-                version: 1,
+                version: 2,
                 ai: {
-                    connectionType: 'openai-compatible',
+                    connectionType: 'local',
                     connections: {
-                        'openai-compatible': {
+                        local: {
                             name: 'Local AI',
                             baseUrl: 'http://127.0.0.1:8080/v1',
                             api: 'openai-completions',
@@ -622,6 +670,7 @@ describe('Workspace planning with a picture attached', () => {
         await user.click(screen.getByRole('button', {name: 'Run Game'}))
         await flush()
         await user.click(screen.getByRole('button', {name: 'Attach a game screenshot'}))
+        await user.click(screen.getByRole('menuitem', {name: /Screenshot the game/u}))
         await flush()
     }
 

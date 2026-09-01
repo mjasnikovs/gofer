@@ -68,10 +68,10 @@ const localConnection: AiConnectionProfile = {
 }
 
 const stored = {
-    version: 1,
+    version: 2,
     ai: {
-        connectionType: 'openai-compatible',
-        connections: {'openai-compatible': localConnection, 'openai-codex': chatgptConnection},
+        connectionType: 'local',
+        connections: {local: localConnection, 'openai-codex': chatgptConnection},
         maxRetries: 2,
         timeoutMs: 120_000,
         compactionPercent: 86
@@ -100,7 +100,7 @@ describe('normalizeSettings', () => {
         expect(normalized.subagent).toEqual(DEFAULT_SUBAGENT_SETTINGS)
         expect(normalized.web).toEqual(DEFAULT_WEB_SETTINGS)
         expect(normalized.connections).toEqual({
-            'openai-compatible': localConnection,
+            local: localConnection,
             'openai-codex': chatgptConnection
         })
     })
@@ -108,7 +108,7 @@ describe('normalizeSettings', () => {
     it('offers no ChatGPT driver when the backend sent no connection for one', () => {
         const normalized = normalizeSettings({
             ...stored,
-            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+            ai: {...stored.ai, connections: {local: localConnection}}
         }).ai
 
         expect(normalized.connections['openai-codex']).toBeUndefined()
@@ -156,11 +156,11 @@ describe('the sub-agent connection', () => {
     it('offers no driver the settings file has never held a connection for', () => {
         const withoutChatgpt = normalizeSettings({
             ...stored,
-            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+            ai: {...stored.ai, connections: {local: localConnection}}
         }).ai
 
         expect(startSubagentConnection(withoutChatgpt, 'openai-codex')).toBeUndefined()
-        expect(startSubagentConnection(withoutChatgpt, 'openai-compatible')).toBeDefined()
+        expect(startSubagentConnection(withoutChatgpt, 'local')).toBeDefined()
     })
 
     it('carries the chosen model limits, and drops a level the model cannot be asked at', () => {
@@ -225,7 +225,7 @@ describe('adoptSubagentReasoning', () => {
             subagent: {
                 ...DEFAULT_SUBAGENT_SETTINGS,
                 connection: {
-                    connectionType: 'openai-compatible' as const,
+                    connectionType: 'local' as const,
                     model: {...listed, reasoningMandatory: false, thinkingLevel: 'off' as const}
                 }
             }
@@ -375,6 +375,33 @@ describe('thinkingLevelsFor', () => {
     })
 })
 
+describe('a listing that only names its models', () => {
+    // The OpenAI-compatible driver's facts are typed, and its listing carries the saved copy back.
+    // Adopting that copy reverts whatever was typed while the listing was on the wire.
+    const typed = {
+        ...localConnection.model,
+        reasoning: true,
+        supportsReasoningEffort: true,
+        contextWindow: 262_144,
+        thinkingLevel: 'medium'
+    } as const
+    const named = option({id: 'qwen3.8-flash', name: 'qwen3.8-flash', namesOnly: true})
+
+    it('changes nothing at all when it is adopted', () => {
+        expect(adoptModelReasoning(typed, named)).toBe(typed)
+    })
+
+    it('changes only which model is chosen when one is picked from it', () => {
+        const picked = applyModelSelection(typed, named)
+
+        expect(picked.id).toBe('qwen3.8-flash')
+        expect(picked.contextWindow).toBe(262_144)
+        expect(picked.reasoning).toBe(true)
+        expect(picked.supportsReasoningEffort).toBe(true)
+        expect(picked.thinkingLevel).toBe('medium')
+    })
+})
+
 describe('adoptModelReasoning', () => {
     it('turns a level on for a model that turns out to reason', () => {
         const chosen = localConnection.model
@@ -445,7 +472,7 @@ describe('selectAiDriver', () => {
     it('preserves each driver model while switching between them', () => {
         const local = normalizeSettings(stored).ai
         const chatgpt = selectAiDriver(local, 'openai-codex')
-        const backToLocal = selectAiDriver(chatgpt, 'openai-compatible')
+        const backToLocal = selectAiDriver(chatgpt, 'local')
         const backToChatgpt = selectAiDriver(backToLocal, 'openai-codex')
 
         expect(activeConnection(backToLocal)?.model.id).toBe('local-model')
@@ -456,7 +483,7 @@ describe('selectAiDriver', () => {
     it('does not switch to a driver that has nowhere to run', () => {
         const localOnly = normalizeSettings({
             ...stored,
-            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+            ai: {...stored.ai, connections: {local: localConnection}}
         }).ai
 
         expect(selectAiDriver(localOnly, 'openai-codex')).toBe(localOnly)
@@ -486,7 +513,7 @@ describe('selectAiDriver across three drivers', () => {
 
         const onOpenrouter = selectAiDriver(start, 'openrouter')
         const onChatgpt = selectAiDriver(onOpenrouter, 'openai-codex')
-        const backToLocal = selectAiDriver(onChatgpt, 'openai-compatible')
+        const backToLocal = selectAiDriver(onChatgpt, 'local')
         const backToOpenrouter = selectAiDriver(backToLocal, 'openrouter')
 
         expect(activeConnection(onOpenrouter)?.model.id).toBe('nvidia/nemotron-3.5-lightning:free')
@@ -495,7 +522,7 @@ describe('selectAiDriver across three drivers', () => {
         expect(activeConnection(backToOpenrouter)?.model.id).toBe(
             'nvidia/nemotron-3.5-lightning:free'
         )
-        expect(backToOpenrouter.connections['openai-compatible']).toEqual(localConnection)
+        expect(backToOpenrouter.connections.local).toEqual(localConnection)
         expect(backToOpenrouter.connections['openai-codex']).toEqual(chatgptConnection)
     })
 
@@ -508,7 +535,7 @@ describe('selectAiDriver across three drivers', () => {
             }
         }).ai
         expect(driverOptions(ai).map(offered => offered.value)).toEqual([
-            'openai-compatible',
+            'local',
             'openai-codex',
             'openrouter'
         ])
@@ -519,7 +546,7 @@ describe('driverOptions', () => {
     it('offers only the drivers that have somewhere to run', () => {
         const both = normalizeSettings(stored).ai
         expect(driverOptions(both)).toEqual([
-            {value: 'openai-compatible', label: 'Local model'},
+            {value: 'local', label: 'Local model'},
             {value: 'openai-codex', label: 'ChatGPT subscription'}
         ])
     })
@@ -527,18 +554,18 @@ describe('driverOptions', () => {
     it('leaves out a driver nobody has configured', () => {
         const localOnly = normalizeSettings({
             ...stored,
-            ai: {...stored.ai, connections: {'openai-compatible': localConnection}}
+            ai: {...stored.ai, connections: {local: localConnection}}
         }).ai
-        expect(driverOptions(localOnly)).toEqual([
-            {value: 'openai-compatible', label: 'Local model'}
-        ])
+        expect(driverOptions(localOnly)).toEqual([{value: 'local', label: 'Local model'}])
     })
 
     it('names every driver this build knows, in the order the picker offers them', () => {
         expect(AI_CONNECTION_TYPES).toEqual([
+            'local',
             'openai-compatible',
             'openai-codex',
             'openrouter',
+            'qwen',
             'cerebras'
         ])
         for (const driver of AI_CONNECTION_TYPES) {

@@ -61,33 +61,56 @@ export const config: WebdriverIO.Config = {
     }
 }
 
+type StoredProfile = Record<string, unknown> & {model?: Record<string, unknown>}
+interface StoredSettings {
+    ai?: Record<string, unknown> & {connections?: Record<string, StoredProfile>}
+}
+
+/**
+ * The local connection, under whichever word the copied file spells it.
+ *
+ * `local` was `openai-compatible` until settings version 2, and this reads a file the developer
+ * saved with whatever build they last ran — which is the one build that has not been told about
+ * the rename. `migrate_settings` does this on the Rust side; a sweep that only knew the new word
+ * refused to start on every machine that had not re-saved.
+ */
+function localProfile(stored: StoredSettings): StoredProfile | undefined {
+    const connections = stored.ai?.connections
+    return connections?.['local'] ?? connections?.['openai-compatible']
+}
+
 function forceTheLocalModel(settings: string) {
     if (!existsSync(settings)) throw new Error(`${settings} was never written`)
-    const stored = JSON.parse(readFileSync(settings, 'utf8')) as {
-        ai?: Record<string, unknown> & {local?: Record<string, unknown>}
-    }
-    const local = stored.ai?.local
+    const stored = JSON.parse(readFileSync(settings, 'utf8')) as StoredSettings
+    const local = localProfile(stored)
     if (!stored.ai || !local)
         throw new Error(
-            'no `ai.local` profile in the copied settings; configure the local endpoint in Gofer '
+            'no local connection in the copied settings; configure the local endpoint in Gofer '
                 + 'once, or this run would talk to a hosted model'
         )
     const subagent = (stored.ai['subagent'] ?? {}) as Record<string, unknown>
-    const connection = {
-        ...local,
-        connectionType: 'openai-compatible',
-        model: servedModel(String(local['baseUrl']), asText(local['model']))
+    const baseUrl = String(local['baseUrl'])
+    const id = servedModel(baseUrl, asText(local.model?.['id']))
+    // Into the connections map, not onto `ai` beside it. The flat fields are read only when the
+    // map is empty, so writing the model there and nowhere else left the parent turn asking for
+    // whatever id the file already held while the console line announced the served one.
+    const model = {...local.model, id, name: id}
+    const connections: Record<string, StoredProfile> = {
+        ...stored.ai.connections,
+        local: {...local, model}
     }
+    // The pre-version-2 key goes, rather than sitting beside the one just written. A version 1
+    // file still runs its migration on the next read, and that renames `openai-compatible` to
+    // `local` — over the top of this.
+    delete connections['openai-compatible']
     stored.ai = {
         ...stored.ai,
-        ...connection,
-        modelName: connection.model,
-        subagent: {...subagent, connection: {...connection, modelName: connection.model}}
+        connectionType: 'local',
+        connections,
+        subagent: {...subagent, connection: {connectionType: 'local', model}}
     }
     writeFileSync(settings, JSON.stringify(stored, undefined, 2))
-    console.log(
-        `the run and its sub-agents talk to ${String(local['baseUrl'])} for ${connection.model}`
-    )
+    console.log(`the run and its sub-agents talk to ${baseUrl} for ${id}`)
 }
 
 function asText(value: unknown): string {

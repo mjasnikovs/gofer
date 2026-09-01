@@ -275,14 +275,16 @@ fn live_agent_acceptance() {
         Ok("openai-codex") => crate::settings::AiConnectionType::OpenaiCodex,
         Ok("openrouter") => crate::settings::AiConnectionType::Openrouter,
         Ok("cerebras") => crate::settings::AiConnectionType::Cerebras,
-        Ok("openai-compatible") | Err(_) => crate::settings::AiConnectionType::OpenaiCompatible,
+        Ok("qwen") => crate::settings::AiConnectionType::Qwen,
+        Ok("openai-compatible") => crate::settings::AiConnectionType::OpenaiCompatible,
+        Ok("local") | Err(_) => crate::settings::AiConnectionType::Local,
         Ok(other) => panic!(
-            "GOFER_LIVE_CONNECTION names {other}, which is not openai-compatible, openai-codex, \
-             openrouter or cerebras"
+            "GOFER_LIVE_CONNECTION names {other}, which is not local, openai-compatible, \
+             openai-codex, openrouter, qwen or cerebras"
         ),
     };
     let base_url = std::env::var("GOFER_LIVE_BASE_URL").ok().or_else(|| {
-        (driver == crate::settings::AiConnectionType::OpenaiCompatible)
+        (driver == crate::settings::AiConnectionType::Local)
             .then(|| "http://127.0.0.1:8080/v1".to_owned())
     });
     let model = std::env::var("GOFER_LIVE_MODEL").unwrap_or_else(|_| "local".to_owned());

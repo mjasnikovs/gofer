@@ -1,4 +1,5 @@
 import {Button} from '@astryxdesign/core/Button'
+import {CheckboxInput} from '@astryxdesign/core/CheckboxInput'
 import {Divider} from '@astryxdesign/core/Divider'
 import {FormLayout} from '@astryxdesign/core/FormLayout'
 import {Grid} from '@astryxdesign/core/Grid'
@@ -66,6 +67,13 @@ const HOSTED_DRIVERS: Partial<Record<AiConnectionType, HostedDriverCopy>> = {
         ceiling: "OpenRouter's catalogue answers this, so there is nothing to type.",
         accepts: 'What this model takes as input, as OpenRouter describes it.'
     },
+    qwen: {
+        awaiting: 'Qwen has not answered with its model list yet.',
+        listed: 'Only the models Gofer has measured are listed. The rest of what this host serves draws pictures or speaks, and cannot call a tool.',
+        answered: 'Measured against the live endpoint, so there is nothing to type.',
+        ceiling: 'The largest single answer this model will give, as its own endpoint states it.',
+        accepts: 'What this model takes as input, measured against the live endpoint.'
+    },
     cerebras: {
         awaiting: 'Cerebras has not answered with its model list yet.',
         listed: 'Only models Gofer holds measured capabilities for are listed, because Cerebras publishes none.',
@@ -73,6 +81,11 @@ const HOSTED_DRIVERS: Partial<Record<AiConnectionType, HostedDriverCopy>> = {
         ceiling: 'Output shares the context window here, so this is the room Gofer leaves for it.',
         accepts: 'What this model takes as input, measured against the live endpoint.'
     }
+}
+
+/** The drivers whose address the user types, which are the two the dialect readout is about. */
+function typesItsOwnAddress(driver: AiConnectionType): boolean {
+    return driver === 'local' || driver === 'openai-compatible'
 }
 
 type AiTabView = SettingsTabView & Readonly<{cancelPendingLogin: () => void}>
@@ -183,7 +196,7 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         })
                                     }}
                                 />
-                                {draft.ai.connectionType === 'openai-compatible' ?
+                                {draft.ai.connectionType === 'local' ?
                                     <>
                                         <TextInput
                                             label='Connection name'
@@ -242,6 +255,126 @@ export function useAiTab(view: SettingsView): AiTabView {
                                             isRequired
                                             onChange={maxTokens => {
                                                 updateModel({maxTokens: Number(maxTokens)})
+                                            }}
+                                        />
+                                    </>
+                                : draft.ai.connectionType === 'openai-compatible' ?
+                                    <>
+                                        <TextInput
+                                            label='Connection name'
+                                            value={connection.name}
+                                            isRequired
+                                            onChange={name => {
+                                                updateConnection({name})
+                                            }}
+                                        />
+                                        <TextInput
+                                            label='Base URL'
+                                            value={connection.baseUrl}
+                                            isRequired
+                                            description='Absolute HTTP or HTTPS URL including the API prefix, such as /v1.'
+                                            onChange={baseUrl => {
+                                                updateConnection({baseUrl})
+                                            }}
+                                        />
+                                        {hostedSecret && (
+                                            <StoredKeyField
+                                                secret={hostedSecret}
+                                                draft={keys[hostedSecret]}
+                                                dispatch={dispatch}
+                                            />
+                                        )}
+                                        <TextInput
+                                            label='Model ID'
+                                            value={connection.model.id}
+                                            isRequired
+                                            description='Must exactly match an ID returned by the server models endpoint.'
+                                            onChange={id => {
+                                                updateModel({id})
+                                            }}
+                                        />
+                                        {availableModels.length > 0 && (
+                                            <Selector
+                                                label='Models this host lists'
+                                                value={connection.model.id}
+                                                hasSearch
+                                                searchPlaceholder='Filter by id'
+                                                description='Every id the host returns, including ones that cannot run a chat turn. It publishes no capabilities, so the fields below are yours to set.'
+                                                options={availableModels.map(model => ({
+                                                    value: model.id,
+                                                    label: model.name
+                                                }))}
+                                                onChange={modelId => {
+                                                    const model = availableModels.find(
+                                                        option => option.id === modelId
+                                                    )
+                                                    if (model) selectModel(model)
+                                                }}
+                                            />
+                                        )}
+                                        <TextInput
+                                            label='Context window'
+                                            value={String(connection.model.contextWindow)}
+                                            isRequired
+                                            description='This host answers no capabilities. Take this from its documentation.'
+                                            onChange={contextWindow => {
+                                                updateModel({contextWindow: Number(contextWindow)})
+                                            }}
+                                        />
+                                        <TextInput
+                                            label='Maximum output tokens'
+                                            value={String(connection.model.maxTokens)}
+                                            isRequired
+                                            onChange={maxTokens => {
+                                                updateModel({maxTokens: Number(maxTokens)})
+                                            }}
+                                        />
+                                        <CheckboxInput
+                                            label='This model reasons'
+                                            value={connection.model.reasoning}
+                                            description='Unlocks the reasoning menu below. Leave it off and the model is never asked to think.'
+                                            onChange={reasoning => {
+                                                updateModel({reasoning})
+                                            }}
+                                        />
+                                        <CheckboxInput
+                                            label='It accepts a named effort'
+                                            value={connection.model.supportsReasoningEffort}
+                                            isDisabled={!connection.model.reasoning}
+                                            disabledMessage='Only a model that reasons can be asked how hard.'
+                                            description='Turns the reasoning menu from on and off into named levels.'
+                                            onChange={supportsReasoningEffort => {
+                                                updateModel({supportsReasoningEffort})
+                                            }}
+                                        />
+                                        <TextInput
+                                            label='Its word for no thinking'
+                                            value={connection.model.offEffort ?? ''}
+                                            isOptional
+                                            placeholder='none'
+                                            description='Sent as the effort when the reasoning menu says off. Some hosts think anyway unless one is named.'
+                                            onChange={offEffort => {
+                                                updateModel({
+                                                    offEffort: offEffort.trim() || undefined
+                                                })
+                                            }}
+                                        />
+                                        <CheckboxInput
+                                            label='Thinking is switched by the chat template'
+                                            value={connection.chatTemplateThinking}
+                                            description='Sends enable_thinking through chat_template_kwargs rather than as a top-level effort. Some hosts have no other off switch.'
+                                            onChange={chatTemplateThinking => {
+                                                updateConnection({chatTemplateThinking})
+                                            }}
+                                        />
+                                        <CheckboxInput
+                                            label='It reads images'
+                                            value={connection.model.input.includes('image')}
+                                            description='Turns the composer image control on. A host that refuses pictures answers the whole turn with an error.'
+                                            onChange={reads => {
+                                                updateModel({
+                                                    input: reads ? ['text', 'image'] : ['text']
+                                                })
                                             }}
                                         />
                                     </>
@@ -432,15 +565,15 @@ export function useAiTab(view: SettingsView): AiTabView {
                                         if (thinkingLevel) updateModel({thinkingLevel})
                                     }}
                                 />
-                                {draft.ai.connectionType === 'openai-compatible' && (
+                                {typesItsOwnAddress(draft.ai.connectionType) && (
                                     <TextInput
                                         label='API dialect'
                                         value='OpenAI chat completions'
                                         isReadOnly
-                                        description='The local driver uses OpenAI chat completions.'
+                                        description='This driver speaks OpenAI chat completions.'
                                     />
                                 )}
-                                {draft.ai.connectionType === 'openai-compatible' && (
+                                {draft.ai.connectionType === 'local' && (
                                     <StoredKeyField
                                         secret='ai-default'
                                         draft={keys['ai-default']}

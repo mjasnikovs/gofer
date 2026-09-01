@@ -1,0 +1,94 @@
+{
+    "$comment": "What Gofer knows about each model on the Qwen token plan, because the endpoint will not say. `GET https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/models` answers `{id, object, created, owned_by}` and nothing else — no window, no output ceiling, no tool support, no reasoning. Same shape and same reason as `cerebras-models.json`, and the same generator emits both: `scripts/generate-command-surface.mjs` writes `QWEN_MODELS` in `src-tauri/src/settings/mod.rs`, which `qwen_model_options` intersects the live id list against.",
+    "$hiddenComment": "A model this file does not name is not offered. The live list carries models that cannot run a turn at all — `wan2.7-image` and `wan2.7-image-pro` answer a chat request but return no tool call, and `qwen-audio-3.0-realtime-plus` refuses the endpoint outright — and unlike OpenRouter there is no `supported_parameters` to filter them by. Naming the ones that work is the filter.",
+    "$provenanceComment": "Every row's `maxTokens`, `input`, `thinkingLevels`, `reasoningMandatory` and `offEffort` were measured against the live endpoint on 2026-09-01, and each row's `note` says how. `contextWindow` is the one fact that was not: exceeding a million-token window needs a request body larger than the endpoint accepts, which answers `RequestTooLarge` before the model sees it. Those figures come from the table pi-ai ships for this exact host, `@earendil-works/pi-ai/dist/providers/data/qwen-token-plan.json`, and each note says so rather than implying a measurement nobody made.",
+    "models": [
+        {
+            "id": "qwen3.8-flash",
+            "name": "Qwen3.8 Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 131072,
+            "input": ["text", "image"],
+            "thinkingLevels": ["minimal", "low", "medium", "high", "xhigh", "max"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-09-01. `max_tokens: 99999999` is refused with \"Range of max_tokens should be [1, 131072]\", which is the ceiling. Tools are called, `strict` and all. An `image_url` part is accepted. All six named efforts are accepted, and `reasoning_effort: \"none\"` comes back with no `reasoning_content` at all, so `off` sends that word rather than sending nothing — without it the model thinks on every turn, which is what sending no effort field does here. The window is pi-ai's figure for the 3.8 family; this model is newer than pi-ai's shipped table and is not in it, so nothing has measured its window and the body limit stops this file from being the first."
+        },
+        {
+            "id": "qwen3.8-max",
+            "name": "Qwen3.8 Max",
+            "contextWindow": 1000000,
+            "maxTokens": 131072,
+            "input": ["text", "image"],
+            "thinkingLevels": ["minimal", "low", "medium", "high", "xhigh", "max"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-09-01, and it answers exactly as `qwen3.8-flash` does: a 131,072 output ceiling named in its own refusal, tools, images, all six efforts, and `none` for no thinking. Window from pi-ai's table."
+        },
+        {
+            "id": "qwen3.7-max",
+            "name": "Qwen3.7 Max",
+            "contextWindow": 1000000,
+            "maxTokens": 131072,
+            "input": ["text"],
+            "thinkingLevels": ["minimal", "low", "medium", "high", "xhigh"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-09-01. Ceiling 131,072, named in its own refusal. Text only: an `image_url` part answers \"The provided messages input is invalid\", which is the one model of these that refuses a picture. `max` is refused where the other five efforts are accepted, so the menu stops at `xhigh`. Window from pi-ai's table."
+        },
+        {
+            "id": "qwen3.7-plus",
+            "name": "Qwen3.7 Plus",
+            "contextWindow": 1000000,
+            "maxTokens": 131072,
+            "input": ["text", "image"],
+            "thinkingLevels": ["minimal", "low", "medium", "high", "xhigh"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-09-01. Ceiling 131,072 — pi-ai's table says 65,536 for this model, and the endpoint's own refusal is the one that counts. Tools and images both work. `max` is refused, as on `qwen3.7-max`. Window from pi-ai's table."
+        },
+        {
+            "id": "qwen3.6-flash",
+            "name": "Qwen3.6 Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 65536,
+            "input": ["text", "image"],
+            "thinkingLevels": ["minimal", "low", "medium", "high", "xhigh"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-09-01. The only ceiling here that is not 131,072: its refusal names 65,536. Tools and images work, `max` is refused. Window from pi-ai's table."
+        },
+        {
+            "id": "glm-5.2",
+            "name": "GLM-5.2",
+            "contextWindow": 1000000,
+            "maxTokens": 131072,
+            "input": ["text", "image"],
+            "thinkingLevels": ["minimal", "low", "medium", "high", "xhigh", "max"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-09-01. Ceiling 131,072, tools, images, all six efforts, and `none` stops it thinking. Window from pi-ai's table."
+        },
+        {
+            "id": "deepseek-v4-flash-0731",
+            "name": "DeepSeek V4 Flash",
+            "contextWindow": 1000000,
+            "maxTokens": 384000,
+            "input": ["text", "image"],
+            "thinkingLevels": ["minimal", "low", "medium", "high", "xhigh", "max"],
+            "reasoningMandatory": false,
+            "offEffort": "none",
+            "note": "Measured on 2026-09-01. Tools, images, all six efforts, and `none` stops it thinking. It is one of two models here that accepts `max_tokens: 99999999` without complaint, so the ceiling is not its own answer — 384,000 is pi-ai's figure, and so is the window."
+        },
+        {
+            "id": "deepseek-v4-pro",
+            "name": "DeepSeek V4 Pro",
+            "contextWindow": 1000000,
+            "maxTokens": 384000,
+            "input": ["text", "image"],
+            "thinkingLevels": ["low", "medium", "high", "xhigh", "max"],
+            "reasoningMandatory": true,
+            "note": "Measured on 2026-09-01, and the one model here that cannot be told to stop. `reasoning_effort: \"none\"` is accepted and the reply still carries `reasoning_content`, so there is no word for off and the row carries none — the reasoning menu offers levels only. `minimal` is refused where the other five efforts are accepted. Tools and images work. Like its Flash sibling it accepts any `max_tokens`, so the ceiling and the window are both pi-ai's figures."
+        }
+    ]
+}

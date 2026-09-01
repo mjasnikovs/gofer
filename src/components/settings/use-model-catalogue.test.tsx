@@ -14,7 +14,7 @@ const tauri = createDesktopFake()
 const STORED: GoferSettings = SETTINGS.settings
 
 function at(address: string): GoferSettings {
-    const local = STORED.ai.connections['openai-compatible']
+    const local = STORED.ai.connections.local
     if (!local) throw new Error('the fixture settings have a local connection')
     return {
         ...STORED,
@@ -22,7 +22,7 @@ function at(address: string): GoferSettings {
             ...STORED.ai,
             connections: {
                 ...STORED.ai.connections,
-                'openai-compatible': {...local, baseUrl: address}
+                local: {...local, baseUrl: address}
             }
         }
     }
@@ -90,7 +90,7 @@ describe('useModelCatalogue', () => {
         })
         const [, payload] = tauri.invoke.mock.calls[0] ?? []
         const sent = (payload as {request: {settings: GoferSettings}}).request.settings
-        expect(sent.ai.connections['openai-compatible']?.baseUrl).toBe('http://saved:8080/v1')
+        expect(sent.ai.connections.local?.baseUrl).toBe('http://saved:8080/v1')
     })
 
     it('re-asks when the confirmed address moves, which is the only thing that changes the question', async () => {

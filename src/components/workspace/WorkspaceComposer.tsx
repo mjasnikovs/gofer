@@ -26,7 +26,7 @@ import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
 import {useWorkspaceFailure} from '../../hooks/useWorkspaceFailure'
 import {pngFile} from '../../services/chat-storage'
 import {toGodotError} from '../../services/godot-session'
-import {isSessionPlaying} from '../../models/godot'
+import {isSessionOffline, isSessionPlaying} from '../../models/godot'
 
 const CHAT_ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif'
 const SPACIOUS_COMPOSER_INPUT_STYLE = {
@@ -92,10 +92,10 @@ function AttachmentPicker() {
     )
 }
 
-function captureTooltip(supportsImages: boolean, isPlaying: boolean): string {
+function captureTooltip(supportsImages: boolean, isOffline: boolean): string {
     if (!supportsImages) return 'The selected model does not support image input'
-    if (!isPlaying) return 'The game is not running. Run it, then take a screenshot of it.'
-    return 'Attach a screenshot of the running game'
+    if (isOffline) return 'The editor is not running. Start a session, then take a screenshot.'
+    return 'Attach a screenshot of the game or the editor'
 }
 
 function GameCapturePicker() {
@@ -103,27 +103,54 @@ function GameCapturePicker() {
     const {call, state} = useEditorSession()
     const report = useWorkspaceFailure()
     const isPlaying = isSessionPlaying(state)
+    const isOffline = isSessionOffline(state)
+
+    // The editor half is the only way to photograph a 2D or 3D canvas: it captures whichever main
+    // screen the editor is showing, and a game does not have to be running for it.
+    const attach = async (source: 'game' | 'editor') => {
+        const subject = source === 'game' ? 'game' : 'editor'
+        try {
+            const {frame} = await call('runtime.capture', source === 'editor' ? {source} : {})
+            if (!frame) {
+                report(`The ${subject} answered the screenshot request with no picture.`)
+                return
+            }
+            await actions.selectAttachments([pngFile(frame.data, `${source}-screenshot.png`)])
+        } catch (failure) {
+            report(`The ${subject} could not be captured: ${toGodotError(failure).message}`)
+        }
+    }
+
     return (
-        <Button
-            label='Attach a game screenshot'
-            variant='ghost'
-            size='sm'
-            isIconOnly
-            icon={<Icon icon={CameraIcon} />}
-            isDisabled={!meta.canAttachImages || !isPlaying}
-            tooltip={captureTooltip(meta.supportsImages, isPlaying)}
-            clickAction={async () => {
-                try {
-                    const {frame} = await call('runtime.capture')
-                    if (!frame) {
-                        report('The game answered the screenshot request with no picture.')
-                        return
-                    }
-                    await actions.selectAttachments([pngFile(frame.data, 'game-screenshot.png')])
-                } catch (failure) {
-                    report(`The game could not be captured: ${toGodotError(failure).message}`)
-                }
+        <DropdownMenu
+            hasChevron={false}
+            button={{
+                label: 'Attach a game screenshot',
+                variant: 'ghost',
+                size: 'sm',
+                isIconOnly: true,
+                icon: <Icon icon={CameraIcon} />,
+                isDisabled: !meta.canAttachImages || isOffline,
+                tooltip: captureTooltip(meta.supportsImages, isOffline)
             }}
+            menuWidth={260}
+            items={[
+                {
+                    label: 'Screenshot the game',
+                    isDisabled: !isPlaying,
+                    ...(!isPlaying && {description: 'The game is not running. Run it first.'}),
+                    onClick: () => {
+                        void attach('game')
+                    }
+                },
+                {
+                    label: 'Screenshot the editor',
+                    description: 'Whichever screen the editor is showing — 2D, 3D or Script',
+                    onClick: () => {
+                        void attach('editor')
+                    }
+                }
+            ]}
         />
     )
 }

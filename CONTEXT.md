@@ -165,12 +165,15 @@ every stored key under its slot rather than one named field per key, because a f
 spelt the same on both sides of a process boundary and a driver whose field nobody passed registered
 with no key at all. A secret that is not an API key sends no bearer, whatever is stored.
 
-**Driver** — which model service a turn is put to: `openai-compatible`, `openai-codex`, `openrouter`
-or `cerebras`. A closed set of four, spelt as a Rust enum with `driver_id` for the wire word, as a
-TypeScript union with `AI_CONNECTION_TYPES` beside it, and as `DRIVERS` in the worker.
-`check-command-surface.mjs` reconciles the three, because a driver that reaches the worker as a word
-no map has a key for used to resolve to the local provider — a hosted model's turn put to this
-machine, with the hosted key never sent and nothing said about it.
+**Driver** — which model service a turn is put to: `local`, `openai-compatible`, `openai-codex`,
+`openrouter` or `cerebras`. A closed set of five, spelt as a Rust enum with `driver_id` for the wire
+word, as a TypeScript union with `AI_CONNECTION_TYPES` beside it, and as `DRIVERS` in the worker.
+Until settings version 2 the word `openai-compatible` named the local llama.cpp connection, so an
+older bug report saying it means `local` — `migrate_settings` in `settings/legacy.rs` is what tells
+the two apart, and it is version-gated rather than word-gated. `check-command-surface.mjs`
+reconciles the three, because a driver that reaches the worker as a word no map has a key for used
+to resolve to the local provider — a hosted model's turn put to this machine, with the hosted key
+never sent and nothing said about it.
 
 There are two seams, and they answer different questions. `scripts/ai-provider.mjs` runs the turn,
 over pi-ai, in the worker. `src-tauri/src/settings/catalogue.rs` asks which models may be picked and

@@ -1,4 +1,5 @@
 import {activeConnection, adoptModelReasoning, adoptSubagentReasoning} from '../models/settings'
+import {AI_CONNECTION_SECRETS, connectionProfile} from '../models/settings'
 import {applyModelSelection, selectAiDriver, withActiveConnection} from '../models/settings'
 import type {
     AiConnectionType,
@@ -31,8 +32,12 @@ export type CatalogueAsk = Readonly<{key: string; request: SettingsRequest}>
  * They were built from two: the key from the confirmed settings and the request from the draft. A
  * driver switched away and back re-asked the question, sent the address the user had just typed,
  * and filed what came back under the address it replaced. Both come from the confirmed settings
- * now, which is what `savedSettings` says the question is about; the typed keys still travel,
- * because a key is not part of the question.
+ * now, which is what `savedSettings` says the question is about.
+ *
+ * A typed key travels only while the draft still points at the saved address. A key is typed
+ * against the address in the box above it, and this asks the *saved* one — so on a driver whose
+ * address the user types, editing both and letting a listing fire would hand the new host's key
+ * to the old host. The saved key is what the saved address is entitled to.
  */
 export function catalogueAsk(
     state: SettingsDraft,
@@ -42,7 +47,13 @@ export function catalogueAsk(
     const saved = state.savedSettings
     if (!request || !saved) return undefined
     const ai = selectAiDriver(saved.ai, driver)
-    return {key: catalogueKey(ai), request: {...request, settings: {...saved, ai}}}
+    const secret = AI_CONNECTION_SECRETS[driver]
+    const moved =
+        connectionProfile(state.settings?.ai ?? ai, driver)?.baseUrl
+        !== connectionProfile(saved.ai, driver)?.baseUrl
+    const secrets =
+        moved ? {...request.secrets, [secret]: {action: 'keep'} as const} : request.secrets
+    return {key: catalogueKey(ai), request: {...request, secrets, settings: {...saved, ai}}}
 }
 
 /**

@@ -155,7 +155,7 @@ impl From<AiSettingsFile> for AiSettings {
         let mut connections = file.connections.unwrap_or_default();
         if connections.is_empty() {
             for (driver, mirrored) in [
-                (AiConnectionType::OpenaiCompatible, file.local),
+                (AiConnectionType::Local, file.local),
                 (AiConnectionType::OpenaiCodex, file.chatgpt),
                 (AiConnectionType::Openrouter, file.openrouter),
                 (AiConnectionType::Cerebras, file.cerebras),
@@ -179,10 +179,12 @@ impl From<AiSettingsFile> for AiSettings {
         }
         for (driver, shipped) in [
             (
-                AiConnectionType::OpenaiCodex,
-                default_chatgpt_profile as fn() -> _,
+                AiConnectionType::OpenaiCompatible,
+                default_openai_compatible_profile as fn() -> _,
             ),
+            (AiConnectionType::OpenaiCodex, default_chatgpt_profile),
             (AiConnectionType::Openrouter, default_openrouter_profile),
+            (AiConnectionType::Qwen, default_qwen_profile),
             (AiConnectionType::Cerebras, default_cerebras_profile),
         ] {
             connections.entry(driver).or_insert_with(shipped);
@@ -196,5 +198,52 @@ impl From<AiSettingsFile> for AiSettings {
             subagent: file.subagent,
             web: file.web,
         }
+    }
+}
+
+/// One driver word changed meaning, so a file has to be read as the version that wrote it.
+///
+/// Until version 2, `openai-compatible` was the local llama.cpp connection. From version 2 it is
+/// any hosted endpoint the user names, and the local one is `local`. Serde cannot tell the two
+/// apart — it is the same word — so the rename happens here, on the raw JSON, before
+/// `AiConnectionType` exists.
+///
+/// Anything that is not a version 1 file is returned untouched. That includes a broken one: what
+/// the shape is wrong about is `validate_settings`' answer to give, and guessing at it here would
+/// only change which sentence the user reads.
+pub(super) fn migrate_settings(mut stored: serde_json::Value) -> serde_json::Value {
+    if stored.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return stored;
+    }
+    if let Some(ai) = stored
+        .get_mut("ai")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        rename_driver(ai.get_mut("connectionType"));
+        rename_driver(
+            ai.get_mut("subagent")
+                .and_then(|subagent| subagent.get_mut("connection"))
+                .and_then(|connection| connection.get_mut("connectionType")),
+        );
+        if let Some(connections) = ai
+            .get_mut("connections")
+            .and_then(serde_json::Value::as_object_mut)
+            && let Some(profile) = connections.remove(LOCAL_BEFORE_V2)
+        {
+            connections.insert("local".to_owned(), profile);
+        }
+    }
+    stored["version"] = serde_json::json!(2);
+    stored
+}
+
+/// The word the local driver was written down as before settings version 2.
+const LOCAL_BEFORE_V2: &str = "openai-compatible";
+
+fn rename_driver(named: Option<&mut serde_json::Value>) {
+    if let Some(named) = named
+        && named.as_str() == Some(LOCAL_BEFORE_V2)
+    {
+        *named = serde_json::json!("local");
     }
 }

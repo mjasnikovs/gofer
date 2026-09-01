@@ -14,7 +14,7 @@
 
 use super::*;
 
-// GENERATED-BEGIN secrets sha256:634582cff522bced
+// GENERATED-BEGIN secrets sha256:e575e2a0a78aabf0
 impl Secret {
     /// The word a request and a response key this secret by.
     pub(crate) const fn id(self) -> &'static str {
@@ -23,6 +23,8 @@ impl Secret {
             Self::Brave => "brave",
             Self::OpenRouter => "openrouter",
             Self::Cerebras => "cerebras",
+            Self::OpenaiCompatible => "openai-compatible",
+            Self::Qwen => "qwen",
             Self::ChatGpt => "chat-gpt",
         }
     }
@@ -35,6 +37,8 @@ impl Secret {
             Self::Brave => "web-brave-search",
             Self::OpenRouter => "ai-openrouter",
             Self::Cerebras => "ai-cerebras",
+            Self::OpenaiCompatible => "ai-openai-compatible",
+            Self::Qwen => "ai-qwen",
             Self::ChatGpt => "ai-openai-codex",
         }
     }
@@ -46,6 +50,8 @@ impl Secret {
             Self::Brave => "Brave Search key",
             Self::OpenRouter => "OpenRouter API key",
             Self::Cerebras => "Cerebras API key",
+            Self::OpenaiCompatible => "OpenAI-compatible API key",
+            Self::Qwen => "Qwen API key",
             Self::ChatGpt => "ChatGPT credential",
         }
     }
@@ -57,6 +63,8 @@ impl Secret {
             Self::Brave => Blank::Clears,
             Self::OpenRouter => Blank::Clears,
             Self::Cerebras => Blank::Clears,
+            Self::OpenaiCompatible => Blank::Clears,
+            Self::Qwen => Blank::Clears,
             Self::ChatGpt => Blank::Refused,
         }
     }
@@ -68,6 +76,8 @@ impl Secret {
             Self::Brave => true,
             Self::OpenRouter => true,
             Self::Cerebras => true,
+            Self::OpenaiCompatible => true,
+            Self::Qwen => true,
             Self::ChatGpt => false,
         }
     }
@@ -79,17 +89,21 @@ impl Secret {
             "brave" => Some(Self::Brave),
             "openrouter" => Some(Self::OpenRouter),
             "cerebras" => Some(Self::Cerebras),
+            "openai-compatible" => Some(Self::OpenaiCompatible),
+            "qwen" => Some(Self::Qwen),
             "chat-gpt" => Some(Self::ChatGpt),
             _ => None,
         }
     }
 
     /// Every secret Gofer keeps, in the order a save writes them.
-    pub(crate) const ORDER: [Self; 5] = [
+    pub(crate) const ORDER: [Self; 7] = [
         Self::AiDefault,
         Self::Brave,
         Self::OpenRouter,
         Self::Cerebras,
+        Self::OpenaiCompatible,
+        Self::Qwen,
         Self::ChatGpt,
     ];
 }
@@ -102,9 +116,11 @@ impl Secret {
 /// now, and every one of those is a lookup.
 pub(crate) const fn driver_secret(driver: AiConnectionType) -> Secret {
     match driver {
-        AiConnectionType::OpenaiCompatible => Secret::AiDefault,
+        AiConnectionType::Local => Secret::AiDefault,
+        AiConnectionType::OpenaiCompatible => Secret::OpenaiCompatible,
         AiConnectionType::OpenaiCodex => Secret::ChatGpt,
         AiConnectionType::Openrouter => Secret::OpenRouter,
+        AiConnectionType::Qwen => Secret::Qwen,
         AiConnectionType::Cerebras => Secret::Cerebras,
     }
 }
@@ -179,8 +195,10 @@ pub(super) const NO_CREDENTIAL_STORE: &str = "This machine has no credential sto
 /// held to it. This carries the three differences, and everything else is written once.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Secret {
-    /// The AI key of the local, OpenAI-compatible driver.
+    /// The AI key of the local driver.
     AiDefault,
+    /// The key of the OpenAI-compatible driver, which is any host the user names.
+    OpenaiCompatible,
     /// The Brave Search key. In the keyring rather than in `settings.json`, on the same reasoning
     /// as the AI key: the settings file is plain text a person may copy, diff or paste into a bug
     /// report, and a search key is a credential. Nothing is an ordinary state, not a fault — the
@@ -189,10 +207,11 @@ pub(crate) enum Secret {
     Brave,
     OpenRouter,
     Cerebras,
+    Qwen,
     ChatGpt,
 }
 
-/// What empty text means for one secret, which is not the same answer for all five.
+/// What empty text means for one secret, which is not the same answer for all six.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Blank {
     /// Refused. The AI key's box is the connection's own field, and saving a connection with a

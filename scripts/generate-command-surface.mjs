@@ -306,8 +306,14 @@ async function subagentBoundsCatalogue() {
     return bounds
 }
 
-async function cerebrasModelCatalogue() {
-    const path = 'protocol/cerebras-models.json'
+/**
+ * One shipped model table, held to the rules every row of one has to obey.
+ *
+ * Two files have this shape — Cerebras' and Qwen's — because two endpoints publish no
+ * capabilities at all. The rules are the same rules, so they are written once here rather
+ * than copied per file, which is how the three copies of the driver set went wrong.
+ */
+async function shippedModelCatalogue(path) {
     const {models} = JSON.parse(await read(path))
     if (!Array.isArray(models) || models.length === 0) throw new Error(`${path} declares no models`)
     const seen = new Set()
@@ -512,7 +518,7 @@ function rustSubagentBounds(bounds) {
     return `const SUBAGENT_BOUNDS: [SubagentBound; ${bounds.length}] = [\n${table}];\n\n${defaults}`
 }
 
-function rustCerebrasModels(models) {
+function rustShippedModels(models, constName) {
     const rows = models
         .map(model => {
             const note = `${wrapPrefixed(model.note, '    // ', 100)}\n`
@@ -521,7 +527,7 @@ function rustCerebrasModels(models) {
             const off =
                 model.offEffort === undefined ? 'None' : `Some(${rustString(model.offEffort)})`
             return (
-                `${note}    CerebrasModel {\n`
+                `${note}    ShippedModel {\n`
                 + `        id: ${rustString(model.id)},\n`
                 + `        name: ${rustString(model.name)},\n`
                 + `        context_window: ${grouped(model.contextWindow)},\n`
@@ -534,7 +540,7 @@ function rustCerebrasModels(models) {
             )
         })
         .join('')
-    return `const CEREBRAS_MODELS: [CerebrasModel; ${models.length}] = [\n${rows}];\n`
+    return `const ${constName}: [ShippedModel; ${models.length}] = [\n${rows}];\n`
 }
 
 function grouped(value) {
@@ -647,7 +653,7 @@ function typescriptDrivers(drivers, secrets) {
         })
         .join(',\n')
     return (
-        `export type AiConnectionType = ${union}\n\n`
+        `${declared('export type AiConnectionType =', union)}\n\n`
         + '/** Every driver a build knows, in the order the pickers offer them. */\n'
         + `export const AI_CONNECTION_TYPES: readonly AiConnectionType[] = [\n${listed}\n]\n\n`
         + '/**\n'
@@ -675,9 +681,7 @@ function typescriptSecrets(drivers, secrets) {
         .map(driver => `    ${key(driver.id)}: '${driver.secret}'`)
         .join(',\n')
     return (
-        'export type SecretName = '
-        + union
-        + '\n\n'
+        `${declared('export type SecretName =', union)}\n\n`
         + '/** Every secret Gofer keeps, in the order a save writes them. */\n'
         + `export const SECRET_NAMES: readonly SecretName[] = [\n${listed}\n]\n\n`
         + '/**\n'
@@ -686,7 +690,7 @@ function typescriptSecrets(drivers, secrets) {
         + ' * A ChatGPT credential is written by its login, so a settings save that named it would\n'
         + ' * be saying something the page cannot mean.\n'
         + ' */\n'
-        + `export type TypedSecret = ${typedUnion}\n\n`
+        + `${declared('export type TypedSecret =', typedUnion)}\n\n`
         + `export const TYPED_SECRET_NAMES: readonly TypedSecret[] = [\n${typedListed}\n]\n\n`
         + '/**\n'
         + ' * The one credential each driver authenticates with.\n'
@@ -721,12 +725,12 @@ function nodeDrivers(drivers) {
         .join(',\n')
     const names = drivers.map(driver => `    ${key(driver.id)}: '${driver.shortName}'`).join(',\n')
     const slots = drivers.map(driver => `    ${key(driver.id)}: '${driver.secret}'`).join(',\n')
-    const hosted = drivers.filter(
-        driver => driver.providerId !== null && driver.id !== 'openai-compatible'
-    )
+    const hosted = drivers.filter(driver => driver.providerId !== null && driver.id !== 'local')
     return (
         '/** Every driver a build knows, in the order the pickers offer them. */\n'
-        + (oneLine.length <= 120 ? `${oneLine}\n\n` : `export const DRIVERS = [\n${listed}\n]\n\n`)
+        + (oneLine.length <= PRINT_WIDTH ?
+            `${oneLine}\n\n`
+        :   `export const DRIVERS = [\n${listed}\n]\n\n`)
         + '/** Which pi-ai provider answers each driver. ChatGPT has none: pi-ai ships its own. */\n'
         + `const PROVIDER_IDS = {\n${ids}\n}\n\n`
         + '/** What each driver is called in the one sentence a user reads about its connection. */\n'
@@ -767,6 +771,22 @@ function typescriptSubagentBounds(bounds) {
     )
 }
 
+/**
+ * The formatter's own `printWidth`, which decides where an emitted line has to be broken.
+ *
+ * Written down because a generator that guesses it emits code `format:check` rewrites, and the
+ * rewrite lands inside a `GENERATED` region — so the next `check:command-surface` fails on a file
+ * nobody edited. It was 120 here and 100 in `.prettierrc.cjs`, and a fifth driver is what made the
+ * union long enough for the two to disagree.
+ */
+const PRINT_WIDTH = 100
+
+/** One declaration, on its line or wrapped onto the next, the way Prettier would write it. */
+function declared(head, body) {
+    const oneLine = `${head} ${body}`
+    return oneLine.length <= PRINT_WIDTH ? oneLine : `${head}\n    ${body}`
+}
+
 function wrapPrefixed(note, prefix, width) {
     const lines = []
     let line = ''
@@ -789,7 +809,8 @@ export async function generateSurfaces() {
     const desktop = await registeredDesktopCommands()
     const {operations: parameters, vocabularies} = await parameterCatalogue()
     const subagentBounds = await subagentBoundsCatalogue()
-    const cerebrasModels = await cerebrasModelCatalogue()
+    const cerebrasModels = await shippedModelCatalogue('protocol/cerebras-models.json')
+    const qwenModels = await shippedModelCatalogue('protocol/qwen-models.json')
     const {drivers, secrets} = await driverCatalogue()
     const turnRetry = await turnRetryCatalogue()
 
@@ -850,7 +871,11 @@ export async function generateSurfaces() {
             rustfmt: true,
             regions: [
                 {name: 'subagent-bounds', body: rustSubagentBounds(subagentBounds)},
-                {name: 'cerebras-models', body: rustCerebrasModels(cerebrasModels)},
+                {
+                    name: 'cerebras-models',
+                    body: rustShippedModels(cerebrasModels, 'CEREBRAS_MODELS')
+                },
+                {name: 'qwen-models', body: rustShippedModels(qwenModels, 'QWEN_MODELS')},
                 {name: 'drivers', body: rustDrivers(drivers)}
             ]
         },

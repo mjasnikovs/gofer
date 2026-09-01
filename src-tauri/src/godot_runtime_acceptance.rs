@@ -1375,7 +1375,7 @@ fn dap_client(dap_port: u16, session: &Session) -> DapClient {
     );
 }
 
-/// A game continued after a break answers again, without having to speak first.
+/// A break refuses only what a break actually stops, and continuing clears it.
 ///
 /// The break state is the addon's own, because the debugger's `is_breaked()` is stale over a
 /// healthy game. It was cleared by any message from the game — and a game only ever speaks when
@@ -1383,8 +1383,13 @@ fn dap_client(dap_port: u16, session: &Session) -> DapClient {
 /// request refused with "the game is paused at an error", forever: the one call that could have
 /// cleared the state was the call the state refused. The debugger's `continued` is the signal that
 /// ends it, and nothing else can.
+///
+/// What the break stops is the scene tree, and only `input` and `wait` sit on it. Measured at a
+/// live breakpoint on 4.7.2: capture answered in 140ms with a real PNG, and tree, node and monitor
+/// reads all answered too — the renderer draws through a break. Refusing them cost the agent the
+/// one look at the frozen frame that a breakpoint is for.
 #[test]
-fn a_game_continued_after_a_break_answers_again() {
+fn a_break_refuses_only_the_calls_it_stops() {
     let directory = TempDir::new().expect("temporary directory");
     let worktree = worktree_with_probes(&directory);
     let script = worktree.join("scripts/runtime_probe.gd");
@@ -1425,12 +1430,20 @@ fn a_game_continued_after_a_break_answers_again() {
     let state = session.call("runtime.get_state", json!({}));
     assert_eq!(state["broke"], true, "{state}");
     let refused = session
-        .try_call("runtime.get_tree", json!({}), None)
-        .expect_err("a paused game cannot answer a forwarded request");
+        .try_call("runtime.wait", json!({"frames": 2}), None)
+        .expect_err("a paused game runs no frames, so a wait cannot answer");
     assert!(
         refused.starts_with("runtime_broke"),
-        "a paused game must be refused for the pause: {refused}"
+        "a paused game must refuse a wait for the pause: {refused}"
     );
+    let paused_tree = session.call("runtime.get_tree", json!({}));
+    assert!(
+        paused_tree.get("root").is_some(),
+        "a paused game still answers a read: {paused_tree}"
+    );
+    // The renderer draws through a break; only the scene tree stops.
+    let paused_frame = session.call("runtime.capture", json!({}));
+    assert_frame(&paused_frame["frame"]);
 
     client
         .set_breakpoints(&script, &[])

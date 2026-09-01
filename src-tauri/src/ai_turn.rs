@@ -2229,8 +2229,10 @@ mod tests {
         use crate::settings::AiConnectionType;
 
         for driver in [
+            AiConnectionType::Local,
             AiConnectionType::OpenaiCompatible,
             AiConnectionType::Openrouter,
+            AiConnectionType::Qwen,
             AiConnectionType::Cerebras,
         ] {
             let filled = Credentials::for_driver(driver, Some("a-key".to_owned()), None);
