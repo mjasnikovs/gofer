@@ -66,6 +66,21 @@ table — to a real editor. Nothing it covers can break because of a commit, so 
 every change. Run it when the pinned version in `protocol/godot-artifacts.json` moves; a failure
 there is the engine having renamed something, and the fix is the sentence in `CATALOG`.
 
+## Visual snapshots
+
+The baselines under `e2e/visual/**/*-snapshots/` are rendered by CI, not by your machine. Fonts and
+subpixel antialiasing differ enough that a locally taken PNG fails the check even when the screen is
+right. `npm run check` does not run the visual suite, so a local `--update-snapshots` is invisible
+until CI rejects it.
+
+When a UI change moves a screen, regenerate on the runner and commit what it produces:
+
+```
+gh workflow run "Visual snapshots" --ref master
+gh run download <id> -n visual-snapshots -D /tmp/snap
+cp /tmp/snap/*-snapshots/*.png e2e/visual/application.visual.spec.ts-snapshots/
+```
+
 ## Asking a real model what it gets wrong
 
 `src-tauri/src/godot_live_agent.rs` puts one real turn — the real worker, the real router, one real

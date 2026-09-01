@@ -3,7 +3,9 @@ import type {Page} from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 import {installDesktop} from './desktop-fixture'
 
-const MONACO_DIFF_HOST = '[data-testid="script-diff-host"]'
+// Every Monaco diff host, whichever screen it is on. Monaco's own DOM carries the violations, and
+// suffix-matching keeps a new host from silently escaping the exclusion the way an exact id would.
+const MONACO_DIFF_HOST = '[data-testid$="diff-host"]'
 
 async function stableScreenshot(page: Page, name: string, hasDiff = false, hasSketch = false) {
     await page.addStyleTag({
@@ -432,6 +434,21 @@ test('skills tab', async ({page}) => {
     await expect(page.getByText('tile-levels', {exact: true})).toBeVisible()
     await expect(page.getByText('One file needs attention')).toBeVisible()
     await stableScreenshot(page, 'skills-tab.png')
+})
+
+test('changes tab', async ({page}) => {
+    // Wider than the shipped default so the diff has room to read, not to clear Monaco's own
+    // breakpoint — the centre column is still under it, which is the point of the wait below.
+    await page.setViewportSize({width: 1600, height: 900})
+    await openSession(page)
+    await page.getByRole('button', {name: 'Changes', exact: true}).click()
+    await expect(page.getByText('scripts/player.gd')).toBeVisible()
+    await page.getByText('scripts/player.gd').click()
+    // The host is in the DOM before Monaco's chunk has loaded, so waiting on it alone photographs
+    // an empty box. side-by-side is also the proof the layout choice took: 678px is under Monaco's
+    // own 900px inline breakpoint, which only `useInlineViewWhenSpaceIsLimited: false` overrides.
+    await expect(page.locator('.monaco-diff-editor.side-by-side')).toBeVisible()
+    await stableScreenshot(page, 'changes-tab.png', true)
 })
 
 test('sketch viewer', async ({page}) => {

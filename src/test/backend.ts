@@ -19,6 +19,8 @@ import type {
 import type {TaskSummary} from '../models/app'
 import type {HealthReport} from '../models/health'
 import type {MemoryEdit, MemoryState, ProjectMemory} from '../models/memory'
+import type {FileDiff, TaskChanges} from '../models/changes'
+import {NO_CHANGES} from '../models/changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
 import type {Skill, SkillsResponse} from '../models/skills'
 import type {BriefRun} from '../models/brief'
@@ -35,6 +37,8 @@ export interface BackendState {
     briefs: Map<string, BriefRun>
     memories: ProjectMemory[]
     sketches: ProjectSketch[]
+    changes: TaskChanges
+    diffs: Map<string, FileDiff>
     skills: Map<string, {skill: Skill; text: string}>
     sketchHtml: SketchHtml
     settings: SettingsResponse
@@ -73,6 +77,8 @@ export type BackendOptions = Readonly<{
     briefs?: Readonly<Record<string, BriefRun>>
     memories?: readonly ProjectMemory[]
     sketches?: readonly ProjectSketch[]
+    changes?: TaskChanges
+    diffs?: Readonly<Record<string, FileDiff>>
     sketchHtml?: SketchHtml
     skills?: readonly {skill: Skill; text: string}[]
     files?: readonly {path: string; bytes: number}[]
@@ -281,6 +287,8 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
         briefs: new Map(Object.entries(options.briefs ?? {})),
         memories: [...(options.memories ?? [])],
         sketches: [...(options.sketches ?? [])],
+        changes: options.changes ?? NO_CHANGES,
+        diffs: new Map(Object.entries(options.diffs ?? {})),
         skills: new Map((options.skills ?? []).map(one => [one.skill.name, one])),
         sketchHtml: options.sketchHtml ?? SKETCH_HTML,
         settings: options.settings ?? SETTINGS
@@ -519,6 +527,21 @@ export function installBackend(fake: DesktopFake, options: BackendOptions = {}):
             }
             case 'list_project_sketches':
                 return [...state.sketches]
+
+            case 'list_task_changes':
+                return state.changes
+
+            case 'read_task_change': {
+                const path = payload['path'] as string
+                const diff = state.diffs.get(path)
+                if (!diff)
+                    throw new GodotFailure(
+                        'task_change_not_listed',
+                        `${path} is not a changed file`,
+                        false
+                    )
+                return diff
+            }
 
             case 'list_skills':
                 return skillsResponse(state)

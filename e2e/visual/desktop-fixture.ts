@@ -139,6 +139,49 @@ export async function installDesktop(
                             {path: 'scripts/player.gd', isNew: false},
                             {path: 'notes/from-the-user.md', isNew: true}
                         ]
+                    if (command === 'list_task_changes')
+                        return {
+                            files: [
+                                {
+                                    path: 'scripts/player.gd',
+                                    status: 'modified',
+                                    fromPath: null,
+                                    isBinary: false,
+                                    added: 12,
+                                    removed: 3,
+                                    isConflicted: false
+                                },
+                                {
+                                    path: 'scenes/pause_menu.tscn',
+                                    status: 'added',
+                                    fromPath: null,
+                                    isBinary: false,
+                                    added: 41,
+                                    removed: 0,
+                                    isConflicted: false
+                                },
+                                {
+                                    path: 'assets/tiles.png',
+                                    status: 'modified',
+                                    fromPath: null,
+                                    isBinary: true,
+                                    added: 0,
+                                    removed: 0,
+                                    isConflicted: false
+                                }
+                            ],
+                            dropped: 0,
+                            isMerging: false
+                        }
+                    if (command === 'read_task_change')
+                        return {
+                            path: 'scripts/player.gd',
+                            original: script,
+                            modified: script.replace('ready', 'started'),
+                            isText: true,
+                            isTooLarge: false,
+                            isSubmodule: false
+                        }
                     if (command === 'list_project_sketches')
                         return [
                             {

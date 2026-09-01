@@ -19,6 +19,7 @@ import type {
     MemorySweepEvent,
     ProjectMemory
 } from '../models/memory'
+import type {FileDiff, TaskChanges} from '../models/changes'
 import type {ProjectSketch, SketchHtml} from '../models/sketch'
 import type {SkillsResponse} from '../models/skills'
 import type {UnsavedWork} from '../models/unsaved-work'
@@ -200,6 +201,7 @@ export type DesktopCommandMap = Readonly<{
     list_project_sketches: CommandSpec<undefined, readonly ProjectSketch[]>
     list_project_tasks: CommandSpec<undefined, readonly TaskSummary[]>
     list_skills: CommandSpec<undefined, SkillsResponse>
+    list_task_changes: CommandSpec<undefined, TaskChanges>
     list_workspace_files: CommandSpec<undefined, readonly WorkspaceEntry[]>
     load_chat: CommandSpec<{taskId: string | undefined}, StoredChat>
     load_settings: CommandSpec<undefined, SettingsResponse>
@@ -222,6 +224,7 @@ export type DesktopCommandMap = Readonly<{
     read_project_state: CommandSpec<{key: string}, string | null>
     read_skill: CommandSpec<{name: string}, string>
     read_task_brief: CommandSpec<{taskId: string}, BriefRun | null>
+    read_task_change: CommandSpec<{path: string}, FileDiff>
     read_workspace_file: CommandSpec<{path: string}, WorkspaceFileContents>
     read_workspace_thumbnail: CommandSpec<{path: string}, string | null>
     resolve_task_merge: CommandSpec<{taskId: string}, ResolveTaskMergeResult>

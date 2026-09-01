@@ -3,6 +3,7 @@ import {Icon} from '@astryxdesign/core/Icon'
 import type {IconType} from '@astryxdesign/core/Icon'
 import AdjustmentsHorizontalIcon from '@heroicons/react/24/outline/AdjustmentsHorizontalIcon'
 import ArrowDownTrayIcon from '@heroicons/react/24/outline/ArrowDownTrayIcon'
+import ArrowsRightLeftIcon from '@heroicons/react/24/outline/ArrowsRightLeftIcon'
 import BoltIcon from '@heroicons/react/24/outline/BoltIcon'
 import BookOpenIcon from '@heroicons/react/24/outline/BookOpenIcon'
 import BugAntIcon from '@heroicons/react/24/outline/BugAntIcon'
@@ -25,6 +26,7 @@ import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
 import WrenchScrewdriverIcon from '@heroicons/react/24/outline/WrenchScrewdriverIcon'
 import AdjustmentsHorizontalSolid from '@heroicons/react/24/solid/AdjustmentsHorizontalIcon'
 import ArrowDownTraySolid from '@heroicons/react/24/solid/ArrowDownTrayIcon'
+import ArrowsRightLeftSolid from '@heroicons/react/24/solid/ArrowsRightLeftIcon'
 import BoltSolid from '@heroicons/react/24/solid/BoltIcon'
 import BookOpenSolid from '@heroicons/react/24/solid/BookOpenIcon'
 import BugAntSolid from '@heroicons/react/24/solid/BugAntIcon'
@@ -75,6 +77,7 @@ export const DOCS_TAB = pair(BookOpenIcon, BookOpenSolid)
 export const MEMORY_TAB = pair(CircleStackIcon, CircleStackSolid)
 export const DESIGN_TAB = pair(PaintBrushIcon, PaintBrushSolid)
 export const SKILLS_TAB = pair(SparklesIcon, SparklesSolid)
+export const CHANGES_TAB = pair(ArrowsRightLeftIcon, ArrowsRightLeftSolid)
 
 export const SCENE_TAB = pair(RectangleGroupIcon, RectangleGroupSolid)
 export const FILES_TAB = pair(FolderIcon, FolderSolid)

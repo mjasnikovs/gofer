@@ -20,6 +20,7 @@ export interface MonacoStubState {
     decorations: readonly Monaco.editor.IModelDeltaDecoration[]
     actions: string[]
     diffEditors: number
+    sideBySide: boolean | undefined
     revealed: number[]
     activeText: () => string
     type: (text: string) => void
@@ -46,6 +47,7 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
         decorations: [],
         actions: [],
         diffEditors: 0,
+        sideBySide: undefined,
         revealed: [],
         activeText: () => activeModel?.getValue() ?? '',
         type: (text: string) => {
@@ -72,6 +74,7 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
             state.decorations = []
             state.actions = []
             state.diffEditors = 0
+            state.sideBySide = undefined
             state.revealed = []
             contentListener = undefined
             mouseListener = undefined
@@ -170,7 +173,13 @@ export function createMonacoStub(): {monaco: typeof Monaco; state: MonacoStubSta
             },
             createDiffEditor: () => {
                 state.diffEditors += 1
-                return {setModel: () => undefined, dispose: () => undefined}
+                return {
+                    setModel: () => undefined,
+                    updateOptions: (options: Monaco.editor.IDiffEditorOptions) => {
+                        state.sideBySide = options.renderSideBySide ?? state.sideBySide
+                    },
+                    dispose: () => undefined
+                }
             },
             createModel,
             setModelMarkers: (

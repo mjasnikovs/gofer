@@ -25,6 +25,7 @@ const STORED = {
     inspectorWidth: 400,
     logSeverity: 'error',
     logScope: 'history',
+    isDiffSideBySide: false,
     openScripts: ['scripts/player.gd', 'scripts/enemy.gd'],
     activeScript: 'scripts/enemy.gd',
     breakpoints: {'scripts/player.gd': [3, 11]},
@@ -45,6 +46,23 @@ describe('toWorkspaceLayout', () => {
         expect(toWorkspaceLayout('not a layout')).toEqual(DEFAULT_WORKSPACE_LAYOUT)
     })
 
+    /**
+     * How the diff is laid out is a view mode like the collapsed bottom panel, not a filter, so
+     * it survives a reopen where a stored filter would hide files with no sign of why.
+     */
+    it('remembers which way the diff was laid out', () => {
+        const inline = reduceLayout(DEFAULT_WORKSPACE_LAYOUT, {
+            type: 'diff-side-by-side',
+            isSideBySide: false
+        })
+        expect(inline.isDiffSideBySide).toBe(false)
+        expect(toWorkspaceLayout({...STORED, isDiffSideBySide: false}).isDiffSideBySide).toBe(false)
+        expect(
+            reduceLayout(inline, {type: 'diff-side-by-side', isSideBySide: false}),
+            'an unchanged choice writes nothing'
+        ).toBe(inline)
+    })
+
     it('remembers every tab the centre column has', () => {
         for (const tab of [
             'chat',
@@ -53,7 +71,8 @@ describe('toWorkspaceLayout', () => {
             'docs',
             'memory',
             'sketches',
-            'skills'
+            'skills',
+            'changes'
         ] as const)
             expect(toWorkspaceLayout({...STORED, centerTab: tab}).centerTab).toBe(tab)
     })

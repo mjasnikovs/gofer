@@ -255,6 +255,32 @@ impl Tasks<'_> {
             .map_err(CommandError::or_coded("tasks_unavailable"))
     }
 
+    /// Where the open task branched from, which is what its whole diff is measured against.
+    ///
+    /// `None` covers three situations the caller must not tell apart by guessing: no task is open,
+    /// the project is not a repository, and a task made before the repository existed that has not
+    /// been given its branch yet. All three mean the same thing to a reader — there is no span of
+    /// work to show — and none of them is a failure.
+    pub fn base_commit(&self) -> Result<Option<String>, CommandError> {
+        self.open_task_base_commit()
+            .map_err(CommandError::or_coded("tasks_unavailable"))
+    }
+
+    fn open_task_base_commit(&self) -> Result<Option<String>, CommandError> {
+        let connection = self.storage.connection()?;
+        let Some(task_id) = active_task_id(&connection)? else {
+            return Ok(None);
+        };
+        connection
+            .query_row(
+                "SELECT base_commit FROM task_worktrees WHERE task_id = ?1",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(database_error)
+    }
+
     fn active_task_id(&self) -> Result<Option<String>, CommandError> {
         active_task_id(&self.storage.connection()?)
     }
@@ -902,6 +928,48 @@ mod tests {
         storage.chats().save(&chat).expect("save the chat");
 
         assert_eq!(before, order(&storage));
+    }
+
+    /// The open task's branch point is what its whole diff is measured against, and a project with
+    /// no repository behind it has none to answer — which is an ordinary state, not a failure.
+    #[test]
+    fn the_open_task_answers_where_it_branched_from() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = committed_repository(directory.path());
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        storage.chats().load(None).expect("the first task");
+
+        let base = storage
+            .tasks()
+            .base_commit()
+            .expect("ask for the branch point")
+            .expect("a task on a repository has one");
+
+        assert_eq!(
+            base,
+            crate::git::branch_commit(&workspace, "master")
+                .or_else(|| crate::git::branch_commit(&workspace, "main"))
+                .expect("the project's own branch"),
+            "a task branches from the project as it stood"
+        );
+    }
+
+    /// Somewhere that is not a repository has no branch point, and must not invent one.
+    #[test]
+    fn a_project_with_no_repository_has_no_branch_point() {
+        let directory = TempDir::new().expect("temporary directory");
+        let workspace = directory.path().join("loose");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let storage =
+            ProjectStorage::open(&directory.path().join("data"), &workspace).expect("storage");
+        storage.chats().load(None).expect("the first task");
+
+        assert_eq!(
+            storage.tasks().base_commit().expect("ask"),
+            None,
+            "there is no span of work to measure"
+        );
     }
 
     /// Deleting a task has to take everything Gofer made for it: the chat, the Git worktree, and the

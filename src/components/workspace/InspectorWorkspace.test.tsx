@@ -148,7 +148,16 @@ describe('InspectorWorkspace', () => {
 
         for (const label of ['Scene', 'Runtime', 'Files'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
-        for (const label of ['Chat', 'Scripts', 'Game', 'Docs', 'Memory', 'Design', 'Skills'])
+        for (const label of [
+            'Chat',
+            'Scripts',
+            'Game',
+            'Docs',
+            'Memory',
+            'Design',
+            'Skills',
+            'Changes'
+        ])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()
         for (const label of ['Node', 'Project', 'Editor'])
             expect(screen.getByRole('button', {name: label})).toBeInTheDocument()

@@ -10,6 +10,7 @@ import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {
+    CHANGES_TAB,
     CHAT_TAB,
     DESIGN_TAB,
     DOCS_TAB,
@@ -45,6 +46,7 @@ import {
 } from '../../models/ui-state'
 import type {CenterTab, LayoutAction, ScriptViews, WorkspaceLayout} from '../../models/ui-state'
 import {BottomPanel} from './BottomPanel'
+import {ChangesView} from './ChangesView'
 import {DocsView} from './DocsView'
 import {MemoryView} from './MemoryView'
 import {SketchesView} from './SketchesView'
@@ -506,6 +508,12 @@ function FrameRegions({
                                         isLabelHidden={isCentreCompact}
                                         {...SKILLS_TAB}
                                     />
+                                    <Tab
+                                        value='changes'
+                                        label='Changes'
+                                        isLabelHidden={isCentreCompact}
+                                        {...CHANGES_TAB}
+                                    />
                                 </TabList>
                             </HStack>
                         </StackItem>
@@ -534,6 +542,13 @@ function FrameRegions({
                                 <MemoryView />
                             : layout.centerTab === 'skills' ?
                                 <SkillsView />
+                            : layout.centerTab === 'changes' ?
+                                <ChangesView
+                                    isSideBySide={layout.isDiffSideBySide}
+                                    onSideBySideChange={isSideBySide => {
+                                        dispatch({type: 'diff-side-by-side', isSideBySide})
+                                    }}
+                                />
                             :   <SketchesView />}
                         </StackItem>
                         <Divider />

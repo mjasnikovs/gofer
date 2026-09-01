@@ -1,7 +1,8 @@
 import type {GodotLogSeverity} from './godot'
 import type {GodotSelection} from './workspace'
 
-export type CenterTab = 'chat' | 'scripts' | 'game' | 'docs' | 'memory' | 'sketches' | 'skills'
+export type CenterTab =
+    'chat' | 'scripts' | 'game' | 'docs' | 'memory' | 'sketches' | 'skills' | 'changes'
 export type ExplorerTab = 'scene' | 'runtime' | 'files'
 export type InspectorTab = 'node' | 'project' | 'editor'
 export type BottomTab = 'problems' | 'debugger' | 'output' | 'import'
@@ -55,6 +56,7 @@ export type WorkspaceLayout = Readonly<{
     inspectorWidth: number
     logSeverity: GodotLogSeverity
     logScope: LogScope
+    isDiffSideBySide: boolean
     openScripts: readonly string[]
     activeScript?: string | undefined
     breakpoints: Readonly<Record<string, readonly number[]>>
@@ -73,6 +75,7 @@ export const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayout = {
     inspectorWidth: INSPECTOR_WIDTH,
     logSeverity: 'info',
     logScope: 'session',
+    isDiffSideBySide: true,
     openScripts: [],
     breakpoints: {}
 }
@@ -84,7 +87,8 @@ const CENTER_TABS: readonly CenterTab[] = [
     'docs',
     'memory',
     'sketches',
-    'skills'
+    'skills',
+    'changes'
 ]
 const EXPLORER_TABS: readonly ExplorerTab[] = ['scene', 'runtime', 'files']
 const INSPECTOR_TABS: readonly InspectorTab[] = ['node', 'project', 'editor']
@@ -193,6 +197,10 @@ export function toWorkspaceLayout(value: unknown): WorkspaceLayout {
             DEFAULT_WORKSPACE_LAYOUT.logSeverity
         ),
         logScope: oneOf(stored['logScope'], LOG_SCOPES, DEFAULT_WORKSPACE_LAYOUT.logScope),
+        isDiffSideBySide:
+            typeof stored['isDiffSideBySide'] === 'boolean' ?
+                stored['isDiffSideBySide']
+            :   DEFAULT_WORKSPACE_LAYOUT.isDiffSideBySide,
         openScripts,
         ...(typeof activeScript === 'string'
             && openScripts.includes(activeScript) && {activeScript}),
@@ -219,6 +227,7 @@ export type LayoutAction =
     | Readonly<{type: 'inspector-tab'; tab: InspectorTab}>
     | Readonly<{type: 'bottom-tab'; tab: BottomTab}>
     | Readonly<{type: 'bottom-toggled'}>
+    | Readonly<{type: 'diff-side-by-side'; isSideBySide: boolean}>
     | Readonly<{type: 'debug-started'}>
     | Readonly<{type: 'log-severity'; severity: GodotLogSeverity}>
     | Readonly<{type: 'log-scope'; scope: LogScope}>
@@ -279,6 +288,11 @@ export function reduceLayout(state: WorkspaceLayout, action: LayoutAction): Work
 
         case 'bottom-toggled':
             return {...state, isBottomCollapsed: !state.isBottomCollapsed}
+
+        case 'diff-side-by-side':
+            return state.isDiffSideBySide === action.isSideBySide ?
+                    state
+                :   {...state, isDiffSideBySide: action.isSideBySide}
 
         case 'debug-started':
             return state.bottomTab === 'debugger' && !state.isBottomCollapsed ?

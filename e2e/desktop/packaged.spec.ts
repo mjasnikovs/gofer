@@ -170,7 +170,7 @@ describe('packaged desktop application', () => {
             const stored = chat.messages.map(
                 message => `${message.status ?? 'no-status'}: ${message.text.slice(0, 60)}`
             )
-            const candidates = browser.$$('button*=Retry')
+            const candidates = await browser.$$('button*=Retry').getElements()
             const described: string[] = []
             for (const candidate of candidates) {
                 const size = await candidate.getSize()

@@ -256,6 +256,97 @@ fn pending_project_changes(app: AppHandle) -> Result<Vec<git::PendingChange>, Co
     git::pending_changes(&workspace).map_err(CommandError::from)
 }
 
+/// Every file the open task changed, from where it branched to the files on disk now.
+///
+/// Answers nothing rather than failing wherever there is no span of work to measure: outside a
+/// repository, with no task open, or for a task that has not been given its branch yet. All three
+/// are ordinary states of a project, and none of them is a fault the user can act on.
+#[tauri::command(async)]
+fn list_task_changes(app: AppHandle) -> Result<git::TaskChanges, CommandError> {
+    let Some(span) = task_change_span(&app)? else {
+        return Ok(git::TaskChanges::default());
+    };
+    git::changed_files(
+        &span.workspace,
+        &span.base_commit,
+        span.project_file.as_deref(),
+    )
+    .map_err(CommandError::coded("task_changes_unavailable"))
+}
+
+/// What both change commands measure against, or nothing when there is no span of work.
+///
+/// Derived once and shared, because the two have to agree exactly: a listing that dropped
+/// `project.godot` and a lookup that kept it would disagree about which files exist.
+struct TaskChangeSpan {
+    workspace: std::path::PathBuf,
+    base_commit: String,
+    project_file: Option<String>,
+}
+
+fn task_change_span(app: &AppHandle) -> Result<Option<TaskChangeSpan>, CommandError> {
+    let storage = project_storage(app)?;
+    // The branch point is read first, and the order is the whole point: `agent_workspace` repairs a
+    // task whose branch has gone, and that repair rewrites `base_commit` to wherever the project
+    // stands now. Asked afterwards it answers "here", and a task that did a day's work reports that
+    // it changed nothing.
+    let Some(base_commit) = storage.tasks().base_commit()? else {
+        return Ok(None);
+    };
+    let workspace = storage.tasks().agent_workspace()?;
+    if !git::is_repository(&workspace) {
+        return Ok(None);
+    }
+    Ok(Some(TaskChangeSpan {
+        project_file: project_file_without_addon(app),
+        workspace,
+        base_commit,
+    }))
+}
+
+/// `project.godot` as Git should record it, or nothing when the addon has put nothing in it.
+///
+/// Asked of the workspace the stager itself recorded, because its ledger is keyed on that exact
+/// path: handed a differently spelled one it answers `None`, and the project file would come back
+/// into the listing carrying Gofer's own two lines.
+fn project_file_without_addon(app: &AppHandle) -> Option<String> {
+    let storage = project_storage(app).ok()?;
+    let worktree = storage.tasks().active_workspace().ok()?;
+    godot_session_api::addon_stager(app)
+        .project_file_for_git(&worktree)
+        .ok()
+        .flatten()
+}
+
+/// The two sides of one changed file, for the diff editor.
+///
+/// The path is not taken on trust: it has to be one this task's own listing produced, which is also
+/// where a renamed file's earlier name comes from. A path the caller invented reaches neither Git
+/// nor the disk.
+#[tauri::command(async)]
+fn read_task_change(app: AppHandle, path: String) -> Result<git::FileDiff, CommandError> {
+    let not_listed =
+        || CommandError::coded("task_change_not_listed")(format!("{path} is not a changed file"));
+    let span = task_change_span(&app)?.ok_or_else(not_listed)?;
+    let listed = git::changed_file(
+        &span.workspace,
+        &span.base_commit,
+        span.project_file.as_deref(),
+        &path,
+    )
+    .map_err(CommandError::coded("task_changes_unavailable"))?
+    .ok_or_else(not_listed)?;
+    git::file_diff(
+        &span.workspace,
+        &span.base_commit,
+        &listed.path,
+        listed.from_path.as_deref(),
+        listed.status,
+        span.project_file.as_deref(),
+    )
+    .map_err(CommandError::coded("task_changes_unavailable"))
+}
+
 /// Opens another task, which moves the project's one checkout onto that task's branch.
 ///
 /// A turn in flight is refused rather than raced: the agent is holding file hashes and an open
@@ -1203,6 +1294,7 @@ pub fn run() {
         list_project_sketches,
         list_project_tasks,
         list_skills,
+        list_task_changes,
         list_workspace_files,
         load_chat,
         load_settings,
@@ -1217,6 +1309,7 @@ pub fn run() {
         read_clipboard_image,
         read_godot_logs,
         read_task_brief,
+        read_task_change,
         read_project_sketch,
         read_project_state,
         read_skill,

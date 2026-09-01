@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -370,17 +371,22 @@ fn holds_conflict_markers(path: &Path) -> bool {
 }
 
 /// The files a stopped merge left unresolved. Read before the abort, which clears them.
+///
+/// `-z` because these paths are both joined onto disk and compared against the changed-file
+/// listing. Git C-quotes anything that is not plain ASCII — `"spelar\303\251.gd"` — and that names
+/// no file: the marker check would find nothing and call a conflicted file resolved.
 fn conflicting_paths(repository_root: &Path) -> Vec<String> {
-    git_text(repository_root, &["diff", "--name-only", "--diff-filter=U"])
-        .map(|listing| {
-            listing
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+    git_bytes(
+        repository_root,
+        &["diff", "--name-only", "--diff-filter=U", "-z"],
+    )
+    .map(|listing| {
+        nul_records(&listing)
+            .into_iter()
+            .filter(|path| !path.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Why a task could not be merged.
@@ -942,6 +948,541 @@ fn git_failure(action: &str, output: &Output) -> String {
         return format!("Could not {action}: Git exited with {}", output.status);
     }
     format!("Could not {action}: {}", said.join("\n"))
+}
+
+/// Paths that are never anyone's work, whatever Git thinks of them.
+///
+/// `.gofer` is the reason this list exists rather than being left to the ignore file: it holds the
+/// project database, which is rewritten every turn, and nothing has ever put it in `.gitignore`.
+/// The rest are here because a repository committed before Gofer's ignore rule still tracks them.
+const NEVER_THE_USERS_WORK: [&str; 4] = [".gofer/", ".godot/", ".git/", "addons/gofer/"];
+
+/// The most rows worth drawing, and the reason is the window rather than Git. Five thousand changed
+/// files cost Git a quarter of a second and cost an unvirtualised list far more; the explorer caps
+/// its own tree at the same order for the same reason.
+const MAX_LISTED_CHANGES: usize = 400;
+
+/// What happened to one file between the task's base and the files on disk.
+///
+/// `Renamed` is only ever seen for work a task switch already committed. Git pairs a rename from
+/// the index, and Gofer leaves the agent's work loose, so a rename made during a task arrives as a
+/// `Deleted` and an `Added` — which is what `git status` shows a human for the same tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChangeStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    /// A file became a symlink, or the other way about. Git calls it `T`.
+    TypeChanged,
+    /// A letter this build does not know. Named rather than dropped, so a listing never silently
+    /// loses a row.
+    Other,
+}
+
+impl ChangeStatus {
+    /// Git writes a similarity score onto the letter — `R100`, `R072` — so only the first byte
+    /// carries the kind.
+    fn from_code(code: &str) -> Self {
+        match code.as_bytes().first() {
+            Some(b'A') => Self::Added,
+            Some(b'M') => Self::Modified,
+            Some(b'D') => Self::Deleted,
+            Some(b'R') | Some(b'C') => Self::Renamed,
+            Some(b'T') => Self::TypeChanged,
+            _ => Self::Other,
+        }
+    }
+
+    fn pairs_two_paths(code: &str) -> bool {
+        matches!(code.as_bytes().first(), Some(b'R') | Some(b'C'))
+    }
+}
+
+/// One file the task changed.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    pub path: String,
+    pub status: ChangeStatus,
+    /// Where a renamed file came from, and nothing for every other status.
+    pub from_path: Option<String>,
+    /// Git's own answer, not a guess from the extension: `--numstat` prints a dash for a file it
+    /// will not count lines in.
+    pub is_binary: bool,
+    pub added: u32,
+    pub removed: u32,
+    /// Still holding both sides of a merge. The diff of one of these is conflict markers, not work.
+    pub is_conflicted: bool,
+}
+
+/// Everything the Changes view needs in one answer.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskChanges {
+    pub files: Vec<ChangedFile>,
+    /// How many rows the cap dropped. Shown, never silent: a listing that is short and says so
+    /// still lets someone go looking, where a silently shortened one does not.
+    pub dropped: u32,
+    /// A resolution merge is open, so some of these files are Git's markers rather than the task's
+    /// work.
+    pub is_merging: bool,
+}
+
+/// One file's two sides, ready for a diff editor.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDiff {
+    pub path: String,
+    pub original: String,
+    pub modified: String,
+    /// Both sides decoded. A file Git counts lines in can still be Latin-1, and that is not
+    /// something a diff editor can show.
+    pub is_text: bool,
+    pub is_too_large: bool,
+    /// A pointer to another repository's commit. Git lists it as an ordinary changed path, and
+    /// there is no blob behind it to read.
+    pub is_submodule: bool,
+}
+
+/// Every file the task changed, from where it branched to the files on disk now.
+///
+/// `project_file` is `project.godot` with Gofer's own two lines taken back out, or nothing when
+/// there are none to take. Without it every diff taken while an editor session is running shows a
+/// change to `project.godot` that nobody made.
+pub fn changed_files(
+    workspace_path: &Path,
+    base_commit: &str,
+    project_file: Option<&str>,
+) -> Result<TaskChanges, String> {
+    let files = collect_changes(workspace_path, base_commit, project_file)?;
+    let dropped = files.len().saturating_sub(MAX_LISTED_CHANGES);
+    let files = within_the_row_budget(files);
+    Ok(TaskChanges {
+        files,
+        dropped: dropped as u32,
+        is_merging: merge_in_progress(workspace_path),
+    })
+}
+
+/// Godot writes one of these beside every asset it imports, so in any listing that touches art
+/// they roughly equal the work. `src/models/file-kinds.ts` holds the same two names for the toggle
+/// that hides them.
+const GENERATED_SIDECARS: [&str; 2] = ["import", "uid"];
+
+fn is_generated_sidecar(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.rfind('.')
+        .filter(|dot| *dot > 0)
+        .is_some_and(|dot| GENERATED_SIDECARS.contains(&&name[dot + 1..]))
+}
+
+/// Spends the row budget on the user's own files before Godot's sidecars.
+///
+/// Cut in path order instead, half the budget goes to rows the view hides by default, and the real
+/// files past the cut cannot be reached from the listing at all.
+fn within_the_row_budget(files: Vec<ChangedFile>) -> Vec<ChangedFile> {
+    if files.len() <= MAX_LISTED_CHANGES {
+        return files;
+    }
+    let (sidecars, mut kept): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|file| is_generated_sidecar(&file.path));
+    kept.truncate(MAX_LISTED_CHANGES);
+    let room = MAX_LISTED_CHANGES - kept.len();
+    kept.extend(sidecars.into_iter().take(room));
+    kept.sort_by(|left, right| left.path.cmp(&right.path));
+    kept
+}
+
+/// One changed file by name, found in the whole listing rather than the part of it that fits.
+///
+/// The cap is a drawing limit, not a boundary: looked up in the truncated listing, the rows past it
+/// would be visible in one answer and missing from the other.
+pub fn changed_file(
+    workspace_path: &Path,
+    base_commit: &str,
+    project_file: Option<&str>,
+    path: &str,
+) -> Result<Option<ChangedFile>, String> {
+    Ok(collect_changes(workspace_path, base_commit, project_file)?
+        .into_iter()
+        .find(|file| file.path == path))
+}
+
+fn collect_changes(
+    workspace_path: &Path,
+    base_commit: &str,
+    project_file: Option<&str>,
+) -> Result<Vec<ChangedFile>, String> {
+    let counts = numstat(workspace_path, base_commit)?;
+    let conflicted: Vec<String> = conflicting_paths(workspace_path);
+    let mut files: Vec<ChangedFile> = Vec::new();
+
+    for (code, path, from_path) in name_status(workspace_path, base_commit)? {
+        if is_never_the_users_work(&path) {
+            continue;
+        }
+        let counted = counts.get(&path).copied().unwrap_or((false, 0, 0));
+        files.push(ChangedFile {
+            is_conflicted: conflicted.contains(&path),
+            status: ChangeStatus::from_code(&code),
+            is_binary: counted.0,
+            added: counted.1,
+            removed: counted.2,
+            from_path,
+            path,
+        });
+    }
+
+    for path in untracked_files(workspace_path)? {
+        if is_never_the_users_work(&path) {
+            continue;
+        }
+        files.push(ChangedFile {
+            path,
+            status: ChangeStatus::Added,
+            from_path: None,
+            // Git counts nothing for a file it has never seen, and asking per file would be a
+            // process per row. So the row carries no measurement and shows none; whether it is
+            // text at all is settled when it is opened, by the read that has the bytes anyway.
+            is_binary: false,
+            added: 0,
+            removed: 0,
+            is_conflicted: false,
+        });
+    }
+
+    if let Some(text) = project_file {
+        drop_unchanged_project_file(workspace_path, base_commit, text, &mut files);
+    }
+
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+/// Takes `project.godot` out of the listing when the only thing changing it is Gofer.
+///
+/// The stripped text is what a commit would record, so comparing it against the base is the same
+/// question the user is asking: did this task change the project file, or is that just the addon?
+fn drop_unchanged_project_file(
+    workspace_path: &Path,
+    base_commit: &str,
+    stripped: &str,
+    files: &mut Vec<ChangedFile>,
+) {
+    let Ok(Some(original)) = blob_at(workspace_path, base_commit, crate::addon::PROJECT_FILE)
+    else {
+        return;
+    };
+    if original.as_slice() != stripped.as_bytes() {
+        return;
+    }
+    files.retain(|file| file.path != crate::addon::PROJECT_FILE);
+}
+
+fn is_never_the_users_work(path: &str) -> bool {
+    NEVER_THE_USERS_WORK
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
+}
+
+/// `--name-status`, as `(code, path, from_path)`.
+///
+/// `-z` is not a preference. Without it Git C-quotes any path that is not plain ASCII —
+/// `"w\303\251ird.gd"` — and that string names no file on disk.
+fn name_status(
+    workspace_path: &Path,
+    base_commit: &str,
+) -> Result<Vec<(String, String, Option<String>)>, String> {
+    let output = git_bytes(
+        workspace_path,
+        &["diff", "--name-status", "-M", "-z", base_commit],
+    )?;
+    let mut records = nul_records(&output).into_iter();
+    let mut listed = Vec::new();
+    while let Some(code) = records.next() {
+        if code.is_empty() {
+            continue;
+        }
+        let paired = ChangeStatus::pairs_two_paths(&code);
+        let Some(first) = records.next() else { break };
+        if !paired {
+            listed.push((code, first, None));
+            continue;
+        }
+        let Some(second) = records.next() else { break };
+        listed.push((code, second, Some(first)));
+    }
+    Ok(listed)
+}
+
+/// `--numstat` by path: `(is_binary, added, removed)`.
+///
+/// Read separately from `--name-status` because only this one answers whether Git considers a file
+/// binary, and only `-z` makes the two joinable: without it a rename is one field spelled
+/// `src/{old => new}/thing.gd`, which matches no path in the other listing.
+fn numstat(
+    workspace_path: &Path,
+    base_commit: &str,
+) -> Result<std::collections::HashMap<String, (bool, u32, u32)>, String> {
+    let output = git_bytes(
+        workspace_path,
+        &["diff", "--numstat", "-M", "-z", base_commit],
+    )?;
+    let mut records = nul_records(&output).into_iter();
+    let mut counted = std::collections::HashMap::new();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let mut fields = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        // A rename leaves the path field empty and puts both names in the records that follow.
+        let path = if path.is_empty() {
+            let Some(_from) = records.next() else { break };
+            let Some(to) = records.next() else { break };
+            to
+        } else {
+            path.to_owned()
+        };
+        let is_binary = added == "-" || removed == "-";
+        counted.insert(
+            path,
+            (
+                is_binary,
+                added.parse().unwrap_or(0),
+                removed.parse().unwrap_or(0),
+            ),
+        );
+    }
+    Ok(counted)
+}
+
+/// Files Git has never seen. `git diff` against a commit never lists one, so this is the other half
+/// of the listing rather than an extra.
+///
+/// `--full-name` because `ls-files` answers relative to the directory it runs in, where `git diff`
+/// answers relative to the repository root.
+fn untracked_files(workspace_path: &Path) -> Result<Vec<String>, String> {
+    let output = git_bytes(
+        workspace_path,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+            "-z",
+        ],
+    )?;
+    Ok(nul_records(&output)
+        .into_iter()
+        .filter(|path| !path.is_empty())
+        .collect())
+}
+
+/// Splits Git's `-z` output into its records, the empty tail of the final separator included.
+///
+/// Lossy on purpose: a path Git cannot spell in UTF-8 is still better shown mangled than dropped
+/// from a listing whose whole job is to be complete.
+fn nul_records(output: &[u8]) -> Vec<String> {
+    output
+        .split(|byte| *byte == 0)
+        .map(|record| String::from_utf8_lossy(record).into_owned())
+        .collect()
+}
+
+/// The two sides of one file, as a diff editor needs them.
+///
+/// `from_path` is where a renamed file came from, and the side at the base has to be read from
+/// there rather than from the name it has now.
+pub fn file_diff(
+    workspace_path: &Path,
+    base_commit: &str,
+    path: &str,
+    from_path: Option<&str>,
+    status: ChangeStatus,
+    project_file: Option<&str>,
+) -> Result<FileDiff, String> {
+    let source = from_path.unwrap_or(path);
+    if is_submodule(workspace_path, base_commit, source, path) {
+        return Ok(FileDiff {
+            path: path.to_owned(),
+            is_submodule: true,
+            ..FileDiff::default()
+        });
+    }
+    let reads_a_base_side = status != ChangeStatus::Added;
+    // Asked before either side is read, because answering "too large" by loading the file first is
+    // how a packed atlas or an imported video takes the process down instead of a row saying so.
+    if reads_a_base_side
+        && blob_size(workspace_path, base_commit, source) > crate::files::MAX_FILE_BYTES
+    {
+        return Ok(too_large(path));
+    }
+    if status != ChangeStatus::Deleted
+        && working_file_size(workspace_path, path) > crate::files::MAX_FILE_BYTES
+    {
+        return Ok(too_large(path));
+    }
+    let original = match status {
+        // Nothing existed at the base, and asking Git for it fails rather than answering nothing.
+        ChangeStatus::Added => Vec::new(),
+        _ => match blob_at(workspace_path, base_commit, source)? {
+            Some(bytes) => bytes,
+            None => return Ok(too_large(path)),
+        },
+    };
+    // The row survived the listing because the task really did edit the project file. Read raw it
+    // would still show the addon's own two lines beside that edit, as work nobody did.
+    if path == crate::addon::PROJECT_FILE
+        && let Some(stripped) = project_file
+    {
+        return Ok(decoded(path, original, stripped.as_bytes().to_vec()));
+    }
+    let modified = match status {
+        ChangeStatus::Deleted => Vec::new(),
+        _ => read_working_file(workspace_path, path)?,
+    };
+    Ok(decoded(path, original, modified))
+}
+
+/// The two sides as a diff editor can take them, or the reason it cannot have them.
+///
+/// Neither side is turned into text until both are known to fit, and a side that is not UTF-8 is
+/// answered as such rather than failing: a Latin-1 script is not binary to Git, so it reaches here.
+fn decoded(path: &str, original: Vec<u8>, modified: Vec<u8>) -> FileDiff {
+    if original.len() as u64 > crate::files::MAX_FILE_BYTES
+        || modified.len() as u64 > crate::files::MAX_FILE_BYTES
+    {
+        return FileDiff {
+            path: path.to_owned(),
+            is_too_large: true,
+            ..FileDiff::default()
+        };
+    }
+    let (Ok(original), Ok(modified)) = (String::from_utf8(original), String::from_utf8(modified))
+    else {
+        return FileDiff {
+            path: path.to_owned(),
+            ..FileDiff::default()
+        };
+    };
+    FileDiff {
+        path: path.to_owned(),
+        original,
+        modified,
+        is_text: true,
+        is_too_large: false,
+        is_submodule: false,
+    }
+}
+
+fn too_large(path: &str) -> FileDiff {
+    FileDiff {
+        path: path.to_owned(),
+        is_too_large: true,
+        ..FileDiff::default()
+    }
+}
+
+/// Whether this path is another repository rather than a file, at the base or on disk now.
+///
+/// Git gives a submodule the same `M` and the same line counts as an edited file, so nothing in the
+/// listing separates the two. Every read of one fails: `cat-file` is asked for a blob and the tree
+/// holds a commit.
+fn is_submodule(workspace_path: &Path, commit: &str, source: &str, path: &str) -> bool {
+    git_text(workspace_path, &["ls-tree", commit, "--", source])
+        .is_ok_and(|entry| entry.starts_with("160000"))
+        || workspace_path.join(path).join(".git").exists()
+}
+
+/// What the base holds for this path, in bytes, without fetching any of it. Answers zero for a
+/// path the base does not have, which the status has already ruled out.
+fn blob_size(workspace_path: &Path, commit: &str, path: &str) -> u64 {
+    git_text(
+        workspace_path,
+        &["cat-file", "-s", &format!("{commit}:{path}")],
+    )
+    .ok()
+    .and_then(|size| size.trim().parse().ok())
+    .unwrap_or(0)
+}
+
+fn working_file_size(workspace_path: &Path, path: &str) -> u64 {
+    crate::files::Workspace::open(workspace_path)
+        .and_then(|workspace| workspace.resolve(path))
+        .ok()
+        .and_then(|resolved| fs::metadata(resolved).ok())
+        .map_or(0, |metadata| metadata.len())
+}
+
+/// One file as the base commit holds it, converted the way a checkout would write it.
+///
+/// `cat-file --filters` rather than `show`: `show` hands back the stored blob, so on a checkout
+/// with `core.autocrlf` on, every line of every file differs from the copy on disk and Git itself
+/// reports the file unchanged. This applies the same conversion the working tree got.
+///
+/// Read with a ceiling rather than into whatever it turns out to be. `cat-file -s` measures the
+/// stored object, and a smudge filter — git-lfs, on the art in any large Godot project — turns a
+/// 130 byte pointer into the whole asset. Checked only on the stored size, the guard passes and the
+/// filter's output arrives in memory anyway. Answers `None` for anything past the ceiling.
+fn blob_at(workspace_path: &Path, commit: &str, path: &str) -> Result<Option<Vec<u8>>, String> {
+    let mut child = git_command(
+        workspace_path,
+        &["cat-file", "--filters", &format!("{commit}:{path}")],
+    )
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .map_err(|error| format!("Could not start Git: {error}"))?;
+    let mut stdout = child.stdout.take().ok_or("Git produced no output")?;
+    let mut held = Vec::new();
+    let capped = (&mut stdout).take(crate::files::MAX_FILE_BYTES + 1);
+    let read = std::io::BufReader::new(capped).read_to_end(&mut held);
+    // Killed rather than drained: a filter still writing gigabytes has nothing left to tell us.
+    let _ = child.kill();
+    let status = child
+        .wait()
+        .map_err(|error| format!("Could not read from Git: {error}"))?;
+    read.map_err(|error| format!("Could not read {path}: {error}"))?;
+    if held.len() as u64 > crate::files::MAX_FILE_BYTES {
+        return Ok(None);
+    }
+    if !status.success() && held.is_empty() {
+        return Err(format!("Could not read {path} from {commit}"));
+    }
+    Ok(Some(held))
+}
+
+/// The copy on disk, through the workspace's own guard rather than around it.
+///
+/// `Workspace::resolve` is the single place that refuses a path leaving the worktree, symlinks
+/// included. Git lists a symlink as an ordinary added file, so joining the path by hand would read
+/// whatever it points at and draw it in the diff editor.
+fn read_working_file(workspace_path: &Path, path: &str) -> Result<Vec<u8>, String> {
+    let resolved = crate::files::Workspace::open(workspace_path)
+        .and_then(|workspace| workspace.resolve(path))
+        .map_err(|error| error.message)?;
+    fs::read(resolved).map_err(|error| format!("Could not read {path}: {error}"))
+}
+
+/// Git's stdout exactly as it came.
+///
+/// [`git_text`] trims and insists on UTF-8, and a file's own bytes survive neither: trimming eats
+/// the trailing newline that every other reader keeps, and a Latin-1 script is not binary to Git
+/// but is not UTF-8 either.
+fn git_bytes(directory: &Path, arguments: &[&str]) -> Result<Vec<u8>, String> {
+    let output = git_output(directory, arguments)?;
+    if !output.status.success() {
+        return Err(git_failure("read from Git", &output));
+    }
+    Ok(output.stdout)
 }
 
 #[cfg(test)]
@@ -1804,5 +2345,777 @@ mod tests {
             git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head"),
             "there was nothing to remove, so there is nothing to commit"
         );
+    }
+    /// Everything the working tree holds, whether or not it was ever committed.
+    ///
+    /// Gofer leaves a task's work loose until a switch, so a listing that read only the index would
+    /// be empty for exactly the case the view exists for.
+    #[test]
+    fn a_task_lists_committed_and_uncommitted_work_alike() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(repository.path().join("banked.gd"), "extends Node\n").expect("banked");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "banked"]);
+        fs::write(repository.path().join("loose.gd"), "extends Node2D\n").expect("loose");
+        fs::write(
+            repository.path().join("project.godot"),
+            "[application]\nx=1\n",
+        )
+        .expect("edit");
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        let listed: Vec<(&str, ChangeStatus)> = changes
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.status))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("banked.gd", ChangeStatus::Added),
+                ("loose.gd", ChangeStatus::Added),
+                ("project.godot", ChangeStatus::Modified),
+            ]
+        );
+        assert_eq!(changes.dropped, 0);
+        assert!(!changes.is_merging);
+    }
+
+    /// Git's own answer about binary, rather than a guess from the extension: `--numstat` prints a
+    /// dash where it will not count lines, and that is the only honest signal there is.
+    #[test]
+    fn a_binary_file_is_named_binary_and_carries_no_counts() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(repository.path().join("sprite.png"), [0u8, 1, 2, 255, 254]).expect("binary");
+        fs::write(repository.path().join("player.gd"), "extends Node\n").expect("script");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "assets"]);
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        let binary = find(&changes, "sprite.png");
+        assert!(binary.is_binary, "Git refused to count its lines");
+        assert_eq!((binary.added, binary.removed), (0, 0));
+        let script = find(&changes, "player.gd");
+        assert!(!script.is_binary);
+        assert_eq!(script.added, 1);
+    }
+
+    /// A rename made during a task is a delete and an add, because Git pairs a rename from the
+    /// index and Gofer never stages one. `git status` tells a human the same thing about the same
+    /// tree, so this is the truth rather than a shortfall.
+    #[test]
+    fn a_rename_the_agent_made_reads_as_a_delete_and_an_add() {
+        let repository = repository();
+        fs::write(
+            repository.path().join("old.gd"),
+            "extends Node\nfunc a():\n\tpass\n",
+        )
+        .expect("script");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "script"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::rename(
+            repository.path().join("old.gd"),
+            repository.path().join("new.gd"),
+        )
+        .expect("rename");
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        assert_eq!(find(&changes, "old.gd").status, ChangeStatus::Deleted);
+        assert_eq!(find(&changes, "new.gd").status, ChangeStatus::Added);
+        assert!(
+            changes.files.iter().all(|file| file.from_path.is_none()),
+            "nothing may claim to know where an unstaged rename came from"
+        );
+    }
+
+    /// A rename a task switch already committed is a rename, and carries where it came from.
+    #[test]
+    fn a_rename_that_was_committed_keeps_the_name_it_had() {
+        let repository = repository();
+        fs::write(
+            repository.path().join("old.gd"),
+            "extends Node\nfunc a():\n\tpass\n",
+        )
+        .expect("script");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "script"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        git(repository.path(), &["mv", "old.gd", "new.gd"]);
+        git(repository.path(), &["commit", "-m", "renamed"]);
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        let renamed = find(&changes, "new.gd");
+        assert_eq!(renamed.status, ChangeStatus::Renamed);
+        assert_eq!(renamed.from_path.as_deref(), Some("old.gd"));
+    }
+
+    /// Git spells a rename as one braced field in `--numstat` and as two fields in `--name-status`,
+    /// so the two listings are joined by path and the join has to survive it.
+    #[test]
+    fn a_rename_under_a_shared_directory_still_joins_to_its_counts() {
+        let repository = repository();
+        fs::create_dir_all(repository.path().join("src/old")).expect("directory");
+        fs::write(
+            repository.path().join("src/old/thing.gd"),
+            "extends Node\nfunc a():\n\tpass\n",
+        )
+        .expect("script");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "script"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::create_dir_all(repository.path().join("src/new")).expect("directory");
+        git(
+            repository.path(),
+            &["mv", "src/old/thing.gd", "src/new/thing.gd"],
+        );
+        git(repository.path(), &["commit", "-m", "moved"]);
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        let moved = find(&changes, "src/new/thing.gd");
+        assert_eq!(moved.status, ChangeStatus::Renamed);
+        assert!(
+            !moved.is_binary,
+            "the counts joined, so the row is not left looking like a binary"
+        );
+    }
+
+    /// Git C-quotes any path that is not plain ASCII unless it is asked for `-z`, and a quoted path
+    /// names no file on disk.
+    #[test]
+    fn a_path_that_is_not_ascii_arrives_as_itself() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(repository.path().join("spelar.gd"), "extends Node\n").expect("tracked");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "tracked"]);
+        git(repository.path(), &["mv", "spelar.gd", "spelaré.gd"]);
+        git(repository.path(), &["commit", "-m", "accented"]);
+        fs::write(repository.path().join("löse.gd"), "extends Node\n").expect("untracked");
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        let paths: Vec<&str> = changes
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert!(paths.contains(&"spelaré.gd"), "{paths:?}");
+        assert!(paths.contains(&"löse.gd"), "{paths:?}");
+        assert!(
+            paths.iter().all(|path| !path.contains('\\')),
+            "an octal escape is not a path: {paths:?}"
+        );
+    }
+
+    /// A file becoming a symlink is `T`, which is neither an add nor a modification, and a listing
+    /// that had no arm for it would report something untrue.
+    #[test]
+    fn a_file_that_changed_type_is_named_rather_than_guessed_at() {
+        let repository = repository();
+        fs::write(repository.path().join("link.txt"), "text\n").expect("file");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "file"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::remove_file(repository.path().join("link.txt")).expect("remove");
+        std::os::unix::fs::symlink("project.godot", repository.path().join("link.txt"))
+            .expect("symlink");
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        assert_eq!(find(&changes, "link.txt").status, ChangeStatus::TypeChanged);
+    }
+
+    /// Gofer's own directory holds the project database, which is rewritten every turn and is
+    /// nobody's work. Nothing has ever put it in an ignore file, so the listing has to.
+    #[test]
+    fn gofers_own_files_are_never_listed_as_the_tasks_work() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        for path in [".gofer/project.sqlite", ".godot/uid_cache.bin"] {
+            let file = repository.path().join(path);
+            fs::create_dir_all(file.parent().expect("parent")).expect("directory");
+            fs::write(&file, "not the game").expect("write");
+        }
+        fs::write(repository.path().join("player.gd"), "extends Node\n").expect("script");
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        let paths: Vec<&str> = changes
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, ["player.gd"], "{paths:?}");
+    }
+
+    /// The addon puts two lines in `project.godot` while a session runs. Left in, every diff taken
+    /// during a session shows a change to the project file that nobody made.
+    #[test]
+    fn the_project_file_is_dropped_when_only_the_addon_changed_it() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        let staged = "[application]\n[autoload]\nGoferRuntime=\"*res://addons/gofer/runtime.gd\"\n";
+        fs::write(repository.path().join("project.godot"), staged).expect("staged project file");
+
+        let with_addon = changed_files(repository.path(), &base, None).expect("list the changes");
+        assert_eq!(with_addon.files.len(), 1, "the addon's edit is a change");
+
+        let stripped = changed_files(repository.path(), &base, Some("[application]\n"))
+            .expect("list the changes");
+
+        assert!(
+            stripped.files.is_empty(),
+            "with the addon's lines taken back out the task changed nothing: {:?}",
+            stripped.files
+        );
+    }
+
+    /// A task that also edited the project file keeps it, or the view would hide real work.
+    #[test]
+    fn the_project_file_stays_when_the_task_changed_it_too() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(
+            repository.path().join("project.godot"),
+            "[application]\nname=\"the game\"\n[autoload]\nGoferRuntime=\"*res://x.gd\"\n",
+        )
+        .expect("project file");
+
+        let changes = changed_files(
+            repository.path(),
+            &base,
+            Some("[application]\nname=\"the game\"\n"),
+        )
+        .expect("list the changes");
+
+        assert_eq!(
+            find(&changes, "project.godot").status,
+            ChangeStatus::Modified
+        );
+    }
+
+    /// A listing cut to fit says how many it dropped. A short listing that says so still lets
+    /// someone go looking; a silently short one does not.
+    #[test]
+    fn an_oversized_listing_is_cut_and_says_how_many_it_dropped() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        for index in 0..MAX_LISTED_CHANGES + 25 {
+            fs::write(
+                repository.path().join(format!("scene_{index:04}.gd")),
+                "extends Node\n",
+            )
+            .expect("script");
+        }
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        assert_eq!(changes.files.len(), MAX_LISTED_CHANGES);
+        assert_eq!(changes.dropped, 25);
+    }
+
+    /// A merge left half-finished puts Git's markers in the working tree. Read as the task's work
+    /// they are a diff of something nobody wrote, so the rows say which files they are.
+    #[test]
+    fn files_a_merge_left_conflicted_are_marked_as_such() {
+        let repository = repository();
+        create_task_branch(repository.path(), TASK, "master").expect("create the branch");
+        fs::write(
+            repository.path().join("player.gd"),
+            "extends Node # master\n",
+        )
+        .expect("edit");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "master edit"]);
+        checkout_branch(repository.path(), TASK).expect("open the task");
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(repository.path().join("player.gd"), "extends Node # task\n").expect("edit");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "task edit"]);
+        resolve_task_conflicts(repository.path(), TASK, "master").expect("start the merge");
+
+        let changes = changed_files(repository.path(), &base, None).expect("list the changes");
+
+        assert!(changes.is_merging, "the view has to say a merge is open");
+        assert!(
+            find(&changes, "player.gd").is_conflicted,
+            "the file holds both versions, not the task's work"
+        );
+    }
+
+    /// The content read must not go through `git_text`, which trims. The side on disk is not
+    /// trimmed, so a trimmed original shows a change at the end of every file that has one.
+    #[test]
+    fn a_files_trailing_newlines_survive_the_read() {
+        let repository = repository();
+        fs::write(repository.path().join("player.gd"), "extends Node\n\n\n").expect("script");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "script"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(repository.path().join("player.gd"), "extends Node2D\n\n\n").expect("edit");
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "player.gd",
+            None,
+            ChangeStatus::Modified,
+            None,
+        )
+        .expect("read the diff");
+
+        assert_eq!(diff.original, "extends Node\n\n\n");
+        assert_eq!(diff.modified, "extends Node2D\n\n\n");
+        assert!(diff.is_text);
+    }
+
+    /// An added file has no side at the base, and asking Git for one fails rather than answering
+    /// nothing — so the status decides, not an error that gets swallowed.
+    #[test]
+    fn an_added_file_reads_as_an_empty_original_rather_than_a_failure() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(repository.path().join("fresh.gd"), "extends Node\n").expect("script");
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "fresh.gd",
+            None,
+            ChangeStatus::Added,
+            None,
+        )
+        .expect("read the diff");
+
+        assert_eq!(diff.original, "");
+        assert_eq!(diff.modified, "extends Node\n");
+    }
+
+    /// A deleted file has no side on disk, and reading one would fail.
+    #[test]
+    fn a_deleted_file_reads_as_an_empty_modified_side() {
+        let repository = repository();
+        fs::write(repository.path().join("gone.gd"), "extends Node\n").expect("script");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "script"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::remove_file(repository.path().join("gone.gd")).expect("remove");
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "gone.gd",
+            None,
+            ChangeStatus::Deleted,
+            None,
+        )
+        .expect("read the diff");
+
+        assert_eq!(diff.original, "extends Node\n");
+        assert_eq!(diff.modified, "");
+    }
+
+    /// A Latin-1 script is not binary to Git — it counts its lines — but it is not UTF-8 either,
+    /// and a read that insisted on UTF-8 would fail the whole listing rather than one row.
+    #[test]
+    fn a_file_that_is_not_utf8_is_reported_rather_than_failing_the_read() {
+        let repository = repository();
+        fs::write(repository.path().join("latin.gd"), b"# caf\xe9\n").expect("latin-1");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "latin"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(repository.path().join("latin.gd"), b"# caf\xe9 changed\n").expect("edit");
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "latin.gd",
+            None,
+            ChangeStatus::Modified,
+            None,
+        )
+        .expect("the read answers rather than failing");
+
+        assert!(!diff.is_text, "there is nothing a diff editor can show");
+        assert!(!diff.is_too_large);
+    }
+
+    /// A file past the workspace's own read ceiling is answered as such, rather than sent to a
+    /// diff editor that would have to hold both sides of it.
+    #[test]
+    fn a_file_over_the_ceiling_says_so_instead_of_answering_its_text() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::write(
+            repository.path().join("huge.txt"),
+            vec![b'a'; crate::files::MAX_FILE_BYTES as usize + 1],
+        )
+        .expect("huge");
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "huge.txt",
+            None,
+            ChangeStatus::Added,
+            None,
+        )
+        .expect("read the diff");
+
+        assert!(diff.is_too_large);
+        assert_eq!(diff.modified, "", "nothing that large may cross the wire");
+    }
+
+    /// A rename's side at the base lives under the name it used to have.
+    #[test]
+    fn a_renamed_files_original_is_read_from_where_it_came_from() {
+        let repository = repository();
+        fs::write(
+            repository.path().join("old.gd"),
+            "extends Node\nfunc a():\n\tpass\n",
+        )
+        .expect("script");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "script"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        git(repository.path(), &["mv", "old.gd", "new.gd"]);
+        git(repository.path(), &["commit", "-m", "renamed"]);
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "new.gd",
+            Some("old.gd"),
+            ChangeStatus::Renamed,
+            None,
+        )
+        .expect("read the diff");
+
+        assert_eq!(diff.original, "extends Node\nfunc a():\n\tpass\n");
+        assert_eq!(diff.modified, diff.original);
+    }
+
+    /// `git show` hands back the stored blob, so on a checkout that converts line endings every
+    /// line of every file differs from the copy on disk while Git itself reports the file clean.
+    /// `cat-file --filters` applies the conversion the working tree got.
+    #[test]
+    fn a_checkout_that_converts_line_endings_still_reads_as_unchanged() {
+        let repository = repository();
+        git(repository.path(), &["config", "core.autocrlf", "true"]);
+        fs::write(repository.path().join("notes.txt"), b"a\r\nb\r\n").expect("crlf file");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "notes"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "notes.txt",
+            None,
+            ChangeStatus::Modified,
+            None,
+        )
+        .expect("read the diff");
+
+        assert_eq!(
+            diff.original, diff.modified,
+            "Git calls this file unchanged, so its two sides have to match"
+        );
+    }
+
+    /// A symlink is an ordinary added file to Git, so the copy on disk has to be read through the
+    /// workspace's guard rather than by joining the path: otherwise whatever it points at is what
+    /// gets drawn in the diff editor.
+    #[test]
+    fn a_symlink_out_of_the_worktree_is_refused_rather_than_followed() {
+        let repository = repository();
+        let outside = TempDir::new().expect("somewhere else");
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, "not the game\n").expect("secret");
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        std::os::unix::fs::symlink(&secret, repository.path().join("innocent.gd")).expect("link");
+
+        let refused = file_diff(
+            repository.path(),
+            &base,
+            "innocent.gd",
+            None,
+            ChangeStatus::Added,
+            None,
+        )
+        .expect_err("the workspace refuses a path that leaves it");
+
+        assert!(!refused.contains("not the game"), "{refused}");
+    }
+
+    /// The cap is how many rows are drawn, not which files exist. Looked up in the truncated
+    /// listing, everything past it would be a row the user can ask for and never be given.
+    #[test]
+    fn a_file_past_the_drawing_cap_can_still_be_read() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        for index in 0..MAX_LISTED_CHANGES + 5 {
+            fs::write(
+                repository.path().join(format!("scene_{index:04}.gd")),
+                "extends Node\n",
+            )
+            .expect("script");
+        }
+        let last = format!("scene_{:04}.gd", MAX_LISTED_CHANGES + 4);
+
+        let listed = changed_files(repository.path(), &base, None).expect("list");
+        assert!(
+            !listed.files.iter().any(|file| file.path == last),
+            "this file is past the cap, so the listing does not draw it"
+        );
+
+        let found = changed_file(repository.path(), &base, None, &last)
+            .expect("look it up")
+            .expect("the cap must not decide which files exist");
+        assert_eq!(found.status, ChangeStatus::Added);
+    }
+
+    /// A task that really did edit the project file keeps its row, and the side on disk still
+    /// carries the addon's two lines. Shown raw, they read as work the task did.
+    #[test]
+    fn the_project_files_diff_leaves_the_addons_lines_out_of_the_task() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        let edited = "[application]\nname=\"the game\"\n";
+        fs::write(
+            repository.path().join("project.godot"),
+            format!("{edited}[autoload]\nGoferRuntime=\"*res://addons/gofer/runtime.gd\"\n"),
+        )
+        .expect("staged project file");
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "project.godot",
+            None,
+            ChangeStatus::Modified,
+            Some(edited),
+        )
+        .expect("read the diff");
+
+        assert_eq!(diff.modified, edited);
+        assert!(!diff.modified.contains("GoferRuntime"), "{}", diff.modified);
+        assert_eq!(diff.original, "[application]\n");
+    }
+
+    /// The ceiling is answered from the sizes, never by loading the file to find out how big it is.
+    /// A packed atlas read twice to say "too large" is how the window dies instead of answering.
+    #[test]
+    fn the_ceiling_is_answered_without_reading_either_side() {
+        let repository = repository();
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        let huge = repository.path().join("atlas.png");
+        fs::write(&huge, vec![0u8; crate::files::MAX_FILE_BYTES as usize + 1]).expect("huge");
+
+        assert!(
+            working_file_size(repository.path(), "atlas.png") > crate::files::MAX_FILE_BYTES,
+            "the size is known from the metadata alone"
+        );
+        assert_eq!(
+            blob_size(repository.path(), &base, "project.godot"),
+            fs::metadata(repository.path().join("project.godot"))
+                .expect("metadata")
+                .len(),
+            "and the base side's size comes from Git rather than from its contents"
+        );
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "atlas.png",
+            None,
+            ChangeStatus::Added,
+            None,
+        )
+        .expect("answer rather than load it");
+
+        assert!(diff.is_too_large);
+        assert_eq!(diff.modified, "");
+    }
+
+    /// A smudge filter — git-lfs, on the art in any large project — turns a small stored object
+    /// into a large working copy. Measured on the stored size alone the guard passes and the
+    /// filter's output lands in memory regardless, which is the thing the guard is for.
+    #[test]
+    fn a_filter_cannot_smuggle_a_huge_file_past_the_ceiling() {
+        let repository = repository();
+        git(
+            repository.path(),
+            &[
+                "config",
+                "filter.balloon.smudge",
+                "sh -c 'head -c 9000000 /dev/zero | tr \\\\000 a'",
+            ],
+        );
+        fs::write(
+            repository.path().join(".gitattributes"),
+            "pointer.bin filter=balloon\n",
+        )
+        .expect("attributes");
+        fs::write(repository.path().join("pointer.bin"), "a tiny pointer\n").expect("pointer");
+        git(repository.path(), &["add", "--all"]);
+        git(repository.path(), &["commit", "-m", "pointer"]);
+        let base = git_text(repository.path(), &["rev-parse", "HEAD"]).expect("head");
+        fs::remove_file(repository.path().join("pointer.bin")).expect("delete it");
+
+        assert!(
+            blob_size(repository.path(), &base, "pointer.bin") < crate::files::MAX_FILE_BYTES,
+            "the stored object is small; only the filter's output is not"
+        );
+
+        // Asked of the read, which is what has to refuse it. The answer alone proves less than it
+        // looks: `decoded` reports `too_large` from the bytes it is handed either way, and that the
+        // read never holds them is a property no assertion here can see.
+        assert_eq!(
+            blob_at(repository.path(), &base, "pointer.bin").expect("read with a ceiling"),
+            None,
+            "the read stops at the ceiling rather than holding the filter's whole output"
+        );
+
+        let diff = file_diff(
+            repository.path(),
+            &base,
+            "pointer.bin",
+            None,
+            ChangeStatus::Deleted,
+            None,
+        )
+        .expect("answer rather than hold it all");
+        assert!(diff.is_too_large);
+        assert_eq!(diff.original, "");
+    }
+
+    fn find<'a>(changes: &'a TaskChanges, path: &str) -> &'a ChangedFile {
+        changes
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("{path} is not in {:?}", changes.files))
+    }
+
+    /// A submodule is not a file, and every read of one fails. It has to be answered rather than
+    /// error, the way a binary or an oversized file is.
+    #[test]
+    fn a_submodule_is_listed_and_says_it_cannot_be_shown() {
+        let outer = repository();
+        let inner = repository();
+        let url = inner.path().to_string_lossy().to_string();
+        git(
+            outer.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &url,
+                "addons/dep",
+            ],
+        );
+        git(outer.path(), &["add", "-A"]);
+        git(outer.path(), &["commit", "-m", "Vendor a dependency"]);
+        let base = git_text(outer.path(), &["rev-parse", "HEAD"]).expect("head");
+
+        let dependency = outer.path().join("addons/dep");
+        fs::write(dependency.join("moved.gd"), "extends Node\n").expect("write");
+        git(&dependency, &["add", "-A"]);
+        git(&dependency, &["commit", "-m", "Move the pointer"]);
+
+        let listed = changed_files(outer.path(), &base, None).expect("listing");
+        assert_eq!(
+            listed
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["addons/dep"],
+            "the pointer change is the task's work and has to be listed"
+        );
+
+        let diff = file_diff(
+            outer.path(),
+            &base,
+            "addons/dep",
+            None,
+            ChangeStatus::Modified,
+            None,
+        )
+        .expect("a submodule answers rather than failing");
+        assert!(diff.is_submodule);
+        assert!(!diff.is_text);
+    }
+
+    /// The sidecars are hidden by default, so a budget spent on them is spent on nothing.
+    #[test]
+    fn the_row_budget_goes_to_the_users_files_before_godots_sidecars() {
+        let real = MAX_LISTED_CHANGES - 100;
+        let mut files = Vec::new();
+        for index in 0..real {
+            files.push(changed(&format!("assets/art/tile_{index:04}.png")));
+            files.push(changed(&format!("assets/art/tile_{index:04}.png.import")));
+        }
+        files.push(changed("scripts/zz_last.gd"));
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+
+        let kept = within_the_row_budget(files);
+
+        assert_eq!(kept.len(), MAX_LISTED_CHANGES);
+        assert_eq!(
+            kept.iter()
+                .filter(|file| !is_generated_sidecar(&file.path))
+                .count(),
+            real + 1,
+            "every real file fits, and the sidecars take only what is left"
+        );
+        assert!(
+            kept.iter().any(|file| file.path == "scripts/zz_last.gd"),
+            "a real file last in path order still has to be reachable"
+        );
+        assert!(
+            kept.windows(2).all(|pair| pair[0].path <= pair[1].path),
+            "the listing stays in path order"
+        );
+    }
+
+    /// The budget is the user's work first, but it is still a budget: past it, real files go too.
+    #[test]
+    fn a_listing_of_nothing_but_real_files_is_still_cut_at_the_cap() {
+        let files = (0..MAX_LISTED_CHANGES + 50)
+            .map(|index| changed(&format!("scripts/file_{index:04}.gd")))
+            .collect();
+
+        assert_eq!(within_the_row_budget(files).len(), MAX_LISTED_CHANGES);
+    }
+
+    #[test]
+    fn a_dotfile_named_for_a_sidecar_is_not_one() {
+        assert!(is_generated_sidecar("assets/art/tile.png.import"));
+        assert!(is_generated_sidecar("scripts/player.gd.uid"));
+        assert!(!is_generated_sidecar(".import"));
+        assert!(!is_generated_sidecar("scripts/player.gd"));
+    }
+
+    fn changed(path: &str) -> ChangedFile {
+        ChangedFile {
+            path: path.to_owned(),
+            status: ChangeStatus::Modified,
+            from_path: None,
+            is_binary: false,
+            added: 1,
+            removed: 0,
+            is_conflicted: false,
+        }
     }
 }
