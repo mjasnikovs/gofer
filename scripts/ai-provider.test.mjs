@@ -25,6 +25,7 @@ import {
     instantTimers,
     isProbe,
     longConversation,
+    oneLongTurn,
     probeResult,
     servedBy,
     settings,
@@ -894,6 +895,61 @@ test('a manual compaction of an already summarised conversation changes nothing'
     assert.equal(mock.bodies.length, 0, 'nothing is paid for')
     assert.equal(completion.summarised, 0)
     assert.deepEqual(completion.agentMessages, history)
+})
+
+test('a manual compaction folds away a conversation that is all one turn', async context => {
+    const mock = startScriptedServer([{text: 'SUMMARY OF THE TURN SO FAR'}])
+    const url = await baseUrl(context, mock.server)
+    const history = oneLongTurn(120, 3_500)
+
+    const completion = await runCompaction({
+        settings: servedBy(url),
+        agentMessages: history,
+        emit: () => undefined
+    })
+
+    // The cut lands inside the first turn, so every foldable message is a turn prefix and none of
+    // them is history. Reading only the history half calls the longest conversation there is empty.
+    assert.ok(mock.bodies.length >= 1, 'the summary is asked for')
+    assert.ok(completion.summarised > 0, 'and it says how much it folded')
+    assert.ok(completion.agentMessages.length < history.length)
+    assert.equal(completion.agentMessages[0].role, 'compactionSummary')
+})
+
+test('a compaction counts the turn prefix it folded, not only the older messages', async context => {
+    const mock = startScriptedServer([{text: 'HISTORY'}, {text: 'TURN SO FAR'}])
+    const url = await baseUrl(context, mock.server)
+    const history = [...longConversation(40, 3_500), ...oneLongTurn(40, 3_500)]
+
+    const completion = await runCompaction({
+        settings: servedBy(url),
+        agentMessages: history,
+        emit: () => undefined
+    })
+
+    const retained = completion.agentMessages.filter(
+        message => message.role !== 'compactionSummary'
+    )
+    assert.equal(completion.summarised, history.length - retained.length)
+})
+
+test('a compaction that folds nothing reports the size it started with', async context => {
+    const mock = startScriptedServer([{text: 'unused'}])
+    const url = await baseUrl(context, mock.server)
+    const history = longConversation(4, 200)
+    const last = history.at(-1)
+    // A real transcript carries the provider's own count, which includes the system prompt and the
+    // tool catalogue. Measuring one side with it and the other without makes the bar drop on its own.
+    history[history.length - 1] = {...last, usage: {...NO_USAGE, totalTokens: 40_000}}
+
+    const completion = await runCompaction({
+        settings: servedBy(url),
+        agentMessages: history,
+        emit: () => undefined
+    })
+
+    assert.equal(completion.summarised, 0)
+    assert.equal(completion.tokensAfter, completion.tokensBefore)
 })
 
 test('compaction set to 100 percent sends the conversation whole', async context => {

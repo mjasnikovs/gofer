@@ -97,6 +97,7 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
     const listeners = new Set<() => void>()
     let nextMessageId = 1
     let activeRequestId: number | undefined
+    let stoppedRequestId: number | undefined
     let nextSteerId = 1
     const takeSteerId = () => nextSteerId++
 
@@ -396,12 +397,15 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
             } finally {
                 if (activeRequestId === requestId) activeRequestId = undefined
             }
-            // Stopped, or torn down before it answered. Saying so beats a button that did nothing.
+            // A Stop is the user's own answer. Only a teardown that never answered needs saying,
+            // because there the button looks like it did nothing.
             if (!done) {
                 publish({
                     ...current,
                     isStreaming: false,
-                    error: 'The conversation was not summarised.'
+                    ...(stoppedRequestId !== requestId && {
+                        error: 'The conversation was not summarised.'
+                    })
                 })
                 return
             }
@@ -436,6 +440,7 @@ export function createTurnRunner({send, cancel, steer, compact}: TurnDependencie
         },
         stop() {
             if (activeRequestId === undefined) return
+            stoppedRequestId = activeRequestId
             void cancel(activeRequestId)
         }
     }

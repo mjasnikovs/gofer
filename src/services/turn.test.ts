@@ -163,6 +163,21 @@ describe('createTurnRunner', () => {
         expect(runner.state().isStreaming).toBe(false)
     })
 
+    it('says nothing when the summary was stopped on purpose', async () => {
+        const {runner, holdCompact, idle} = harness({})
+        const released = holdCompact()
+
+        runner.start('go')
+        await idle()
+        const running = runner.compact()
+        await idle()
+        runner.stop()
+        released()
+        await running
+
+        expect(runner.state().error).toBeUndefined()
+    })
+
     it('says so rather than drawing a divider over nothing', async () => {
         const {runner, answerCompact, idle} = harness({})
         answerCompact({

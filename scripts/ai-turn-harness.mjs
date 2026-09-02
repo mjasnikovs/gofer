@@ -287,6 +287,24 @@ export function longConversation(pairs, characters) {
     return messages
 }
 
+/** One user message and a long run of answers to it: the shape that splits at the first turn. */
+export function oneLongTurn(steps, characters) {
+    const messages = [{role: 'user', content: 'u'.repeat(characters), timestamp: 1}]
+    for (let index = 0; index < steps; index += 1) {
+        messages.push({
+            role: 'assistant',
+            content: [{type: 'text', text: 'a'.repeat(characters)}],
+            api: 'openai-completions',
+            provider: 'local',
+            model: MODEL_ID,
+            usage: NO_USAGE,
+            stopReason: 'stop',
+            timestamp: index + 2
+        })
+    }
+    return messages
+}
+
 export function toolStep(marker, at) {
     return [
         {

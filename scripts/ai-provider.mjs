@@ -249,15 +249,25 @@ function compactionEntries(messages) {
     })
 }
 
+function bodyTokens(messages) {
+    return messages.reduce((total, message) => total + estimateTokens(message), 0)
+}
+
+function foldedCount(preparation) {
+    if (!preparation) return 0
+    return preparation.messagesToSummarize.length + preparation.turnPrefixMessages.length
+}
+
 // The count travels because no caller can recover it: the cut point is chosen inside
 // prepareCompaction, and the retained tail does not say how much was folded away.
 async function compactMessages(messages, models, model, settings, thinkingLevel, signal) {
     const preparation = prepareCompaction(compactionEntries(messages), settings)
     if (!preparation.ok) throw new Error(`Compaction failed: ${preparation.error.message}`)
     // Nothing older than the tail budget: there is no summary to write, and asking for one buys a
-    // model request that folds away zero messages.
-    if (!preparation.value || preparation.value.messagesToSummarize.length === 0)
-        return {messages, summarised: 0}
+    // model request that folds away zero messages. A cut inside the first turn folds only a turn
+    // prefix, so reading the history half alone calls the longest conversation there is empty.
+    const folded = foldedCount(preparation.value)
+    if (folded === 0) return {messages, summarised: 0}
     const result = await compact(preparation.value, models, model, undefined, signal, thinkingLevel)
     if (!result.ok) throw new Error(`Compaction failed: ${result.error.message}`)
     return {
@@ -269,7 +279,7 @@ async function compactMessages(messages, models, model, settings, thinkingLevel,
             ),
             ...(result.value.retainedTail ?? [])
         ],
-        summarised: preparation.value.messagesToSummarize.length
+        summarised: folded
     }
 }
 
@@ -943,16 +953,16 @@ export async function runCompaction({
     } finally {
         emit(compactionEnd())
     }
+    // The two sides have to be one scale, and only one of them can be read off the provider:
+    // estimateContextTokens trusts the newest assistant usage it finds, and the retained tail still
+    // reports the count from before the cut. So carry the part a cut cannot touch — the system
+    // prompt and the tool catalogue — and move it by what the message bodies lost.
+    const overhead = Math.max(0, tokensBefore - bodyTokens(stored))
     const completion = compactDone({
         agentMessages: compacted.messages,
         summarised: compacted.summarised,
         tokensBefore,
-        // Summed, not estimated: estimateContextTokens trusts the newest assistant usage it finds,
-        // and the retained tail still reports the count from before the cut.
-        tokensAfter: compacted.messages.reduce(
-            (total, message) => total + estimateTokens(message),
-            0
-        )
+        tokensAfter: overhead + bodyTokens(compacted.messages)
     })
     emit(completion)
     return completion
