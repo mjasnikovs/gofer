@@ -2,13 +2,19 @@ import {useCallback, useLayoutEffect, useRef, useState} from 'react'
 
 type CompactTabs = readonly [isCompact: boolean, onStrip: (node: HTMLElement | null) => void]
 
+// TabList's ref lands on its outer landmark, and the tabs live in a scrolling strip
+// inside it. That strip is the only box whose overflow is the tabs' own.
+function stripOf(node: HTMLElement): HTMLElement {
+    return node.querySelector<HTMLElement>('.astryx-tab-strip') ?? node
+}
+
 /**
- * Astryx caps a tab strip at its parent's width but lets tabs that do not fit paint
- * outside it, where they leave the window entirely. Rather than guess a breakpoint,
- * measure the strip: the labels come off exactly when they stop fitting, and go back
- * on when the width they needed is available again. Expanding into a width that turns
- * out too small records the larger requirement, so the two states settle rather than
- * trade places forever.
+ * Astryx answers tabs that do not fit by scrolling them out of sight, where they are
+ * gone as far as anyone using a strip with no scrollbar can tell. Rather than guess a
+ * breakpoint, measure the strip: the labels come off exactly when they stop fitting,
+ * and go back on when the width they needed is available again. Expanding into a width
+ * that turns out too small records the larger requirement, so the two states settle
+ * rather than trade places forever.
  */
 export function useCompactTabs(): CompactTabs {
     const [isCompact, setIsCompact] = useState(false)
@@ -22,8 +28,9 @@ export function useCompactTabs(): CompactTabs {
     }, [])
 
     useLayoutEffect(() => {
-        const node = strip.current
-        if (!node) return undefined
+        const root = strip.current
+        if (!root) return undefined
+        const node = stripOf(root)
         const measure = () => {
             setIsCompact(compact => {
                 if (compact) return node.clientWidth < widthWithLabels.current

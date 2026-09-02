@@ -51,8 +51,8 @@
         "astryx": "astryx"
     },
     "dependencies": {
-        "@astryxdesign/core": "0.4.7",
-        "@astryxdesign/theme-stone": "0.4.7",
+        "@astryxdesign/core": "0.5.2",
+        "@astryxdesign/theme-stone": "0.5.2",
         "@earendil-works/pi-agent-core": "0.84.2",
         "@earendil-works/pi-ai": "0.84.2",
         "@fontsource-variable/figtree": "^5.3.0",
@@ -71,7 +71,7 @@
         "turndown": "7.2.4"
     },
     "devDependencies": {
-        "@astryxdesign/cli": "0.4.7",
+        "@astryxdesign/cli": "0.5.2",
         "@axe-core/playwright": "4.12.1",
         "@eslint/js": "10.0.1",
         "@playwright/test": "1.62.1",

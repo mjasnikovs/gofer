@@ -1077,7 +1077,7 @@ describe('Workspace errors', () => {
         const banner = await screen.findByRole('alert')
         expect(banner).toHaveTextContent('the AI worker died')
 
-        await user.click(screen.getByRole('button', {name: 'Dismiss'}))
+        await user.click(screen.getByRole('button', {name: 'Dismiss Gofer could not do that'}))
         await flush()
 
         expect(screen.queryByRole('alert')).not.toBeInTheDocument()
@@ -1090,7 +1090,9 @@ describe('Workspace errors', () => {
 
         ending = 'crash'
         await send(user, 'first prompt')
-        await user.click(await screen.findByRole('button', {name: 'Dismiss'}))
+        await user.click(
+            await screen.findByRole('button', {name: 'Dismiss Gofer could not do that'})
+        )
         await flush()
 
         await send(user, 'second prompt')
