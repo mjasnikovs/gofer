@@ -64,9 +64,16 @@ type MergeOffer = Readonly<{
 
 const NOTHING_TO_OFFER: MergeOffer = {mode: 'clashed', paths: []}
 
-function joinDraft(previous: string, text: string): string | undefined {
-    if (previous.includes(text)) return undefined
-    return previous.trim() === '' ? text : `\n\n${text}`
+// The live document is not ours to rewrite, so the blank line before the addition is made out of
+// whatever the draft already ends with.
+function joinDraft(previous: string, text: string): string {
+    if (previous.trim() === '') return text
+    const written = /\n*$/u.exec(previous)?.[0].length ?? 0
+    return `${'\n\n'.slice(Math.min(written, 2))}${text}`
+}
+
+function pasteDraft(previous: string, text: string): string | undefined {
+    return previous.includes(text) ? undefined : joinDraft(previous, text)
 }
 
 function mergeOffer(failure: CommandError): MergeOffer {
@@ -166,12 +173,9 @@ export function Workspace({
     const draft = storedDraft ?? ''
     // The composer's own document is the live one; the remembered value only catches up to it.
     const addToDraft = useCallback(
-        (addition: ComposerAddition) => {
+        (addition: ComposerAddition, takesCaret: boolean) => {
             const append = composerAppendRef.current
-            if (append) {
-                append(addition)
-                return
-            }
+            if (append?.(addition, takesCaret)) return
             setDraft(previous => {
                 const added = addition(previous)
                 return added === undefined ? previous : `${previous}${added}`
@@ -182,7 +186,9 @@ export function Workspace({
     // A queued message the turn never carried comes back to where it was typed.
     useEffect(() => {
         if (handBack.length === 0) return
-        for (const text of takeHandBack()) addToDraft(previous => joinDraft(previous, text))
+        // The queue holds what the user wrote, twice over if they wrote it twice, and nothing else
+        // is keeping it once it is taken.
+        for (const text of takeHandBack()) addToDraft(previous => joinDraft(previous, text), false)
     }, [addToDraft, handBack, takeHandBack])
     const {briefState, isPlanStarted, startPlan, stopBrief, startWithoutPlan} = useTaskBrief({
         taskId: openTaskId,
@@ -534,10 +540,10 @@ export function Workspace({
     const references = useMemo(
         () => ({
             add: (reference: ChatReference) => {
-                addToDraft(previous => referenceInsertion(previous, reference))
+                addToDraft(previous => referenceInsertion(previous, reference), true)
             },
             paste: (text: string) => {
-                addToDraft(previous => joinDraft(previous, text))
+                addToDraft(previous => pasteDraft(previous, text), true)
             }
         }),
         [addToDraft]

@@ -2,9 +2,12 @@ import {useCallback, useLayoutEffect, useRef, useState} from 'react'
 
 type CompactTabs = readonly [isCompact: boolean, onStrip: (node: HTMLElement | null) => void]
 
-// TabList's ref lands on its outer landmark, and the tabs live in a scrolling strip
-// inside it. That strip is the only box whose overflow is the tabs' own.
-function stripOf(node: HTMLElement): HTMLElement {
+/**
+ * TabList's ref lands on its outer landmark, and the tabs live in a scrolling strip inside it.
+ * That strip is the only box whose overflow is the tabs' own. The class is Astryx's own theme
+ * target, so it is pinned by a test rather than trusted.
+ */
+export function stripOf(node: HTMLElement): HTMLElement {
     return node.querySelector<HTMLElement>('.astryx-tab-strip') ?? node
 }
 

@@ -976,6 +976,48 @@ describe('Workspace while a turn is running', () => {
         )
     })
 
+    it('hands back every queued message, however alike they are', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'try again')
+        await type(user, 'try again')
+        await turn.end()
+
+        expect((await screen.findByRole('combobox', {name: 'Message input'})).textContent).toBe(
+            'try again\n\ntry again'
+        )
+    })
+
+    it('leaves the caret where it was typing when a message comes back', async () => {
+        const user = userEvent.setup()
+        const turn = holdTurnOpen()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+
+        await type(user, 'build the level')
+        await type(user, 'try again')
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.paste('more')
+        const written = composer.firstChild as Text
+        const caret = document.createRange()
+        caret.setStart(written, 2)
+        caret.collapse(true)
+        const selection = window.getSelection()
+        selection?.removeAllRanges()
+        selection?.addRange(caret)
+
+        await turn.end()
+        await user.keyboard('X')
+        await flush()
+
+        expect(composer.textContent).toBe('moXre\n\ntry again')
+    })
+
     it('never stores a message the model has not taken', async () => {
         const user = userEvent.setup()
         const turn = holdTurnOpen()

@@ -4,7 +4,12 @@ import {createContext, use} from 'react'
 // carries the text.
 export type ComposerAddition = (value: string) => string | undefined
 
-export type ComposerAppend = (addition: ComposerAddition) => void
+/**
+ * Writes an addition into the live document, and answers whether it could. A reference the user
+ * asked for takes the caret with it; text the app is handing back does not, because the user may
+ * be typing when it arrives.
+ */
+export type ComposerAppend = (addition: ComposerAddition, takesCaret: boolean) => boolean
 
 export interface ComposerAppendRef {
     current: ComposerAppend | null

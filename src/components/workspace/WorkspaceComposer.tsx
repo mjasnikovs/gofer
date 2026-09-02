@@ -370,16 +370,22 @@ export function WorkspaceComposer() {
 
     useEffect(() => {
         if (!appendRef) return
-        appendRef.current = addition => {
+        appendRef.current = (addition, takesCaret) => {
             const handle = input.current
             const editable = root.current?.querySelector<HTMLElement>('[contenteditable="true"]')
-            if (!handle || !editable) return
+            // React nulls a ref before it runs this effect's cleanup, so the caller has to be told
+            // the document is gone rather than have its text quietly dropped.
+            if (!handle || !editable) return false
             const added = addition(handle.getValue())
-            if (added === undefined) return
-            handle.focus()
-            caretToEnd(editable)
-            handle.insertText(added)
-            editable.dispatchEvent(new Event('input', {bubbles: true}))
+            if (added !== undefined) {
+                const resume = takesCaret ? undefined : caretNow(editable)
+                handle.focus()
+                caretToEnd(editable)
+                handle.insertText(added)
+                editable.dispatchEvent(new Event('input', {bubbles: true}))
+                resume?.()
+            }
+            return true
         }
         return () => {
             appendRef.current = null
@@ -513,6 +519,24 @@ export function WorkspaceWelcome({composer}: {composer: React.ReactNode}) {
             {composer}
         </VStack>
     )
+}
+
+/**
+ * Remembers where the caret and the focus are, for text arriving on its own rather than because
+ * the user asked for it. The addition lands past everything already written, so an offset taken
+ * before it survives it.
+ */
+function caretNow(editable: HTMLElement): (() => void) | undefined {
+    const focused = document.activeElement
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0) return undefined
+    const range = selection.getRangeAt(0).cloneRange()
+    if (!editable.contains(range.startContainer)) return undefined
+    return () => {
+        selection.removeAllRanges()
+        selection.addRange(range)
+        if (focused instanceof HTMLElement && focused !== editable) focused.focus()
+    }
 }
 
 // insertText writes at the live caret and deletes whatever is selected. The addition is measured
