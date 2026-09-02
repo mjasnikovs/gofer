@@ -50,6 +50,7 @@ export type TurnRunner = Readonly<{
     start: (prompt: string, attachments?: readonly ChatAttachment[]) => void
     queue: (prompt: string) => boolean
     takeHandBack: () => readonly string[]
+    clearError: () => void
     retry: (assistantId: number) => void
     stop: () => void
 }>
@@ -340,6 +341,10 @@ export function createTurnRunner({send, cancel, steer}: TurnDependencies): TurnR
             const taken = current.handBack
             if (taken.length > 0) publish({...current, handBack: []})
             return taken
+        },
+        clearError() {
+            const dropped = cleared(current)
+            if (dropped !== current) publish(dropped)
         },
         retry(assistantId) {
             const plan = retryPlan(current.messages, assistantId)

@@ -1,4 +1,5 @@
 import {useRef, useState} from 'react'
+import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {
     ChatComposer,
@@ -437,10 +438,16 @@ export function WorkspaceComposer() {
                         onStop={actions.stop}
                     />
                 }
-                {...(state.streamError && {
-                    status: {type: 'error' as const, message: state.streamError}
-                })}
             />
+            {state.streamError === undefined ? null : (
+                <Banner
+                    status='error'
+                    title='Gofer could not do that'
+                    description={state.streamError}
+                    isDismissable
+                    onDismiss={actions.clearError}
+                />
+            )}
             <ComposerFooter />
         </VStack>
     )

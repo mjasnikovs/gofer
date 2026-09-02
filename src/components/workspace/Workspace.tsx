@@ -124,6 +124,7 @@ export function Workspace({
         messages,
         taskId,
         turnError,
+        clearTurnError,
         isChatLoaded,
         isStreaming,
         handBack,
@@ -134,6 +135,11 @@ export function Workspace({
         stop
     } = useConversation({taskId: openTaskId, onError: report, onTasksChanged})
     const streamError = workspaceError ?? turnError
+    // The banner shows whichever half is set, so dismissing it has to answer for both.
+    const dismissError = useCallback(() => {
+        clearError()
+        clearTurnError()
+    }, [clearError, clearTurnError])
     const {attachmentPreviews, addPreviews} = useAttachmentPreviews({messages, isChatLoaded})
     const {settings, models, connectionState, connect, applyModel, applyThinkingLevel} =
         useAiConnection({onError: report, onConnected: clearError})
@@ -422,6 +428,7 @@ export function Workspace({
         applyThinkingLevel,
         attachClipboardImage,
         changeDraft: setDraft,
+        clearError: dismissError,
         editAttachment,
         plan: planMessage,
         removeAttachment,
@@ -443,6 +450,9 @@ export function Workspace({
             attachClipboardImage: () => newest.current.attachClipboardImage(),
             changeDraft: value => {
                 newest.current.changeDraft(value)
+            },
+            clearError: () => {
+                newest.current.clearError()
             },
             editAttachment: (attachmentId, file, shapes) =>
                 newest.current.editAttachment(attachmentId, file, shapes),

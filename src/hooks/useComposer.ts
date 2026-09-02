@@ -22,6 +22,7 @@ export type ComposerActions = Readonly<{
     attachClipboardImage: () => Promise<void>
     applyThinkingLevel: (level: ThinkingLevel, previous?: GoferSettings) => Promise<void>
     changeDraft: (value: string) => void
+    clearError: () => void
     editAttachment: (
         attachmentId: string,
         file: File,

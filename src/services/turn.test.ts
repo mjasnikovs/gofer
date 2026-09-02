@@ -259,6 +259,19 @@ describe('createTurnRunner', () => {
             expect(runner.state().isStreaming).toBe(false)
         })
 
+        it('drops the failure when it is dismissed, leaving the reply as it was', async () => {
+            const {runner, idle} = harness({
+                throws: {code: 'worker_crashed', message: 'the worker died'}
+            })
+
+            runner.start('go')
+            await idle()
+            runner.clearError()
+
+            expect(runner.state().error).toBeUndefined()
+            expect(reply(runner.state()).status).toBe('error')
+        })
+
         it('says a refused turn never reached the model', async () => {
             const {runner, idle} = harness({
                 throws: {code: 'ai_request_in_progress', message: 'busy'}

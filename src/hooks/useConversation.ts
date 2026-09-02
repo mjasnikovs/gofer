@@ -135,6 +135,7 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         isChatLoaded,
         handBack: state.handBack,
         takeHandBack: runner.takeHandBack,
+        clearTurnError: runner.clearError,
         start: runner.start,
         queue: runner.queue,
         retry: runner.retry,

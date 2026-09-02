@@ -1022,3 +1022,37 @@ describe('Workspace while another job is running', () => {
         })
     })
 })
+
+describe('Workspace errors', () => {
+    it('lets a failed turn be dismissed, and stays dismissed', async () => {
+        const user = userEvent.setup()
+        render(<Workspace />)
+        await flush()
+
+        ending = 'crash'
+        await send(user, 'first prompt')
+
+        const banner = await screen.findByRole('alert')
+        expect(banner).toHaveTextContent('the AI worker died')
+
+        await user.click(screen.getByRole('button', {name: 'Dismiss'}))
+        await flush()
+
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('still reports the next failure after one has been dismissed', async () => {
+        const user = userEvent.setup()
+        render(<Workspace />)
+        await flush()
+
+        ending = 'crash'
+        await send(user, 'first prompt')
+        await user.click(await screen.findByRole('button', {name: 'Dismiss'}))
+        await flush()
+
+        await send(user, 'second prompt')
+
+        expect(await screen.findByRole('alert')).toHaveTextContent('the AI worker died')
+    })
+})
