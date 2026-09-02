@@ -1656,14 +1656,19 @@ mod tests {
         );
     }
 
+    /// Git refuses to commit without an author, and a runner has no global one.
+    fn identify(directory: &Path) {
+        git(directory, &["config", "user.name", "Gofer Test"]);
+        git(
+            directory,
+            &["config", "user.email", "gofer@example.invalid"],
+        );
+    }
+
     fn repository() -> TempDir {
         let directory = TempDir::new().expect("temporary repository");
         git(directory.path(), &["init", "-b", "master"]);
-        git(directory.path(), &["config", "user.name", "Gofer Test"]);
-        git(
-            directory.path(),
-            &["config", "user.email", "gofer@example.invalid"],
-        );
+        identify(directory.path());
         fs::write(directory.path().join("project.godot"), "[application]\n").expect("project file");
         git(directory.path(), &["add", "project.godot"]);
         git(directory.path(), &["commit", "-m", "Initial"]);
@@ -2226,11 +2231,7 @@ mod tests {
         .expect("cache file");
 
         initialize_repository(directory.path()).expect("initialize");
-        git(directory.path(), &["config", "user.name", "Gofer Test"]);
-        git(
-            directory.path(),
-            &["config", "user.email", "gofer@example.invalid"],
-        );
+        identify(directory.path());
         commit_project_files(directory.path()).expect("commit the project");
 
         assert!(
@@ -3029,6 +3030,8 @@ mod tests {
         let base = git_text(outer.path(), &["rev-parse", "HEAD"]).expect("head");
 
         let dependency = outer.path().join("addons/dep");
+        // The submodule is its own clone, so the outer repository's author is not its own.
+        identify(&dependency);
         fs::write(dependency.join("moved.gd"), "extends Node\n").expect("write");
         git(&dependency, &["add", "-A"]);
         git(&dependency, &["commit", "-m", "Move the pointer"]);
