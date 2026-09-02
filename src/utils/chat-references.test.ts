@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {appendReference, referenceText} from './chat-references'
+import {referenceInsertion, referenceText} from './chat-references'
 
 const PLAYER = {kind: 'node', id: 'Main/Player', detail: 'CharacterBody2D'} as const
 
@@ -15,24 +15,28 @@ describe('chat references', () => {
     })
 
     it('starts an empty draft with the reference and room to type', () => {
-        expect(appendReference('', PLAYER)).toBe('node `Main/Player` (CharacterBody2D) ')
+        expect(referenceInsertion('', PLAYER)).toBe('node `Main/Player` (CharacterBody2D) ')
     })
 
-    it('adds to what is already written without swallowing the spacing', () => {
-        expect(appendReference('why does ', PLAYER)).toBe(
-            'why does node `Main/Player` (CharacterBody2D) '
+    it('writes only the part the draft is missing, so the chips in it are left alone', () => {
+        expect(referenceInsertion('why does', PLAYER)).toBe(
+            ' node `Main/Player` (CharacterBody2D) '
+        )
+        expect(referenceInsertion('why does ', PLAYER)).toBe(
+            'node `Main/Player` (CharacterBody2D) '
+        )
+        expect(referenceInsertion('@scripts/player.gd ', PLAYER)).toBe(
+            'node `Main/Player` (CharacterBody2D) '
         )
     })
 
     it('names a thing once, however many times it is added', () => {
-        const once = appendReference('', PLAYER)
-        expect(appendReference(once, PLAYER)).toBe(once)
+        expect(referenceInsertion('node `Main/Player` (CharacterBody2D) ', PLAYER)).toBeUndefined()
     })
 
     it('does not mistake a folder for the file already named inside it', () => {
-        const file = appendReference('', {kind: 'file', id: 'scripts/player.gd'})
-        expect(appendReference(file, {kind: 'file', id: 'scripts/'})).toBe(
-            '@scripts/player.gd @scripts/ '
+        expect(referenceInsertion('@scripts/player.gd ', {kind: 'file', id: 'scripts/'})).toBe(
+            '@scripts/ '
         )
     })
 })

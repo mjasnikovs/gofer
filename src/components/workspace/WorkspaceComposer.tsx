@@ -1,4 +1,4 @@
-import {useRef, useState} from 'react'
+import {useCallback, useEffect, useRef, useState} from 'react'
 import {Banner} from '@astryxdesign/core/Banner'
 import {Button} from '@astryxdesign/core/Button'
 import {
@@ -7,6 +7,7 @@ import {
     ChatComposerInput,
     ChatSendButton
 } from '@astryxdesign/core/Chat'
+import type {ChatComposerInputHandle} from '@astryxdesign/core/Chat'
 import {DropdownMenu} from '@astryxdesign/core/DropdownMenu'
 import {Icon} from '@astryxdesign/core/Icon'
 import {isImeKeyEvent} from '@astryxdesign/core/utils'
@@ -22,6 +23,7 @@ import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
 import {ImageScratchpad} from './ImageScratchpad'
 import {contextProgressVariant, formatContextUsage} from '../../utils/chat-format'
 import {useComposer} from '../../hooks/useComposer'
+import {useComposerAppendRef} from '../../hooks/useComposerAppend'
 import {useEditorSession} from '../../hooks/useEditorSession'
 import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
 import {useWorkspaceFailure} from '../../hooks/useWorkspaceFailure'
@@ -354,13 +356,36 @@ function PlanButton() {
     )
 }
 
-function correctTheEditableRole(root: HTMLDivElement | null) {
-    root?.querySelector('[role="combobox"]')?.removeAttribute('aria-multiline')
-}
-
 export function WorkspaceComposer() {
     const {state, actions, meta} = useComposer()
     const fileMentions = useFileMentionTrigger()
+    const input = useRef<ChatComposerInputHandle>(null)
+    const root = useRef<HTMLDivElement | null>(null)
+    const appendRef = useComposerAppendRef()
+
+    const correctTheEditableRole = useCallback((node: HTMLDivElement | null) => {
+        root.current = node
+        node?.querySelector('[role="combobox"]')?.removeAttribute('aria-multiline')
+    }, [])
+
+    useEffect(() => {
+        if (!appendRef) return
+        appendRef.current = addition => {
+            const handle = input.current
+            const editable = root.current?.querySelector<HTMLElement>('[contenteditable="true"]')
+            if (!handle || !editable) return
+            const added = addition(handle.getValue())
+            if (added === undefined) return
+            handle.focus()
+            caretToEnd(editable)
+            handle.insertText(added)
+            editable.dispatchEvent(new Event('input', {bubbles: true}))
+        }
+        return () => {
+            appendRef.current = null
+        }
+    }, [appendRef])
+
     return (
         <VStack gap={1}>
             <ChatComposer
@@ -390,9 +415,10 @@ export function WorkspaceComposer() {
                 input={
                     <ChatComposerInput
                         ref={correctTheEditableRole}
+                        handleRef={input}
                         maxRows={8}
                         style={SPACIOUS_COMPOSER_INPUT_STYLE}
-                        triggers={[fileMentions]}
+                        triggers={[fileMentions.trigger]}
                         onFiles={files => {
                             const images = imageFiles(files)
                             if (!meta.canAttachImages || images.length === 0) return
@@ -411,6 +437,8 @@ export function WorkspaceComposer() {
                         }}
                         hasHistory={false}
                         onKeyDown={event => {
+                            fileMentions.onKeyDown(event)
+                            if (event.defaultPrevented) return
                             if (event.key !== 'Enter' || event.shiftKey) return
                             // Taking the whole Enter takes the input's own IME guard with it, and
                             // isComposing alone misses the IMEs that only report keyCode 229.
@@ -485,4 +513,16 @@ export function WorkspaceWelcome({composer}: {composer: React.ReactNode}) {
             {composer}
         </VStack>
     )
+}
+
+// insertText writes at the live caret and deletes whatever is selected. The addition is measured
+// against the end of the document, so the caret has to be there before it lands.
+function caretToEnd(editable: HTMLElement) {
+    const selection = window.getSelection()
+    if (!selection) return
+    const range = document.createRange()
+    range.selectNodeContents(editable)
+    range.collapse(false)
+    selection.removeAllRanges()
+    selection.addRange(range)
 }

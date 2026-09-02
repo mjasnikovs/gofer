@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
-import {act, cleanup, render, screen} from '@testing-library/react'
+import {act, cleanup, render, screen, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {Workspace} from './Workspace'
 import {ErrorBoundary} from '../application/ErrorBoundary'
@@ -1020,6 +1020,48 @@ describe('Workspace while another job is running', () => {
         act(() => {
             setTurnRunning('memory', false)
         })
+    })
+})
+
+describe('Workspace mentions', () => {
+    it('keeps the chips already written when the explorer mentions another file', async () => {
+        const user = userEvent.setup()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.type(composer, '@player{Enter}')
+        await flush()
+
+        await user.click(screen.getByRole('button', {name: 'Files'}))
+        await user.click(
+            await screen.findByRole('button', {name: 'Mention main.tscn in the message'})
+        )
+        await flush()
+
+        expect(composer.querySelectorAll('[data-astryx-token]')).toHaveLength(1)
+        expect(composer.textContent).toContain('scripts/player.gd')
+        expect(composer.textContent).toContain('@scenes/main.tscn')
+    })
+
+    it('keeps the chips already written when a scene node is mentioned', async () => {
+        const user = userEvent.setup()
+        render(<Workspace taskId='task-1' />)
+        await flush()
+        const composer = await screen.findByRole('combobox', {name: 'Message input'})
+        await user.click(composer)
+        await user.type(composer, '@player{Enter}')
+        await flush()
+
+        const explorer = within(screen.getByRole('navigation', {name: 'Explorer'}))
+        await user.click(explorer.getByRole('button', {name: 'Start Godot'}))
+        await flush()
+        await user.click(await screen.findByRole('button', {name: 'Mention Player in the message'}))
+        await flush()
+
+        expect(composer.querySelectorAll('[data-astryx-token]')).toHaveLength(1)
+        expect(composer.textContent).toContain('scripts/player.gd')
+        expect(composer.textContent).toContain('node `Main/Player` (CharacterBody2D)')
     })
 })
 

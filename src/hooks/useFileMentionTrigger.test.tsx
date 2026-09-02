@@ -33,7 +33,12 @@ function Composer({onSubmit}: {onSubmit: (value: string) => void}) {
             value={draft}
             onChange={setDraft}
             onSubmit={onSubmit}
-            input={<ChatComposerInput triggers={[mentions]} />}
+            input={
+                <ChatComposerInput
+                    triggers={[mentions.trigger]}
+                    onKeyDown={mentions.onKeyDown}
+                />
+            }
         />
     )
 }
@@ -44,6 +49,15 @@ async function composer() {
     render(<Composer onSubmit={onSubmit} />)
     await flush()
     return {onSubmit, editable: screen.getByRole('combobox'), user: userEvent.setup()}
+}
+
+function caretAt(node: Node, offset: number) {
+    const range = document.createRange()
+    range.setStart(node, offset)
+    range.collapse(true)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
 }
 
 const squares = () => [...screen.getByRole('listbox').querySelectorAll('img')]
@@ -130,6 +144,35 @@ describe('the @ menu', () => {
         expect(screen.queryByRole('listbox')).toBeNull()
         await user.keyboard('{Enter}')
         expect(onSubmit).toHaveBeenCalledWith('@"My Notes/"')
+    })
+
+    it('opens the menu straight off a chip, parting the two with a space', async () => {
+        const {user, editable} = await composer()
+        await user.click(editable)
+        await user.type(editable, '@player{Enter}')
+        await flush()
+
+        await user.keyboard('@')
+        await flush()
+
+        expect(editable.textContent.endsWith('\u00A0 @')).toBe(true)
+        expect(rows()).toContain('enemy_base.gdscripts')
+    })
+
+    it('leaves a typed trailing space alone, however the browser spells it', async () => {
+        const {user, editable} = await composer()
+        await user.click(editable)
+        await user.type(editable, 'look at ')
+        await flush()
+        // A space typed at the end of a line is written as a non-breaking one by the real engines.
+        const typed = editable.firstChild as Text
+        typed.textContent = 'look at\u00A0'
+        caretAt(typed, 8)
+
+        await user.keyboard('@')
+        await flush()
+
+        expect(editable.textContent).toBe('look at\u00A0@')
     })
 
     it('keeps stepping, and ends on the file that is picked', async () => {

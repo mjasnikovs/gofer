@@ -31,9 +31,11 @@ import {useTaskBrief} from '../../hooks/useTaskBrief'
 import {ChatColumnContext} from '../../hooks/useChatColumn'
 import type {ChatColumn as ChatColumnValue} from '../../hooks/useChatColumn'
 import {ChatReferenceContext} from '../../hooks/useChatReferences'
+import {ComposerAppendContext} from '../../hooks/useComposerAppend'
+import type {ComposerAddition, ComposerAppend} from '../../hooks/useComposerAppend'
 import {ComposerContext} from '../../hooks/useComposer'
 import type {Composer, ComposerActions} from '../../hooks/useComposer'
-import {appendReference} from '../../utils/chat-references'
+import {referenceInsertion} from '../../utils/chat-references'
 import type {ChatReference} from '../../utils/chat-references'
 import {ChatColumn} from './ChatColumn'
 import {InspectorWorkspace} from './InspectorWorkspace'
@@ -62,8 +64,9 @@ type MergeOffer = Readonly<{
 
 const NOTHING_TO_OFFER: MergeOffer = {mode: 'clashed', paths: []}
 
-function joinDraft(previous: string, text: string): string {
-    return previous.trim() === '' ? text : `${previous.trimEnd()}\n\n${text}`
+function joinDraft(previous: string, text: string): string | undefined {
+    if (previous.includes(text)) return undefined
+    return previous.trim() === '' ? text : `\n\n${text}`
 }
 
 function mergeOffer(failure: CommandError): MergeOffer {
@@ -107,6 +110,7 @@ export function Workspace({
     onAbandonMerge
 }: WorkspaceProps) {
     const [draftAttachments, setDraftAttachments] = useState<readonly DraftAttachment[]>([])
+    const composerAppendRef = useRef<ComposerAppend | null>(null)
     const [isSavingAttachments, setIsSavingAttachments] = useState(false)
     const [workspaceError, setWorkspaceError] = useState<string>()
     const [mergeOffered, setMergeOffered] = useState<MergeOffer>(NOTHING_TO_OFFER)
@@ -160,11 +164,26 @@ export function Workspace({
         isEmpty: value => value === ''
     })
     const draft = storedDraft ?? ''
+    // The composer's own document is the live one; the remembered value only catches up to it.
+    const addToDraft = useCallback(
+        (addition: ComposerAddition) => {
+            const append = composerAppendRef.current
+            if (append) {
+                append(addition)
+                return
+            }
+            setDraft(previous => {
+                const added = addition(previous)
+                return added === undefined ? previous : `${previous}${added}`
+            })
+        },
+        [setDraft]
+    )
     // A queued message the turn never carried comes back to where it was typed.
     useEffect(() => {
         if (handBack.length === 0) return
-        for (const text of takeHandBack()) setDraft(previous => joinDraft(previous, text))
-    }, [handBack, setDraft, takeHandBack])
+        for (const text of takeHandBack()) addToDraft(previous => joinDraft(previous, text))
+    }, [addToDraft, handBack, takeHandBack])
     const {briefState, isPlanStarted, startPlan, stopBrief, startWithoutPlan} = useTaskBrief({
         taskId: openTaskId,
         onStartTurn: start,
@@ -515,15 +534,13 @@ export function Workspace({
     const references = useMemo(
         () => ({
             add: (reference: ChatReference) => {
-                setDraft(previous => appendReference(previous, reference))
+                addToDraft(previous => referenceInsertion(previous, reference))
             },
             paste: (text: string) => {
-                setDraft(previous =>
-                    previous.includes(text) ? previous : joinDraft(previous, text)
-                )
+                addToDraft(previous => joinDraft(previous, text))
             }
         }),
-        [setDraft]
+        [addToDraft]
     )
 
     const chatColumn = useMemo<ChatColumnValue>(
@@ -574,10 +591,12 @@ export function Workspace({
                         <Divider />
                         <StackItem size='fill'>
                             <ChatReferenceContext.Provider value={references}>
-                                <InspectorWorkspace
-                                    chat={CHAT_COLUMN}
-                                    onError={report}
-                                />
+                                <ComposerAppendContext.Provider value={composerAppendRef}>
+                                    <InspectorWorkspace
+                                        chat={CHAT_COLUMN}
+                                        onError={report}
+                                    />
+                                </ComposerAppendContext.Provider>
                             </ChatReferenceContext.Provider>
                         </StackItem>
                         <ToolApprovalDialog

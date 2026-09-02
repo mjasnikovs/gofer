@@ -30,9 +30,9 @@ function names(draft: string, text: string): boolean {
     return false
 }
 
-export function appendReference(draft: string, reference: ChatReference): string {
+export function referenceInsertion(draft: string, reference: ChatReference): string | undefined {
     const text = referenceText(reference)
-    if (names(draft, text)) return draft
-    if (draft.trim() === '') return `${text} `
-    return `${draft.replace(/\s+$/, '')} ${text} `
+    if (names(draft, text)) return undefined
+    if (draft === '' || /\s$/.test(draft)) return `${text} `
+    return ` ${text} `
 }
