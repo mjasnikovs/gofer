@@ -208,4 +208,74 @@ describe('verification points', () => {
 
         expect(screen.getByText('Verified — 1 of 1')).toBeTruthy()
     })
+
+    // A failed point re-prompts the same turn, so the retry streams into the same message. The
+    // verdict has to stay where it was reached or it reads as the answer to work it never saw.
+    it('stays where it was reached, not under the retry it started', () => {
+        const retry: ToolActivity = {
+            id: 'call-9',
+            name: 'bash',
+            status: 'running',
+            startedAt: STARTED_AT,
+            target: 'godot --headless --script fix.gd'
+        }
+        const message: Message = {
+            id: 2,
+            sender: 'assistant',
+            text: 'Done.',
+            timestamp: STARTED_AT,
+            status: 'streaming',
+            tools: [retry],
+            parts: [
+                {kind: 'text', text: 'Done.'},
+                {kind: 'verify'},
+                {kind: 'tool', toolId: retry.id}
+            ],
+            verifyPoints: [
+                {
+                    name: 'the boss moves',
+                    command: 'godot --headless',
+                    status: 'error',
+                    output: 'actual=0'
+                }
+            ]
+        }
+        render(
+            <ChatConversation
+                attachmentPreviews={{}}
+                isStreaming
+                messages={[message]}
+                scrollRef={createRef<HTMLElement>()}
+                onRetry={() => undefined}
+            />
+        )
+
+        const verdict = screen.getByText('Verification failed — 1 of 1')
+        const retried = screen.getByText(/godot --headless --script fix\.gd/)
+        // eslint-disable-next-line no-bitwise
+        const isAfter = verdict.compareDocumentPosition(retried) & Node.DOCUMENT_POSITION_FOLLOWING
+
+        expect(isAfter).toBeTruthy()
+    })
+
+    // errorMessage draws no row control, so the one thing a failure is worth reading stays shut.
+    it('opens the output of a point that failed', async () => {
+        const user = userEvent.setup()
+        render(
+            withPoints([
+                {
+                    name: 'the boss moves',
+                    command: 'godot --headless',
+                    status: 'error',
+                    output: 'expected>0 actual=0'
+                },
+                {name: 'it still starts', command: 'test -f project.godot', status: 'complete'}
+            ])
+        )
+
+        const row = screen.getByRole('button', {name: /the boss moves/})
+        await user.click(row)
+
+        expect(await screen.findByText(/expected>0 actual=0/)).toBeTruthy()
+    })
 })

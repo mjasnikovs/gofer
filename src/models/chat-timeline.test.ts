@@ -78,6 +78,38 @@ describe('applyStreamEvent', () => {
         ])
     })
 
+    // A failed point re-prompts the same turn, so the retry's work streams into the same message.
+    // Without a place in the timeline the verdict draws below work it never saw.
+    it('marks where verification ran, once, before the retry it starts', () => {
+        const message = replay([
+            {type: 'text-delta', delta: 'Done.'},
+            {
+                type: 'verify-point',
+                name: 'the boss moves',
+                command: 'a',
+                status: 'running',
+                index: 0,
+                of: 1
+            },
+            {
+                type: 'verify-point',
+                name: 'the boss moves',
+                command: 'a',
+                status: 'error',
+                index: 0,
+                of: 1,
+                output: 'actual=0'
+            },
+            {type: 'tool-start', id: 'fix', name: 'bash', target: 'retry', startedAt: 1}
+        ])
+
+        expect(messageParts(message)).toEqual([
+            {kind: 'text', text: 'Done.'},
+            {kind: 'verify'},
+            {kind: 'tool', toolId: 'fix'}
+        ])
+    })
+
     it('keeps text and tool calls in the order they arrived', () => {
         const message = replay([
             {type: 'text-delta', delta: 'Let me look.'},

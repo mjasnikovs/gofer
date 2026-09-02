@@ -5,6 +5,7 @@ export type MessagePart =
     | Readonly<{kind: 'text'; text: string}>
     | Readonly<{kind: 'thinking'; text: string}>
     | Readonly<{kind: 'tool'; toolId: string}>
+    | Readonly<{kind: 'verify'}>
 
 export type Message = Readonly<{
     id: number

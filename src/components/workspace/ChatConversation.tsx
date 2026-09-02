@@ -10,12 +10,13 @@ import {
     ChatToolCalls
 } from '@astryxdesign/core/Chat'
 import {CodeBlock} from '@astryxdesign/core/CodeBlock'
-import {Collapsible} from '@astryxdesign/core/Collapsible'
+import {Collapsible, CollapsibleGroup} from '@astryxdesign/core/Collapsible'
 import {Icon} from '@astryxdesign/core/Icon'
 import {Lightbox} from '@astryxdesign/core/Lightbox'
 import {Markdown} from '@astryxdesign/core/Markdown'
 import type {MarkdownComponents} from '@astryxdesign/core/Markdown'
 import {Spinner} from '@astryxdesign/core/Spinner'
+import {StatusDot} from '@astryxdesign/core/StatusDot'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
 import {Thumbnail} from '@astryxdesign/core/Thumbnail'
@@ -180,6 +181,49 @@ const ToolCallRow = memo(({now, tool}: {now?: number | undefined; tool: ToolActi
 })
 ToolCallRow.displayName = 'ToolCallRow'
 
+const POINT_DOT: Readonly<Record<VerifyPoint['status'], 'success' | 'error' | 'accent'>> = {
+    complete: 'success',
+    error: 'error',
+    running: 'accent'
+}
+
+// A point's name is a sentence, not an identifier, so it takes the trigger's label and the command
+// takes the body. ChatToolCalls draws the name in monospace, which a sentence overruns.
+function VerifyPointRow({point}: {point: VerifyPoint}) {
+    return (
+        <Collapsible
+            value={point.name}
+            defaultIsOpen={false}
+            trigger={
+                <HStack
+                    gap={2}
+                    vAlign='center'
+                >
+                    <StatusDot
+                        variant={POINT_DOT[point.status]}
+                        label={point.status}
+                        isPulsing={point.status === 'running'}
+                    />
+                    <Text type='body'>{point.name}</Text>
+                </HStack>
+            }
+        >
+            <VStack gap={2}>
+                <CodeBlock
+                    code={point.command}
+                    language='bash'
+                />
+                {point.output ?
+                    <CodeBlock
+                        code={point.output}
+                        language='text'
+                    />
+                :   null}
+            </VStack>
+        </Collapsible>
+    )
+}
+
 const VerifyPointsRow = memo(({points}: {points: readonly VerifyPoint[]}) => {
     const failed = points.filter(point => point.status === 'error').length
     const settled = points.filter(point => point.status !== 'running').length
@@ -190,17 +234,18 @@ const VerifyPointsRow = memo(({points}: {points: readonly VerifyPoint[]}) => {
     return (
         <VStack gap={1}>
             <Text type={failed > 0 ? 'label' : 'supporting'}>{label}</Text>
-            <ChatToolCalls
-                style={TOOL_ROW_STYLE}
-                defaultIsExpanded={failed > 0}
-                calls={points.map(point => ({
-                    key: point.name,
-                    name: point.name,
-                    status: point.status,
-                    target: point.command,
-                    ...(point.status === 'error' && point.output && {errorMessage: point.output})
-                }))}
-            />
+            <CollapsibleGroup
+                type='multiple'
+                hasDividers
+                density='compact'
+            >
+                {points.map(point => (
+                    <VerifyPointRow
+                        key={point.name}
+                        point={point}
+                    />
+                ))}
+            </CollapsibleGroup>
         </VStack>
     )
 })
@@ -321,9 +366,14 @@ function AssistantTimeline({message}: {message: Message}) {
         tool => tool.status === 'running' || tool.status === 'pending'
     )
     const now = useRunningCallClock(isCallRunning)
+    const verdict =
+        message.verifyPoints && message.verifyPoints.length > 0 ?
+            <VerifyPointsRow points={message.verifyPoints} />
+        :   null
     return (
         <>
             {parts.map((part: MessagePart, index) => {
+                if (part.kind === 'verify') return <Fragment key='verify'>{verdict}</Fragment>
                 if (part.kind === 'tool') {
                     const tool = toolsById.get(part.toolId)
                     if (!tool) return null
@@ -351,9 +401,7 @@ function AssistantTimeline({message}: {message: Message}) {
                     />
                 )
             })}
-            {message.verifyPoints && message.verifyPoints.length > 0 ?
-                <VerifyPointsRow points={message.verifyPoints} />
-            :   null}
+            {parts.some(part => part.kind === 'verify') ? null : verdict}
             {isStreaming && !isCallRunning ?
                 <ChatMessageBubble variant='ghost'>
                     <HStack

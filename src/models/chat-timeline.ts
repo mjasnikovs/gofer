@@ -14,10 +14,13 @@ function appendProse(
     delta: string
 ): readonly MessagePart[] {
     const last = parts.at(-1)
-    if (last === undefined || last.kind === 'tool' || last.kind !== kind) {
-        return [...parts, {kind, text: delta}]
-    }
+    if (last?.kind !== kind) return [...parts, {kind, text: delta}]
     return [...parts.slice(0, -1), {kind, text: last.text + delta}]
+}
+
+function withVerifyPart(parts: readonly MessagePart[]): readonly MessagePart[] {
+    if (parts.some(part => part.kind === 'verify')) return parts
+    return [...parts, {kind: 'verify'}]
 }
 
 export function messageParts(message: Message): readonly MessagePart[] {
@@ -347,6 +350,7 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
             const at = points.findIndex(existing => existing.name === event.name)
             return {
                 ...message,
+                parts: withVerifyPart(parts),
                 verifyPoints:
                     at < 0 ?
                         [...points, point]
