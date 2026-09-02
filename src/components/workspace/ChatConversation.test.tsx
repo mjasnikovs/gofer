@@ -53,6 +53,38 @@ describe('ChatConversation', () => {
         expect(await screen.findByText('scenes/player.tscn · 24s')).toBeTruthy()
     })
 
+    it('colours a GDScript fence, and leaves an unknown language alone', () => {
+        const fenceText = (fence: string) =>
+            ['```' + fence, 'func _ready() -> void:', '\tpass', '```'].join('\n')
+        const prose = (fence: string): Message => ({
+            id: 3,
+            sender: 'assistant',
+            text: fenceText(fence),
+            timestamp: STARTED_AT,
+            tools: [],
+            parts: [{kind: 'text', text: fenceText(fence)}],
+            status: 'complete'
+        })
+        const chat = (message: Message) => (
+            <ChatConversation
+                attachmentPreviews={{}}
+                isStreaming={false}
+                messages={[message]}
+                scrollRef={createRef<HTMLElement>()}
+                onRetry={() => undefined}
+            />
+        )
+
+        const {container} = render(chat(prose('gd')))
+        expect(container.querySelector('.astryx-token-keyword')?.textContent).toBe('func')
+        expect(container.querySelector('.astryx-token-function')?.textContent).toBe('_ready')
+
+        cleanup()
+        expect(
+            render(chat(prose('brainfuck'))).container.querySelector('[class*=astryx-token-]')
+        ).toBeNull()
+    })
+
     it('keeps the line breaks in a message the way it was typed', () => {
         const message: Message = {
             id: 1,

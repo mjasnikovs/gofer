@@ -18,7 +18,7 @@ import type {ScriptDiagnostic, ScriptPosition} from '../../models/script'
 import type {ScriptViews} from '../../models/ui-state'
 import type {ScriptBuffer} from '../../hooks/useScriptBuffers'
 import {useWorkspaceFailure} from '../../hooks/useWorkspaceFailure'
-import {GDSCRIPT_LANGUAGE_ID} from '../../services/monaco-gdscript'
+import {GDSCRIPT_LANGUAGE_ID} from '../../services/gdscript-syntax'
 
 type ScriptEditorProps = Readonly<{
     buffer: ScriptBuffer
