@@ -1928,7 +1928,7 @@
         {
             "tool": "godot_debug",
             "op": "set_breakpoints",
-            "summary": "Replaces the breakpoints of one script.",
+            "summary": "Replaces the breakpoints of one script. The answer echoes what was asked for, so it says success whether or not the game took it: read `armed` for what is actually still set, everywhere. A clear sent while the game is stopped can be lost — clear it, continue, and check it does not stop there again. A launch does not clear what the editor is holding either; an empty breakpoint list at launch is not a clear.",
             "params": [
                 {
                     "name": "path",

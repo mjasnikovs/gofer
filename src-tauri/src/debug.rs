@@ -163,6 +163,15 @@ pub enum DebugResponse {
     },
     Breakpoints {
         breakpoints: Vec<VerifiedBreakpoint>,
+        /// Every breakpoint this session still holds, across every file — `scripts/player.gd:22`.
+        ///
+        /// The answer to a clear covers only the file it was asked about, and it is a success by
+        /// construction: the request went out, so `breakpoints: []` comes back. A model that
+        /// cleared a file and then watched the game stop again had no call that could say what was
+        /// actually armed, and spent about forty of them guessing between "the clear never reached
+        /// the game", "another file holds one", and "this is not a breakpoint at all" (issue #11).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        armed: Vec<String>,
     },
     BreakpointLocations {
         locations: Vec<BreakpointLocation>,
@@ -518,9 +527,13 @@ fn answer(request: DebugRequest) -> Result<DebugResponse, DapError> {
         DebugRequest::Status => Ok(DebugResponse::Status {
             capabilities: client.capabilities().clone(),
         }),
-        DebugRequest::SetBreakpoints { path, lines } => Ok(DebugResponse::Breakpoints {
-            breakpoints: set_breakpoints(&client, &workspace, &path, &lines)?,
-        }),
+        DebugRequest::SetBreakpoints { path, lines } => {
+            let breakpoints = set_breakpoints(&client, &workspace, &path, &lines)?;
+            Ok(DebugResponse::Breakpoints {
+                breakpoints,
+                armed: where_the_breakpoints_are(),
+            })
+        }
         DebugRequest::BreakpointLocations { path, line } => {
             let absolute = resolve(&workspace, &path)?;
             Ok(DebugResponse::BreakpointLocations {

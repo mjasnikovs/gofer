@@ -262,7 +262,12 @@ export type DebugRequest =
 
 export type DebugResponse =
     | Readonly<{op: 'status'; capabilities: Readonly<Record<string, unknown>>}>
-    | Readonly<{op: 'breakpoints'; breakpoints: readonly DebugVerifiedBreakpoint[]}>
+    | Readonly<{
+          op: 'breakpoints'
+          breakpoints: readonly DebugVerifiedBreakpoint[]
+          /** Every breakpoint the session still holds, across every file. Absent when none do. */
+          armed?: readonly string[] | undefined
+      }>
     | Readonly<{op: 'launched'; breakpoints: readonly DebugVerifiedBreakpoint[]}>
     | Readonly<{op: 'attached'}>
     | Readonly<{op: 'threads'; threads: readonly Readonly<{id: number; name: string}>[]}>

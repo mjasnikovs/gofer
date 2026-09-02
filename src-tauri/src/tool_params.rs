@@ -469,7 +469,7 @@ use Kind::{Flag, Hash, Int, List, Number, Object, Tagged, Text};
 ///
 /// One list per domain, and `CATALOG` is the only thing that names them: a list nobody hands to a
 /// domain is a dead const, which the compiler reports rather than a test.
-// GENERATED-BEGIN operations sha256:07b7ba8e7dcec615
+// GENERATED-BEGIN operations sha256:12ddb273450b570e
 pub const GODOT_SESSION_OPERATIONS: &[Operation] = &[
     alone(
         op(
@@ -1566,7 +1566,7 @@ pub const GODOT_DEBUG_OPERATIONS: &[Operation] = &[
     op(
         "godot_debug",
         "set_breakpoints",
-        "Replaces the breakpoints of one script.",
+        "Replaces the breakpoints of one script. The answer echoes what was asked for, so it says success whether or not the game took it: read `armed` for what is actually still set, everywhere. A clear sent while the game is stopped can be lost — clear it, continue, and check it does not stop there again. A launch does not clear what the editor is holding either; an empty breakpoint list at launch is not a clear.",
         Answers::Rust,
         &[need("path", Text), opt("lines", List)],
     ),

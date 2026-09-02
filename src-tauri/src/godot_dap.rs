@@ -211,7 +211,7 @@ pub struct DapEvent {
     pub seq: u64,
     pub event: String,
     pub body: Value,
-    /// Which debuggee this belongs to. See [`DapClient::begin_run`].
+    /// Which debuggee this belongs to. See [`DapClient::begin_run_when_answered`].
     pub run: u64,
 }
 
@@ -269,8 +269,10 @@ pub struct PendingLaunch {
 pub struct DapClient {
     shared: Arc<Mutex<Shared>>,
     next_seq: Arc<AtomicU64>,
-    /// Which debuggee the adapter is on. See [`DapClient::begin_run`].
+    /// Which debuggee the adapter is on. See [`DapClient::begin_run_when_answered`].
     run: Arc<AtomicU64>,
+    /// The request whose answer opens that next debuggee, or [`NO_BOUNDARY`].
+    run_boundary: Arc<AtomicU64>,
     reader: Mutex<Option<JoinHandle<()>>>,
     capabilities: DapCapabilities,
     launch_arguments: Mutex<Option<Value>>,
@@ -311,17 +313,28 @@ impl DapClient {
         }));
         let next_seq = Arc::new(AtomicU64::new(1));
         let run = Arc::new(AtomicU64::new(1));
+        let run_boundary = Arc::new(AtomicU64::new(NO_BOUNDARY));
         let reader = thread::spawn({
             let shared = Arc::clone(&shared);
             let next_seq = Arc::clone(&next_seq);
             let run = Arc::clone(&run);
-            move || read_loop(BufReader::new(reader_stream), shared, next_seq, run)
+            let run_boundary = Arc::clone(&run_boundary);
+            move || {
+                read_loop(
+                    BufReader::new(reader_stream),
+                    shared,
+                    next_seq,
+                    run,
+                    run_boundary,
+                )
+            }
         });
 
         Ok(Self {
             shared,
             next_seq,
             run,
+            run_boundary,
             reader: Mutex::new(Some(reader)),
             capabilities: DapCapabilities::default(),
             launch_arguments: Mutex::new(None),
@@ -371,8 +384,17 @@ impl DapClient {
     /// started as already over: the panel then said "Not running" over a game that was printing to
     /// its own output. Each event is stamped with the debuggee that was current when it arrived,
     /// and [`Self::await_stop`] ignores the ones from a debuggee that is gone.
-    pub fn begin_run(&self) {
-        self.run.fetch_add(1, Ordering::Relaxed);
+    ///
+    /// Where the boundary between the two debuggees falls is the whole difficulty. Bumping the run
+    /// on this thread, at the moment the launch is asked for, puts it ahead of the wire: Godot
+    /// writes the old game's `terminated`/`exited` before it ever reads the new `launch`, so those
+    /// two frames are read afterwards and were stamped with the new game's id. `await_stop` then
+    /// took one and answered `stopped: null` for a game that was alive and stopped at a breakpoint
+    /// (issue #11). So the boundary is placed in the stream instead, by the single-threaded reader:
+    /// the request registered here opens the new run when *its answer* is read, and everything read
+    /// before that belonged to the debuggee that is going.
+    fn begin_run_when_answered(&self, seq: u64) {
+        self.run_boundary.store(seq, Ordering::Relaxed);
     }
 
     /// Subscribes to every event the adapter pushes: stopped, continued, terminated, exited,
@@ -402,7 +424,6 @@ impl DapClient {
         project: &Path,
         play_args: &[String],
     ) -> Result<PendingLaunch, DapError> {
-        self.begin_run();
         let arguments = json!({
             "project": project.to_string_lossy(),
             "scene": "main",
@@ -412,7 +433,7 @@ impl DapClient {
             .launch_arguments
             .lock()
             .map_err(|_| DapError::poisoned())? = Some(arguments.clone());
-        let (seq, receiver) = self.start_request("launch", arguments)?;
+        let (seq, receiver) = self.start_request_beginning_a_run("launch", arguments)?;
         Ok(PendingLaunch { seq, receiver })
     }
 
@@ -427,12 +448,12 @@ impl DapClient {
     /// Attaches to the game the editor is already running. Godot answers `not_running` when no
     /// debug session is active.
     pub fn attach(&self) -> Result<(), DapError> {
-        self.begin_run();
         *self
             .launch_arguments
             .lock()
             .map_err(|_| DapError::poisoned())? = Some(json!({}));
-        self.request("attach", json!({}))?;
+        let (seq, receiver) = self.start_request_beginning_a_run("attach", json!({}))?;
+        succeeded(self.await_response(seq, &receiver, DEFAULT_REQUEST_TIMEOUT)?)?;
         Ok(())
     }
 
@@ -655,14 +676,15 @@ impl DapClient {
     /// Relaunches the game with the arguments of the last launch or attach, nested the way
     /// Godot's restart handler expects (`arguments.arguments`).
     pub fn restart(&self) -> Result<(), DapError> {
-        self.begin_run();
         let arguments = self
             .launch_arguments
             .lock()
             .map_err(|_| DapError::poisoned())?
             .clone()
             .unwrap_or_else(|| json!({}));
-        self.request_with_timeout("restart", json!({"arguments": arguments}), LAUNCH_TIMEOUT)?;
+        let (seq, receiver) =
+            self.start_request_beginning_a_run("restart", json!({"arguments": arguments}))?;
+        succeeded(self.await_response(seq, &receiver, LAUNCH_TIMEOUT)?)?;
         Ok(())
     }
 
@@ -741,7 +763,29 @@ impl DapClient {
         command: &str,
         arguments: Value,
     ) -> Result<(u64, Receiver<Result<Value, DapError>>), DapError> {
+        self.write_request(command, arguments, false)
+    }
+
+    /// The same, for the request that starts a new debuggee. The boundary is claimed before the
+    /// request reaches the socket, so no answer can be read ahead of it.
+    fn start_request_beginning_a_run(
+        &self,
+        command: &str,
+        arguments: Value,
+    ) -> Result<(u64, Receiver<Result<Value, DapError>>), DapError> {
+        self.write_request(command, arguments, true)
+    }
+
+    fn write_request(
+        &self,
+        command: &str,
+        arguments: Value,
+        begins_a_run: bool,
+    ) -> Result<(u64, Receiver<Result<Value, DapError>>), DapError> {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        if begins_a_run {
+            self.begin_run_when_answered(seq);
+        }
         let (sender, receiver) = channel();
         let mut shared = self.lock_shared()?;
         if shared.closed {
@@ -921,12 +965,13 @@ fn read_loop(
     shared: Arc<Mutex<Shared>>,
     next_seq: Arc<AtomicU64>,
     run: Arc<AtomicU64>,
+    run_boundary: Arc<AtomicU64>,
 ) {
     let mut reader = reader;
     let mut failure = None;
     loop {
         match read_message(&mut reader) {
-            Ok(Some(message)) => dispatch(&shared, &next_seq, &run, message),
+            Ok(Some(message)) => dispatch(&shared, &next_seq, &run, &run_boundary, message),
             Ok(None) => break,
             Err(error) => {
                 failure = Some(error);
@@ -966,6 +1011,9 @@ fn read_loop(
 /// `stopped` that arrives with nobody waiting sits in a queue and would be seen late or not at all.
 static DEBUGGEE_IS_STOPPED: AtomicBool = AtomicBool::new(false);
 
+/// No request is waiting to start a run. Request sequence numbers start at 1, so zero is free.
+const NO_BOUNDARY: u64 = 0;
+
 /// Whether the debuggee is halted, as far as the adapter's events have said.
 pub fn debuggee_is_stopped() -> bool {
     DEBUGGEE_IS_STOPPED.load(Ordering::Relaxed)
@@ -982,12 +1030,19 @@ pub(crate) fn note_the_debuggee_is_running() {
     DEBUGGEE_IS_STOPPED.store(false, Ordering::Relaxed);
 }
 
-fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, message: Value) {
+fn dispatch(
+    shared: &Arc<Mutex<Shared>>,
+    next_seq: &AtomicU64,
+    run: &AtomicU64,
+    run_boundary: &AtomicU64,
+    message: Value,
+) {
     match message.get("type").and_then(Value::as_str) {
         Some("response") => {
             let Some(seq) = message.get("request_seq").and_then(Value::as_u64) else {
                 return;
             };
+            open_the_run_this_answer_starts(run, run_boundary, seq);
             let Ok(mut shared) = shared.lock() else {
                 return;
             };
@@ -1001,7 +1056,12 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, 
                 return;
             };
             match name {
-                "stopped" => DEBUGGEE_IS_STOPPED.store(true, Ordering::Relaxed),
+                "stopped" => {
+                    // A stop is proof the new debuggee exists, for an adapter that answers the
+                    // request that started it later than that.
+                    open_the_run_that_is_already_stopped(run, run_boundary);
+                    DEBUGGEE_IS_STOPPED.store(true, Ordering::Relaxed);
+                }
                 "continued" | "terminated" | "exited" => note_the_debuggee_is_running(),
                 _ => {}
             }
@@ -1031,6 +1091,24 @@ fn dispatch(shared: &Arc<Mutex<Shared>>, next_seq: &AtomicU64, run: &AtomicU64, 
             }
         }
         _ => {}
+    }
+}
+
+/// Opens the run the answer to `seq` starts, when `seq` is the request that was waiting to start
+/// one. Called from the reader, so the boundary falls exactly where it does in the stream.
+fn open_the_run_this_answer_starts(run: &AtomicU64, boundary: &AtomicU64, seq: u64) {
+    if boundary
+        .compare_exchange(seq, NO_BOUNDARY, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        run.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Opens a run that a `stopped` event has already proved is running.
+fn open_the_run_that_is_already_stopped(run: &AtomicU64, boundary: &AtomicU64) {
+    if boundary.swap(NO_BOUNDARY, Ordering::Relaxed) != NO_BOUNDARY {
+        run.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1743,15 +1821,66 @@ mod tests {
                     write_message(writer, &event).expect("push stopped");
                     FakeAction::Result(json!({}))
                 }
-                _ => FakeAction::Ignore,
+                _ => FakeAction::Result(json!({})),
             }
         });
         let client = connected_client(&server);
         let events = client.subscribe_events();
 
         client.terminate().expect("terminate");
-        client.begin_run();
+        client.attach().expect("attach");
         client.continue_execution(MAIN_THREAD_ID).expect("continue");
+        let stop = client
+            .await_stop(&events, MAIN_THREAD_ID, Duration::from_secs(2))
+            .expect("await stop")
+            .expect("the new game's stop, not the old game's end");
+        assert_eq!(stop.reason, "breakpoint");
+        client.shutdown();
+        server.join.join().expect("server thread");
+    }
+
+    /// The end of the last game, read while the next one is being launched, is not the next
+    /// one's end.
+    ///
+    /// Godot writes the previous debuggee's `terminated`/`exited` before it takes the new `launch`,
+    /// so those two frames land on the wire *after* the caller has already asked for a new run.
+    /// Stamping them with the run that happened to be current when they were read gave them the new
+    /// game's id, and the first `await_stop` after the launch took one and answered
+    /// `stopped: null` — a game that was alive and stopped at a breakpoint reported as gone. A live
+    /// turn read that four times while trying to clear a breakpoint (issue #11).
+    #[test]
+    fn the_last_game_ending_is_not_the_launch_that_followed_it() {
+        let server = start_fake_server(|message, writer| {
+            match message["command"].as_str().unwrap_or_default() {
+                "initialize" => handshake_handler(message, writer),
+                "launch" => {
+                    for event in [
+                        json!({"seq": 901, "type": "event", "event": "terminated"}),
+                        json!({"seq": 902, "type": "event", "event": "exited",
+                           "body": {"exitCode": 0}}),
+                    ] {
+                        write_message(writer, &event).expect("push the end of the old game");
+                    }
+                    FakeAction::Result(json!({}))
+                }
+                "configurationDone" => {
+                    let event = json!({"seq": 903, "type": "event", "event": "stopped",
+                       "body": {"reason": "breakpoint", "threadId": 1}});
+                    write_message(writer, &event).expect("push the new game's stop");
+                    FakeAction::Result(json!({}))
+                }
+                _ => FakeAction::Result(json!({})),
+            }
+        });
+        let client = connected_client(&server);
+        let events = client.subscribe_events();
+
+        let launching = client
+            .start_launch(Path::new("/project"), &[])
+            .expect("start launch");
+        client.configuration_done().expect("configuration done");
+        client.await_launch(launching).expect("launch response");
+
         let stop = client
             .await_stop(&events, MAIN_THREAD_ID, Duration::from_secs(2))
             .expect("await stop")

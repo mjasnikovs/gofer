@@ -224,7 +224,9 @@ fn the_editor_runs_breaks_steps_and_terminates() {
         "a game told to run on is not halted, and a router that still thinks it is refuses a call \
          the game could have answered"
     );
-    while events.try_recv().is_ok() {}
+    // The next stop is the evidence that the clear reached the game, so it is not drained away:
+    // a clear the engine dropped shows up here as a breakpoint stop on the cleared line, which is
+    // what a live turn met and could not see (issue #11).
     client.pause(MAIN_THREAD_ID).expect("pause");
     let paused = client
         .await_stop(&events, MAIN_THREAD_ID, STOP_TIMEOUT)
@@ -235,7 +237,13 @@ fn the_editor_runs_breaks_steps_and_terminates() {
                 editor.output()
             )
         });
-    assert_eq!(paused.reason, "paused");
+    assert_eq!(
+        paused.reason,
+        "paused",
+        "a cleared breakpoint must not stop the game again; got {paused:?}\n--- editor output \
+         ---\n{}",
+        editor.output()
+    );
 
     assert!(
         client
