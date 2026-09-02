@@ -282,6 +282,7 @@ async function everyEmitSiteBuildsItsEvent() {
         ...aiEvents.TURN_EVENTS,
         ...aiEvents.BRIEF_EVENTS,
         ...aiEvents.JUDGE_EVENTS,
+        ...aiEvents.COMPACT_EVENTS,
         ...aiEvents.COMPLETION_EVENTS
     ])
     for (const path of await workerScripts()) {
@@ -568,8 +569,11 @@ checkAgreement('brief event', [
     await typescriptBriefList('BRIEF_EVENT_TYPES')
 ])
 
+// Everything that can arrive on the one stream channel, which is what the TypeScript union is.
 checkAgreement('AI stream event', [
-    aiEvent('TURN_EVENTS', aiEvents.TURN_EVENTS),
+    aiEvent('TURN_EVENTS + COMPACT_EVENTS', [
+        ...new Set([...aiEvents.TURN_EVENTS, ...aiEvents.COMPACT_EVENTS])
+    ]),
     await typescriptStreamEvents(),
     await typescriptStreamEventGuard()
 ])

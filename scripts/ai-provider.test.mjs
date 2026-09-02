@@ -12,7 +12,8 @@ import {
     outOfRoom,
     readableProviderError,
     retryDelay,
-    runAgent
+    runAgent,
+    runCompaction
 } from './ai-provider.mjs'
 import {
     MODEL_ID,
@@ -820,6 +821,79 @@ test('a conversation past the compaction line is summarised before the turn', as
         events.indexOf(start) < events.findIndex(event => event.type === 'compaction-end'),
         'and withdrawn once the summary exists'
     )
+})
+
+test('a manual compaction summarises a conversation nowhere near the line', async context => {
+    const mock = startScriptedServer([{text: 'SUMMARY OF THE EARLY WORK'}])
+    const url = await baseUrl(context, mock.server)
+    const history = longConversation(200, 3_500)
+    const events = []
+
+    const completion = await runCompaction({
+        settings: servedBy(url),
+        agentMessages: history,
+        emit: event => events.push(event)
+    })
+
+    assert.ok(mock.bodies.length >= 1, 'the summary is a request of its own')
+    assert.match(JSON.stringify(mock.bodies[0].messages), /summarization assistant/)
+    assert.equal(completion.type, 'compact-done')
+    assert.equal(completion.agentMessages[0].role, 'compactionSummary')
+    assert.ok(completion.summarised > 0, 'it says how much it folded away')
+    assert.ok(completion.tokensAfter < completion.tokensBefore)
+    assert.deepEqual(
+        events.map(event => event.type),
+        ['compaction-start', 'compaction-end', 'compact-done']
+    )
+})
+
+test('a manual compaction still writes a summary with automatic compaction turned off', async context => {
+    const mock = startScriptedServer([{text: 'SUMMARY WRITTEN ANYWAY'}])
+    const url = await baseUrl(context, mock.server)
+
+    const completion = await runCompaction({
+        settings: servedBy(url, {compactionPercent: 100}),
+        agentMessages: longConversation(200, 3_500),
+        emit: () => undefined
+    })
+
+    // A reserve taken literally from 100 percent leaves the summariser no output tokens at all.
+    assert.ok(mock.bodies[0].max_completion_tokens > 0)
+    assert.match(completion.agentMessages[0].summary, /SUMMARY WRITTEN ANYWAY/)
+})
+
+test('a manual compaction of a conversation with no old part costs nothing', async context => {
+    const mock = startScriptedServer([{text: 'unused'}])
+    const url = await baseUrl(context, mock.server)
+    const history = longConversation(4, 200)
+
+    const completion = await runCompaction({
+        settings: servedBy(url),
+        agentMessages: history,
+        emit: () => undefined
+    })
+
+    assert.equal(mock.bodies.length, 0, 'nothing older than the retained tail, so nothing is asked')
+    assert.equal(completion.summarised, 0)
+    assert.deepEqual(completion.agentMessages, history)
+})
+
+test('a manual compaction of an already summarised conversation changes nothing', async context => {
+    const mock = startScriptedServer([{text: 'unused'}])
+    const url = await baseUrl(context, mock.server)
+    const history = [
+        {role: 'compactionSummary', summary: 'what came before', tokensBefore: 900, timestamp: 1}
+    ]
+
+    const completion = await runCompaction({
+        settings: servedBy(url),
+        agentMessages: history,
+        emit: () => undefined
+    })
+
+    assert.equal(mock.bodies.length, 0, 'nothing is paid for')
+    assert.equal(completion.summarised, 0)
+    assert.deepEqual(completion.agentMessages, history)
 })
 
 test('compaction set to 100 percent sends the conversation whole', async context => {

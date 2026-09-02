@@ -18,6 +18,7 @@ import {Thumbnail} from '@astryxdesign/core/Thumbnail'
 import CameraIcon from '@heroicons/react/24/outline/CameraIcon'
 import Cog6ToothIcon from '@heroicons/react/24/outline/Cog6ToothIcon'
 import MapIcon from '@heroicons/react/24/outline/MapIcon'
+import ArrowsPointingInIcon from '@heroicons/react/24/outline/ArrowsPointingInIcon'
 import PhotoIcon from '@heroicons/react/24/outline/PhotoIcon'
 import SparklesIcon from '@heroicons/react/24/outline/SparklesIcon'
 import {ImageScratchpad} from './ImageScratchpad'
@@ -25,6 +26,7 @@ import {contextProgressVariant, formatContextUsage} from '../../utils/chat-forma
 import {useComposer} from '../../hooks/useComposer'
 import {useComposerAppendRef} from '../../hooks/useComposerAppend'
 import {useEditorSession} from '../../hooks/useEditorSession'
+import {useCompactCommandTrigger} from '../../hooks/useCompactCommandTrigger'
 import {useFileMentionTrigger} from '../../hooks/useFileMentionTrigger'
 import {useWorkspaceFailure} from '../../hooks/useWorkspaceFailure'
 import {pngFile} from '../../services/chat-storage'
@@ -312,6 +314,28 @@ function ContextUsage() {
     )
 }
 
+function CompactButton() {
+    const {actions, meta} = useComposer()
+    return (
+        <Button
+            label='Compact'
+            variant='ghost'
+            size='sm'
+            isIconOnly
+            icon={<Icon icon={ArrowsPointingInIcon} />}
+            isDisabled={!meta.canCompact}
+            tooltip={
+                meta.isStreaming ?
+                    'Gofer is working. Compact once the turn ends.'
+                :   'Summarise the older messages to free context'
+            }
+            onClick={() => {
+                void actions.compact()
+            }}
+        />
+    )
+}
+
 function ComposerFooter() {
     const {state} = useComposer()
     return (
@@ -325,6 +349,7 @@ function ComposerFooter() {
             <ModelMenu />
             <ReasoningMenu />
             <ContextUsage />
+            <CompactButton />
             <Text
                 type='supporting'
                 color='secondary'
@@ -359,6 +384,7 @@ function PlanButton() {
 export function WorkspaceComposer() {
     const {state, actions, meta} = useComposer()
     const fileMentions = useFileMentionTrigger()
+    const compactCommand = useCompactCommandTrigger()
     const input = useRef<ChatComposerInputHandle>(null)
     const root = useRef<HTMLDivElement | null>(null)
     const appendRef = useComposerAppendRef()
@@ -424,7 +450,7 @@ export function WorkspaceComposer() {
                         handleRef={input}
                         maxRows={8}
                         style={SPACIOUS_COMPOSER_INPUT_STYLE}
-                        triggers={[fileMentions.trigger]}
+                        triggers={[fileMentions.trigger, compactCommand]}
                         onFiles={files => {
                             const images = imageFiles(files)
                             if (!meta.canAttachImages || images.length === 0) return

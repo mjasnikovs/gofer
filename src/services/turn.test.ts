@@ -2,7 +2,7 @@ import {describe, expect, it, vi} from 'vitest'
 import {createTurnRunner} from './turn'
 import type {TurnRunner} from './turn'
 import type {AiStreamEvent, Message, TokenUsage} from '../models/chat'
-import type {SendAiMessageRequest, SteerAiRequest} from './desktop'
+import type {CompactAiContextRequest, SendAiMessageRequest, SteerAiRequest} from './desktop'
 
 const USAGE: TokenUsage = {
     input: 10,
@@ -24,7 +24,11 @@ type Harness = Readonly<{
     sent: SendAiMessageRequest[]
     cancelled: number[]
     steered: SteerAiRequest[]
+    compacted: CompactAiContextRequest[]
     refuseSteer: (reason: unknown) => void
+    refuseCompact: (reason: unknown) => void
+    answerCompact: (event: AiStreamEvent) => void
+    holdCompact: () => () => void
     idle: () => Promise<void>
 }>
 
@@ -36,8 +40,13 @@ function harness(...scripts: readonly Script[]): Harness {
     const sent: SendAiMessageRequest[] = []
     const cancelled: number[] = []
     const steered: SteerAiRequest[] = []
+    const compacted: CompactAiContextRequest[] = []
     let turn = 0
     let steerFailure: unknown
+    let compactFailure: unknown
+    let compaction: AiStreamEvent | undefined
+    let hold = false
+    let release: (() => void) | undefined
 
     const runner = createTurnRunner({
         send: async (request, receive) => {
@@ -58,6 +67,13 @@ function harness(...scripts: readonly Script[]): Harness {
             steered.push(request)
             // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/prefer-promise-reject-errors
             if (steerFailure !== undefined) throw steerFailure
+        },
+        compact: async (request, receive) => {
+            compacted.push(request)
+            if (hold) await new Promise<void>(resolve => (release = resolve))
+            if (compaction) receive({requestId: request.requestId, event: compaction})
+            // eslint-disable-next-line @typescript-eslint/only-throw-error, @typescript-eslint/prefer-promise-reject-errors
+            if (compactFailure !== undefined) throw compactFailure
         }
     })
 
@@ -66,6 +82,17 @@ function harness(...scripts: readonly Script[]): Harness {
         sent,
         cancelled,
         steered,
+        compacted,
+        refuseCompact: reason => {
+            compactFailure = reason
+        },
+        answerCompact: event => {
+            compaction = event
+        },
+        holdCompact: () => {
+            hold = true
+            return () => release?.()
+        },
         refuseSteer: reason => {
             steerFailure = reason
         },
@@ -80,6 +107,119 @@ function reply(state: {messages: readonly Message[]}): Message {
 }
 
 describe('createTurnRunner', () => {
+    it('compacts on request, stamping the divider on the message it cut after', async () => {
+        const {runner, compacted, answerCompact, idle} = harness({
+            events: [
+                {
+                    type: 'done',
+                    text: 'Hi',
+                    thinking: '',
+                    stopReason: 'end_turn',
+                    usage: USAGE,
+                    model: 'test',
+                    agentMessages: [{role: 'user'}, {role: 'assistant'}]
+                }
+            ]
+        })
+        answerCompact({
+            type: 'compact-done',
+            agentMessages: [{role: 'compactionSummary'}],
+            summarised: 4,
+            tokensBefore: 900,
+            tokensAfter: 120
+        })
+
+        runner.start('go')
+        await idle()
+        await runner.compact()
+
+        const state = runner.state()
+        expect(compacted[0]?.agentMessages).toEqual([{role: 'user'}, {role: 'assistant'}])
+        expect(state.agentMessages).toEqual([{role: 'compactionSummary'}])
+        expect(reply(state).compaction).toEqual({
+            messages: 4,
+            tokensBefore: 900,
+            tokensAfter: 120
+        })
+        expect(state.messages.filter(message => message.compaction)).toHaveLength(1)
+        expect(state.isStreaming).toBe(false)
+    })
+
+    it('holds the turn while it summarises, so Stop and the task lock reach it', async () => {
+        const {runner, cancelled, holdCompact, idle} = harness({})
+        const released = holdCompact()
+
+        runner.start('go')
+        await idle()
+        const running = runner.compact()
+        await idle()
+
+        expect(runner.state().isStreaming).toBe(true)
+        runner.stop()
+        expect(cancelled).toHaveLength(1)
+
+        released()
+        await running
+        expect(runner.state().isStreaming).toBe(false)
+    })
+
+    it('says so rather than drawing a divider over nothing', async () => {
+        const {runner, answerCompact, idle} = harness({})
+        answerCompact({
+            type: 'compact-done',
+            agentMessages: [],
+            summarised: 0,
+            tokensBefore: 900,
+            tokensAfter: 900
+        })
+
+        runner.start('go')
+        await idle()
+        await runner.compact()
+
+        const state = runner.state()
+        expect(state.error).toBe('Nothing in this conversation is old enough to summarise yet.')
+        expect(state.messages.some(message => message.compaction)).toBe(false)
+    })
+
+    it('says so when the summary never arrived', async () => {
+        const {runner, idle} = harness({})
+
+        runner.start('go')
+        await idle()
+        await runner.compact()
+
+        expect(runner.state().error).toBe('The conversation was not summarised.')
+    })
+
+    it('leaves the conversation alone when a compaction is refused', async () => {
+        const {runner, refuseCompact, idle} = harness({})
+        refuseCompact({code: 'compaction_failed', message: 'the worker died'})
+
+        runner.start('go')
+        await idle()
+        await runner.compact()
+
+        const state = runner.state()
+        expect(state.error).toBe('the worker died')
+        expect(reply(state).compaction).toBeUndefined()
+        expect(state.isStreaming).toBe(false)
+    })
+
+    it('refuses to compact while a turn is in flight', async () => {
+        const {runner, compacted, idle} = harness({
+            during: play => {
+                play({type: 'text-delta', delta: 'working'})
+                void runner.compact()
+            }
+        })
+
+        runner.start('go')
+        await idle()
+
+        expect(compacted).toHaveLength(0)
+    })
+
     it('starts with an empty conversation that is not streaming', () => {
         const {runner} = harness()
         expect(runner.state()).toEqual({
@@ -214,7 +354,8 @@ describe('createTurnRunner', () => {
                 receive(stale)
             },
             cancel: async () => undefined,
-            steer: async () => undefined
+            steer: async () => undefined,
+            compact: async () => undefined
         })
 
         runner.start('go')
@@ -231,7 +372,8 @@ describe('createTurnRunner', () => {
                 receive({requestId: request.requestId, event: {type: 'text-delta'} as never})
             },
             cancel: async () => undefined,
-            steer: async () => undefined
+            steer: async () => undefined,
+            compact: async () => undefined
         })
 
         runner.start('go')
@@ -300,7 +442,8 @@ describe('createTurnRunner', () => {
                 cancel: async requestId => {
                     cancelled.push(requestId)
                 },
-                steer: async () => undefined
+                steer: async () => undefined,
+                compact: async () => undefined
             })
 
             runner.start('go')

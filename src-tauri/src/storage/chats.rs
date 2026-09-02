@@ -540,6 +540,38 @@ mod tests {
         );
     }
 
+    /// The compaction divider is a field the renderer invented, and `extra` is what carries it.
+    #[test]
+    fn a_message_field_this_side_does_not_know_survives_a_round_trip() {
+        let directory = TempDir::new().expect("temporary directory");
+        let storage = storage(&directory);
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "compaction".to_owned(),
+            serde_json::json!({"messages": 12, "tokensBefore": 105_000}),
+        );
+        let chat = StoredChat {
+            task_id: None,
+            messages: vec![StoredMessage {
+                id: 1,
+                sender: "assistant".to_owned(),
+                text: "Done".to_owned(),
+                timestamp: 10,
+                attachments: Vec::new(),
+                extra,
+            }],
+            agent_messages: vec![serde_json::json!({"role": "compactionSummary"})],
+        };
+
+        storage.chats().save(&chat).expect("save chat");
+
+        let loaded = storage.chats().load(None).expect("load chat");
+        assert_eq!(
+            loaded.messages[0].extra["compaction"],
+            serde_json::json!({"messages": 12, "tokensBefore": 105_000})
+        );
+    }
+
     /// A save is the whole conversation, so a save holding fewer messages is a caller that lost
     /// some. The renderer used to shorten the array whenever a turn was retried, and this write
     /// deleted the difference from the database with nothing to restore it from.

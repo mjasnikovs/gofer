@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useRef, useState, useSyncExternalStore} from 'react'
 import {schedule} from '../services/clock'
-import {sendAiMessage} from '../services/ai-stream'
+import {compactAiContext, sendAiMessage} from '../services/ai-stream'
 import {invoke, isTauri} from '../services/desktop'
 import {createTurnRunner} from '../services/turn'
 import {setTurnRunning} from '../services/turn-activity'
@@ -28,7 +28,8 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         createTurnRunner({
             send: sendAiMessage,
             cancel: requestId => invoke('cancel_ai_request', {requestId}),
-            steer: request => invoke('steer_ai_request', {request})
+            steer: request => invoke('steer_ai_request', {request}),
+            compact: compactAiContext
         })
     )
     const state = useSyncExternalStore(runner.subscribe, runner.state)
@@ -139,6 +140,7 @@ export function useConversation({taskId, onError, onTasksChanged}: ConversationO
         start: runner.start,
         queue: runner.queue,
         retry: runner.retry,
+        compact: runner.compact,
         stop: runner.stop
     }
 }

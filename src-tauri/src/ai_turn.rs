@@ -59,7 +59,7 @@ const AI_STEER_TYPE: &str = "steer";
 /// The turn's own is still `done`: it is the completion that was always this event, and the other
 /// two were the impostors sharing its name. `scripts/ai-events.mjs` owns the list and
 /// `scripts/check-command-surface.mjs` holds this copy to it.
-const AI_COMPLETION_EVENTS: [&str; 3] = ["done", "brief-done", "judge-done"];
+const AI_COMPLETION_EVENTS: [&str; 4] = ["done", "brief-done", "judge-done", "compact-done"];
 
 /// What a `done` event's `stopReason` says when the worker's turn was stopped rather than finished.
 ///
@@ -295,6 +295,13 @@ pub(crate) enum WorkerJob {
         memory_id: String,
         memory: JudgedMemory,
     },
+    /// The conversation, put to one summarisation the user asked for.
+    ///
+    /// The transcript is the whole job. A summary is written from it alone, so none of the turn's
+    /// context travels — no prompt, no session line, no inventory, no skills.
+    Compact {
+        agent_messages: Option<serde_json::Value>,
+    },
 }
 
 /// The memory a judgement is about, as the worker is given it.
@@ -352,6 +359,12 @@ pub(crate) enum Job {
     Judge {
         memory_id: String,
         memory: JudgedMemory,
+    },
+    /// The conversation, put to one summarisation the user asked for.
+    Compact {
+        /// The task the conversation belongs to, which is also its prompt cache key.
+        task_id: Option<String>,
+        agent_messages: Option<serde_json::Value>,
     },
 }
 
@@ -614,11 +627,15 @@ impl JobContext {
                 },
             ),
             Job::Judge { memory_id, memory } => (None, WorkerJob::Judge { memory_id, memory }),
+            Job::Compact {
+                task_id,
+                agent_messages,
+            } => (task_id, WorkerJob::Compact { agent_messages }),
         };
         let mut secrets = self.credentials.keys.clone();
-        // A judgement reads what is already filed and searches nothing, so the search key has no
-        // errand on that request.
-        if matches!(job, WorkerJob::Judge { .. }) {
+        // A judgement reads what is already filed and a compaction reads the transcript. Neither
+        // searches anything, so the search key has no errand on either request.
+        if matches!(job, WorkerJob::Judge { .. } | WorkerJob::Compact { .. }) {
             secrets.remove(&Secret::Brave);
         }
         AiWorkerRequest {
@@ -978,6 +995,21 @@ pub struct BriefRequest {
     pub attachments: Vec<ChatAttachment>,
 }
 
+/// What a manual compaction needs: which turn it runs as, and the conversation to summarise.
+///
+/// The transcript comes from the window rather than being read here, for the reason every other
+/// turn's does: the window is the side that knows which conversation it is drawing, and a
+/// compaction of whichever task happened to be active is the same bug the chat loader documents.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactRequest {
+    pub request_id: u64,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub agent_messages: Option<serde_json::Value>,
+}
+
 /// What judging a memory needs: which turn it runs as, and which memory it is about.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1100,6 +1132,40 @@ pub(crate) async fn run_judge(
     .await
     .map_err(|error| format!("The memory judgement failed: {error}"))?
     .map_err(CommandError::coded("memory_judge_failed"))
+}
+
+/// Summarises the conversation once, because the user asked rather than because it filled up.
+///
+/// It answers with nothing. The summary, the count and the two token totals ride the stream as one
+/// `compact-done` event, the way every other thing a worker produces reaches the window — and the
+/// window is where they are needed, since the compacted transcript is the renderer's to hold and
+/// save. Reading it back out of `run_ai_worker` would be a second path to the same payload.
+///
+/// It begins an `AiTurn` for the reasons a judgement does: it is what Stop reaches, and it is what
+/// keeps a compaction off the one provider connection while a chat turn is using it.
+pub(crate) async fn run_compaction(
+    app: AppHandle,
+    request: CompactRequest,
+    stream: tauri::ipc::Channel<AiStreamPayload>,
+) -> Result<(), CommandError> {
+    let turn = AiTurn::begin(request.request_id, stream)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let turn = turn;
+        validate_agent_messages(&request.agent_messages)?;
+        let context = JobContext::read(&app)?;
+        run_ai_worker(
+            &app,
+            &turn,
+            context.request(Job::Compact {
+                task_id: request.task_id,
+                agent_messages: request.agent_messages,
+            }),
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("The compaction task failed: {error}"))?
+    .map_err(CommandError::coded("compaction_failed"))
 }
 
 /// The window event a sweep's own progress reaches the renderer on.
@@ -2563,6 +2629,41 @@ mod tests {
         assert_eq!(encoded["memory"]["anchors"], serde_json::json!([]));
         assert!(encoded.get("systemPrompt").is_none(), "{encoded}");
         assert!(encoded.get("messages").is_none(), "{encoded}");
+    }
+
+    /// The variant renaming that a struct's `rename_all` would not have done for it.
+    #[test]
+    fn a_compaction_names_the_transcript_where_the_worker_reads_it() {
+        let request = AiWorkerRequest {
+            job: WorkerJob::Compact {
+                agent_messages: Some(serde_json::json!([{"role": "user"}])),
+            },
+            ..worker_request()
+        };
+        let encoded = serde_json::to_value(&request).expect("serialize the request");
+
+        assert_eq!(encoded["mode"], serde_json::json!("compact"));
+        assert_eq!(
+            encoded["agentMessages"],
+            serde_json::json!([{"role": "user"}])
+        );
+        assert!(encoded.get("systemPrompt").is_none(), "{encoded}");
+        assert!(encoded.get("messages").is_none(), "{encoded}");
+        assert!(encoded.get("inventory").is_none(), "{encoded}");
+    }
+
+    /// The summariser searches nothing, so it is not given the key that would let it.
+    #[test]
+    fn a_compaction_is_not_given_the_search_key() {
+        let directory = TempDir::new().expect("temporary directory");
+        let (app, _task_id) = app_with_a_task(&directory);
+        let context = JobContext::read(app.handle()).expect("a job context");
+        let request = context.request(Job::Compact {
+            task_id: None,
+            agent_messages: None,
+        });
+
+        assert!(!request.secrets.contains_key(&Secret::Brave));
     }
 
     #[test]

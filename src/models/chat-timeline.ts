@@ -188,6 +188,13 @@ export function isAiStreamEvent(value: unknown): value is AiStreamEvent {
             )
         case 'compaction-start':
             return isCount(value['tokens']) && isCount(value['contextWindow'])
+        case 'compact-done':
+            return (
+                Array.isArray(value['agentMessages'])
+                && isCount(value['summarised'])
+                && isCount(value['tokensBefore'])
+                && isCount(value['tokensAfter'])
+            )
         case 'compaction-end':
         case 'aborted':
             return true
@@ -307,7 +314,10 @@ export function applyStreamEvent(message: Message, event: AiStreamEvent): Messag
         }
         case 'compaction-start':
             return {...message, activity: compactionActivity(event.tokens, event.contextWindow)}
+        // A manual compaction has no assistant message of its own to change; the runner reads
+        // compact-done off the stream and stamps the divider itself.
         case 'compaction-end':
+        case 'compact-done':
             return withoutActivity(message)
         case 'done': {
             const thinking = streamedOr(message.thinking, event.thinking)

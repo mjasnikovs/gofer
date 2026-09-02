@@ -979,6 +979,21 @@ async fn send_ai_message(
     ai_turn::run_turn(app, request, stream).await
 }
 
+/// Summarises the conversation once, on the user's say-so rather than a threshold's.
+///
+/// It takes the same stream channel a chat turn does, because it runs as one: that is what Stop
+/// reaches, and what keeps it off the single provider connection while a turn is on it. The
+/// compacted transcript comes back as a `compact-done` event on that channel, not as a return
+/// value — the window is the side that holds and saves the conversation.
+#[tauri::command]
+async fn compact_ai_context(
+    app: AppHandle,
+    request: ai_turn::CompactRequest,
+    stream: tauri::ipc::Channel<ai_turn::AiStreamPayload>,
+) -> Result<(), CommandError> {
+    ai_turn::run_compaction(app, request, stream).await
+}
+
 /// Runs the four phases that turn a planned task's ask into a specification.
 ///
 /// It takes the same stream channel a chat turn does, because it runs as one: that is what the Stop
@@ -1266,6 +1281,7 @@ pub fn run() {
         call_script_language,
         cancel_ai_request,
         cancel_chatgpt_login,
+        compact_ai_context,
         close_script_document,
         create_chat_task,
         pending_project_changes,

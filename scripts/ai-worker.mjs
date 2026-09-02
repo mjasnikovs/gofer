@@ -9,7 +9,7 @@ import {
     createSteering,
     createToolHost
 } from './ai-host.mjs'
-import {runAgent} from './ai-provider.mjs'
+import {runAgent, runCompaction} from './ai-provider.mjs'
 
 export {EVENT_PREFIX}
 
@@ -28,6 +28,10 @@ async function runRequest(request, {host, credentialHost, emit, signal, steering
     if (mode === 'brief') {
         const {runBrief} = await import('./brief/run.mjs')
         await runBrief({...request, host, credentialHost, emit, signal})
+        return
+    }
+    if (mode === 'compact') {
+        await runCompaction({...request, credentialHost, emit, signal})
         return
     }
     if (mode === 'judge') {

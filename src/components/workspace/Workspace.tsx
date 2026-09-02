@@ -7,6 +7,7 @@ import {
     useState,
     useSyncExternalStore
 } from 'react'
+import {AlertDialog} from '@astryxdesign/core/AlertDialog'
 import {useChatStreamScroll} from '@astryxdesign/core/Chat'
 import {Divider} from '@astryxdesign/core/Divider'
 import {StackItem, VStack} from '@astryxdesign/core/Stack'
@@ -24,6 +25,7 @@ import {NO_THINKING_LEVELS, activeModel, thinkingLevelsFor} from '../../models/s
 import {useAiConnection} from '../../hooks/useAiConnection'
 import {useAttachmentPreviews} from '../../hooks/useAttachmentPreviews'
 import {useConversation} from '../../hooks/useConversation'
+import {COMPACT_COMMAND} from '../../hooks/useCompactCommandTrigger'
 import {useRememberedValue} from '../../hooks/useRememberedValue'
 import {useToolApprovals} from '../../hooks/useToolApprovals'
 import {AskedQuestionsContext, useUserQuestions} from '../../hooks/useUserQuestions'
@@ -143,6 +145,7 @@ export function Workspace({
         start,
         queue,
         retry,
+        compact,
         stop
     } = useConversation({taskId: openTaskId, onError: report, onTasksChanged})
     const streamError = workspaceError ?? turnError
@@ -264,6 +267,21 @@ export function Workspace({
 
     const submitMessage = async (value: string) => {
         const prompt = value.trim()
+        // Intercepted here rather than at the keyboard, so the send button spends it too. The
+        // draft is only spent once the command can actually run; otherwise it is still the user's.
+        if (prompt === COMPACT_COMMAND) {
+            if (!canCompact) {
+                setWorkspaceError(
+                    isBusy ?
+                        'Gofer is working. Summarise once the turn ends.'
+                    :   'There is no conversation to summarise yet.'
+                )
+                return
+            }
+            setDraft('')
+            await offerCompact()
+            return
+        }
         if ((!prompt && draftAttachments.length === 0) || !isTauri()) return
         if (isBusy) {
             queueMessage(prompt)
@@ -380,6 +398,8 @@ export function Workspace({
     }
 
     const usage = useMemo(() => messageUsage(messages), [messages])
+    const canCompact = isChatLoaded && !isBusy && hasConversation
+    const [isCompactOffered, setIsCompactOffered] = useState(false)
     const model = activeModel(settings)
     const supportsImages = Boolean(model?.input.includes('image'))
 
@@ -448,12 +468,17 @@ export function Workspace({
         }
     }
 
+    const offerCompact = async () => {
+        setIsCompactOffered(true)
+    }
+
     const liveActions: ComposerActions = {
         applyModel,
         applyThinkingLevel,
         attachClipboardImage,
         changeDraft: setDraft,
         clearError: dismissError,
+        compact: offerCompact,
         editAttachment,
         plan: planMessage,
         removeAttachment,
@@ -479,6 +504,7 @@ export function Workspace({
             clearError: () => {
                 newest.current.clearError()
             },
+            compact: () => newest.current.compact(),
             editAttachment: (attachmentId, file, shapes) =>
                 newest.current.editAttachment(attachmentId, file, shapes),
             plan: value => newest.current.plan(value),
@@ -507,6 +533,7 @@ export function Workspace({
             actions,
             meta: {
                 canAttachImages: supportsImages && !isBusy && !isSavingAttachments && isTauri(),
+                canCompact,
                 canQueue: isStreaming,
                 contextWindow: model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
                 isSavingAttachments,
@@ -523,6 +550,7 @@ export function Workspace({
             draft,
             draftAttachments,
             hasConversation,
+            canCompact,
             isBusy,
             isChatLoaded,
             isStreaming,
@@ -619,6 +647,23 @@ export function Workspace({
                             }}
                             onDismiss={() => {
                                 setUnsaved([])
+                            }}
+                        />
+                        <AlertDialog
+                            isOpen={isCompactOffered}
+                            // Escape would otherwise leave the summary running behind a closed
+                            // dialog, with nothing on screen saying the connection is still held.
+                            onOpenChange={next => {
+                                if (!isBusy) setIsCompactOffered(next)
+                            }}
+                            title='Summarise this conversation?'
+                            description='The older part becomes a summary the model reads instead. Every message stays on screen, and this cannot be undone.'
+                            actionLabel='Summarise'
+                            isActionLoading={isBusy}
+                            onAction={() => {
+                                void compact().finally(() => {
+                                    setIsCompactOffered(false)
+                                })
                             }}
                         />
                         <MergeConflictDialog

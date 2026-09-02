@@ -9,6 +9,7 @@ import {
     createReadTool,
     createWriteTool,
     estimateContextTokens,
+    estimateTokens,
     prepareCompaction,
     shouldCompact
 } from '@earendil-works/pi-agent-core/node'
@@ -32,6 +33,7 @@ import {
     zeroUsage
 } from './agent-runtime.mjs'
 import {
+    compactDone,
     compactionEnd,
     compactionStart,
     contextRebuilt,
@@ -219,6 +221,13 @@ function compactionSettings(percent, contextWindow) {
     }
 }
 
+// A slider at 100 means "never summarise on your own", not "summarise badly when asked": taken
+// literally it leaves reserveTokens at 1, and generateSummary spends 0.8 of that on the summary.
+function manualCompactionSettings(percent, contextWindow) {
+    const usable = percent >= 100 ? TUNING_DEFAULTS.compactionPercent : percent
+    return compactionSettings(usable, contextWindow)
+}
+
 function compactionEntries(messages) {
     return messages.map((message, index) => {
         const base = {
@@ -240,20 +249,28 @@ function compactionEntries(messages) {
     })
 }
 
+// The count travels because no caller can recover it: the cut point is chosen inside
+// prepareCompaction, and the retained tail does not say how much was folded away.
 async function compactMessages(messages, models, model, settings, thinkingLevel, signal) {
     const preparation = prepareCompaction(compactionEntries(messages), settings)
     if (!preparation.ok) throw new Error(`Compaction failed: ${preparation.error.message}`)
-    if (!preparation.value) return messages
+    // Nothing older than the tail budget: there is no summary to write, and asking for one buys a
+    // model request that folds away zero messages.
+    if (!preparation.value || preparation.value.messagesToSummarize.length === 0)
+        return {messages, summarised: 0}
     const result = await compact(preparation.value, models, model, undefined, signal, thinkingLevel)
     if (!result.ok) throw new Error(`Compaction failed: ${result.error.message}`)
-    return [
-        createCompactionSummaryMessage(
-            result.value.summary,
-            result.value.tokensBefore,
-            new Date().toISOString()
-        ),
-        ...(result.value.retainedTail ?? [])
-    ]
+    return {
+        messages: [
+            createCompactionSummaryMessage(
+                result.value.summary,
+                result.value.tokensBefore,
+                new Date().toISOString()
+            ),
+            ...(result.value.retainedTail ?? [])
+        ],
+        summarised: preparation.value.messagesToSummarize.length
+    }
 }
 
 function modelFor(connection, providerId = LOCAL_PROVIDER_ID) {
@@ -586,14 +603,16 @@ export async function runAgent({
     let contextMessages = previousMessages
     if (shouldCompact(contextTokens, model.contextWindow, compaction)) {
         emit(compactionStart(contextTokens, model.contextWindow))
-        contextMessages = await compactMessages(
-            previousMessages,
-            models,
-            model,
-            compaction,
-            parentThinkingLevel(settings),
-            signal
-        )
+        contextMessages = (
+            await compactMessages(
+                previousMessages,
+                models,
+                model,
+                compaction,
+                parentThinkingLevel(settings),
+                signal
+            )
+        ).messages
         emit(compactionEnd())
     }
 
@@ -608,7 +627,7 @@ export async function runAgent({
             signal
         )
         emit(compactionEnd())
-        return compacted
+        return compacted.messages
     }
 
     let transcript
@@ -877,4 +896,64 @@ export async function runAgent({
         unsubscribe()
         await env.cleanup()
     }
+}
+
+/**
+ * One summarisation, with no turn around it. What the Compact button runs.
+ *
+ * No tools, no probes, no skills, no system prompt: a summary is one completion against the
+ * transcript, and none of those reach the summariser. No `shouldCompact` gate either —
+ * `prepareCompaction` has no threshold, and declines only what compacting on demand should decline.
+ */
+export async function runCompaction({
+    settings,
+    secrets = {},
+    oauthCredential,
+    agentMessages,
+    sessionId,
+    credentialHost,
+    emit,
+    signal,
+    world = LIVE_WORLD
+}) {
+    const {models, model} = world.createModelContext({
+        settings,
+        secrets,
+        oauthCredential,
+        credentialHost,
+        sessionId,
+        signal
+    })
+    const stored = Array.isArray(agentMessages) ? agentMessages : []
+    const tokensBefore = estimateContextTokens(stored).tokens
+    emit(compactionStart(tokensBefore, model.contextWindow))
+    let compacted
+    try {
+        compacted = await compactMessages(
+            stored,
+            models,
+            model,
+            manualCompactionSettings(
+                settings.compactionPercent ?? TUNING_DEFAULTS.compactionPercent,
+                model.contextWindow
+            ),
+            parentThinkingLevel(settings),
+            signal
+        )
+    } finally {
+        emit(compactionEnd())
+    }
+    const completion = compactDone({
+        agentMessages: compacted.messages,
+        summarised: compacted.summarised,
+        tokensBefore,
+        // Summed, not estimated: estimateContextTokens trusts the newest assistant usage it finds,
+        // and the retained tail still reports the count from before the cut.
+        tokensAfter: compacted.messages.reduce(
+            (total, message) => total + estimateTokens(message),
+            0
+        )
+    })
+    emit(completion)
+    return completion
 }

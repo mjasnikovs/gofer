@@ -23,6 +23,7 @@ export type ComposerActions = Readonly<{
     applyThinkingLevel: (level: ThinkingLevel, previous?: GoferSettings) => Promise<void>
     changeDraft: (value: string) => void
     clearError: () => void
+    compact: () => Promise<void>
     editAttachment: (
         attachmentId: string,
         file: File,
@@ -37,6 +38,7 @@ export type ComposerActions = Readonly<{
 
 export type ComposerMeta = Readonly<{
     canAttachImages: boolean
+    canCompact: boolean
     canQueue: boolean
     contextWindow: number
     isSavingAttachments: boolean

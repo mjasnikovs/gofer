@@ -1,17 +1,20 @@
-import {Suspense, lazy, memo, useEffect, useMemo, useState} from 'react'
-import type {RefObject} from 'react'
+import {Fragment, memo, useEffect, useMemo, useState} from 'react'
+import type {CSSProperties, RefObject} from 'react'
 import {Button} from '@astryxdesign/core/Button'
 import {
     ChatMessage,
     ChatMessageBubble,
     ChatMessageList,
     ChatMessageMetadata,
+    ChatSystemMessage,
     ChatToolCalls
 } from '@astryxdesign/core/Chat'
+import {CodeBlock} from '@astryxdesign/core/CodeBlock'
 import {Collapsible} from '@astryxdesign/core/Collapsible'
 import {Icon} from '@astryxdesign/core/Icon'
 import {Lightbox} from '@astryxdesign/core/Lightbox'
 import {Markdown} from '@astryxdesign/core/Markdown'
+import type {MarkdownComponents} from '@astryxdesign/core/Markdown'
 import {Spinner} from '@astryxdesign/core/Spinner'
 import {HStack, StackItem, VStack} from '@astryxdesign/core/Stack'
 import {Text} from '@astryxdesign/core/Text'
@@ -25,6 +28,8 @@ import type {
     VerifyPoint
 } from '../../models/chat'
 import {messageParts} from '../../models/chat-timeline'
+import {gdscriptFenceLanguage, tokenizeGdscript} from '../../services/gdscript-syntax'
+import {compactedDivider} from '../../utils/chat-format'
 import {AskBlock} from './AskBlock'
 
 type ChatConversationProps = Readonly<{
@@ -40,9 +45,49 @@ const CHAT_SCROLL_VIEWPORT_STYLE = {display: 'flex', width: '100%'} as const
 const CHAT_MESSAGE_LIST_STYLE = {minWidth: 0, paddingBlockEnd: 'var(--spacing-3)'} as const
 const TOOL_ROW_STYLE = {maxWidth: '100%', overflow: 'hidden'} as const
 const MESSAGE_HEADING_LEVEL = 3
-const ToolOutputCodeBlock = lazy(() =>
-    import('@astryxdesign/core/CodeBlock').then(module => ({default: module.CodeBlock}))
-)
+
+// Astryx drops its own spacing wrapper as soon as components.code is set, so the
+// margin between markdown blocks has to come back on the block itself.
+const CODE_STYLE = {marginBlock: 'var(--spacing-4)'} as const
+const COMPACT_CODE_STYLE = {marginBlock: 'var(--spacing-2)'} as const
+
+type MarkdownCodeProps = Readonly<{
+    code: string
+    language?: string
+    style: CSSProperties
+}>
+
+function MarkdownCode({code, language, style}: MarkdownCodeProps) {
+    const gdscript = gdscriptFenceLanguage(language)
+    return (
+        <CodeBlock
+            code={code}
+            language={gdscript ?? language ?? 'plaintext'}
+            {...(gdscript !== undefined && {tokenizer: tokenizeGdscript})}
+            isCollapsible
+            width='100%'
+            style={style}
+        />
+    )
+}
+
+const MARKDOWN_COMPONENTS: MarkdownComponents = {
+    code: props => (
+        <MarkdownCode
+            {...props}
+            style={CODE_STYLE}
+        />
+    )
+}
+
+const COMPACT_MARKDOWN_COMPONENTS: MarkdownComponents = {
+    code: props => (
+        <MarkdownCode
+            {...props}
+            style={COMPACT_CODE_STYLE}
+        />
+    )
+}
 
 function runningCallTarget(tool: ToolActivity, now: number | undefined) {
     const named = [tool.target, tool.step].filter(Boolean).join(' · ')
@@ -97,11 +142,7 @@ function operationStatus(entry: AnsweredOperation) {
 
 const ToolCallRow = memo(({now, tool}: {now?: number | undefined; tool: ToolActivity}) => {
     const duration = callDuration(tool)
-    const detailOf = (output: string) => (
-        <Suspense fallback={<Text>{output}</Text>}>
-            <ToolOutputCodeBlock {...toolOutputCode(tool, output)} />
-        </Suspense>
-    )
+    const detailOf = (output: string) => <CodeBlock {...toolOutputCode(tool, output)} />
     const answered = answeredOperations(tool)
     if (answered) {
         const summary = [tool.name, tool.target, duration].filter(Boolean).join(' · ')
@@ -188,6 +229,7 @@ const ProseBubble = memo(({isReasoning, isStreaming, text}: ProseBubbleProps) =>
                 density={isReasoning ? 'compact' : 'default'}
                 headingLevelStart={MESSAGE_HEADING_LEVEL}
                 isStreaming={isStreaming}
+                components={isReasoning ? COMPACT_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS}
             >
                 {text}
             </Markdown>
@@ -487,13 +529,19 @@ export function ChatConversation({
                 style={CHAT_MESSAGE_LIST_STYLE}
             >
                 {messages.map((message, index) => (
-                    <ConversationMessage
-                        key={message.id}
-                        attachmentPreviews={attachmentPreviews}
-                        isLast={index === messages.length - 1}
-                        message={message}
-                        onRetry={onRetry}
-                    />
+                    <Fragment key={message.id}>
+                        <ConversationMessage
+                            attachmentPreviews={attachmentPreviews}
+                            isLast={index === messages.length - 1}
+                            message={message}
+                            onRetry={onRetry}
+                        />
+                        {message.compaction ?
+                            <ChatSystemMessage variant='divider'>
+                                {compactedDivider(message.compaction.messages)}
+                            </ChatSystemMessage>
+                        :   null}
+                    </Fragment>
                 ))}
             </ChatMessageList>
         </StackItem>

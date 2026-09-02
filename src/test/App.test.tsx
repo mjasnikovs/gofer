@@ -627,6 +627,93 @@ describe('Workspace', () => {
         expect(screen.queryByText(/Summarising the conversation/)).not.toBeInTheDocument()
     })
 
+    it('summarises on request, and draws the divider where it cut', async () => {
+        backend({
+            send_ai_message: async args => {
+                const stream = streamOf(args)
+                stream.onmessage({
+                    requestId: 1,
+                    event: {
+                        type: 'done',
+                        text: 'Hello',
+                        thinking: '',
+                        stopReason: 'end_turn',
+                        usage: emptyUsage,
+                        model: 'local',
+                        agentMessages: [{role: 'assistant'}]
+                    }
+                })
+            },
+            compact_ai_context: async args => {
+                const stream = streamOf(args)
+                stream.onmessage({
+                    requestId: 1,
+                    event: {
+                        type: 'compact-done',
+                        agentMessages: [{role: 'compactionSummary'}],
+                        summarised: 12,
+                        tokensBefore: 105_000,
+                        tokensAfter: 8_000
+                    }
+                })
+            }
+        })
+        render(<Workspace />)
+        await flush()
+
+        await userEvent.type(
+            screen.getByRole('combobox', {name: 'Message input'}),
+            'Say hello{enter}'
+        )
+        await flush()
+
+        await userEvent.click(screen.getByRole('button', {name: 'Compact'}))
+        await flush()
+        await userEvent.click(screen.getByRole('button', {name: 'Summarise'}))
+        await flush()
+
+        expect(screen.getByText('Summarised 12 earlier messages')).toBeInTheDocument()
+        expect(screen.getByText('Hello')).toBeInTheDocument()
+        expect(screen.getByText('8K / 120K')).toBeInTheDocument()
+    })
+
+    it('will not offer to summarise while a turn is running', async () => {
+        backend({
+            send_ai_message: async () => {
+                // Never settles, so the turn is still in flight when the button is read.
+                await new Promise<void>(() => undefined)
+            }
+        })
+        render(<Workspace />)
+        await flush()
+
+        await userEvent.type(
+            screen.getByRole('combobox', {name: 'Message input'}),
+            'Keep going{enter}'
+        )
+        await flush()
+
+        expect(screen.getByRole('button', {name: 'Compact'})).toHaveAttribute(
+            'aria-disabled',
+            'true'
+        )
+    })
+
+    it('hands back a /compact typed with nothing to summarise', async () => {
+        backend({})
+        render(<Workspace />)
+        await flush()
+
+        // The first Enter takes the command out of the trigger menu; the second sends it.
+        await userEvent.type(
+            screen.getByRole('combobox', {name: 'Message input'}),
+            '/compact{enter}{enter}'
+        )
+        await flush()
+
+        expect(screen.getByText('There is no conversation to summarise yet.')).toBeInTheDocument()
+    })
+
     it('shows the turn is still working after it stops writing', async () => {
         let stream: AiStream | undefined
         let endTurn: (() => void) | undefined

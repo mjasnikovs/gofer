@@ -5,9 +5,13 @@ export function messageUsage(messages: readonly Message[]) {
     let context = 0
     for (const message of messages) {
         const tokens = message.usage?.totalTokens
-        if (tokens === undefined) continue
-        total += tokens
-        context = tokens
+        if (tokens !== undefined) {
+            total += tokens
+            context = tokens
+        }
+        // A compaction adds no message of its own, so the one it is stamped on still reports the
+        // size it just shrank. Read after the usage, because the cut happened after the answer.
+        if (message.compaction) context = message.compaction.tokensAfter
     }
     return {total, context}
 }
@@ -28,6 +32,10 @@ export function formatContextUsage(value: number, max: number) {
 
 export function compactionActivity(tokens: number, contextWindow: number) {
     return `Summarising the conversation to make room (${formatContextUsage(tokens, contextWindow)})`
+}
+
+export function compactedDivider(messages: number) {
+    return `Summarised ${messages.toLocaleString()} earlier message${messages === 1 ? '' : 's'}`
 }
 
 export function rebuiltActivity(messages: number) {

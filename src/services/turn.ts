@@ -12,8 +12,14 @@ import {
     withoutActivity,
     withoutStatus
 } from '../models/chat-timeline'
-import type {AiStreamPayload, ChatAttachment, Message, StoredChat} from '../models/chat'
-import type {SendAiMessageRequest, SteerAiRequest} from './desktop'
+import type {
+    AiStreamEvent,
+    AiStreamPayload,
+    ChatAttachment,
+    Message,
+    StoredChat
+} from '../models/chat'
+import type {CompactAiContextRequest, SendAiMessageRequest, SteerAiRequest} from './desktop'
 
 const UNFINISHED_TOOL_REASON = 'The turn ended before this call finished.'
 
@@ -41,6 +47,10 @@ export type TurnDependencies = Readonly<{
     ) => Promise<void>
     cancel: (requestId: number) => Promise<unknown>
     steer: (request: SteerAiRequest) => Promise<unknown>
+    compact: (
+        request: CompactAiContextRequest,
+        receive: (payload: AiStreamPayload) => void
+    ) => Promise<void>
 }>
 
 export type TurnRunner = Readonly<{
@@ -52,6 +62,7 @@ export type TurnRunner = Readonly<{
     takeHandBack: () => readonly string[]
     clearError: () => void
     retry: (assistantId: number) => void
+    compact: () => Promise<void>
     stop: () => void
 }>
 
@@ -81,7 +92,7 @@ const EMPTY: TurnState = {
 
 let nextRequestId = 1
 
-export function createTurnRunner({send, cancel, steer}: TurnDependencies): TurnRunner {
+export function createTurnRunner({send, cancel, steer, compact}: TurnDependencies): TurnRunner {
     let current: TurnState = EMPTY
     const listeners = new Set<() => void>()
     let nextMessageId = 1
@@ -355,6 +366,72 @@ export function createTurnRunner({send, cancel, steer}: TurnDependencies): TurnR
                 prompt: plan.prompt,
                 assistantId: plan.assistant.id,
                 isRetry: true
+            })
+        },
+        // It runs as a turn because it is one: it holds the single provider connection, Stop
+        // reaches it through the same registry, and a task switch has to stay locked while it does.
+        async compact() {
+            if (activeRequestId !== undefined) return
+            const requestId = nextRequestId++
+            const last = current.messages.at(-1)
+            let done: Extract<AiStreamEvent, {type: 'compact-done'}> | undefined
+            activeRequestId = requestId
+            publish({...cleared(current), isStreaming: true})
+            try {
+                await compact(
+                    {
+                        requestId,
+                        taskId: current.taskId,
+                        agentMessages: current.agentMessages
+                    },
+                    payload => {
+                        if (payload.requestId !== requestId) return
+                        if (!isAiStreamEvent(payload.event)) return
+                        if (payload.event.type === 'compact-done') done = payload.event
+                    }
+                )
+            } catch (error) {
+                publish({...current, isStreaming: false, error: toCommandError(error).message})
+                return
+            } finally {
+                if (activeRequestId === requestId) activeRequestId = undefined
+            }
+            // Stopped, or torn down before it answered. Saying so beats a button that did nothing.
+            if (!done) {
+                publish({
+                    ...current,
+                    isStreaming: false,
+                    error: 'The conversation was not summarised.'
+                })
+                return
+            }
+            const settled = done
+            // Nothing was older than the retained tail, so there is no divider to draw and no
+            // smaller context to report — only a sentence saying the click bought nothing.
+            if (settled.summarised === 0 || !last) {
+                publish({
+                    ...current,
+                    isStreaming: false,
+                    error: 'Nothing in this conversation is old enough to summarise yet.'
+                })
+                return
+            }
+            publish({
+                ...cleared(current),
+                isStreaming: false,
+                agentMessages: settled.agentMessages,
+                messages: current.messages.map(message =>
+                    message.id === last.id ?
+                        {
+                            ...message,
+                            compaction: {
+                                messages: settled.summarised,
+                                tokensBefore: settled.tokensBefore,
+                                tokensAfter: settled.tokensAfter
+                            }
+                        }
+                    :   message
+                )
             })
         },
         stop() {

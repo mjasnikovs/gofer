@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest'
 import {
+    compactedDivider,
     compactionActivity,
     contextProgressVariant,
     formatContextUsage,
@@ -36,6 +37,22 @@ describe('context usage', () => {
         expect(messageUsage([]).context).toBe(0)
     })
 
+    it('reads a compaction over the usage of the message it cut after', () => {
+        const compacted: Message = {
+            ...answered(2, 105_000),
+            compaction: {messages: 12, tokensBefore: 105_000, tokensAfter: 8_000}
+        }
+        expect(messageUsage([answered(1, 4_000), compacted]).context).toBe(8_000)
+    })
+
+    it('lets the turn after a compaction report the context again', () => {
+        const compacted: Message = {
+            ...answered(1, 105_000),
+            compaction: {messages: 12, tokensBefore: 105_000, tokensAfter: 8_000}
+        }
+        expect(messageUsage([compacted, answered(2, 9_000)]).context).toBe(9_000)
+    })
+
     it('warns before the wall and not on it', () => {
         expect(contextProgressVariant(21_000, WINDOW)).toBe('success')
         expect(contextProgressVariant(96_051, WINDOW)).toBe('success')
@@ -60,5 +77,15 @@ describe('compaction activity', () => {
         expect(compactionActivity(105_000, 120_064)).toBe(
             'Summarising the conversation to make room (105K / 120K)'
         )
+    })
+})
+
+describe('compaction divider', () => {
+    it('counts the messages it folded away', () => {
+        expect(compactedDivider(12)).toBe('Summarised 12 earlier messages')
+    })
+
+    it('says one message singular', () => {
+        expect(compactedDivider(1)).toBe('Summarised 1 earlier message')
     })
 })

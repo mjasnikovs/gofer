@@ -12,6 +12,8 @@ export const BRIEF_EVENTS = []
 
 export const JUDGE_EVENTS = []
 
+export const COMPACT_EVENTS = []
+
 export const COMPLETION_EVENTS = []
 
 export const textDelta = declare([TURN_EVENTS], 'text-delta', delta => ({delta}))
@@ -43,12 +45,12 @@ export const usageReport = declare([TURN_EVENTS], 'usage', (usage, model) => ({u
 export const toolCost = declare([TURN_EVENTS], 'tool-cost', (ids, tokens) => ({ids, tokens}))
 
 export const compactionStart = declare(
-    [TURN_EVENTS],
+    [TURN_EVENTS, COMPACT_EVENTS],
     'compaction-start',
     (tokens, contextWindow) => ({tokens, contextWindow})
 )
 
-export const compactionEnd = declare([TURN_EVENTS], 'compaction-end', () => ({}))
+export const compactionEnd = declare([TURN_EVENTS, COMPACT_EVENTS], 'compaction-end', () => ({}))
 
 export const turnState = declare([TURN_EVENTS], 'turn-state', agentMessages => ({agentMessages}))
 
@@ -162,3 +164,14 @@ export const judgeStopped = declare([JUDGE_EVENTS], 'judge-stopped', () => ({}))
 export const judgeFailed = declare([JUDGE_EVENTS], 'judge-failed', reason => ({reason}))
 
 export const judgeDone = declare([COMPLETION_EVENTS], 'judge-done', verdict => ({verdict}))
+
+export const compactDone = declare(
+    [COMPACT_EVENTS, COMPLETION_EVENTS],
+    'compact-done',
+    ({agentMessages, summarised, tokensBefore, tokensAfter}) => ({
+        agentMessages,
+        summarised,
+        tokensBefore,
+        tokensAfter
+    })
+)

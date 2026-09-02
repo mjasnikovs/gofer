@@ -20,6 +20,15 @@ export type Message = Readonly<{
     activity?: string
     attachments?: readonly ChatAttachment[]
     verifyPoints?: readonly VerifyPoint[]
+    compaction?: MessageCompaction
+}>
+
+// A field rather than a row of its own: storage refuses any sender but user and assistant, and
+// carries unknown message fields through untouched.
+export type MessageCompaction = Readonly<{
+    messages: number
+    tokensBefore: number
+    tokensAfter: number
 }>
 
 export type VerifyPoint = Readonly<{
@@ -80,6 +89,13 @@ export type AiStreamEvent =
     | Readonly<{type: 'tool-cost'; ids: readonly string[]; tokens: number}>
     | Readonly<{type: 'compaction-start'; tokens: number; contextWindow: number}>
     | Readonly<{type: 'compaction-end'}>
+    | Readonly<{
+          type: 'compact-done'
+          agentMessages: readonly unknown[]
+          summarised: number
+          tokensBefore: number
+          tokensAfter: number
+      }>
     | Readonly<{
           type: 'done'
           text: string

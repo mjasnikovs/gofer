@@ -92,6 +92,12 @@ export type SendAiMessageRequest = Readonly<{
     isRetry: boolean
 }>
 
+export type CompactAiContextRequest = Readonly<{
+    requestId: number
+    taskId?: string | undefined
+    agentMessages: readonly unknown[]
+}>
+
 export type SteerAiRequest = Readonly<{
     requestId: number
     id: string
@@ -178,6 +184,10 @@ export type DesktopCommandMap = Readonly<{
     cancel_chatgpt_login: CommandSpec<undefined, boolean>
     check_workspace_health: CommandSpec<undefined, HealthReport>
     close_script_document: CommandSpec<{request: OpenScriptRequest}, void>
+    compact_ai_context: CommandSpec<
+        {request: CompactAiContextRequest; stream: Channel<AiStreamPayload>},
+        void
+    >
     create_chat_task: CommandSpec<{bringChanges: boolean}, StoredChat>
     create_project_backup: CommandSpec<undefined, BackupResult>
     delete_chat_task: CommandSpec<{taskId: string}, StoredChat>
