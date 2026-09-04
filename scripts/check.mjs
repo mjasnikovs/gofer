@@ -113,6 +113,10 @@ function run([label, command]) {
             env: {...process.env, PATH: PATH_WITH_LOCAL_BINARIES}
         })
         let output = ''
+        // Decode across chunks, or a character landing on a pipe boundary is mojibake in the one
+        // place someone is reading closely: the output of the step that just failed.
+        child.stdout.setEncoding('utf8')
+        child.stderr.setEncoding('utf8')
         child.stdout.on('data', chunk => (output += chunk))
         child.stderr.on('data', chunk => (output += chunk))
         child.on('close', status => {

@@ -952,6 +952,20 @@ function sliceRegion(text, path, comment, name) {
     return text.slice(lineEnd, stop)
 }
 
+/**
+ * Reads a pipe as text, decoding across chunk boundaries rather than per chunk.
+ *
+ * `out += chunk` decodes each Buffer on its own, so a character split by a pipe boundary becomes
+ * two replacement characters. Where the boundary falls is timing, which is why the surface check
+ * failed on one CI run and passed on the next over a file nobody had touched — 217KB of Rust
+ * holding 114 em dashes gives it plenty of chances.
+ */
+export function collectText(stream, take) {
+    stream.setEncoding('utf8')
+    stream.on('data', take)
+    return stream
+}
+
 async function formatRust(text, path) {
     const {spawn} = await import('node:child_process')
     return await new Promise((resolve, reject) => {
@@ -960,8 +974,8 @@ async function formatRust(text, path) {
         })
         let out = ''
         let error = ''
-        child.stdout.on('data', chunk => (out += chunk))
-        child.stderr.on('data', chunk => (error += chunk))
+        collectText(child.stdout, chunk => (out += chunk))
+        collectText(child.stderr, chunk => (error += chunk))
         child.on('error', cause =>
             reject(
                 new Error(`${GENERATOR} needs rustfmt on PATH to emit ${path}: ${cause.message}`)
