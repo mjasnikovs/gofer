@@ -275,12 +275,14 @@ test('question with one sketch', async ({page}) => {
 test('question in words', async ({page}) => {
     await askDuringATurn(page, 0)
     await expect(page.getByRole('textbox', {name: /Your answer/u})).toBeVisible()
-    await expect(
-        page.getByRole('button', {
-            name: 'Its own scene under ui/, instanced by every level that needs it (recommended)'
-        })
-    ).toBeVisible()
+    const longest = page.getByRole('button', {
+        name: 'Its own scene under ui/, instanced by every level that needs it (recommended)'
+    })
+    await expect(longest).toBeVisible()
     await expect(page.getByRole('button', {name: 'Stop asking, continue'})).toBeVisible()
+    // The card scrolls its own end into view when it opens, which puts the options above the fold
+    // — and the options are the half this shot exists to guard.
+    await longest.scrollIntoViewIfNeeded()
     await stableScreenshot(page, 'question-in-words.png')
 })
 
